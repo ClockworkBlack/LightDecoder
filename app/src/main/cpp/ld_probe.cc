@@ -114,6 +114,23 @@ int main(int argc, char** argv) {
       ++idx;
     }
     std::printf("total_frames=%d\n", idx);
+
+    // Start over and count again: looping an animation depends on this.
+    if (!dec->rewind(error)) {
+      std::fprintf(stderr, "rewind error: %s\n", error.c_str());
+      return 1;
+    }
+    int again = 0;
+    while (true) {
+      int r = dec->prepareNextFrame(error);
+      if (r < 0) {
+        std::fprintf(stderr, "frame error after rewind: %s\n", error.c_str());
+        return 1;
+      }
+      if (r == 0) break;
+      ++again;
+    }
+    std::printf("frames_after_rewind=%d\n", again);
   } else {
     if (!dec->prepareStill(0, error)) {
       std::fprintf(stderr, "still error: %s\n", error.c_str());

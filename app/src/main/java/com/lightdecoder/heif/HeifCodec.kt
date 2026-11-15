@@ -104,10 +104,29 @@ object HeifCodec {
         val h = NativeDecoder.nativePreparedHeight(handle)
         if (w <= 0 || h <= 0) throw DecodeException("Decoded frame has no size")
         val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        if (!NativeDecoder.nativeFillBitmap(handle, bitmap)) {
+        bitmap.setHasAlpha(NativeDecoder.nativePreparedHasAlpha(handle))
+        if (NativeDecoder.nativeFillBitmap(handle, bitmap)) return bitmap
+
+        // The direct route writes straight into the bitmap's memory. Where
+        // that is not available (the unit tests run the decoder off-device),
+        // go through a copy of the pixels instead.
+        val rgba = NativeDecoder.nativeCopyRGBA(handle)
+        if (rgba == null || rgba.size < w * h * 4) {
             bitmap.recycle()
-            throw DecodeException(NativeDecoder.nativeLastError(handle))
+            throw DecodeException(NativeDecoder.nativeLastError(handle).ifEmpty { "Could not read the decoded picture" })
         }
+        val pixels = IntArray(w * h)
+        var src = 0
+        for (i in pixels.indices) {
+            val r = rgba[src].toInt() and 0xFF
+            val g = rgba[src + 1].toInt() and 0xFF
+            val b = rgba[src + 2].toInt() and 0xFF
+            val a = rgba[src + 3].toInt() and 0xFF
+            pixels[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
+            src += 4
+        }
+        // setPixels takes straight alpha and premultiplies as the bitmap needs.
+        bitmap.setPixels(pixels, 0, w, 0, 0, w, h)
         return bitmap
     }
 

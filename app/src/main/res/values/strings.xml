@@ -1,18 +1,83 @@
 <resources>
     <string name="app_name">LightDecoder</string>
     <string name="open_with">Open with LightDecoder</string>
+    <string name="listener_label">Sticker catching</string>
+    <string name="yes">yes</string>
+    <string name="no">no</string>
+    <string name="delete">Delete</string>
 
-    <string name="empty_title">No sticker open</string>
-    <string name="empty_body">Open a .heic sticker, or share one into LightDecoder, to view it here. Transparency and animation are decoded on-device.</string>
+    <!-- Viewer -->
+    <string name="empty_title">No picture open</string>
+    <string name="empty_body">Open a .heic sticker, or share one to LightDecoder from another app, to see it here.</string>
     <string name="open_file">Open a file</string>
-
     <string name="action_save">Save as PNG</string>
     <string name="action_share">Share</string>
     <string name="action_info">Details</string>
-    <string name="action_play">Play / pause</string>
-
+    <string name="action_play">Play or pause</string>
+    <string name="action_effect">Show or hide the sticker effect</string>
     <string name="saved_to">Saved to %1$s</string>
-    <string name="decode_failed">Couldn\'t decode this file: %1$s</string>
-    <string name="not_available">The decoder couldn\'t be loaded on this device.</string>
-    <string name="share_title">Share sticker as PNG</string>
+    <string name="save_failed">Could not save the picture</string>
+    <string name="share_failed">Could not prepare the picture for sharing</string>
+    <string name="share_png">PNG (opens everywhere)</string>
+    <string name="share_original">Original %1$s file (best for iPhones)</string>
+    <string name="decode_failed">Could not open this file: %1$s</string>
+    <string name="unknown_error">unknown error</string>
+    <string name="cannot_open">the file could not be read</string>
+    <string name="too_large">the picture is too large for this phone\'s memory</string>
+    <string name="not_available">The built-in decoder could not be loaded on this device.</string>
+    <string name="inbox_item_gone">That sticker is no longer in the inbox.</string>
+    <string name="effect_not_drawn_suffix">" (not drawn)"</string>
+
+    <string name="details_from">From: %1$s</string>
+    <string name="details_size">Size: %1$d×%2$d</string>
+    <string name="details_transparency">Transparency: %1$s</string>
+    <string name="details_animated">Animated: %1$s</string>
+    <string name="details_animated_frames">Animated: yes (%1$d frames)</string>
+    <string name="details_file">File: %1$s, %2$d KB</string>
+    <string name="details_effect_none">Effect: none</string>
+    <string name="details_effect_drawn">Effect: %1$s. The iPhone draws it when showing the sticker; it is not part of the picture in the file. LightDecoder draws it too, and the effect button hides it.</string>
+    <string name="details_effect_not_drawn">Effect: %1$s. The iPhone draws it when showing the sticker; it is not part of the picture in the file, and LightDecoder does not draw this one yet.</string>
+    <string name="details_type">Type: %1$s</string>
+    <string name="details_brands">Brands: %1$s</string>
+    <string name="details_color">Color: %1$s</string>
+    <string name="details_bits">Bit depth: %1$s</string>
+
+    <!-- Inbox -->
+    <string name="inbox_empty">No stickers caught yet.\n\nWhen an iPhone sticker arrives it shows up here. You can also open a file from the menu, or share a picture to LightDecoder from another app.</string>
+    <string name="inbox_thumb_description">Caught sticker</string>
+    <string name="status_off_title">Catch stickers automatically</string>
+    <string name="status_off_body">LightDecoder can pick up stickers from your message notifications and decode them here, so you don\'t have to share each one.\n\nThis needs notification access, which you turn on in Android\'s settings. Notification access lets an app see all your notifications. LightDecoder only uses the ones from Google Messages and Samsung Messages, keeps what it catches on this phone, and sends nothing anywhere.</string>
+    <string name="status_turn_on">Turn on</string>
+    <string name="status_greyed_out">Switch greyed out?</string>
+    <string name="status_on_title">Catching stickers</string>
+    <string name="status_on_body">HEIC stickers and pictures from Messages show up here by themselves. Pictures that Messages can already show are left alone.</string>
+    <string name="status_on_body_all">Every picture from Messages is kept here, not only the HEIC ones.</string>
+    <string name="status_pause">Pause</string>
+    <string name="status_paused_title">Catching is paused</string>
+    <string name="status_paused_body">Nothing is read from your notifications while this is paused.</string>
+    <string name="status_resume">Resume</string>
+    <string name="settings_unavailable">This phone did not open that settings screen. Look for \"Notification access\" or \"Device and app notifications\" in Settings.</string>
+    <string name="greyed_title">If the switch is greyed out</string>
+    <string name="greyed_body">Android blocks this switch for apps installed from a file until you allow it.\n\n1. Tap the greyed-out switch once, so Android shows its warning.\n2. Tap \"Open app info\" below.\n3. Tap the ⋮ menu in the top corner and choose \"Allow restricted settings\".\n4. Come back here and tap \"Turn on\" again.</string>
+    <string name="greyed_open_app_info">Open app info</string>
+    <string name="delete_one_question">Delete this sticker from the inbox?</string>
+    <string name="clear_question">Delete every sticker in the inbox? Stickers you saved to your gallery are kept.</string>
+
+    <string name="action_all_images">Keep every picture, not only HEIC</string>
+    <string name="action_alerts">Show caught stickers as notifications</string>
+    <string name="action_log">Activity log</string>
+    <string name="action_clear">Clear inbox</string>
+    <string name="action_about">About</string>
+    <string name="about_body">LightDecoder opens HEIC stickers and pictures with its own built-in decoder (libheif and libde265), so it does not depend on what the phone supports.\n\nEverything stays on this phone.\n\nSource code: github.com/ClockworkBlack/LightDecoder (AGPL-3.0)</string>
+    <string name="log_access_on">Notification access: on</string>
+    <string name="log_access_off">Notification access: off</string>
+    <string name="log_empty">Nothing yet. Lines appear here when a message notification with an attachment arrives.</string>
+    <string name="log_clear">Clear log</string>
+
+    <!-- Notifications LightDecoder posts -->
+    <string name="alert_channel">Decoded stickers</string>
+    <string name="alert_channel_description">Shows a sticker that LightDecoder decoded from an incoming message.</string>
+    <string name="alert_title_from">Sticker from %1$s</string>
+    <string name="alert_title">Sticker decoded</string>
+    <string name="alert_text">Tap to view</string>
 </resources>

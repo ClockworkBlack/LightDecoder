@@ -3,22 +3,27 @@
     xmlns:app="http://schemas.android.com/apk/res-auto">
     <item
         android:id="@+id/action_play"
-        android:title="@string/action_play"
         android:icon="@android:drawable/ic_media_play"
+        android:title="@string/action_play"
+        app:showAsAction="ifRoom" />
+    <item
+        android:id="@+id/action_effect"
+        android:icon="@drawable/ic_effect"
+        android:title="@string/action_effect"
         app:showAsAction="ifRoom" />
     <item
         android:id="@+id/action_save"
-        android:title="@string/action_save"
         android:icon="@android:drawable/ic_menu_save"
+        android:title="@string/action_save"
         app:showAsAction="ifRoom" />
     <item
         android:id="@+id/action_share"
-        android:title="@string/action_share"
         android:icon="@android:drawable/ic_menu_share"
+        android:title="@string/action_share"
         app:showAsAction="ifRoom" />
     <item
         android:id="@+id/action_info"
-        android:title="@string/action_info"
         android:icon="@android:drawable/ic_menu_info_details"
+        android:title="@string/action_info"
         app:showAsAction="ifRoom" />
 </menu>

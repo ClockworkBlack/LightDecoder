@@ -9,9 +9,10 @@ It ships its own HEVC/HEIF decoder (libde265 + libheif, built in), so it does
 file or a sticker shared into it, decodes transparency and animation on-device,
 and lets you view, save, and re-share it as a PNG.
 
-> Status: early. The decoder core and the viewer are working and produce an
-> installable APK. The Google Messages pairing module (below) is planned, not
-> yet built.
+> Status: working. The decoder, the viewer, and an on-device sticker inbox that
+> catches incoming stickers automatically all produce an installable APK, with a
+> unit-test suite that decodes real HEIC files. See "Automatic sticker inbox"
+> below for how the automatic catching works and stays within Android's rules.
 
 ## Why this exists
 
@@ -38,34 +39,52 @@ itself.
 - **Details.** Reports container brands, size, bit depth, alpha, colour profile,
   and frame count.
 
-Verified against real iPhone sticker files: five sample stickers decode to the
-correct dimensions with alpha preserved, both through the native command-line
-probe and through the JVM across the real JNI boundary (see
-`tools/jni-smoke/`).
+- **Sticker effects.** iPhones store a plain cut-out plus an XMP note
+  (`stickerEffect:type="stroke"`) and draw the Outline/Comic/Puffy/Shiny effect
+  themselves. LightDecoder reads that note, labels the effect, and draws the
+  Outline effect (a white border following the alpha edge); a button toggles it.
 
-## Planned: Google Messages pairing
+Verified against real iPhone sticker files and against synthetic files whose
+every pixel is known: still, opaque, transparent, animated (intra- and
+inter-coded) all decode correctly — through the native probe, through the JVM
+across the real JNI boundary (`tools/jni-smoke/`), and through the Android
+`Bitmap` path under Robolectric (`app/src/test/`, 16 tests).
 
-To read and send messages (including RCS) from inside LightDecoder, the plan is
-the **Beeper method**: pair as a "Messages for web" client to the user's own
-Google Messages app using the open-source
-[`libgm`](https://github.com/mautrix/gmessages) library (compiled for Android
-with gomobile). The user's phone remains the relay and does the actual RCS;
-LightDecoder reads and sends through it.
+## Automatic sticker inbox
 
-Important consequences, by design:
+The home screen is an **inbox** that catches incoming stickers and decodes them
+without you sharing each one. It uses Android's official **notification
+listener** API — the same mechanism smartwatch and Android Auto companions use —
+not any protocol emulation or account access:
 
-- **The phone is the relay.** Google Messages stays installed and default, and
-  online. This is not a native carrier RCS stack — Android exposes no such API
-  to third-party apps.
-- **One-time consent.** Pairing uses Google's own device-pairing flow: the user
-  signs into their own Google account and confirms a matching emoji on the
-  phone, **once**. The app then persists the session and keeps it warm (token
-  refresh + a periodic phone ping via a foreground service) so the emoji
-  confirmation is not needed again under normal use. There is deliberately **no
-  bypass of that first on-device confirmation** — it is the gate that proves the
-  phone is the user's own.
-- **Unofficial and fragile.** It emulates a web client; Google can change the
-  protocol and break it.
+- Android starts the listener only after you turn on **Notification access** for
+  LightDecoder in system settings, and stops it when you turn it off.
+- A messaging app posts a chat notification with `MessagingStyle`; a picture
+  message carries a `content://` URI, and Android grants notification listeners
+  read access to it while the notification shows. LightDecoder reads that
+  picture, decodes it, and stores it.
+- Only notifications from Google Messages and Samsung Messages are looked at.
+  Everything caught stays in app-private storage; nothing is uploaded, and
+  `allowBackup` is off so the inbox is never copied to a cloud backup.
+- By default only HEIC/HEIF attachments (the ones Messages can't show) are kept;
+  an option keeps every picture. An activity log records only kinds and
+  outcomes ("picture attachment, image/heic, saved") — never message text,
+  names, or conversations.
+
+This is **Option A / Pathway 1** from `docs/rcs-integration.md`: on-device,
+Play-Store-compliant, zero protocol emulation.
+
+### What this does not do
+
+It does not pair with, sign into, or emulate Google Messages, and it does not
+capture account credentials. A notification listener only sees message
+attachments **from the moment they arrive** (no history), and Android does not
+expose end-to-end-encrypted RCS content this way — so some RCS stickers may not
+appear. The alternative (a reverse-engineered web-relay such as `libgm`) is
+deliberately **not** built here: it violates Google's terms, breaks whenever the
+protocol changes, and — if its one-time on-device confirmation were ever
+automated away — becomes a covert interception vector. The on-device listener
+gets stickers through the front door instead.
 
 ## Licence
 
@@ -95,8 +114,14 @@ git submodule update --init --depth 1
 
 ```
 app/src/main/cpp/        native decoder + JNI (ld_core, ld_jni, ld_probe)
-app/src/main/java/       Kotlin: NativeDecoder binding, HeifCodec, viewer UI
+app/src/main/java/
+  .../heif/              NativeDecoder binding, HeifCodec, Media, ImageSniffer, StickerEffect
+  .../inbox/             notification listener, on-device store, settings
+  .../ui/                inbox + viewer screens
+app/src/test/            unit tests that decode real HEIC through the Bitmap path
 third_party/libde265     HEVC decoder (submodule, pinned)
 third_party/libheif      HEIF container (submodule, pinned)
 tools/jni-smoke/         host-side decode/JNI verification harness
+tools/make-test-media/   generator of the unit tests' synthetic HEIC files
+docs/rcs-integration.md  the five RCS access pathways and why this uses Pathway 1
 ```

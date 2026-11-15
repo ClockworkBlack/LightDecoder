@@ -182,8 +182,17 @@ bool Decoder::load(std::string& error) {
     }
   }
 
+  sequenceWidth_ = 0;
+  sequenceHeight_ = 0;
   if (heif_context_has_sequence(ctx_)) {
     track_ = heif_context_get_track(ctx_, 0);  // 0 = first visual track
+    if (track_) {
+      uint16_t w = 0, h = 0;
+      if (heif_track_get_image_resolution(track_, &w, &h).code == heif_error_Ok) {
+        sequenceWidth_ = w;
+        sequenceHeight_ = h;
+      }
+    }
   }
 
   if (imageIds_.empty() && track_ == nullptr) {
@@ -261,15 +270,15 @@ void Decoder::buildDescription() {
   }
 
   if (track_) {
-    uint16_t w = 0, h = 0;
-    heif_track_get_image_resolution(track_, &w, &h);
     addLine(out, "sequence", 1);
-    addLine(out, "seq_width", w);
-    addLine(out, "seq_height", h);
+    addLine(out, "seq_width", sequenceWidth_);
+    addLine(out, "seq_height", sequenceHeight_);
     addLine(out, "seq_alpha", heif_track_has_alpha_channel(track_) ? 1 : 0);
+    // A file that loops forever stores an all-ones "unknown" duration.
+    const uint64_t durationTicks = heif_context_get_sequence_duration(ctx_);
+    const bool durationKnown = durationTicks < 0xFFFFFFFFull;
     addLine(out, "seq_duration_ms",
-            ticksToMs(heif_context_get_sequence_duration(ctx_),
-                      heif_context_get_sequence_timescale(ctx_)));
+            durationKnown ? ticksToMs(durationTicks, heif_context_get_sequence_timescale(ctx_)) : 0);
     addLine(out, "seq_repeat", heif_track_get_number_of_repetitions(track_));
     addLine(out, "seq_handler", fourcc(heif_track_get_track_handler_type(track_)));
   } else {
@@ -279,8 +288,8 @@ void Decoder::buildDescription() {
   description_ = std::move(out);
 }
 
-bool Decoder::adoptPrepared(heif_image* image, bool hasAlpha, uint32_t durationMs,
-                            std::string& error) {
+bool Decoder::adoptPrepared(heif_image* image, bool hasAlpha, uint32_t durationMs, int maxWidth,
+                            int maxHeight, std::string& error) {
   releasePrepared();
   prepared_ = image;
   preparedHasAlpha_ = hasAlpha;
@@ -288,6 +297,10 @@ bool Decoder::adoptPrepared(heif_image* image, bool hasAlpha, uint32_t durationM
   preparedDurationMs_ = durationMs;
   preparedWidth_ = heif_image_get_width(image, heif_channel_interleaved);
   preparedHeight_ = heif_image_get_height(image, heif_channel_interleaved);
+  // HEVC codes whole blocks, so a decoded frame can be a few pixels larger
+  // than the picture. The extra columns and rows are at the right and bottom.
+  if (maxWidth > 0 && preparedWidth_ > maxWidth) preparedWidth_ = maxWidth;
+  if (maxHeight > 0 && preparedHeight_ > maxHeight) preparedHeight_ = maxHeight;
   if (preparedWidth_ <= 0 || preparedHeight_ <= 0 ||
       static_cast<uint64_t>(preparedWidth_) * static_cast<uint64_t>(preparedHeight_) >
           kMaxImagePixels) {
@@ -326,7 +339,7 @@ bool Decoder::prepareStill(int index, std::string& error) {
     if (image) heif_image_release(image);
     return false;
   }
-  return adoptPrepared(image, hasAlpha, 0, error);
+  return adoptPrepared(image, hasAlpha, 0, 0, 0, error);
 }
 
 int Decoder::prepareNextFrame(std::string& error) {
@@ -360,7 +373,7 @@ int Decoder::prepareNextFrame(std::string& error) {
   uint32_t durationMs = ticksToMs(heif_image_get_duration(image), heif_track_get_timescale(track_));
   if (durationMs == 0) durationMs = 100;  // unspecified: 10 frames per second
   ++framesDecoded_;
-  return adoptPrepared(image, hasAlpha, durationMs, error) ? 1 : -1;
+  return adoptPrepared(image, hasAlpha, durationMs, sequenceWidth_, sequenceHeight_, error) ? 1 : -1;
 }
 
 bool Decoder::rewind(std::string& error) {

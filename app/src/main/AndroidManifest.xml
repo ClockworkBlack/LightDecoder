@@ -1,63 +1,93 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Only to show a caught sticker as a notification. Asked for at the moment it is needed. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!--
+        allowBackup is off because the inbox holds pictures from private
+        conversations, which should not be copied to a cloud backup.
+    -->
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.LightDecoder">
 
+        <!-- Home screen: the sticker inbox. -->
+        <activity
+            android:name=".ui.InboxActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Shows one picture: opened, shared in, or from the inbox. -->
         <activity
             android:name=".ui.ViewerActivity"
             android:exported="true"
             android:label="@string/app_name">
 
-            <!-- Launcher entry. -->
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-
-            <!-- Opening a HEIC by tapping it (file manager, "open with"). -->
+            <!-- "Open with" for HEIC files. -->
             <intent-filter android:label="@string/open_with">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
                 <data android:mimeType="image/heic" />
                 <data android:mimeType="image/heif" />
                 <data android:mimeType="image/heic-sequence" />
                 <data android:mimeType="image/heif-sequence" />
             </intent-filter>
 
-            <!-- A sticker shared into the app from Messages, Photos, etc. -->
+            <!-- A picture shared to the app from Messages, a file manager and so on. -->
             <intent-filter android:label="@string/open_with">
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="image/heic" />
-                <data android:mimeType="image/heif" />
-                <data android:mimeType="image/heic-sequence" />
-                <data android:mimeType="image/heif-sequence" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="application/octet-stream" />
             </intent-filter>
 
-            <!-- Some senders label HEIC as a generic image; match by .heic name too. -->
-            <intent-filter
-                android:autoVerify="false"
-                android:label="@string/open_with">
+            <!-- Some apps label a .heic as a generic file, so match the file name too. -->
+            <intent-filter android:label="@string/open_with">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="content" />
                 <data android:scheme="file" />
                 <data android:host="*" />
-                <data android:mimeType="*/*" />
+                <data android:mimeType="application/octet-stream" />
                 <data android:pathPattern=".*\\.heic" />
                 <data android:pathPattern=".*\\.HEIC" />
                 <data android:pathPattern=".*\\.heif" />
                 <data android:pathPattern=".*\\.heics" />
             </intent-filter>
         </activity>
+
+        <!--
+            Catches picture attachments from message notifications. Android
+            starts this only after the user turns on notification access for
+            LightDecoder in system settings, and only the system can bind to it.
+            Ongoing notifications (music players, navigation and the like) are
+            declared as not wanted.
+        -->
+        <service
+            android:name=".inbox.StickerNotificationListener"
+            android:exported="true"
+            android:label="@string/listener_label"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.service.notification.disabled_filter_types"
+                android:value="ongoing" />
+        </service>
 
         <provider
             android:name="androidx.core.content.FileProvider"

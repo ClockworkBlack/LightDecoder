@@ -10,6 +10,7 @@ project(lightdecoder LANGUAGES C CXX)
 # (LD_HOST_BUILD=ON), where the JVM unit tests load it to decode real files.
 
 option(LD_HOST_BUILD "Build for the build machine, for the JVM unit tests" OFF)
+option(LD_TEST_MEDIA_TOOL "Also build the generator of the unit tests' sample files (needs kvazaar)" OFF)
 
 get_filename_component(LD_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../.." ABSOLUTE)
 set(LD_THIRD_PARTY "${LD_REPO_ROOT}/third_party" CACHE PATH "Directory holding the libde265 and libheif checkouts")
@@ -60,6 +61,11 @@ foreach(codec
   set(WITH_${codec} OFF CACHE BOOL "" FORCE)
   set(WITH_${codec}_PLUGIN OFF CACHE BOOL "" FORCE)
 endforeach()
+if(LD_TEST_MEDIA_TOOL)
+  # The generator of the unit tests' sample files needs an HEVC encoder.
+  # kvazaar must be installed where CMake can find it (CMAKE_PREFIX_PATH).
+  set(WITH_KVAZAAR ON CACHE BOOL "" FORCE)
+endif()
 set(WITH_UNCOMPRESSED_CODEC OFF CACHE BOOL "" FORCE)
 set(WITH_WEBCODECS OFF CACHE BOOL "" FORCE)
 set(WITH_LIBSHARPYUV OFF CACHE BOOL "" FORCE)
@@ -109,4 +115,10 @@ else()
   add_executable(ldprobe ld_core.cc ld_probe.cc)
   target_include_directories(ldprobe PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" ${LD_HEIF_INCLUDE_DIRS})
   target_link_libraries(ldprobe PRIVATE heif)
+
+  if(LD_TEST_MEDIA_TOOL)
+    add_executable(make_test_media "${LD_REPO_ROOT}/tools/make-test-media/make_test_media.cc")
+    target_include_directories(make_test_media PRIVATE ${LD_HEIF_INCLUDE_DIRS})
+    target_link_libraries(make_test_media PRIVATE heif)
+  endif()
 endif()

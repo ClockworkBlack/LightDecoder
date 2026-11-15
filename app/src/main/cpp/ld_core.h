@@ -71,7 +71,8 @@ class Decoder {
   bool load(std::string& error);
   void unload();
   void buildDescription();
-  bool adoptPrepared(heif_image* image, bool hasAlpha, uint32_t durationMs, std::string& error);
+  bool adoptPrepared(heif_image* image, bool hasAlpha, uint32_t durationMs, int maxWidth,
+                     int maxHeight, std::string& error);
 
   std::vector<uint8_t> data_;
   heif_context* ctx_ = nullptr;
@@ -79,6 +80,8 @@ class Decoder {
   std::vector<uint32_t> imageIds_;
   std::string description_;
   uint32_t framesDecoded_ = 0;
+  int sequenceWidth_ = 0;
+  int sequenceHeight_ = 0;
 
   heif_image* prepared_ = nullptr;
   int preparedWidth_ = 0;
