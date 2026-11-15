@@ -1,0 +1,6 @@
+<resources>
+    <color name="brand">#FF4C8DFF</color>
+    <color name="brand_dark">#FF1B3A6B</color>
+    <color name="checker_light">#FFEDEDED</color>
+    <color name="checker_dark">#FFCFCFCF</color>
+</resources>

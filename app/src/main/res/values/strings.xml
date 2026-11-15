@@ -1,0 +1,18 @@
+<resources>
+    <string name="app_name">LightDecoder</string>
+    <string name="open_with">Open with LightDecoder</string>
+
+    <string name="empty_title">No sticker open</string>
+    <string name="empty_body">Open a .heic sticker, or share one into LightDecoder, to view it here. Transparency and animation are decoded on-device.</string>
+    <string name="open_file">Open a file</string>
+
+    <string name="action_save">Save as PNG</string>
+    <string name="action_share">Share</string>
+    <string name="action_info">Details</string>
+    <string name="action_play">Play / pause</string>
+
+    <string name="saved_to">Saved to %1$s</string>
+    <string name="decode_failed">Couldn\'t decode this file: %1$s</string>
+    <string name="not_available">The decoder couldn\'t be loaded on this device.</string>
+    <string name="share_title">Share sticker as PNG</string>
+</resources>
