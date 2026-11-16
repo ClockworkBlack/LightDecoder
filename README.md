@@ -252,6 +252,22 @@ connection and loads nothing.
 
 How the link is built, and how to maintain it: `docs/google-messages-link.md`.
 
+### Pictures and your own stickers
+
+Pictures in a conversation load by themselves and show at full size in the
+bubble (up to 25 MB each; a video shows its still). If the phone only has a
+thumbnail so far, the app asks it for the original without a tap.
+
+The sticker button next to the attachment button opens your own stickers. "Make
+a sticker" turns any picture into one, on the phone: optionally cut away a plain
+background, clip it to a rounded square or circle, add the white outline, and
+save. Tapping a sticker sends it as a 512×512 PNG, which an iPhone shows as a
+picture in the conversation. It is not an iMessage sticker (those exist only
+inside iMessage), and messages still arrive as green RCS/SMS bubbles there:
+blue means iMessage, which only Apple devices can send. If a carrier turns the
+picture into a JPEG (MMS), transparency is lost; the "White background" switch
+is for that.
+
 ## Licence
 
 **GNU AGPL-3.0-or-later** (see [`LICENSE`](LICENSE)). The Google Messages link

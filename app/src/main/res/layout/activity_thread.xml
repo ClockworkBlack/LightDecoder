@@ -168,6 +168,14 @@
             android:contentDescription="@string/chat_attach"
             android:src="@drawable/ic_attach" />
 
+        <ImageButton
+            android:id="@+id/stickers"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/chat_stickers"
+            android:src="@drawable/ic_sticker" />
+
         <com.google.android.material.textfield.TextInputLayout
             style="@style/Widget.Material3.TextInputLayout.OutlinedBox.Dense"
             android:layout_width="0dp"

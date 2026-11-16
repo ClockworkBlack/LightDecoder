@@ -32,10 +32,10 @@ import java.nio.ByteBuffer
 import java.util.WeakHashMap
 
 /**
- * Previews for the media in message bubbles. A preview comes from, in order:
- * the downloaded thumbnail, the downloaded file, inline bytes, or a download
- * through the link (the thumbnail when the phone has one, else the picture
- * itself if it is not too large). HEIC goes through the built-in decoder.
+ * The media in message bubbles. A picture shows at full size without being
+ * asked: from the downloaded file, inline bytes, or a download through the
+ * link; the phone's thumbnail is the fallback (and what a video shows). HEIC
+ * goes through the built-in decoder.
  *
  * Main thread only, except the decoding, which runs on IO with at most
  * [PARALLEL] at a time so a fast scroll does not decode fifty pictures at once.
@@ -149,16 +149,35 @@ class MediaLoader(
         object NeedsConnection : Fetched()
     }
 
+    /**
+     * Pictures show at full size by themselves: the downloaded file, inline
+     * bytes, or a download of the picture itself (up to [AUTO_DOWNLOAD_MAX]).
+     * The phone's small thumbnail is only the fallback (and what a video
+     * shows). While just the thumbnail exists on the phone, the screen asks
+     * for the original; its arrival changes the part and so rebinds it.
+     */
     private suspend fun loadPreview(messageId: String, part: MediaRow, maxSide: Int): Preview {
-        val bytes = existing(part.thumbPath)?.let(::readCapped)
-            ?: existing(part.localPath)?.let(::readCapped)
-            ?: part.inlineData.takeIf { it.isNotEmpty() }
-            ?: when (val fetched = download(messageId, part)) {
-                is Fetched.Got -> readCapped(fetched.file)
-                Fetched.None -> null
-                Fetched.NeedsConnection -> return Preview.NeedsConnection
+        val video = part.mime.startsWith("video/")
+        var needsConnection = false
+        suspend fun fetch(thumbnail: Boolean): ByteArray? = when (val fetched = download(messageId, part, thumbnail)) {
+            is Fetched.Got -> readCapped(fetched.file)
+            Fetched.None -> null
+            Fetched.NeedsConnection -> {
+                needsConnection = true
+                null
             }
-            ?: return Preview.Unavailable
+        }
+        val full: ByteArray? = if (video) null else {
+            existing(part.localPath)?.let(::readCapped)
+                ?: part.inlineData.takeIf { it.isNotEmpty() }
+                ?: fetch(thumbnail = false)
+        }
+        val bytes = full
+            ?: existing(part.thumbPath)?.let(::readCapped)
+            ?: (if (video) existing(part.localPath)?.let(::readCapped) else null)
+            ?: (if (video) part.inlineData.takeIf { it.isNotEmpty() } else null)
+            ?: fetch(thumbnail = true)
+            ?: return if (needsConnection) Preview.NeedsConnection else Preview.Unavailable
         currentCoroutineContext().ensureActive()
         val bitmap = try {
             decodePreview(bytes, maxSide)
@@ -169,10 +188,11 @@ class MediaLoader(
         return Preview.Ready(bitmap)
     }
 
-    private suspend fun download(messageId: String, part: MediaRow): Fetched {
-        val thumbnail = part.thumbMediaId.isNotEmpty()
-        if (!thumbnail) {
-            // No thumbnail: fetch the file itself only when it is a picture of sensible size.
+    private suspend fun download(messageId: String, part: MediaRow, thumbnail: Boolean): Fetched {
+        if (thumbnail) {
+            if (part.thumbMediaId.isEmpty()) return Fetched.None
+        } else {
+            // The file itself: only a picture of sensible size.
             val picture = part.mime.isEmpty() || part.mime.startsWith("image/")
             if (part.mediaId.isEmpty() || !picture || part.size > AUTO_DOWNLOAD_MAX) return Fetched.None
         }

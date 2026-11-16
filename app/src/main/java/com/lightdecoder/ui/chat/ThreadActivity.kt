@@ -205,6 +205,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             // The long-press sheet and an open question (delete, send again) still act on the old
             // conversation's message or id: close them, and the overflow menu built from its row.
             actionSheet?.dismiss()
+            stickerSheet?.dismiss()
+            fullSizeAsked.clear()
             confirmDialog?.dismiss()
             closeOptionsMenu()
             windowSize = PAGE
@@ -657,6 +659,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         binding.attach.setOnClickListener {
             pickMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
         }
+        binding.stickers.setOnClickListener { showStickers() }
         binding.attachmentRemove.setOnClickListener { clearAttachment() }
         binding.replyClose.setOnClickListener { clearReply() }
         binding.input.addTextChangedListener(object : TextWatcher {
@@ -683,6 +686,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
         binding.input.isEnabled = paired
         binding.attach.isEnabled = paired
+        binding.stickers.isEnabled = paired
         binding.input.hint = getString(if (paired) R.string.chat_compose_hint else R.string.chat_compose_unpaired)
         updateSendEnabled()
     }
@@ -724,6 +728,101 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 }
             }
             result.onFailure { toast(RelayErrors.message(this@ThreadActivity, it)) }
+        }
+    }
+
+    // --- stickers ------------------------------------------------------------
+
+    private var stickerSheet: BottomSheetDialog? = null
+
+    private val makeSticker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        // A new sticker was saved: show the library again with it in front.
+        if (result.resultCode == RESULT_OK) showStickers()
+    }
+
+    /** The user's own stickers: tap sends one to this conversation, touch-and-hold deletes it. */
+    private fun showStickers() {
+        stickerSheet?.dismiss()
+        val sheet = BottomSheetDialog(this)
+        val view = layoutInflater.inflate(R.layout.sheet_stickers, null)
+        val grid = view.findViewById<RecyclerView>(R.id.stickersGrid)
+        val empty = view.findViewById<View>(R.id.stickersEmpty)
+        grid.layoutManager = androidx.recyclerview.widget.GridLayoutManager(this, STICKER_COLUMNS)
+        view.findViewById<View>(R.id.stickersNew).setOnClickListener {
+            sheet.dismiss()
+            makeSticker.launch(com.lightdecoder.ui.sticker.StickerMakerActivity.intent(this))
+        }
+        sheet.setContentView(view)
+        sheet.setOnDismissListener { if (stickerSheet === sheet) stickerSheet = null }
+        stickerSheet = sheet
+        sheet.show()
+        val side = (STICKER_TILE_DP * resources.displayMetrics.density).toInt()
+        fun refresh() {
+            lifecycleScope.launch {
+                val tiles = withContext(Dispatchers.IO) {
+                    com.lightdecoder.sticker.StickerLibrary.list(applicationContext).mapNotNull { file ->
+                        runCatching { MediaLoader.decodePreview(file.readBytes(), side) }.getOrNull()?.let { file to it }
+                    }
+                }
+                empty.visibility = if (tiles.isEmpty()) View.VISIBLE else View.GONE
+                grid.adapter = StickerTiles(
+                    tiles,
+                    onTap = { file ->
+                        sheet.dismiss()
+                        sendSticker(file)
+                    },
+                    onHold = { file ->
+                        MaterialAlertDialogBuilder(this@ThreadActivity)
+                            .setTitle(R.string.sticker_delete_title)
+                            .setNegativeButton(android.R.string.cancel, null)
+                            .setPositiveButton(R.string.sticker_delete_confirm) { _, _ ->
+                                lifecycleScope.launch {
+                                    withContext(Dispatchers.IO) {
+                                        com.lightdecoder.sticker.StickerLibrary.delete(applicationContext, file)
+                                    }
+                                    refresh()
+                                }
+                            }
+                            .show()
+                    },
+                )
+            }
+        }
+        refresh()
+    }
+
+    private fun sendSticker(file: File) {
+        val id = conversationId
+        scrollToBottomNext = true
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) { relayAttempt { manager.sendMedia(id, Uri.fromFile(file), null, null) } }
+                .onFailure { toast(RelayErrors.message(this@ThreadActivity, it)) }
+        }
+    }
+
+    private class StickerTiles(
+        private val tiles: List<Pair<File, Bitmap>>,
+        private val onTap: (File) -> Unit,
+        private val onHold: (File) -> Unit,
+    ) : RecyclerView.Adapter<StickerTiles.Holder>() {
+        class Holder(val image: android.widget.ImageView) : RecyclerView.ViewHolder(image)
+
+        override fun getItemCount() = tiles.size
+
+        override fun onCreateViewHolder(parent: android.view.ViewGroup, viewType: Int) = Holder(
+            android.view.LayoutInflater.from(parent.context)
+                .inflate(R.layout.item_sticker_tile, parent, false) as android.widget.ImageView
+        )
+
+        override fun onBindViewHolder(holder: Holder, position: Int) {
+            val (file, bitmap) = tiles[position]
+            holder.image.setImageBitmap(bitmap)
+            holder.image.contentDescription = holder.image.context.getString(R.string.sticker_tile)
+            holder.image.setOnClickListener { onTap(file) }
+            holder.image.setOnLongClickListener {
+                onHold(file)
+                true
+            }
         }
     }
 
@@ -896,11 +995,20 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
     }
 
+    /** Originals already asked of the phone from this screen (asked once each, without a tap). */
+    private val fullSizeAsked = HashSet<String>()
+
+    /**
+     * A picture the phone only has a thumbnail of so far came on screen: ask
+     * for the original, quietly. It arrives as an update of the message.
+     */
     override fun onLoadFullSize(row: MessageRow, part: MediaRow) {
+        if (!online) return
+        val key = row.id + "|" + part.partId
+        if (!fullSizeAsked.add(key)) return
         lifecycleScope.launch {
             relayAttempt { manager.requestFullSize(row.id, part.partId) }
-                .onSuccess { toast(getString(R.string.chat_full_size_requested)) }
-                .onFailure { toast(RelayErrors.message(this@ThreadActivity, it)) }
+                .onFailure { fullSizeAsked.remove(key) }
         }
     }
 
@@ -1170,6 +1278,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     companion object {
         private const val STATE_WINDOW = "window"
         private const val STATE_ATTACHMENT = "attachment"
+        private const val STICKER_COLUMNS = 4
+        private const val STICKER_TILE_DP = 96
         private const val STATE_REPLY_TO = "replyTo"
 
         private const val PAGE = 50

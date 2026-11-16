@@ -324,4 +324,27 @@
     <string name="chat_group_title">New group</string>
     <string name="chat_group_body">Group name (optional; only RCS groups show a name).</string>
     <string name="chat_group_name_hint">Group name</string>
+    <!-- Sticker maker -->
+    <string name="chat_stickers">Stickers</string>
+    <string name="sticker_maker_title">Make a sticker</string>
+    <string name="sticker_preview">Sticker preview</string>
+    <string name="sticker_pick">Choose a picture</string>
+    <string name="sticker_pick_hint">Choose a picture to turn into a sticker.</string>
+    <string name="sticker_remove_background">Cut away a plain background</string>
+    <string name="sticker_tolerance">How much counts as background</string>
+    <string name="sticker_shape">Shape</string>
+    <string name="sticker_shape_original">As it is</string>
+    <string name="sticker_shape_rounded">Rounded</string>
+    <string name="sticker_shape_circle">Circle</string>
+    <string name="sticker_outline">White outline</string>
+    <string name="sticker_solid">White background</string>
+    <string name="sticker_solid_hint">Stickers are sent as PNG pictures, which iPhones show in the conversation. Turn on the white background if the other phone shows a black box around the sticker (some carriers convert pictures sent as MMS).</string>
+    <string name="sticker_save">Save sticker</string>
+    <string name="sticker_failed">That picture could not be read.</string>
+    <string name="sticker_sheet_title">Your stickers</string>
+    <string name="sticker_sheet_empty">No stickers yet. Make one from any picture. Tap a sticker to send it; touch and hold to delete it.</string>
+    <string name="sticker_new">Make a sticker</string>
+    <string name="sticker_tile">Sticker. Tap to send, touch and hold to delete.</string>
+    <string name="sticker_delete_title">Delete this sticker?</string>
+    <string name="sticker_delete_confirm">Delete</string>
 </resources>

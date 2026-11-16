@@ -262,7 +262,9 @@ class MessagesAdapter(
         }
         container.visibility = View.VISIBLE
         val inflater = LayoutInflater.from(container.context)
-        val maxSide = (MEDIA_MAX_SIDE_DP * container.resources.displayMetrics.density).toInt()
+        val metrics = container.resources.displayMetrics
+        // As large as a bubble can show it: its width on screen, and tall pictures up to the cap.
+        val maxSide = maxOf((MEDIA_MAX_SIDE_DP * metrics.density).toInt(), (metrics.widthPixels * 0.8f).toInt())
         for (part in row.media) {
             val pb = ItemMediaPartBinding.inflate(inflater, container, false)
             val visual = isVisual(part)
@@ -284,8 +286,9 @@ class MessagesAdapter(
                 pb.mediaFile.setOnClickListener { callbacks.onMediaTap(row, part) }
             }
             val canAskFullSize = part.needsFullSize && !part.fullSizeRequested && !row.isLocal
-            pb.mediaFullSize.visibility = if (canAskFullSize) View.VISIBLE else View.GONE
-            pb.mediaFullSize.setOnClickListener { callbacks.onLoadFullSize(row, part) }
+            // Only a thumbnail on the phone so far: the original is asked for without a tap.
+            pb.mediaFullSize.visibility = View.GONE
+            if (canAskFullSize && visual) callbacks.onLoadFullSize(row, part)
             container.addView(pb.root)
         }
     }
@@ -364,8 +367,8 @@ class MessagesAdapter(
         /** How Material dims a control that cannot be used. */
         const val DISABLED_ALPHA = 0.38f
 
-        /** Longest side of a picture preview in a bubble (decoded at this size, shown up to it). */
-        const val MEDIA_MAX_SIDE_DP = 240
+        /** Longest side of a picture in a bubble (decoded at this size or the bubble's width, shown up to it). */
+        const val MEDIA_MAX_SIDE_DP = 480
 
         val DIFF = object : DiffUtil.ItemCallback<ThreadItem>() {
             override fun areItemsTheSame(a: ThreadItem, b: ThreadItem) = a.key == b.key
