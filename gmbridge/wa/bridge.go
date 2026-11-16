@@ -234,6 +234,7 @@ var (
 	connectClient    = func(ctx context.Context, cli *whatsmeow.Client) error { return cli.ConnectContext(ctx) }
 	disconnectClient = func(cli *whatsmeow.Client) { cli.Disconnect() }
 	isLoggedIn       = func(cli *whatsmeow.Client) bool { return cli.IsConnected() && cli.IsLoggedIn() }
+	socketConnected  = func(cli *whatsmeow.Client) bool { return cli.IsConnected() }
 	waitForLogin     = func(cli *whatsmeow.Client, d time.Duration) bool { return cli.WaitForConnection(d) }
 	logoutClient     = func(ctx context.Context, cli *whatsmeow.Client) error { return cli.Logout(ctx) }
 )
@@ -296,7 +297,7 @@ func (b *WABridge) Connect() (err error) {
 		return newError(codeInternal, "the WhatsApp store is not available")
 	case !isPaired(cli):
 		return b.startPairingSocketLocked()
-	case wanted && cli.IsConnected():
+	case wanted && socketConnected(cli):
 		return nil
 	}
 	return b.connectLocked(cli)

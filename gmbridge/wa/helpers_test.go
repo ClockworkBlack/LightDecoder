@@ -131,10 +131,10 @@ func (f fakeID) norm(j types.JID) types.JID {
 	}
 	return j
 }
-func (f fakeID) isMe(j types.JID) bool    { return j.User == meJID.User }
-func (f fakeID) name(j types.JID) string  { return f.names[j] }
-func (f fakeID) me() types.JID            { return meJID }
-func newFakeID() fakeID                   { return fakeID{names: map[types.JID]string{aliceJID: "Alice"}} }
+func (f fakeID) isMe(j types.JID) bool                 { return j.User == meJID.User }
+func (f fakeID) name(j types.JID) string               { return f.names[j] }
+func (f fakeID) me() types.JID                         { return meJID }
+func newFakeID() fakeID                                { return fakeID{names: map[types.JID]string{aliceJID: "Alice"}} }
 func (f fakeID) withName(j types.JID, n string) fakeID { f.names[j] = n; return f }
 
 // fakeNet replaces every whatsmeow network call for one test and restores
@@ -185,6 +185,11 @@ func installFakeNet(t *testing.T) *fakeNet {
 		old := isLoggedIn
 		isLoggedIn = func(cli *whatsmeow.Client) bool { f.mu.Lock(); defer f.mu.Unlock(); return f.loggedIn }
 		save(func() { isLoggedIn = old })
+	}
+	{
+		old := socketConnected
+		socketConnected = func(cli *whatsmeow.Client) bool { f.mu.Lock(); defer f.mu.Unlock(); return f.loggedIn }
+		save(func() { socketConnected = old })
 	}
 	{
 		old := waitForLogin
@@ -275,7 +280,10 @@ func installFakeNet(t *testing.T) *fakeNet {
 	{
 		old := newMessageID
 		n := 0
-		newMessageID = func(cli *whatsmeow.Client) types.MessageID { n++; return types.MessageID("3EB0TEST" + string(rune('A'+n))) }
+		newMessageID = func(cli *whatsmeow.Client) types.MessageID {
+			n++
+			return types.MessageID("3EB0TEST" + string(rune('A'+n)))
+		}
 		save(func() { newMessageID = old })
 	}
 	{
@@ -335,7 +343,7 @@ func pair(t *testing.T, b *WABridge) {
 	ad.Device = 7
 	cli.Store.ID = &ad
 	cli.Store.PushName = "Me"
-	cli.Store.Account = &waAdv.ADVSignedDeviceIdentity{}
+	cli.Store.Account = &waAdv.ADVSignedDeviceIdentity{Details: []byte{}, AccountSignature: make([]byte, 64), AccountSignatureKey: make([]byte, 32), DeviceSignature: make([]byte, 64)}
 	if err := cli.Store.Save(context.Background()); err != nil {
 		t.Fatalf("save device: %v", err)
 	}

@@ -54,7 +54,7 @@ func (b *WABridge) startPairingSocketLocked() error {
 	b.mu.Lock()
 	cli, active := b.cli, b.pair.active
 	b.mu.Unlock()
-	if active && cli.IsConnected() {
+	if active && socketConnected(cli) {
 		return nil
 	}
 	b.stopPairingLocked()
