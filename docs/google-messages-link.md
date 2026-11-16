@@ -1164,94 +1164,47 @@ anything that is not a kind or outcome.
 
 ## Known limitations (0.3.0)
 
-Google and libgm:
+Fixed in the limitations pass (kept here for reference): pairing cancel now
+withdraws the phone's prompt; no libgm goroutine parks after the watchdog; acks
+are flushed and their ticker stopped on Unpair, retirement and Close; no pings,
+acks or SetActiveSession go out after Disconnect; panics in libgm's own
+goroutines drop the connection (error / `internal`) instead of crashing; token
+fields are written under a lock; the connector's client reset and receive-stall
+recovery are ported; Disconnect cancels a Connect in progress; Unpair returns
+its verdict directly; the SIM/settings cache survives restarts; "last session
+refresh" counts real token refreshes only; Android 8 re-checks the notification
+every 2 minutes; Disconnect during an unpair keeps an "Unpairing…" notification
+until the revoke ends; live events wait while the archive's owner is unsettled;
+`phone_not_responding` and unpair-held sends are looked up on the phone; the
+forward catch-up has no page cap and resumes after an interruption; attachments
+are sent from their file; media paths are indexed and the cleanup/download race
+is closed; a battery-optimisation exemption can be requested from the status
+screen; conversations the phone deletes go to a local Deleted folder; "Not
+spam", the reply target after rotation, TalkBack link actions and the contact
+picker's offline hint are in. libgm is now a patched copy:
+`gmbridge/third_party/mautrix-gmessages/PATCHES.md`.
 
-- Google may refuse sign-in inside an embedded WebView. The app keeps the
-  WebView's own user agent rather than disguising it; the fallback is pasting
+What remains:
+
+- Google may refuse sign-in inside an embedded WebView; the fallback is pasting
   cookies.
-- `CancelPairing` cannot withdraw the emoji prompt on the phone: libgm sends its
-  cancel with an already-cancelled context, so the request never goes out. The
-  phone's dialog times out by itself. If the user taps the emoji there after
-  cancelling, the phone can keep an orphaned web pairing, which they can remove
-  under Device pairing. Fixing this needs a libgm change.
-- After the 60 s pairing watchdog fires, libgm's `StartGaiaPairing` goroutine
-  may stay parked for good. Every client that ever connected keeps libgm's
-  acknowledgement-ticker goroutine; a dropped client's can no longer reach the
-  network, but the goroutine stays.
-- After Disconnect, a long-poll loop that was asleep in libgm's error backoff
-  keeps its pinger until the sleep ends (about one ping a minute); a long poll
-  it reopens is closed again at once.
-- Unpair cannot flush libgm's pending acknowledgements first (libgm has no
-  exported way). If the same account is paired again, a few old events may be
-  delivered again; they are stored by id, so this is harmless.
-- A panic in libgm's own background goroutines still crashes the app; only
-  calls into the bridge are protected.
-- libgm updates token fields without a lock; only the cookie map, the fatal
-  case, is protected when saving.
-- Only the `SetActiveSession` half of the connector's "SetActiveSession may have
-  failed" workaround is ported, not its later client reset, and the
-  connector's optional receive-stall recovery (re-arming the session and
-  reconnecting while no data arrives) is not ported. After a data gap the
-  bridge asks for a catch-up once data flows again or the session becomes
-  active.
-- ForceRCS follows the newest protocol-switch tombstone the bridge has seen.
-  A chat whose switch is neither in the archive nor on a page fetched since
-  pairing is sent without it until one shows up. Deleting the archive drops
-  its seed at once. If that call to Go fails (only a panic there could make
-  it), the old seed stays until the next connect replaces it.
-
-Connection and Android:
-
-- Doze and battery optimisation are not handled beyond the alarm-backed
-  reconnect and a link to the battery settings on the status screen. Android
-  limits alarms allowed while idle to roughly one per app every nine minutes.
-- The service can be refused a foreground start (Android 12+ background
-  limits, or a restart after the process was killed). The link then comes back
-  when the user next opens one of the app's screens: always after a start the
-  user asked for, otherwise only with "start automatically" on.
-- On Android 8 the system does not report notifications being turned off, so
-  a connected link only notices when a screen of the app is next shown or the
-  link connects again.
-- `Disconnect` waits behind a `Connect` that is still fetching config or
-  refreshing its token (the service and "stay connected" stop at once).
-- Tapping Disconnect in the notification while an unpair is running stops the
-  service while Go's temporary revoke connection may still be up (the revoke
-  itself is limited to 15 s). An unpair can take up to 10 s longer than the
-  revoke while the manager waits for Go's verdict.
-- If a connection came up while the phone id was not known and the initial
-  sync's deletion of another phone's archive then fails, live events of that
-  connection still land in the old archive (sends stay blocked).
-- Go's SIM cache is not persisted, so after a restart the outbox waits for the
-  first `settings` event or 15 s. On a dual-SIM phone a send in that window can
-  go from the phone's default SIM.
-- `settings` is null until the first settings event of each run.
-- The health table's "last session refresh" counts every session save, not
-  only token refreshes.
-
-Sending:
-
-- For an `interrupted`, `unconfirmed` or `phone_not_responding` send the app
-  cannot tell whether it went out (a `phone_not_responding` send, or one an
-  Unpair held while it went out, is not even looked up on the phone; only a
-  late echo settles it). The thread says so and asks before sending it
-  again, but if the user confirms and the first one did go out, it arrives
-  twice.
-- A forward catch-up fetches at most 10 pages (500 messages) per conversation;
-  anything further back in a gap is left to "load older" and the import.
-- Media sends hold the whole attachment (up to 100 MB) in memory.
-
-Archive and UI:
-
-- The archive is not encrypted by the app beyond Android's storage encryption.
-- Conversations the phone deletes or trashes are deleted locally, without a
-  way back.
+- Whether the phone honours a pairing cancel is up to the phone; an emoji tap
+  that beats the cancel is undone by the usual revoke.
+- "Not spam" uses the connector's UNBLOCK update; not verified on a phone for a
+  chat that was marked spam but never blocked.
+- An update request libgm starts by itself after a data gap uses its own
+  context, so one already started may still go out right after Disconnect.
+- The stall check costs one conversation-list request per "no data" report
+  from libgm (about every 3 h while idle).
+- ForceRCS follows the newest protocol-switch tombstone seen; a chat whose
+  switch is in neither the archive nor a fetched page is sent without it.
+- Android limits: Doze still delays alarms (about one per nine minutes while
+  idle) unless the user grants the exemption; a refused foreground start comes
+  back when a screen of the app is next opened.
+- For an `interrupted`, `unconfirmed` or `phone_not_responding` send that the
+  phone lookup cannot settle, the app cannot know whether it went out; it asks
+  before sending again.
+- The archive is protected by Android's storage encryption and the app sandbox,
+  not by app-level encryption.
 - Mute is set on the phone and stored here; the phone never reports mute
-  state, so a change made on the phone is not seen.
-- The check for unreferenced media scans the media table once per file (its
-  paths have no index), which is slow with very many attachments. A download
-  finishing exactly while unreferenced files are cleaned up can lose its new
-  file; it is downloaded again when next shown.
-- No "Not spam" action. The reply target is not restored after rotation.
-  Links inside a bubble cannot be activated with TalkBack.
-- The contact picker's "offline" hint only shows when no contacts are stored,
-  because `listContacts` falls back to the stored list quietly.
+  changes made on it.
