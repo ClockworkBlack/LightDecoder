@@ -10,10 +10,18 @@ import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.lightdecoder.R
+import com.lightdecoder.chat.ChatService
 
 /**
- * The link's notification channels, its ongoing service notification and the
- * "pair again" alert. Message notifications are in [MessageNotifier].
+ * The links' notification channels, the Google Messages link's ongoing
+ * service notification and its "pair again" alert. Message notifications
+ * are in [MessageNotifier].
+ *
+ * Each [ChatService] has channels of its own ([statusChannel],
+ * [messagesChannel]) and its own id for its foreground service's
+ * notification ([serviceNotificationId]), so the user can silence, and each
+ * link can show, one service without the other. Where a function takes the
+ * service it defaults to Google Messages, which was all there was.
  *
  * Notification text never says more than the state: no names, numbers or
  * message text.
@@ -23,48 +31,101 @@ object RelayNotifications {
     const val CHANNEL_ALERTS = "relay_alerts"
     const val CHANNEL_MESSAGES = "relay_messages"
 
+    /** WhatsApp's "WhatsApp link" channel: its foreground service's notification, with Disconnect. */
+    const val CHANNEL_WA_STATUS = "wa_status"
+
+    /** WhatsApp's "WhatsApp messages" channel. */
+    const val CHANNEL_WA_MESSAGES = "wa_messages"
+
     const val ID_SERVICE = 0x5245_4c01
     private const val ID_REPAIR = 0x5245_4c02
 
-    /** Creates the channels. Cheap and idempotent; called at app start. */
-    fun ensureChannels(context: Context) {
-        val system = context.getSystemService(NotificationManager::class.java) ?: return
-        system.createNotificationChannels(
-            listOf(
-                NotificationChannel(
-                    CHANNEL_STATUS,
-                    context.getString(R.string.relay_channel_status),
-                    NotificationManager.IMPORTANCE_LOW, // always there while connected, so never noisy
-                ).apply {
-                    description = context.getString(R.string.relay_channel_status_description)
-                    setShowBadge(false)
-                },
-                NotificationChannel(
-                    CHANNEL_ALERTS,
-                    context.getString(R.string.relay_channel_alerts),
-                    NotificationManager.IMPORTANCE_DEFAULT,
-                ).apply { description = context.getString(R.string.relay_channel_alerts_description) },
-                NotificationChannel(
-                    CHANNEL_MESSAGES,
-                    context.getString(R.string.relay_channel_messages),
-                    NotificationManager.IMPORTANCE_HIGH,
-                ).apply { description = context.getString(R.string.relay_channel_messages_description) },
-            )
-        )
+    /** The notification of WhatsApp's foreground service. */
+    const val ID_WA_SERVICE = 0x5245_4c21
+
+    /** The channel of [service]'s ongoing "connected" notification, the one with Disconnect. */
+    fun statusChannel(service: ChatService): String = when (service) {
+        ChatService.MESSAGES -> CHANNEL_STATUS
+        ChatService.WHATSAPP -> CHANNEL_WA_STATUS
+    }
+
+    /** The channel of [service]'s new-message notifications. */
+    fun messagesChannel(service: ChatService): String = when (service) {
+        ChatService.MESSAGES -> CHANNEL_MESSAGES
+        ChatService.WHATSAPP -> CHANNEL_WA_MESSAGES
+    }
+
+    /** The id of the notification [service]'s foreground service runs under. */
+    fun serviceNotificationId(service: ChatService): Int = when (service) {
+        ChatService.MESSAGES -> ID_SERVICE
+        ChatService.WHATSAPP -> ID_WA_SERVICE
     }
 
     /**
-     * Whether the link's ongoing notification can actually be seen: the
-     * app's notifications are on (on Android 13+ that includes the
-     * POST_NOTIFICATIONS permission) and its channel is not turned off. The
-     * link must not run without it, since its Disconnect button is the
-     * user's way to stop it at any time.
+     * Creates [service]'s channels. Cheap and idempotent. Google Messages'
+     * are created at app start; WhatsApp's the first time anything of
+     * WhatsApp needs them, so that someone who never links WhatsApp does not
+     * find its channels in the system settings.
      */
-    fun statusVisible(context: Context): Boolean {
+    fun ensureChannels(context: Context, service: ChatService = ChatService.MESSAGES) {
+        val system = context.getSystemService(NotificationManager::class.java) ?: return
+        system.createNotificationChannels(
+            when (service) {
+                ChatService.MESSAGES -> messagesChannels(context)
+                ChatService.WHATSAPP -> whatsAppChannels(context)
+            }
+        )
+    }
+
+    private fun messagesChannels(context: Context): List<NotificationChannel> = listOf(
+        NotificationChannel(
+            CHANNEL_STATUS,
+            context.getString(R.string.relay_channel_status),
+            NotificationManager.IMPORTANCE_LOW, // always there while connected, so never noisy
+        ).apply {
+            description = context.getString(R.string.relay_channel_status_description)
+            setShowBadge(false)
+        },
+        NotificationChannel(
+            CHANNEL_ALERTS,
+            context.getString(R.string.relay_channel_alerts),
+            NotificationManager.IMPORTANCE_DEFAULT,
+        ).apply { description = context.getString(R.string.relay_channel_alerts_description) },
+        NotificationChannel(
+            CHANNEL_MESSAGES,
+            context.getString(R.string.relay_channel_messages),
+            NotificationManager.IMPORTANCE_HIGH,
+        ).apply { description = context.getString(R.string.relay_channel_messages_description) },
+    )
+
+    private fun whatsAppChannels(context: Context): List<NotificationChannel> = listOf(
+        NotificationChannel(
+            CHANNEL_WA_STATUS,
+            context.getString(R.string.wa_channel_status),
+            NotificationManager.IMPORTANCE_LOW, // always there while connected, so never noisy
+        ).apply {
+            description = context.getString(R.string.wa_channel_status_description)
+            setShowBadge(false)
+        },
+        NotificationChannel(
+            CHANNEL_WA_MESSAGES,
+            context.getString(R.string.wa_channel_messages),
+            NotificationManager.IMPORTANCE_HIGH,
+        ).apply { description = context.getString(R.string.wa_channel_messages_description) },
+    )
+
+    /**
+     * Whether [service]'s ongoing notification can actually be seen: the
+     * app's notifications are on (on Android 13+ that includes the
+     * POST_NOTIFICATIONS permission) and its channel ([statusChannel]) is
+     * not turned off. A link must not run without it, since its Disconnect
+     * button is the user's way to stop it at any time.
+     */
+    fun statusVisible(context: Context, service: ChatService = ChatService.MESSAGES): Boolean {
         if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) return false
-        ensureChannels(context)
+        ensureChannels(context, service)
         val system = context.getSystemService(NotificationManager::class.java) ?: return true
-        val channel = system.getNotificationChannel(CHANNEL_STATUS) ?: return true
+        val channel = system.getNotificationChannel(statusChannel(service)) ?: return true
         return channel.importance != NotificationManager.IMPORTANCE_NONE
     }
 
@@ -82,9 +143,9 @@ object RelayNotifications {
     }
 
     /**
-     * The foreground service's notification: what the link is doing, a tap
-     * that opens the conversations, and the one-tap Disconnect the product
-     * rules require. Android 14+ lets the user swipe it away even so; its
+     * The Google Messages foreground service's notification: what the link
+     * is doing, a tap that opens the conversations, and the one-tap
+     * Disconnect the product rules require. Android 14+ lets the user swipe it away even so; its
      * delete intent puts it straight back while the service runs.
      *
      * While an unpair runs ([unpairing]) it says "Unpairing…": the service

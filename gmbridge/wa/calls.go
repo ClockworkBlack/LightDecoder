@@ -283,7 +283,10 @@ func replyContext(local *localStore, id identity, chat types.JID, replyToID stri
 // sent records a message this device sent and returns its DTO JSON.
 func (b *WABridge) sent(local *localStore, id identity, chat types.JID, m messageDTO) []byte {
 	normalizeMessage(&m)
-	stored, _, err := local.updateMessage(m.ConversationID, m.ID, chat.String(), func(cur *messageDTO, exists bool) bool {
+	// Record the chat as WhatsApp addresses it (it may be a LID chat), as
+	// history requests anchored on this message need that form.
+	raw := targetJID(local, id.norm(chat))
+	stored, _, err := local.updateMessage(m.ConversationID, m.ID, raw.String(), func(cur *messageDTO, exists bool) bool {
 		if exists {
 			*cur = mergeNew(*cur, m)
 		} else {

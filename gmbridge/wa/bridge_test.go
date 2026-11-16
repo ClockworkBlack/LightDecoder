@@ -283,7 +283,7 @@ func TestSendTextAndReceipts(t *testing.T) {
 	}
 	var p messagePageDTO
 	_ = json.Unmarshal(page, &p)
-	if len(p.Messages) != 2 || p.Messages[1].Status != "OUTGOING_DISPLAYED" || p.Messages[1].TmpID != "tmp-1" {
+	if len(p.Messages) != 2 || p.Messages[0].ID != m.ID || p.Messages[0].Status != "OUTGOING_DISPLAYED" || p.Messages[0].TmpID != "tmp-1" {
 		t.Fatalf("page %+v", p.Messages)
 	}
 
@@ -326,9 +326,18 @@ func TestReactionReadTypingDelete(t *testing.T) {
 		t.Fatalf("reads %v", f.reads)
 	}
 	waitFor(t, "read conversation", func() bool { return !lastConversation(t, rec).Unread })
-	if err := b.SetTyping(groupJID.String(), true); err == nil {
-		// sendChatPresence is not faked: it reaches whatsmeow, which is not connected.
-		t.Log("typing went through")
+	if err := b.SetTyping(groupJID.String(), true); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.SubscribePresence(aliceJID.String()); err != nil {
+		t.Fatal(err)
+	}
+	mustCode(t, b.SubscribePresence(groupJID.String()), codeInvalidArgument)
+	if err := b.SetOnline(true); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.presence, ","); got != "chat:composing,subscribe:"+aliceJID.String()+",presence:available" {
+		t.Fatalf("presence calls %s", got)
 	}
 	if err := b.DeleteMessage(groupJID.String(), "G1", false); err != nil {
 		t.Fatal(err)
@@ -563,12 +572,10 @@ func TestLogoutRemoteFailure(t *testing.T) {
 	}
 	// Offline and WhatsApp unreachable: the same.
 	b2, _, f2 := connected(t)
-	_ = f2
 	b2.Disconnect()
-	f.mu.Lock()
-	f.loggedIn = false
-	f.logoutErr = nil
-	f.mu.Unlock()
+	f2.mu.Lock()
+	f2.loggedIn = false
+	f2.mu.Unlock()
 	mustCode(t, b2.Logout(), codeUnpairRemoteFailed)
 }
 

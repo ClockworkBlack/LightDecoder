@@ -156,11 +156,18 @@ class RelayException(val code: String, message: String) : Exception(message) {
          * "internal", keeping only the exception's class name, since its text
          * was never checked for content.
          */
-        fun fromThrowable(t: Throwable): RelayException {
+        fun fromThrowable(t: Throwable): RelayException = fromThrowable(t, CODES)
+
+        /**
+         * As [fromThrowable], for a bridge whose error codes are [codes]
+         * rather than [CODES] (the WhatsApp bridge: see
+         * [com.lightdecoder.wa.WaErrors]).
+         */
+        fun fromThrowable(t: Throwable, codes: Set<String>): RelayException {
             if (t is RelayException) return t
             val message = t.message.orEmpty()
             val code = message.substringBefore(": ").trim()
-            if (code in CODES) {
+            if (code in codes) {
                 val detail = if (message.contains(": ")) message.substringAfter(": ") else ""
                 return RelayException(code, detail).also { it.initCause(t) }
             }

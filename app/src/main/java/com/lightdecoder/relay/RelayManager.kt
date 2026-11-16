@@ -14,6 +14,10 @@ import com.lightdecoder.archive.MediaCache
 import com.lightdecoder.archive.MediaRow
 import com.lightdecoder.archive.MessageRow
 import com.lightdecoder.capture.StickerCapture
+import com.lightdecoder.chat.Capability
+import com.lightdecoder.chat.ChatBackend
+import com.lightdecoder.chat.ChatService
+import com.lightdecoder.chat.Presence
 import com.lightdecoder.heif.ImageSniffer
 import com.lightdecoder.inbox.InboxItem
 import com.lightdecoder.inbox.InboxPrefs
@@ -108,7 +112,8 @@ data class BackfillProgress(
 )
 
 /**
- * The Google Messages link at runtime: one per process ([get]).
+ * The Google Messages link at runtime: one per process ([get]). To the
+ * conversation screens it is the [ChatBackend] of [ChatService.MESSAGES].
  *
  * It owns the [RelayBridge] (created lazily off the main thread, since that
  * loads the Go library), turns the bridge's events into archive writes and
@@ -135,9 +140,9 @@ data class BackfillProgress(
  */
 class RelayManager private constructor(
     context: Context,
-    private val repo: ArchiveRepository,
+    override val repo: ArchiveRepository,
     private val timing: Timing,
-) {
+) : ChatBackend {
     /** Delays, as one object so tests can shorten them. */
     internal data class Timing(
         /** The connector's backoff for sends the phone asked to retry. */
@@ -187,15 +192,23 @@ class RelayManager private constructor(
     private val _state = MutableStateFlow(
         RelayState(if (SessionVault.exists(app)) RelayState.Phase.DISCONNECTED else RelayState.Phase.UNPAIRED)
     )
-    val state: StateFlow<RelayState> = _state.asStateFlow()
+    override val state: StateFlow<RelayState> = _state.asStateFlow()
+
+    override val service: ChatService get() = ChatService.MESSAGES
+
+    /** Everything but presence and "delete for everyone", which Google Messages does not have. */
+    override val capabilities: Set<Capability> = MESSAGES_CAPABILITIES
 
     private val _typing = MutableStateFlow<Map<String, Set<String>>>(emptyMap())
 
     /** Conversation id → names of the people typing there now. Entries expire after 6 s. */
-    val typing: StateFlow<Map<String, Set<String>>> = _typing.asStateFlow()
+    override val typing: StateFlow<Map<String, Set<String>>> = _typing.asStateFlow()
+
+    /** Google Messages reports nobody's presence: always empty. */
+    override val presence: StateFlow<Map<String, Presence>> = MutableStateFlow<Map<String, Presence>>(emptyMap()).asStateFlow()
 
     private val _backfill = MutableStateFlow(BackfillProgress(running = false, 0, 0, 0))
-    val backfill: StateFlow<BackfillProgress> = _backfill.asStateFlow()
+    override val backfill: StateFlow<BackfillProgress> = _backfill.asStateFlow()
 
     private val _settings = MutableStateFlow(storedSettings(app))
 
@@ -420,7 +433,7 @@ class RelayManager private constructor(
     // ============================== public API (contract §6) ==============================
 
     /** Whether a pairing is stored. Cheap; safe on the main thread. */
-    fun isPaired(): Boolean = paired
+    override fun isPaired(): Boolean = paired
 
     // --- pairing --------------------------------------------------------------------
 
@@ -528,7 +541,7 @@ class RelayManager private constructor(
     }
 
     /** Makes this device the phone's active web session again, after another one took over. */
-    suspend fun useHere(): Unit = withContext(Dispatchers.IO) {
+    override suspend fun useHere(): Unit = withContext(Dispatchers.IO) {
         requireBridge().setActiveSession()
     }
 
@@ -650,7 +663,7 @@ class RelayManager private constructor(
      * every other wipe, so nothing the phone sent just before lands after it.
      * Returns whether the archive was deleted. Does not throw.
      */
-    suspend fun deleteLocalArchive(): Boolean {
+    override suspend fun deleteLocalArchive(): Boolean {
         if (paired) return false
         // In the manager's scope: a screen that goes away meanwhile does not leave it half done.
         return scope.async {
@@ -690,7 +703,7 @@ class RelayManager private constructor(
      * conversations came back. The local [Folder.DELETED] is never asked of
      * the phone: it returns 0 at once.
      */
-    suspend fun refreshConversations(folder: Folder = Folder.INBOX): Int = withContext(Dispatchers.IO) {
+    override suspend fun refreshConversations(folder: Folder): Int = withContext(Dispatchers.IO) {
         if (!folder.listable) return@withContext 0
         listAndStore(folder).size
     }
@@ -704,7 +717,7 @@ class RelayManager private constructor(
     }
 
     /** Fetches the page before where the history import got to; returns how many arrived, 0 at the start. */
-    suspend fun loadOlder(conversationId: String, count: Int = 50): Int = withContext(Dispatchers.IO) {
+    override suspend fun loadOlder(conversationId: String, count: Int): Int = withContext(Dispatchers.IO) {
         backfiller.loadOlder(conversationId, count)
     }
 
@@ -745,7 +758,7 @@ class RelayManager private constructor(
      * that (its download token expired): the caller can say "connect to load"
      * instead of "unavailable". Nothing else is thrown (except cancellation).
      */
-    suspend fun mediaFile(messageId: String, partId: String, thumbnail: Boolean = false): File? {
+    override suspend fun mediaFile(messageId: String, partId: String, thumbnail: Boolean): File? {
         val key = "$messageId\u0000$partId\u0000$thumbnail"
         val load = mediaLoads.computeIfAbsent(key) {
             scope.async(mediaDispatcher, start = CoroutineStart.LAZY) {
@@ -765,7 +778,7 @@ class RelayManager private constructor(
     }
 
     /** Asks the phone to upload the full-size original of a part that only has a thumbnail. */
-    suspend fun requestFullSize(messageId: String, partId: String): Unit = withContext(Dispatchers.IO) {
+    override suspend fun requestFullSize(messageId: String, partId: String): Unit = withContext(Dispatchers.IO) {
         requireBridge().requestFullSizeImage(messageId, partId)
         repo.markFullSizeRequested(messageId, partId)
     }
@@ -777,7 +790,7 @@ class RelayManager private constructor(
      * archive as "tmp:<tmpId>" right away and is sent when the link is
      * connected, surviving restarts.
      */
-    fun sendText(conversationId: String, text: String, replyToId: String? = null): String {
+    override fun sendText(conversationId: String, text: String, replyToId: String?): String {
         val tmpId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
         onIntake("queue a message") { outbox.enqueueText(tmpId, conversationId, text, replyToId, now) }
@@ -785,7 +798,7 @@ class RelayManager private constructor(
     }
 
     /** Like [sendText] for an attachment (at most 100 MB), copied into app storage first. */
-    fun sendMedia(conversationId: String, uri: Uri, caption: String? = null, replyToId: String? = null): String {
+    override fun sendMedia(conversationId: String, uri: Uri, caption: String?, replyToId: String?): String {
         val tmpId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
         onIntake("queue an attachment") { outbox.enqueueMedia(tmpId, conversationId, uri, caption, replyToId, now) }
@@ -793,17 +806,17 @@ class RelayManager private constructor(
     }
 
     /** Sends a failed message again. */
-    fun retry(tmpId: String) {
+    override fun retry(tmpId: String) {
         onIntake("retry a message") { outbox.retry(tmpId) }
     }
 
     /** Drops a failed (or still queued) message and its local copy. */
-    fun discardFailed(tmpId: String) {
+    override fun discardFailed(tmpId: String) {
         onIntake("discard a message") { outbox.discard(tmpId) }
     }
 
     /** Adds, switches or (with [remove]) removes the user's reaction on a message. */
-    suspend fun react(messageId: String, emoji: String, remove: Boolean): Unit = withContext(Dispatchers.IO) {
+    override suspend fun react(messageId: String, emoji: String, remove: Boolean): Unit = withContext(Dispatchers.IO) {
         val mine = repo.message(messageId)?.reactions?.firstOrNull { it.fromMe }
         val action = when {
             remove -> "remove"
@@ -818,7 +831,7 @@ class RelayManager private constructor(
      * latest incoming message when connected. Also clears its notification.
      * Does not throw.
      */
-    suspend fun markRead(conversationId: String): Unit = withContext(Dispatchers.IO) {
+    override suspend fun markRead(conversationId: String): Unit = withContext(Dispatchers.IO) {
         repo.markConversationRead(conversationId)
         MessageNotifier.cancel(app, conversationId)
         val latest = repo.messages(conversationId, limit = 50).lastOrNull { !it.isLocal && it.direction == "in" }
@@ -832,7 +845,7 @@ class RelayManager private constructor(
     }
 
     /** Tells the phone the user is typing; at most one ping per conversation every 5 s. */
-    fun typing(conversationId: String) {
+    override fun typing(conversationId: String) {
         if (!_state.value.isOnline) return
         val now = System.nanoTime() / 1_000_000
         val last = typingSentAt[conversationId]
@@ -847,12 +860,18 @@ class RelayManager private constructor(
         }
     }
 
+    /** Nothing to watch: Google Messages has no presence (see [capabilities]). */
+    override fun watchPresence(conversationId: String) = Unit
+
+    /** Nothing to tell: Google Messages has no "online" for this device. */
+    override fun setAppVisible(visible: Boolean) = Unit
+
     /**
      * Deletes a message on the phone and here. A message still being sent is
      * just dropped. Without a pairing (unpaired with the archive kept, or
      * logged out) it is deleted here only, and the phone keeps it.
      */
-    suspend fun deleteMessage(messageId: String) {
+    override suspend fun deleteMessage(messageId: String) {
         if (messageId.startsWith(MessageRow.TMP_PREFIX)) {
             val tmpId = messageId.removePrefix(MessageRow.TMP_PREFIX)
             onIntakeAndWait { outbox.discard(tmpId) }
@@ -868,7 +887,7 @@ class RelayManager private constructor(
         }
     }
 
-    suspend fun setArchived(conversationId: String, archived: Boolean): Unit = withContext(Dispatchers.IO) {
+    override suspend fun setArchived(conversationId: String, archived: Boolean): Unit = withContext(Dispatchers.IO) {
         requireBridge().setConversationStatus(conversationId, if (archived) "archived" else "active")
         repo.setConversationFolder(conversationId, if (archived) Folder.ARCHIVE else Folder.INBOX)
     }
@@ -878,13 +897,13 @@ class RelayManager private constructor(
      * "not_spam"), then here, into the inbox. Throws [RelayException] when the
      * phone cannot be told; nothing changes here then.
      */
-    suspend fun markNotSpam(conversationId: String): Unit = withContext(Dispatchers.IO) {
+    override suspend fun markNotSpam(conversationId: String): Unit = withContext(Dispatchers.IO) {
         val since = gate.epoch()
         requireBridge().setConversationStatus(conversationId, STATUS_NOT_SPAM)
         gate.ifCurrent(since) { repo.setConversationFolder(conversationId, Folder.INBOX) }
     }
 
-    suspend fun setMuted(conversationId: String, muted: Boolean): Unit = withContext(Dispatchers.IO) {
+    override suspend fun setMuted(conversationId: String, muted: Boolean): Unit = withContext(Dispatchers.IO) {
         requireBridge().setConversationMuted(conversationId, muted)
         repo.setConversationMuted(conversationId, muted)
     }
@@ -893,7 +912,7 @@ class RelayManager private constructor(
      * Deletes a conversation on the phone and here, with its queued sends.
      * Without a pairing it is deleted here only, and the phone keeps it.
      */
-    suspend fun deleteConversation(conversationId: String) {
+    override suspend fun deleteConversation(conversationId: String) {
         if (!paired) {
             deleteLocally { repo.deleteConversationLocal(conversationId) }
         } else {
@@ -910,7 +929,7 @@ class RelayManager private constructor(
      * to the inbox, here only: the phone is not asked. Returns false if it was
      * not in the deleted folder. Does not throw [RelayException].
      */
-    suspend fun restoreDeletedLocally(conversationId: String): Boolean {
+    override suspend fun restoreDeletedLocally(conversationId: String): Boolean {
         var restored = false
         deleteLocally { restored = repo.restoreDeleted(conversationId) }
         return restored
@@ -922,7 +941,7 @@ class RelayManager private constructor(
      * conversation in that folder, with their messages, media and queued
      * sends. Returns how many were deleted. Does not throw [RelayException].
      */
-    suspend fun purgeDeleted(conversationId: String?): Int {
+    override suspend fun purgeDeleted(conversationId: String?): Int {
         var purged = 0
         deleteLocally { purged = repo.purgeDeleted(conversationId) }
         if (conversationId != null) MessageNotifier.cancel(app, conversationId)
@@ -954,7 +973,7 @@ class RelayManager private constructor(
      * (nothing failed). Throws [RelayException] only if the refresh failed
      * and nothing is stored.
      */
-    suspend fun contacts(refresh: Boolean): ContactsResult = withContext(Dispatchers.IO) {
+    override suspend fun contacts(refresh: Boolean): ContactsResult = withContext(Dispatchers.IO) {
         var fromPhone = true
         if (refresh) {
             try {
@@ -970,7 +989,7 @@ class RelayManager private constructor(
     }
 
     /** Opens (or creates) the conversation with these numbers and returns its id. */
-    suspend fun startConversation(numbers: List<String>, groupName: String?): String = withContext(Dispatchers.IO) {
+    override suspend fun startConversation(numbers: List<String>, groupName: String?): String = withContext(Dispatchers.IO) {
         val since = gate.epoch()
         val conversation = requireBridge().getOrCreateConversation(numbers, groupName?.trim()?.ifEmpty { null })
         gate.ifCurrent(since) { repo.upsertConversation(conversation) }
@@ -2509,6 +2528,16 @@ class RelayManager private constructor(
         private const val INDEX_PART_PREFIX = "idx:"
 
         private val HEIF_MIMES = setOf("image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence")
+
+        /**
+         * What Google Messages can do: all of [Capability] except presence
+         * and "delete for everyone". Listed one by one, so a capability added
+         * for another service is not claimed here by accident.
+         */
+        private val MESSAGES_CAPABILITIES: Set<Capability> = setOf(
+            Capability.SPAM_FOLDER, Capability.DELETED_FOLDER, Capability.FULL_SIZE_REQUEST,
+            Capability.USE_HERE, Capability.SUBJECT, Capability.NEW_GROUP,
+        )
 
         /** Phases in which Go keeps a connection (or keeps reconnecting one). */
         private val LIVE_PHASES = setOf(

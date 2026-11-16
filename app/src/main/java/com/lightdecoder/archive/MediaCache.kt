@@ -1,22 +1,45 @@
 package com.lightdecoder.archive
 
 import android.content.Context
+import com.lightdecoder.chat.ChatService
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.security.MessageDigest
 
 /**
- * Where relay media lives on disk, all under app-private storage:
+ * Where a service's media lives on disk, all under app-private storage. For
+ * Google Messages:
  *
  *   filesDir/relay-media/<sha256(mediaId), 32 hex>.<ext>   downloaded media and thumbnails
  *   filesDir/relay-outbox/<tmpId>                          copies of attachments waiting to be sent
  *
+ * and for WhatsApp the same under filesDir/whatsapp-media and
+ * filesDir/whatsapp-outbox.
+ *
+ * Each service has directories of its own because an archive deletes the
+ * media files none of its rows point to any more, and it can only see its
+ * own database: in a shared directory each service would delete the other's
+ * files. So every function that names a directory takes the service; the
+ * default is Google Messages, which was all there was. An archive's own
+ * directories are also on [ArchiveRepository] ([ArchiveRepository.mediaFileFor],
+ * [ArchiveRepository.outboxFileFor]), where the service cannot be got wrong.
+ *
  * File names are hashes so no id from the phone ends up in a path.
  */
 object MediaCache {
-    private const val MEDIA_DIR = "relay-media"
-    private const val OUTBOX_DIR = "relay-outbox"
+
+    /** The directory of [service]'s downloaded media and thumbnails, under filesDir. */
+    fun mediaDirName(service: ChatService): String = when (service) {
+        ChatService.MESSAGES -> "relay-media"
+        ChatService.WHATSAPP -> "whatsapp-media"
+    }
+
+    /** The directory of [service]'s attachments waiting to be sent, under filesDir. */
+    fun outboxDirName(service: ChatService): String = when (service) {
+        ChatService.MESSAGES -> "relay-outbox"
+        ChatService.WHATSAPP -> "whatsapp-outbox"
+    }
 
     /** Cache keys of media that came inside the message (no media id) start with this. */
     const val INLINE_KEY_PREFIX = "inline:"
@@ -27,13 +50,15 @@ object MediaCache {
     /** A [PART_SUFFIX] file this old was left by a write that never finished (the app died mid-write). */
     internal const val STALE_PART_MS = 60 * 60 * 1000L
 
-    fun mediaDir(context: Context) = File(context.applicationContext.filesDir, MEDIA_DIR)
+    fun mediaDir(context: Context, service: ChatService = ChatService.MESSAGES) =
+        mediaDir(context.applicationContext.filesDir, service)
 
-    fun outboxDir(context: Context) = File(context.applicationContext.filesDir, OUTBOX_DIR)
+    fun outboxDir(context: Context, service: ChatService = ChatService.MESSAGES) =
+        outboxDir(context.applicationContext.filesDir, service)
 
-    /** The cache file for one media id (full size or thumbnail id), with [extension] like "heic". */
-    fun fileFor(context: Context, mediaId: String, extension: String): File {
-        val dir = mediaDir(context).apply { mkdirs() }
+    /** The cache file for one media id (full size or thumbnail id) of [service], with [extension] like "heic". */
+    fun fileFor(context: Context, mediaId: String, extension: String, service: ChatService = ChatService.MESSAGES): File {
+        val dir = mediaDir(context, service).apply { mkdirs() }
         val ext = extension.filter { it.isLetterOrDigit() }.take(8).ifEmpty { "bin" }
         return File(dir, "${hash(mediaId)}.$ext")
     }
@@ -74,15 +99,17 @@ object MediaCache {
         }
     }
 
-    /** The local copy of an attachment queued for sending. */
-    fun outboxFile(context: Context, tmpId: String): File {
-        val dir = outboxDir(context).apply { mkdirs() }
+    /** The local copy of an attachment queued for sending through [service]. */
+    fun outboxFile(context: Context, tmpId: String, service: ChatService = ChatService.MESSAGES): File {
+        val dir = outboxDir(context, service).apply { mkdirs() }
         return File(dir, tmpId.filter { it.isLetterOrDigit() || it == '-' }.ifEmpty { hash(tmpId) })
     }
 
-    internal fun mediaDir(filesDir: File) = File(filesDir, MEDIA_DIR)
+    internal fun mediaDir(filesDir: File, service: ChatService = ChatService.MESSAGES) =
+        File(filesDir, mediaDirName(service))
 
-    internal fun outboxDir(filesDir: File) = File(filesDir, OUTBOX_DIR)
+    internal fun outboxDir(filesDir: File, service: ChatService = ChatService.MESSAGES) =
+        File(filesDir, outboxDirName(service))
 
     /**
      * Deletes [PART_SUFFIX] files in [dir] last written more than

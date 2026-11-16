@@ -3,9 +3,14 @@ package com.lightdecoder.archive
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import com.lightdecoder.chat.ChatService
 
 /**
  * The local message archive: app-private SQLite, never backed up or synced.
+ *
+ * Each messaging service has a database file of its own ([nameFor]) with
+ * this same schema, so the conversation and message ids of one service never
+ * meet the other's.
  *
  * WAL lets the UI read while the relay writes. Full-text search uses FTS4
  * (FTS5 is not in every Android build); its rows are kept in step by
@@ -36,8 +41,18 @@ class ArchiveDb(context: Context, name: String? = NAME) :
     }
 
     companion object {
+        /** The Google Messages archive (the only one there was before WhatsApp). */
         const val NAME = "relay-archive.db"
+
+        /** The WhatsApp archive. */
+        const val NAME_WHATSAPP = "whatsapp-archive.db"
         const val VERSION = 2
+
+        /** The database file of [service]'s archive. */
+        fun nameFor(service: ChatService): String = when (service) {
+            ChatService.MESSAGES -> NAME
+            ChatService.WHATSAPP -> NAME_WHATSAPP
+        }
 
         /**
          * Version 2. Whether a media file is still used is asked of both path

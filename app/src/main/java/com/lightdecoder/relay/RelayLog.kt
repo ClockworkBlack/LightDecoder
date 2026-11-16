@@ -7,15 +7,13 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * A short, on-device record of what the Google Messages link did, so that
- * "it stopped working" can be diagnosed from a screenshot of the status screen.
+ * One short, on-device record of what a link did, kept in a file of its own
+ * under app-private storage: the newest [maxLines] lines, each with the time
+ * it was added. Each link has one ([RelayLog], [com.lightdecoder.wa.WaLog]).
  *
- * It records only kinds and outcomes ("connected", "send failed: not_connected",
- * "imported 3 conversations"). Message text, names, phone numbers, the pairing
- * emoji, cookies and keys are never written.
+ * What may be written is the caller's rule to keep: kinds and outcomes only.
  */
-object RelayLog {
-    private const val MAX_LINES = 120
+internal class ActivityLog(private val fileName: String, private val maxLines: Int = 120) {
     private val lock = Any()
     private val lines = ArrayDeque<String>()
     private var loaded = false
@@ -24,7 +22,7 @@ object RelayLog {
         load(context)
         val stamp = SimpleDateFormat("MMM d HH:mm:ss", Locale.US).format(Date())
         lines.addLast("$stamp  $line")
-        while (lines.size > MAX_LINES) lines.removeFirst()
+        while (lines.size > maxLines) lines.removeFirst()
         runCatching { file(context).writeText(lines.joinToString("\n")) }
         Unit
     }
@@ -47,9 +45,28 @@ object RelayLog {
         loaded = true
         runCatching {
             val f = file(context)
-            if (f.exists()) f.readLines().takeLast(MAX_LINES).forEach { lines.addLast(it) }
+            if (f.exists()) f.readLines().takeLast(maxLines).forEach { lines.addLast(it) }
         }
     }
 
-    private fun file(context: Context) = File(context.applicationContext.filesDir, "relay-log.txt")
+    private fun file(context: Context) = File(context.applicationContext.filesDir, fileName)
+}
+
+/**
+ * A short, on-device record of what the Google Messages link did, so that
+ * "it stopped working" can be diagnosed from a screenshot of the status screen.
+ *
+ * It records only kinds and outcomes ("connected", "send failed: not_connected",
+ * "imported 3 conversations"). Message text, names, phone numbers, the pairing
+ * emoji, cookies and keys are never written.
+ */
+object RelayLog {
+    private val log = ActivityLog("relay-log.txt")
+
+    fun add(context: Context, line: String) = log.add(context, line)
+
+    /** Newest first. */
+    fun read(context: Context): List<String> = log.read(context)
+
+    fun clear(context: Context) = log.clear(context)
 }

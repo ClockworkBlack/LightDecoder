@@ -9,7 +9,9 @@
         The Google Messages link (off until the user pairs): it talks to
         Google's Messages for web servers, runs as a visible foreground
         service while connected, and can reconnect after a restart if the
-        user chose to stay connected.
+        user chose to stay connected. The WhatsApp link (off until the user
+        links it) needs the same permissions for the same reasons, with
+        WhatsApp's servers.
     -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -180,12 +182,36 @@
             android:windowSoftInputMode="adjustResize" />
 
         <!--
+            WhatsApp link: linking (the user's number, then the pairing code
+            they type into WhatsApp on their phone, or a QR code) and status.
+            Its conversations are shown by the conversation screens above.
+            The setup screen takes typing, hence adjustResize.
+        -->
+        <activity
+            android:name=".ui.wa.WaSetupActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".ui.wa.WaStatusActivity"
+            android:exported="false" />
+
+        <!--
             Keeps the link connected, always with its notification and a
             Disconnect button showing. remoteMessaging on Android 14+, dataSync
             before that.
         -->
         <service
             android:name=".relay.RelayService"
+            android:exported="false"
+            android:foregroundServiceType="remoteMessaging|dataSync" />
+
+        <!--
+            The same for the WhatsApp link, with a notification and a
+            Disconnect button of its own: each link is connected, shown and
+            stopped by itself.
+        -->
+        <service
+            android:name=".wa.WaService"
             android:exported="false"
             android:foregroundServiceType="remoteMessaging|dataSync" />
 

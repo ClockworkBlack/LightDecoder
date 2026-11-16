@@ -155,7 +155,8 @@ func (b *WABridge) onDisconnected(gen uint64, cli *whatsmeow.Client) {
 // reconnect: the connection is dropped and "error" carries the reason.
 func (b *WABridge) connectionEnded(gen uint64, code, detail string) {
 	b.mu.Lock()
-	wanted := b.wanted && b.gen == gen
+	// A linking attempt reports its own end (pair_error).
+	wanted := b.wanted && b.gen == gen && !b.pair.active
 	b.mu.Unlock()
 	if !wanted {
 		return

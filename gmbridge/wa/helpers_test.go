@@ -159,6 +159,7 @@ type fakeNet struct {
 	download   []byte
 	uploads    int
 	onWhatsApp map[string]types.JID
+	presence   []string
 }
 
 func installFakeNet(t *testing.T) *fakeNet {
@@ -254,6 +255,23 @@ func installFakeNet(t *testing.T) *fakeNet {
 			return nil
 		}
 		save(func() { markRead = old })
+	}
+	{
+		oldChat, oldSub, oldPres := sendChatPresence, subscribePresence, sendPresence
+		note := func(s string) { f.mu.Lock(); f.presence = append(f.presence, s); f.mu.Unlock() }
+		sendChatPresence = func(ctx context.Context, cli *whatsmeow.Client, chat types.JID, state types.ChatPresence) error {
+			note("chat:" + string(state))
+			return nil
+		}
+		subscribePresence = func(ctx context.Context, cli *whatsmeow.Client, jid types.JID) error {
+			note("subscribe:" + jid.String())
+			return nil
+		}
+		sendPresence = func(ctx context.Context, cli *whatsmeow.Client, state types.Presence) error {
+			note("presence:" + string(state))
+			return nil
+		}
+		save(func() { sendChatPresence, subscribePresence, sendPresence = oldChat, oldSub, oldPres })
 	}
 	{
 		old := sendAppState

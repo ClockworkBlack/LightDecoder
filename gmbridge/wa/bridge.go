@@ -325,8 +325,9 @@ func (b *WABridge) connectLocked(cli *whatsmeow.Client) error {
 		cerr = context.Canceled
 	}
 	if cerr != nil {
+		aborted := ctx.Err() != nil
 		b.dropConnectionLocked()
-		if ctx.Err() != nil {
+		if aborted {
 			// abortConnecting: the caller that cancelled reports the state.
 			return newError(codeConnectionClosed, "disconnected while connecting")
 		}

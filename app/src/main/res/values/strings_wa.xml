@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Strings of the WhatsApp link runtime: notification channels and the service. -->
+<resources>
+    <!-- Notification channels -->
+    <string name="wa_channel_status">WhatsApp link</string>
+    <string name="wa_channel_status_description">Shown while LightDecoder is connected to WhatsApp, with a button to disconnect.</string>
+    <string name="wa_channel_messages">WhatsApp messages</string>
+    <string name="wa_channel_messages_description">New messages that arrive through the WhatsApp link. Off unless you turn it on, since WhatsApp on your phone already notifies.</string>
+</resources>

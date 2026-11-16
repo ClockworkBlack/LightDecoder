@@ -9,4 +9,7 @@
     -->
     <files-path name="relay-media" path="relay-media/" />
     <files-path name="relay-outbox" path="relay-outbox/" />
+    <!-- The same for WhatsApp media, which is kept in directories of its own. -->
+    <files-path name="whatsapp-media" path="whatsapp-media/" />
+    <files-path name="whatsapp-outbox" path="whatsapp-outbox/" />
 </paths>

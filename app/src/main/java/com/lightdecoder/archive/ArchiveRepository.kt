@@ -4,6 +4,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import com.lightdecoder.archive.ArchiveChange.Kind
+import com.lightdecoder.chat.ChatService
 import com.lightdecoder.relay.ContactDto
 import com.lightdecoder.relay.ConversationDto
 import com.lightdecoder.relay.Folder
@@ -14,25 +15,40 @@ import com.lightdecoder.relay.ReactionDto
 import org.json.JSONArray
 import org.json.JSONException
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import android.database.Cursor as DbCursor
 
 /**
- * The one way in and out of the local message archive.
+ * The one way in and out of one service's local message archive.
+ *
+ * Each [ChatService] has an archive of its own ([get]): its own database
+ * file and its own media directories ([MediaCache]). Nothing here ever looks
+ * at another service's rows or files.
  *
  * Every method blocks, so call it off the main thread. It is safe from any
  * thread: each write runs in one transaction, and WAL lets reads go on while
  * a write is in progress. After a write commits, the change is announced
- * through [ArchiveEvents], and media files nothing points to any more are
- * deleted.
+ * through [ArchiveEvents] (carrying [service]), and media files nothing
+ * points to any more are deleted.
  *
  * Messages are upserted, because the phone sends the same message again
  * whenever its status, reactions or media change. The rules are in
  * [upsertMessage].
  */
-class ArchiveRepository private constructor(private val helper: ArchiveDb) {
+class ArchiveRepository private constructor(
+    private val helper: ArchiveDb,
+    /** The service whose archive this is: named in every [ArchiveChange], and it decides the media directories. */
+    val service: ChatService,
+) {
 
     private val filesDir: File get() = helper.appContext.filesDir
+
+    /** This archive's downloaded media and thumbnails; never another service's. */
+    private val mediaDir: File get() = MediaCache.mediaDir(filesDir, service)
+
+    /** This archive's copies of attachments waiting to be sent. */
+    private val outboxDir: File get() = MediaCache.outboxDir(filesDir, service)
 
     /** When this instance last looked for partial files left by writes that never finished. */
     private val lastPartSweep = AtomicLong(0)
@@ -386,6 +402,17 @@ class ArchiveRepository private constructor(private val helper: ArchiveDb) {
     fun markStickerChecked(messageId: String, partId: String) =
         updateMedia(messageId, partId, ContentValues().apply { put("sticker_checked", 1) })
 
+    /**
+     * The cache file for one media id (full size or thumbnail id), or a
+     * [MediaCache.inlineKey], in this archive's own media directory: where a
+     * download is written before [setMediaLocalPath] records it.
+     */
+    fun mediaFileFor(mediaId: String, extension: String): File =
+        MediaCache.fileFor(helper.appContext, mediaId, extension, service)
+
+    /** The local copy of an attachment queued for sending, in this archive's own outbox directory. */
+    fun outboxFileFor(tmpId: String): File = MediaCache.outboxFile(helper.appContext, tmpId, service)
+
     // --- search -----------------------------------------------------------------
 
     /**
@@ -519,28 +546,28 @@ class ArchiveRepository private constructor(private val helper: ArchiveDb) {
             TABLES.forEach { b.db.delete(it, null, null) }
             Kind.entries.forEach { b.changed(it, null) }
         }
-        MediaCache.mediaDir(filesDir).deleteRecursively()
-        MediaCache.outboxDir(filesDir).deleteRecursively()
+        mediaDir.deleteRecursively()
+        outboxDir.deleteRecursively()
     }
 
     // --- writing ----------------------------------------------------------------
 
     /** One write transaction: what it changed, and which files it may have orphaned. */
-    private class Batch(val db: SQLiteDatabase) {
+    private class Batch(val db: SQLiteDatabase, private val service: ChatService) {
         val now = System.currentTimeMillis()
         val changes = LinkedHashSet<ArchiveChange>()
         val maybeOrphaned = LinkedHashSet<String>()
         val outboxFiles = ArrayList<String>()
 
         fun changed(kind: Kind, conversationId: String?) {
-            changes.add(ArchiveChange(conversationId, kind))
+            changes.add(ArchiveChange(conversationId, kind, service))
         }
     }
 
     private fun <T> write(block: (Batch) -> T): T {
         sweepStaleParts()
         val db = helper.writableDatabase
-        val batch = Batch(db)
+        val batch = Batch(db, service)
         val result: T
         val orphans: List<String>
         db.beginTransaction()
@@ -810,7 +837,7 @@ class ArchiveRepository private constructor(private val helper: ArchiveDb) {
         val now = System.currentTimeMillis()
         val last = lastPartSweep.get()
         if (now - last < MediaCache.STALE_PART_MS || !lastPartSweep.compareAndSet(last, now)) return
-        MediaCache.deleteStaleParts(MediaCache.mediaDir(filesDir), now)
+        MediaCache.deleteStaleParts(mediaDir, now)
     }
 
     /**
@@ -891,10 +918,14 @@ class ArchiveRepository private constructor(private val helper: ArchiveDb) {
             true
         }.isNotEmpty()
 
-    /** [path] as a file, only if it is inside the media cache (nothing else is ever deleted). */
-    private fun mediaFileOrNull(path: String): File? = fileInside(path, MediaCache.mediaDir(filesDir))
+    /**
+     * [path] as a file, only if it is inside this archive's own media
+     * directory: nothing else is ever deleted, and so never a file of
+     * another service's archive, whose rows this one cannot see.
+     */
+    private fun mediaFileOrNull(path: String): File? = fileInside(path, mediaDir)
 
-    private fun outboxFileOrNull(path: String): File? = fileInside(path, MediaCache.outboxDir(filesDir))
+    private fun outboxFileOrNull(path: String): File? = fileInside(path, outboxDir)
 
     private fun fileInside(path: String, dir: File): File? {
         if (path.isEmpty()) return null
@@ -914,25 +945,43 @@ class ArchiveRepository private constructor(private val helper: ArchiveDb) {
             "contacts", "outbox_queue", "connection_health",
         )
 
-        @Volatile
-        private var instance: ArchiveRepository? = null
-
-        fun get(context: Context): ArchiveRepository =
-            instance ?: synchronized(this) {
-                instance ?: ArchiveRepository(ArchiveDb(context)).also { instance = it }
-            }
-
-        /** A repository over a database of the test's choosing, independent of [get]. */
-        fun forTesting(db: ArchiveDb): ArchiveRepository = ArchiveRepository(db)
+        /** The process's archive of each service, opened on first use. */
+        private val instances = ConcurrentHashMap<ChatService, ArchiveRepository>()
 
         /**
-         * Makes [get] return [repo] (tests only), so screens, which always
-         * use [get], read the archive the test seeded and the manager writes.
+         * The archive of [service]: Google Messages' in [ArchiveDb.NAME] (as
+         * before there was a second service), WhatsApp's in
+         * [ArchiveDb.NAME_WHATSAPP]. One per service and process. Cheap, and
+         * safe on the main thread: the database is only opened by the first
+         * read or write.
          */
-        internal fun installForTesting(repo: ArchiveRepository) = synchronized(this) { instance = repo }
+        fun get(context: Context, service: ChatService = ChatService.MESSAGES): ArchiveRepository =
+            instances[service] ?: instances.computeIfAbsent(service) {
+                ArchiveRepository(ArchiveDb(context, ArchiveDb.nameFor(it)), it)
+            }
 
-        /** Forgets the process instance (tests only); the next [get] opens one for the current app. */
-        internal fun resetForTesting() = synchronized(this) { instance = null }
+        /**
+         * A repository over a database of the test's choosing, independent of
+         * [get]. [service] is whose archive it stands for: it decides the
+         * media directories and what its changes are announced as.
+         */
+        fun forTesting(db: ArchiveDb, service: ChatService = ChatService.MESSAGES): ArchiveRepository =
+            ArchiveRepository(db, service)
+
+        /**
+         * Makes [get] return [repo] for [service] (tests only), so screens,
+         * which always use [get], read the archive the test seeded and the
+         * manager writes. [repo] must have been made for that service
+         * ([forTesting]): one announced as, and keeping its files with,
+         * another service would be told apart from nothing.
+         */
+        internal fun installForTesting(repo: ArchiveRepository, service: ChatService = repo.service) {
+            require(repo.service == service) { "the repository is ${repo.service}'s, not $service's" }
+            instances[service] = repo
+        }
+
+        /** Forgets the process instances of every service (tests only); the next [get] opens one for the current app. */
+        internal fun resetForTesting() = instances.clear()
 
         /**
          * Turns what the user typed into an FTS4 query that cannot be misread

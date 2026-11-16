@@ -131,7 +131,9 @@ if (releaseKeystore == null) {
 
 // --- Go bridge: gomobile bind -> app/libs/gmbridge.aar ---------------------
 //
-// The Google Messages link runs libgm (Go) through gomobile. gomobile and
+// The Google Messages link runs libgm (Go) through gomobile, and the WhatsApp
+// link runs whatsmeow (gmbridge/wa); both packages are bound into the one aar,
+// because two Go runtimes in one app clash. gomobile and
 // gobind are built from the x/mobile version pinned in gmbridge/go.mod, so
 // no `gomobile init` or unpinned install is needed. Needs: Go 1.21 or newer
 // (see goHint), the NDK below, and an SDK platform >= 26 for gomobile's javac
@@ -199,7 +201,10 @@ val buildGomobileTools by tasks.registering(Exec::class) {
 }
 
 val buildGoBridge by tasks.registering(Exec::class) {
-    description = "Builds the Go Google Messages bridge into app/libs/gmbridge.aar."
+    description = "Builds the Go bridges (Google Messages, WhatsApp) into app/libs/gmbridge.aar."
+    // Every Go package bound into the aar: gmbridge itself and the WhatsApp
+    // bridge. Java: com.lightdecoder.gm.gmbridge.* and com.lightdecoder.gm.wa.*.
+    val goPackages = listOf(".", "./wa")
     val targets = "android/arm64,android/arm,android/amd64" // matches abiFilters
     val javaPkg = "com.lightdecoder.gm" // not com.lightdecoder: the aar's keep rule covers javaPkg.**
     val androidApi = "26" // = minSdk; NDK r28 needs >= 21
@@ -221,6 +226,7 @@ val buildGoBridge by tasks.registering(Exec::class) {
     inputs.files(fileTree(goModuleDir) { include("**/*.go", "**/go.mod", "**/go.sum") })
         .withPropertyName("goSources").withPathSensitivity(PathSensitivity.RELATIVE)
     inputs.property("targets", targets)
+    inputs.property("goPackages", goPackages)
     inputs.property("javaPkg", javaPkg)
     inputs.property("androidApi", androidApi)
     inputs.property("goToolchain", toolchain)
@@ -237,7 +243,7 @@ val buildGoBridge by tasks.registering(Exec::class) {
         File(tools, "gomobile").path, "bind",
         "-target=$targets", "-androidapi", androidApi, "-javapkg", javaPkg,
         "-trimpath", "-ldflags=$ldflags",
-        "-o", aar.path, ".",
+        "-o", aar.path, *goPackages.toTypedArray(),
     )
     doFirst {
         // gomobile and gobind always run `go` from PATH, whatever gmbridge.go
@@ -464,6 +470,35 @@ val bundleLicenses by tasks.registering {
             }
             File(licenses, name).writeText(
                 licenceText(heading, texts + files.filter { extraName.matches(it.name) } + patches),
+            )
+        }
+
+        // SQLite itself: github.com/mattn/go-sqlite3 (the WhatsApp store's
+        // driver) compiles the SQLite amalgamation it ships, sqlite3-binding.c,
+        // into libgojni.so with cgo. SQLite is in the public domain; its
+        // sources carry a blessing instead of a licence, quoted from the
+        // amalgamation that was built, with its version.
+        val sqliteModule = "github.com/mattn/go-sqlite3"
+        linked[sqliteModule]?.let { driverVersion ->
+            val dir = File(modules.getValue(sqliteModule)[3])
+            val amalgamation = File(dir, "sqlite3-binding.c")
+            if (!amalgamation.isFile) {
+                throw GradleException("No sqlite3-binding.c in $dir: cannot name the SQLite linked into libgojni.so")
+            }
+            val source = amalgamation.readText()
+            val sqliteVersion = Regex("#define SQLITE_VERSION\\s+\"([^\"]+)\"").find(source)?.groupValues?.get(1)
+                ?: throw GradleException("No SQLITE_VERSION in $amalgamation")
+            val blessing = Regex(
+                "The author disclaims copyright to this source code\\.[\\s\\S]*?" +
+                    "May you share freely, never taking more than you give\\.",
+            ).find(source)?.value
+                ?: throw GradleException("SQLite's public-domain notice not found in $amalgamation; check its licence")
+            File(licenses, "21-sqlite.txt").writeText(
+                "SQLite $sqliteVersion (C library, compiled into libgojni.so by $sqliteModule $driverVersion)\n\n" +
+                    "SQLite is in the public domain (https://sqlite.org/copyright.html). " +
+                    "Its source files carry this notice instead of a licence:\n\n" +
+                    blessing.lines().map { it.trim().removePrefix("**").trim() }
+                        .joinToString("\n") { if (it.isEmpty()) "" else "    $it" } + "\n",
             )
         }
 

@@ -19,12 +19,27 @@ Google Messages link (gmbridge/, compiled into libgojni.so with gomobile)
   github.com/mattn/go-isatty     MIT           Copyright (c) Yasuhiro Matsumoto
   github.com/google/uuid         BSD-3-Clause  Copyright (c) 2009,2014 Google Inc.
   google.golang.org/protobuf     BSD-3-Clause  Copyright (c) 2018 The Go Authors
-  golang.org/x/crypto, x/exp, x/net, x/sys, x/text
+  golang.org/x/crypto, x/exp, x/net, x/sync, x/sys, x/text
                                  BSD-3-Clause  Copyright 2009 The Go Authors
   golang.org/x/mobile (gomobile runtime glue)
                                  BSD-3-Clause  Copyright 2009 The Go Authors
   The Go runtime and standard library
                                  BSD-3-Clause  Copyright 2009 The Go Authors
+
+WhatsApp link (gmbridge/wa, compiled into the same libgojni.so)
+  go.mau.fi/whatsmeow           MPL-2.0       https://github.com/tulir/whatsmeow
+                                Copyright (c) Tulir Asokan
+  go.mau.fi/libsignal           GPL-3.0       https://github.com/tulir/libsignal-protocol-go
+  github.com/mattn/go-sqlite3   MIT           Copyright (c) 2014 Yasuhiro Matsumoto
+  SQLite (C library, the amalgamation go-sqlite3 ships)
+                                Public domain https://sqlite.org/copyright.html
+  filippo.io/edwards25519       BSD-3-Clause  Copyright (c) 2009 The Go Authors
+  github.com/coder/websocket    ISC           Copyright (c) 2025 Coder
+  github.com/beeper/argo-go     MIT           Copyright 2025 Automattic Inc.
+  github.com/vektah/gqlparser   MIT           Copyright (c) 2018 Adam Scarr
+  github.com/elliotchance/orderedmap
+                                MIT           Copyright (c) 2020 Elliot Chance
+  github.com/petermattis/goid   Apache-2.0
 
 Exact versions are pinned in gmbridge/go.mod and gmbridge/go.sum.
 
