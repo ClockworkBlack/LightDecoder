@@ -50,9 +50,29 @@ object StickerLibrary {
         return target
     }
 
+    /**
+     * Puts an edited version in place of the library's sticker [file] (same
+     * name, so it keeps its place), and renews its gallery copy.
+     */
+    fun replace(context: Context, file: File, sticker: Bitmap): File {
+        require(file.parentFile?.canonicalFile == dir(context).canonicalFile) { "not a sticker of the library" }
+        writeTo(file, sticker)
+        removeFromGallery(context, file.name)
+        copyToGallery(context, file)
+        return file
+    }
+
+    /** Whether [file] is one of the library's stickers (only those can be edited or replaced). */
+    fun owns(context: Context, file: File): Boolean =
+        file.isFile && file.parentFile?.canonicalFile == dir(context).canonicalFile
+
     private fun write(context: Context, sticker: Bitmap): File {
         var target = File(dir(context), "sticker-${System.currentTimeMillis()}.png")
         while (target.exists()) target = File(dir(context), "sticker-${System.currentTimeMillis() + 1}.png")
+        return writeTo(target, sticker)
+    }
+
+    private fun writeTo(target: File, sticker: Bitmap): File {
         val part = File(target.path + ".part")
         try {
             FileOutputStream(part).use { out ->
@@ -70,7 +90,10 @@ object StickerLibrary {
     fun delete(context: Context, file: File): Boolean {
         if (file.parentFile?.canonicalFile != dir(context).canonicalFile) return false
         val deleted = file.delete()
-        if (deleted) removeFromGallery(context, file.name)
+        if (deleted) {
+            removeFromGallery(context, file.name)
+            StickerProject.delete(context, file)
+        }
         return deleted
     }
 

@@ -24,13 +24,15 @@ class LassoView @JvmOverloads constructor(
     attrs: AttributeSet? = null,
 ) : View(context, attrs) {
 
-    var onTraced: ((Path) -> Unit)? = null
+    /** The closed outline, and the same outline as x,y pairs (both in the picture's pixels). */
+    var onTraced: ((Path, FloatArray) -> Unit)? = null
 
     private var bitmap: Bitmap? = null
     private val toView = Matrix()
     private val toBitmap = Matrix()
     private val path = Path()
     private var points = 0
+    private val traced = ArrayList<Float>()
     private val imagePaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -75,16 +77,19 @@ class LassoView @JvmOverloads constructor(
                 path.reset()
                 path.moveTo(event.x, event.y)
                 points = 1
+                traced.clear()
+                addPoint(event.x, event.y)
             }
             MotionEvent.ACTION_MOVE -> {
                 path.lineTo(event.x, event.y)
                 points++
+                addPoint(event.x, event.y)
             }
             MotionEvent.ACTION_UP -> {
                 if (points >= MIN_POINTS) {
                     path.close()
-                    val traced = Path(path).apply { transform(toBitmap) }
-                    onTraced?.invoke(traced)
+                    val outline = Path(path).apply { transform(toBitmap) }
+                    onTraced?.invoke(outline, traced.toFloatArray())
                 }
                 path.reset()
             }
@@ -92,6 +97,12 @@ class LassoView @JvmOverloads constructor(
         }
         invalidate()
         return true
+    }
+
+    private fun addPoint(x: Float, y: Float) {
+        val p = floatArrayOf(x, y).also { toBitmap.mapPoints(it) }
+        traced += p[0]
+        traced += p[1]
     }
 
     private companion object {

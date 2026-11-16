@@ -22,6 +22,13 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.3
+- Editing made stickers: touch and hold a sticker in the sticker panel > Edit (or Delete). The maker
+  opens with how it was made (`sticker/StickerProject`: the original picture plus options, traced
+  outline and brush strokes as points, kept in filesDir/my-stickers/projects/<name>/); Save
+  replaces the sticker in place (and its gallery copy); "Back to original picture" undoes every
+  edit. Stickers made before 0.5.3 have no project and are edited as they are.
+
 ## 0.5.2
 - Thread top bar: the conversation's avatar next to the name, and a call button for one-to-one
   conversations with a phone number (opens the dialer with the number; no call permission).

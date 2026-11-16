@@ -67,6 +67,7 @@ class RefineView @JvmOverloads constructor(
     }
 
     private var current: Path? = null
+    private val currentPoints = ArrayList<Float>()
     private var currentWidth = 0f
     private var lastX = 0f
     private var lastY = 0f
@@ -104,7 +105,7 @@ class RefineView @JvmOverloads constructor(
      * same size). The strokes so far are kept and drawn over it again.
      */
     fun setPictures(original: Bitmap, cutOut: Bitmap) {
-        val sizeChanged = this.original?.let { it.width != original.width || it.height != original.height } ?: true
+        val sizeChanged = this.original?.let { it.width != original.width || it.height != original.height } ?: false
         this.original = original
         base = cutOut
         restoreShader = BitmapShader(original, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
@@ -124,6 +125,14 @@ class RefineView @JvmOverloads constructor(
         invalidate()
         onStrokesChanged?.invoke()
         return true
+    }
+
+    /** Replaces the strokes (a sticker opened for editing brings its own). */
+    fun setStrokes(strokes: List<StickerMaker.Stroke>) {
+        _strokes.clear()
+        _strokes.addAll(strokes)
+        rebuild()
+        invalidate()
     }
 
     fun clearStrokes() {
@@ -266,6 +275,9 @@ class RefineView @JvmOverloads constructor(
     private fun startStroke(x: Float, y: Float) {
         val p = toBitmapPoint(x, y)
         current = Path().apply { moveTo(p[0], p[1]) }
+        currentPoints.clear()
+        currentPoints += p[0]
+        currentPoints += p[1]
         // The brush's screen size, in picture pixels at the current zoom.
         currentWidth = brushSizePx * toBitmap.mapRadius(1f)
         lastX = p[0]
@@ -280,6 +292,8 @@ class RefineView @JvmOverloads constructor(
         val path = current ?: return
         val p = toBitmapPoint(x, y)
         path.lineTo(p[0], p[1])
+        currentPoints += p[0]
+        currentPoints += p[1]
         drawSegment(lastX, lastY, p[0], p[1])
         lastX = p[0]
         lastY = p[1]
@@ -298,7 +312,7 @@ class RefineView @JvmOverloads constructor(
         val path = current ?: return
         current = null
         path.lineTo(lastX + 0.1f, lastY)
-        _strokes += StickerMaker.Stroke(path, currentWidth, keep)
+        _strokes += StickerMaker.Stroke(path, currentWidth, keep, currentPoints.toFloatArray())
         onStrokesChanged?.invoke()
     }
 

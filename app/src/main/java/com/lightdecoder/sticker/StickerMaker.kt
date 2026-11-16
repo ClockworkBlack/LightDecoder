@@ -53,7 +53,16 @@ object StickerMaker {
      * coordinates: [keep] paints the original picture back in, otherwise it
      * erases. [width] is the brush's diameter in source pixels.
      */
-    class Stroke(val path: Path, val width: Float, val keep: Boolean)
+    class Stroke(val path: Path, val width: Float, val keep: Boolean, val points: FloatArray = FloatArray(0)) {
+        companion object {
+            /** A stroke through x,y pairs, kept so it can be saved and drawn again ([StickerProject]). */
+            fun of(points: FloatArray, width: Float, keep: Boolean): Stroke {
+                val path = StickerProject.pathOf(points, close = false)
+                if (points.size == 2) path.lineTo(points[0] + 0.1f, points[1]) // a dot
+                return Stroke(path, width, keep, points)
+            }
+        }
+    }
 
     /** The user's brush strokes, and the picture a Keep stroke paints back from (same size as the source). */
     class Edits(val restoreFrom: Bitmap, val strokes: List<Stroke>)

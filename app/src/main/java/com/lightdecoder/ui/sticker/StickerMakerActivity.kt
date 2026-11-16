@@ -20,6 +20,9 @@ import com.lightdecoder.heif.HeifFrame
 import com.lightdecoder.heif.Media
 import com.lightdecoder.sticker.StickerLibrary
 import com.lightdecoder.sticker.StickerMaker
+import com.lightdecoder.sticker.StickerProject
+import android.graphics.BitmapFactory
+import java.io.File
 import com.lightdecoder.ui.applySystemBarPadding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -40,6 +43,12 @@ class StickerMakerActivity : AppCompatActivity() {
 
     /** The picture as chosen, before any traced cut-out. */
     private var original: Bitmap? = null
+
+    /** The library sticker being edited; null while making a new one. */
+    private var editing: java.io.File? = null
+
+    /** The traced outline (x,y pairs in [original]'s pixels), kept so the sticker can be edited later. */
+    private var trace: FloatArray? = null
     private var sticker: Bitmap? = null
     private var renderJob: Job? = null
 
@@ -90,18 +99,29 @@ class StickerMakerActivity : AppCompatActivity() {
         }
         binding.traceUndo.setOnClickListener {
             source = original
+            trace = null
             binding.traceUndo.visibility = View.GONE
             render()
         }
-        binding.lasso.onTraced = { outline ->
-            source?.let { source = StickerMaker.cutToPath(it, outline) }
+        binding.resetOriginal.setOnClickListener { resetToOriginal() }
+        binding.lasso.onTraced = { outline, points ->
+            // Cut from the original, so the same cut can be made again when the sticker is edited later.
+            original?.let { source = StickerMaker.cutToPath(it, outline) }
+            trace = points
             binding.traceUndo.visibility = View.VISIBLE
             stopTracing()
             render()
         }
         updateToleranceVisible()
 
-        savedInstanceState?.getString(STATE_URI)?.let { load(Uri.parse(it)) }
+        val edit = intent.getStringExtra(EXTRA_EDIT)?.let(::File)
+        if (edit != null) {
+            supportActionBar?.setTitle(R.string.sticker_edit_title)
+            binding.pick.visibility = View.GONE
+            loadForEdit(edit)
+        } else {
+            savedInstanceState?.getString(STATE_URI)?.let { load(Uri.parse(it)) }
+        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -117,6 +137,63 @@ class StickerMakerActivity : AppCompatActivity() {
         return super.onOptionsItemSelected(item)
     }
 
+    /** Opens a sticker of the library with how it was made, or (made before that was kept) as it is. */
+    private fun loadForEdit(file: File) {
+        lifecycleScope.launch {
+            val project = withContext(Dispatchers.IO) {
+                if (!StickerLibrary.owns(applicationContext, file)) return@withContext null
+                StickerProject.load(applicationContext, file)
+                    ?: runCatching { BitmapFactory.decodeFile(file.path)?.copy(Bitmap.Config.ARGB_8888, false) }.getOrNull()
+                        ?.let { StickerProject.Project(it, StickerProject.Edits(StickerMaker.Options(outline = false), null, emptyList())) }
+                        ?.also { withContext(Dispatchers.Main) { Toast.makeText(this@StickerMakerActivity, R.string.sticker_old_no_original, Toast.LENGTH_LONG).show() } }
+            }
+            if (project == null) {
+                Toast.makeText(this@StickerMakerActivity, R.string.sticker_failed, Toast.LENGTH_LONG).show()
+                finish()
+                return@launch
+            }
+            editing = file
+            original = project.original
+            applyEdits(project.edits)
+            binding.trace.isEnabled = true
+            binding.refineStart.isEnabled = true
+            binding.resetOriginal.visibility = View.VISIBLE
+            render()
+        }
+    }
+
+    /** Puts the controls, the traced cut and the brush strokes as [edits] has them. */
+    private fun applyEdits(edits: StickerProject.Edits) {
+        val picture = original ?: return
+        trace = edits.trace
+        source = edits.trace?.let { StickerMaker.cutToPath(picture, StickerProject.pathOf(it, close = true)) } ?: picture
+        binding.traceUndo.visibility = if (edits.trace != null) View.VISIBLE else View.GONE
+        val o = edits.options
+        binding.removeBackground.isChecked = o.removeBackground
+        binding.tolerance.value = o.tolerance.toFloat().coerceIn(binding.tolerance.valueFrom, binding.tolerance.valueTo)
+        binding.shape.check(
+            when (o.shape) {
+                StickerMaker.Shape.ROUNDED -> R.id.shapeRounded
+                StickerMaker.Shape.CIRCLE -> R.id.shapeCircle
+                StickerMaker.Shape.ORIGINAL -> R.id.shapeOriginal
+            }
+        )
+        binding.outline.isChecked = o.outline
+        binding.outlineWidth.value = o.outlineWidth.toFloat().coerceIn(binding.outlineWidth.valueFrom, binding.outlineWidth.valueTo)
+        binding.solid.isChecked = o.solidBackground
+        binding.refine.setStrokes(edits.strokes)
+        updateBrushButtons()
+        stopRefining()
+        stopTracing()
+    }
+
+    /** Every edit undone: the picture the sticker was made from, with nothing cut, brushed or outlined. */
+    private fun resetToOriginal() {
+        if (original == null) return
+        applyEdits(StickerProject.Edits(StickerMaker.Options(outline = false), null, emptyList()))
+        render()
+    }
+
     private fun load(uri: Uri) {
         lifecycleScope.launch {
             val bitmap = withContext(Dispatchers.IO) { readPicture(uri) }
@@ -127,6 +204,8 @@ class StickerMakerActivity : AppCompatActivity() {
             sourceUri = uri
             source = bitmap
             original = bitmap
+            trace = null
+            binding.resetOriginal.visibility = View.VISIBLE
             // A new picture: the brushing was for the old one.
             binding.refine.clearStrokes()
             updateBrushButtons()
@@ -281,10 +360,19 @@ class StickerMakerActivity : AppCompatActivity() {
 
     private fun save() {
         val made = sticker ?: return
+        val from = original
+        val edits = StickerProject.Edits(options(), trace, binding.refine.strokes.toList())
+        val target = editing
         binding.save.isEnabled = false
         lifecycleScope.launch {
             val file = withContext(Dispatchers.IO) {
-                runCatching { StickerLibrary.save(applicationContext, made) }.getOrNull()
+                runCatching {
+                    val saved = if (target != null) StickerLibrary.replace(applicationContext, target, made)
+                    else StickerLibrary.save(applicationContext, made)
+                    // How it was made, for editing it later (failing that, the sticker is still saved).
+                    if (from != null) runCatching { StickerProject.save(applicationContext, saved, from, edits) }
+                    saved
+                }.getOrNull()
             }
             if (file == null) {
                 binding.save.isEnabled = true
@@ -298,9 +386,15 @@ class StickerMakerActivity : AppCompatActivity() {
 
     companion object {
         const val EXTRA_PATH = "com.lightdecoder.extra.STICKER_PATH"
+
+        /** A sticker of the library to edit (its file path). */
+        const val EXTRA_EDIT = "com.lightdecoder.extra.EDIT_STICKER"
         private const val STATE_URI = "uri"
         private const val MAX_SOURCE_BYTES = 40 * 1024 * 1024
 
         fun intent(context: Context) = Intent(context, StickerMakerActivity::class.java)
+
+        /** Opens [sticker] of the library for editing; saving replaces it. */
+        fun editIntent(context: Context, sticker: File) = intent(context).putExtra(EXTRA_EDIT, sticker.path)
     }
 }

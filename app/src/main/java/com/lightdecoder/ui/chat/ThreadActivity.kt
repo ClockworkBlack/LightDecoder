@@ -1102,15 +1102,14 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                         sendSticker(file)
                     },
                     onHold = { file ->
+                        // Edit it (all the maker's tools, or back to its original picture) or delete it.
                         MaterialAlertDialogBuilder(this@ThreadActivity)
-                            .setTitle(R.string.sticker_delete_title)
-                            .setNegativeButton(android.R.string.cancel, null)
-                            .setPositiveButton(R.string.sticker_delete_confirm) { _, _ ->
-                                lifecycleScope.launch {
-                                    withContext(Dispatchers.IO) {
-                                        com.lightdecoder.sticker.StickerLibrary.delete(applicationContext, file)
-                                    }
-                                    refresh()
+                            .setItems(arrayOf(getString(R.string.sticker_edit), getString(R.string.sticker_delete))) { _, which ->
+                                if (which == 0) {
+                                    sheet.dismiss()
+                                    makeSticker.launch(com.lightdecoder.ui.sticker.StickerMakerActivity.editIntent(this@ThreadActivity, file))
+                                } else {
+                                    confirmStickerDelete(file) { refresh() }
                                 }
                             }
                             .show()
@@ -1119,6 +1118,21 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             }
         }
         refresh()
+    }
+
+    private fun confirmStickerDelete(file: File, after: () -> Unit) {
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.sticker_delete_title)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(R.string.sticker_delete_confirm) { _, _ ->
+                lifecycleScope.launch {
+                    withContext(Dispatchers.IO) {
+                        com.lightdecoder.sticker.StickerLibrary.delete(applicationContext, file)
+                    }
+                    after()
+                }
+            }
+            .show()
     }
 
     private fun sendSticker(file: File) {
