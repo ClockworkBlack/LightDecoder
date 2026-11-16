@@ -7,6 +7,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -65,6 +66,30 @@ class InboxStoreDedupeTest {
         assertFalse(store.containsDigest(""))
         assertEquals(listOf("two", "one"), store.list().map { it.id })
         assertFalse("same id still refused", store.add(item("one", ""), byteArrayOf(1), preview))
+    }
+
+    @Test
+    fun relayIdsIncludeThePhoneTheMessageCameFrom() {
+        // Conversation, message and part ids are phone-local: another phone can reuse them.
+        val first = InboxStore.relayIdFor("phone-1", "conv-1", "msg-1", "p1")
+        assertEquals("stable", first, InboxStore.relayIdFor("phone-1", "conv-1", "msg-1", "p1"))
+        assertNotEquals(first, InboxStore.relayIdFor("phone-2", "conv-1", "msg-1", "p1"))
+        assertNotEquals(first, InboxStore.relayIdFor("", "conv-1", "msg-1", "p1"))
+        assertNotEquals(first, InboxStore.relayIdFor("phone-1", "conv-1", "msg-1", "p2"))
+        assertNotEquals(first, InboxStore.idFor(InboxItem.SOURCE_RELAY, "conv-1", "msg-1", 0, "p1"))
+
+        // The second phone's picture (other bytes, same ids) is not taken for the first one's.
+        val preview = Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888)
+        val one = byteArrayOf(1, 2, 3)
+        val two = byteArrayOf(4, 5, 6)
+        assertTrue(store.add(item(first, InboxStore.digestOf(one), InboxItem.SOURCE_RELAY), one, preview))
+        val second = InboxStore.relayIdFor("phone-2", "conv-1", "msg-1", "p1")
+        assertFalse(store.contains(second))
+        assertTrue(store.add(item(second, InboxStore.digestOf(two), InboxItem.SOURCE_RELAY), two, preview))
+        // The same picture under another phone's id is still kept once (digest).
+        val third = InboxStore.relayIdFor("phone-3", "conv-1", "msg-1", "p1")
+        assertFalse(store.add(item(third, InboxStore.digestOf(one), InboxItem.SOURCE_RELAY), one, preview))
+        assertEquals(listOf(second, first), store.list().map { it.id })
     }
 
     private fun item(id: String, digest: String, source: String = InboxItem.SOURCE_NOTIFICATION) = InboxItem(

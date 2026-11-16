@@ -3,7 +3,9 @@ package com.lightdecoder.ui.relay
 import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
@@ -80,6 +82,8 @@ class RelaySetupActivity : AppCompatActivity() {
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
         manager = RelayManager.get(this)
 
+        // A debug build's private storage (the archive, the session) is open to adb: say so up front.
+        binding.introDebugWarning.visibility = if (isDebuggableBuild(this)) View.VISIBLE else View.GONE
         binding.introAgree.setOnCheckedChangeListener { _, checked -> binding.introContinue.isEnabled = checked }
         binding.introContinue.isEnabled = binding.introAgree.isChecked
         // Ask for notifications first: once linked, the "connected" notification
@@ -425,5 +429,12 @@ class RelaySetupActivity : AppCompatActivity() {
         }
 
         private val REGIONAL_ACCOUNTS = Regex("accounts\\.google\\.(com?\\.)?[a-z]{2,3}")
+
+        /**
+         * A debuggable build: anyone with adb can run code as the app
+         * (run-as, a debugger) and so read its private files and use its keys.
+         */
+        internal fun isDebuggableBuild(context: Context): Boolean =
+            (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
     }
 }

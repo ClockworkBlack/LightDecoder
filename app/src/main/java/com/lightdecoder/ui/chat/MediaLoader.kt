@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
 import android.os.Build
 import android.util.LruCache
+import android.view.View
 import android.widget.ImageView
 import androidx.annotation.RequiresApi
 import com.lightdecoder.R
@@ -12,7 +13,9 @@ import com.lightdecoder.archive.MediaRow
 import com.lightdecoder.heif.HeifCodec
 import com.lightdecoder.heif.ImageSniffer
 import com.lightdecoder.heif.Media
+import com.lightdecoder.relay.RelayException
 import com.lightdecoder.relay.RelayManager
+import com.lightdecoder.ui.relay.RelayErrors
 import com.lightdecoder.ui.relay.relayAttempt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -37,6 +40,12 @@ import java.util.WeakHashMap
  * Main thread only, except the decoding, which runs on IO with at most
  * [PARALLEL] at a time so a fast scroll does not decode fifty pictures at once.
  * A row that is scrolled away or rebound [cancel]s its loads.
+ *
+ * A download that needs the link connected (the bridge's download token has
+ * expired while disconnected) shows "Connect to load" instead of staying a
+ * blank placeholder. It is not tried again while the link is still offline,
+ * and never counted as "not a picture": [clearFailures], once connected,
+ * lets the rebound rows try again.
  */
 class MediaLoader(
     private val manager: RelayManager,
@@ -51,20 +60,35 @@ class MediaLoader(
     /** Parts that turned out not to be pictures; not tried again. */
     private val notPictures = HashSet<String>()
 
+    /** Parts whose download needs the link connected; tried again once it is ([clearFailures]). */
+    private val needsConnection = HashSet<String>()
+
     /** Set when a download failed (for example while offline), so the screen can retry later. */
     var hadFailures = false
         private set
 
-    fun bind(view: ImageView, messageId: String, part: MediaRow, maxSidePx: Int) {
+    /**
+     * Shows the preview of [part] in [view]. [status], if given, is the
+     * "Connect to load" label over it: shown while the picture can only be
+     * downloaded with the link connected, hidden otherwise.
+     */
+    fun bind(view: ImageView, messageId: String, part: MediaRow, maxSidePx: Int, status: View? = null) {
         val key = keyFor(messageId, part)
         jobs.remove(view)?.cancel()
         view.tag = key
+        status?.visibility = View.GONE
         cache.get(key)?.let {
             view.setImageBitmap(it)
             return
         }
         view.setImageResource(R.drawable.ic_image_placeholder)
         if (key in notPictures) return
+        if (key in needsConnection && !manager.state.value.isOnline) {
+            // Still offline: say so again without another try that cannot work.
+            hadFailures = true
+            status?.visibility = View.VISIBLE
+            return
+        }
         val job = scope.launch {
             try {
                 val result = permits.withPermit {
@@ -79,6 +103,11 @@ class MediaLoader(
                     }
                     Preview.NotAPicture -> notPictures.add(key)
                     Preview.Unavailable -> hadFailures = true
+                    Preview.NeedsConnection -> {
+                        needsConnection.add(key)
+                        hadFailures = true
+                        if (view.tag == key) status?.visibility = View.VISIBLE
+                    }
                 }
             } finally {
                 if (jobs[view] === coroutineContext[Job]) jobs.remove(view)
@@ -97,22 +126,38 @@ class MediaLoader(
         view.tag = null
     }
 
-    /** Forget earlier download failures; the caller rebinds the visible rows. */
+    /**
+     * Forget earlier download failures, including "needs a connection" (call
+     * it once the link is connected); the caller rebinds the visible rows.
+     */
     fun clearFailures() {
         hadFailures = false
+        needsConnection.clear()
     }
 
     private sealed class Preview {
         class Ready(val bitmap: Bitmap) : Preview()
         object NotAPicture : Preview()
         object Unavailable : Preview()
+        object NeedsConnection : Preview()
+    }
+
+    /** What a download through the link gave. */
+    private sealed class Fetched {
+        class Got(val file: File) : Fetched()
+        object None : Fetched()
+        object NeedsConnection : Fetched()
     }
 
     private suspend fun loadPreview(messageId: String, part: MediaRow, maxSide: Int): Preview {
         val bytes = existing(part.thumbPath)?.let(::readCapped)
             ?: existing(part.localPath)?.let(::readCapped)
             ?: part.inlineData.takeIf { it.isNotEmpty() }
-            ?: download(messageId, part)?.let(::readCapped)
+            ?: when (val fetched = download(messageId, part)) {
+                is Fetched.Got -> readCapped(fetched.file)
+                Fetched.None -> null
+                Fetched.NeedsConnection -> return Preview.NeedsConnection
+            }
             ?: return Preview.Unavailable
         currentCoroutineContext().ensureActive()
         val bitmap = try {
@@ -124,14 +169,19 @@ class MediaLoader(
         return Preview.Ready(bitmap)
     }
 
-    private suspend fun download(messageId: String, part: MediaRow): File? {
+    private suspend fun download(messageId: String, part: MediaRow): Fetched {
         val thumbnail = part.thumbMediaId.isNotEmpty()
         if (!thumbnail) {
             // No thumbnail: fetch the file itself only when it is a picture of sensible size.
             val picture = part.mime.isEmpty() || part.mime.startsWith("image/")
-            if (part.mediaId.isEmpty() || !picture || part.size > AUTO_DOWNLOAD_MAX) return null
+            if (part.mediaId.isEmpty() || !picture || part.size > AUTO_DOWNLOAD_MAX) return Fetched.None
         }
-        return relayAttempt { manager.mediaFile(messageId, part.partId, thumbnail) }.getOrNull()
+        return relayAttempt { manager.mediaFile(messageId, part.partId, thumbnail) }.fold(
+            onSuccess = { file -> if (file != null) Fetched.Got(file) else Fetched.None },
+            onFailure = { e ->
+                if (RelayErrors.codeOf(e) == RelayException.NOT_CONNECTED) Fetched.NeedsConnection else Fetched.None
+            },
+        )
     }
 
     private fun existing(path: String): File? =

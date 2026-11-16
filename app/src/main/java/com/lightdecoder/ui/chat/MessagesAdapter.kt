@@ -245,7 +245,7 @@ class MessagesAdapter(
             pb.mediaFrame.visibility = if (visual) View.VISIBLE else View.GONE
             pb.mediaFile.visibility = if (visual) View.GONE else View.VISIBLE
             if (visual) {
-                media.bind(pb.mediaImage, row.id, part, maxSide)
+                media.bind(pb.mediaImage, row.id, part, maxSide, pb.mediaStatus)
                 pb.mediaPlay.visibility = if (part.mime.startsWith("video/")) View.VISIBLE else View.GONE
                 pb.mediaImage.contentDescription = container.context.getString(
                     if (part.mime.startsWith("video/")) R.string.chat_media_video else R.string.chat_media_picture

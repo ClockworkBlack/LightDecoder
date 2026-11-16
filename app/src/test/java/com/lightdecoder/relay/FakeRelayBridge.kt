@@ -34,7 +34,8 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
     // --- pairing
     var challenge = PairingChallenge("🦊", "https://example.invalid/emoji.svg", "someone@example.com")
     var startPairingError: RelayException? = null
-    var finishPairing: () -> String = { "phone-1" }
+    /** What finishPairing returns: by default the phone status() reports, as in Go. */
+    var finishPairing: () -> String = { phoneId }
     var sessionAfterPairing: ByteArray = SESSION
 
     // --- reads
@@ -63,6 +64,19 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
     /** Runs inside downloadMedia() once the bytes are ready, before they are returned. */
     @Volatile
     var beforeDownloadReturns: (() -> Unit)? = null
+
+    /** Every download fails with this (e.g. not_connected: the token expired while disconnected). */
+    @Volatile
+    var downloadError: RelayException? = null
+
+    // --- unpair
+    /** The code of the "unpaired" state unpair() emits (Go: unpair_remote_failed when the revoke failed). */
+    @Volatile
+    var unpairCode: String = ""
+
+    /** Runs inside unpair() before the pairing is dropped (Go may hold a short connection here). */
+    @Volatile
+    var duringUnpair: (() -> Unit)? = null
 
     // --- media
     val media = ConcurrentHashMap<String, ByteArray>()
@@ -126,10 +140,11 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
 
     override fun unpair() {
         calls += "unpair"
+        duringUnpair?.invoke()
         paired = false
         connected = false
         sink.onSession(null)
-        emitState("unpaired")
+        emitState("unpaired", unpairCode, if (unpairCode.isEmpty()) "" else "the phone may still list this device")
     }
 
     override fun exportSession(): ByteArray? = if (paired) SESSION else null
@@ -165,6 +180,7 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
     override fun downloadMedia(mediaId: String, key: ByteArray): ByteArray {
         downloads += mediaId
         if (!paired) throw RelayException(RelayException.NOT_PAIRED, "")
+        downloadError?.let { throw it }
         val bytes = media[mediaId] ?: throw RelayException(RelayException.NOT_FOUND, "media is not available")
         beforeDownloadReturns?.invoke()
         return bytes
@@ -210,18 +226,22 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
 
     override fun deleteMessage(messageId: String) {
         calls += "deleteMessage"
+        requirePaired()
     }
 
     override fun setConversationStatus(conversationId: String, status: String) {
         calls += "setConversationStatus:$status"
+        requirePaired()
     }
 
     override fun setConversationMuted(conversationId: String, muted: Boolean) {
         calls += "setConversationMuted:$muted"
+        requirePaired()
     }
 
     override fun deleteConversation(conversationId: String) {
         calls += "deleteConversation"
+        requirePaired()
     }
 
     override fun getOrCreateConversation(numbers: List<String>, rcsGroupName: String?): ConversationDto {
@@ -231,6 +251,10 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
 
     override fun close() {
         calls += "close"
+    }
+
+    private fun requirePaired() {
+        if (!paired) throw RelayException(RelayException.NOT_PAIRED, "")
     }
 
     private fun requireConnected() {

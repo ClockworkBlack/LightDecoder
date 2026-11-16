@@ -4,11 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"go.mau.fi/util/exhttp"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/events"
@@ -460,3 +466,130 @@ func TestPairedDeviceName(t *testing.T) {
 		t.Errorf("device and browser type must stay libgm's defaults: %v %v", d.GetDeviceType(), d.GetBrowserType())
 	}
 }
+
+// A client the bridge drops (Unpair, lost pairing, replaced by a new
+// pairing) can no longer reach the network: libgm's ack ticker and other
+// goroutines of it outlive Disconnect, and would keep sending the cookies.
+func TestDroppedClientsAreCutOffTheNetwork(t *testing.T) {
+	retiredAfter := func(t *testing.T, b *GMBridge, drop func()) (*libgm.Client, *atomic.Bool) {
+		t.Helper()
+		b.mu.Lock()
+		cli, flag := b.client, b.clientRetired
+		b.mu.Unlock()
+		if cli == nil || flag == nil || flag.Load() {
+			t.Fatal("a paired bridge's client must be usable")
+		}
+		drop()
+		if !flag.Load() {
+			t.Fatal("the dropped client is still on the network")
+		}
+		// The libgm client really goes through the switch: its request fails
+		// locally, before any connection.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := cli.FetchConfig(ctx); !errors.Is(err, errClientRetired) {
+			t.Fatalf("dropped client's request: %v", err)
+		}
+		if be := toBridgeError(fmt.Errorf("x: %w", errClientRetired)); be.code != codeNotPaired {
+			t.Errorf("code %q", be.code)
+		}
+		return cli, flag
+	}
+
+	t.Run("unpair", func(t *testing.T) {
+		stub(t, &unpairGaia, func(context.Context, *libgm.Client) error { return nil })
+		b, _ := newPairedBridge(t)
+		markLive(b)
+		retiredAfter(t, b, func() {
+			if err := b.Unpair(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	})
+	t.Run("unpair keeps the client for the revoke", func(t *testing.T) {
+		b, _ := newPairedBridge(t)
+		stub(t, &unpairGaia, func(ctx context.Context, cli *libgm.Client) error {
+			b.mu.Lock()
+			retired := b.clientRetired.Load()
+			b.mu.Unlock()
+			if retired {
+				t.Error("retired before the revoke went out")
+			}
+			return nil
+		})
+		retiredAfter(t, b, func() { _ = b.Unpair() })
+	})
+	t.Run("logged out", func(t *testing.T) {
+		b, rec := newPairedBridge(t)
+		gen := markLive(b)
+		retiredAfter(t, b, func() {
+			b.handlerFor(gen)(&events.GaiaLoggedOut{})
+			waitFor(t, "logged_out", func() bool { return len(rec.states()) == 1 })
+		})
+	})
+	t.Run("replaced by a new pairing", func(t *testing.T) {
+		b, _ := newPairedBridge(t)
+		retiredAfter(t, b, func() {
+			b.mu.Lock()
+			b.client = b.newClientLocked()
+			b.mu.Unlock()
+		})
+		b.mu.Lock()
+		current := b.clientRetired.Load()
+		b.mu.Unlock()
+		if current {
+			t.Error("the new client must be usable")
+		}
+	})
+}
+
+// The switch itself: requests pass until it is set, then fail without
+// reaching the server; idle connections can still be closed through it.
+func TestRetirableTransport(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	var retired atomic.Bool
+	client := retirableSettings(&retired).Compile()
+	if client.Timeout != exhttp.SensibleClientSettings.GlobalTimeout {
+		t.Errorf("settings changed: timeout %v", client.Timeout)
+	}
+	post := func() error {
+		resp, err := client.Post(srv.URL, "text/plain", strings.NewReader("payload"))
+		if err == nil {
+			resp.Body.Close()
+		}
+		return err
+	}
+	if err := post(); err != nil || hits.Load() != 1 {
+		t.Fatalf("before retiring: err=%v hits=%d", err, hits.Load())
+	}
+	client.CloseIdleConnections()
+	retired.Store(true)
+	body := &closeTracker{Reader: strings.NewReader("payload")}
+	req, _ := http.NewRequest(http.MethodPost, srv.URL, body)
+	if _, err := client.Do(req); !errors.Is(err, errClientRetired) {
+		t.Errorf("after retiring: %v", err)
+	}
+	if err := post(); !errors.Is(err, errClientRetired) {
+		t.Errorf("after retiring: %v", err)
+	}
+	if hits.Load() != 1 {
+		t.Errorf("a retired client reached the server: %d", hits.Load())
+	}
+	if !body.closed.Load() {
+		t.Error("the request body must be closed")
+	}
+}
+
+type closeTracker struct {
+	io.Reader
+	closed atomic.Bool
+}
+
+func (c *closeTracker) Close() error { c.closed.Store(true); return nil }

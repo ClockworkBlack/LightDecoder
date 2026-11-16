@@ -106,6 +106,8 @@ func classify(err error) (code, detail string) {
 		return codeConnectionClosed, "disconnected before the phone answered"
 	case errors.Is(err, libgm.ErrClientIsNil):
 		return codeNotPaired, "no client"
+	case errors.Is(err, errClientRetired):
+		return codeNotPaired, "the pairing was removed"
 	case errors.Is(err, events.ErrInvalidCredentials):
 		return codeCookiesInvalid, "Google rejected the account cookies"
 	case errors.Is(err, events.ErrCallerNoPermission):

@@ -26,9 +26,14 @@ Google Messages link (gmbridge/, compiled into libgojni.so with gomobile)
   The Go runtime and standard library
                                  BSD-3-Clause  Copyright 2009 The Go Authors
 
-Exact versions are pinned in gmbridge/go.mod and gmbridge/go.sum. The full
-licence texts ship with each module's source (go mod download) and with the
-pinned submodules under third_party/.
+Exact versions are pinned in gmbridge/go.mod and gmbridge/go.sum.
+
+The full licence texts also ship inside the app: About > Licences shows this
+NOTICE and the licence texts the build collects into the APK's assets
+(assets/NOTICE and assets/licenses/: this app, the native decoder libraries,
+and each Go module, with its exact version, and the Go runtime linked into
+libgojni.so). They also come with each module's source (go mod download) and
+with the pinned submodules under third_party/.
 
 Android libraries (AndroidX, Material Components, Kotlin and kotlinx.coroutines)
 are Apache-2.0.

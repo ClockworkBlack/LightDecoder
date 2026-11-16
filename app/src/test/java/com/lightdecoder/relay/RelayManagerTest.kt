@@ -262,7 +262,8 @@ class RelayManagerTest {
         env.eventually(manager, what = "sticker in the inbox") { store.list().isNotEmpty() }
         val item = store.list().single()
         assertEquals(InboxItem.SOURCE_RELAY, item.source)
-        assertEquals(InboxStore.idFor("relay", CONV, "m-sticker", 0, "part-1"), item.id)
+        // The phone's id is part of it: another phone can reuse conversation and message ids.
+        assertEquals(InboxStore.relayIdFor("phone-1", CONV, "m-sticker", "part-1"), item.id)
         assertEquals(TestMedia.WIDTH, item.width)
         assertEquals(listOf("media-1"), fake.downloads)
 
@@ -450,6 +451,173 @@ class RelayManagerTest {
     }
 
     @Test
+    fun anUnpairThePhoneDidNotHearAboutSaysSo() {
+        val (manager, fake) = env.pairedManager()
+        fake.emitMessage(incoming("m1", "kept"))
+        manager.awaitIdleForTesting()
+        fake.unpairCode = RelayState.UNPAIR_REMOTE_FAILED
+
+        runBlocking { manager.unpair(deleteArchive = false) }
+
+        assertEquals(RelayState(RelayState.Phase.UNPAIRED, RelayState.UNPAIR_REMOTE_FAILED), manager.state.value)
+        val health = env.repo.health()
+        assertEquals("unpaired", health.status)
+        assertEquals(RelayState.UNPAIR_REMOTE_FAILED, health.lastError)
+        assertEquals("kept", env.repo.message("m1")!!.text)
+        assertFalse(SessionVault.exists(env.context))
+        assertFalse(manager.isPaired())
+        assertTrue(RelayLog.read(env.context).any { it.endsWith("The phone could not be told; it may still list this device") })
+        assertLogIsContentFree()
+    }
+
+    @Test
+    fun anUnpairThatDeletesTheArchiveStillSaysThePhoneWasNotTold() {
+        val (manager, fake) = env.pairedManager()
+        fake.emitMessage(incoming("m1", "secret"))
+        manager.awaitIdleForTesting()
+        fake.unpairCode = RelayState.UNPAIR_REMOTE_FAILED
+
+        runBlocking { manager.unpair(deleteArchive = true) }
+
+        assertEquals(RelayState(RelayState.Phase.UNPAIRED, RelayState.UNPAIR_REMOTE_FAILED), manager.state.value)
+        assertEquals(RelayState.UNPAIR_REMOTE_FAILED, env.repo.health().lastError)
+        assertNull(env.repo.message("m1"))
+    }
+
+    @Test
+    fun anUnpairThePhoneHeardAboutClearsAnEarlierError() {
+        val (manager, fake) = env.pairedManager()
+        fake.emitState("error", RelayException.INTERNAL, "listen failed")
+        manager.awaitIdleForTesting()
+        assertTrue(env.repo.health().lastError.isNotEmpty())
+
+        runBlocking { manager.unpair(deleteArchive = false) }
+
+        assertEquals(RelayState(RelayState.Phase.UNPAIRED), manager.state.value)
+        assertEquals("", env.repo.health().lastError)
+    }
+
+    @Test
+    fun theServiceAndItsNotificationOutlastTheRevoke() {
+        // Go may open a short connection to revoke the pairing (to refresh an
+        // expired token): the link's notification, with Disconnect, must be up.
+        val (manager, fake) = env.pairedManager()
+        RelayPrefs.setLiveEnabled(env.context, true)
+        manager.serviceRunning = true
+        fake.goOnline()
+        manager.awaitIdleForTesting()
+        val shadowApp = shadowOf(env.context as Application)
+        while (shadowApp.nextStoppedService != null) Unit
+        val stoppedBeforeRevoke = java.util.concurrent.atomic.AtomicReference<String>("not called")
+        fake.duringUnpair = { stoppedBeforeRevoke.set(shadowApp.nextStoppedService?.component?.className.orEmpty()) }
+
+        runBlocking { manager.unpair(deleteArchive = false) }
+
+        assertEquals("the service was still running while the phone was told", "", stoppedBeforeRevoke.get())
+        assertEquals(RelayService::class.java.name, shadowApp.nextStoppedService?.component?.className)
+        assertFalse(RelayPrefs.liveEnabled(env.context))
+        assertFalse("no connect for the unpair", fake.calls.contains("connect"))
+        assertEquals(RelayState.Phase.UNPAIRED, manager.state.value.phase)
+    }
+
+    @Test
+    fun theLocalArchiveCanOnlyBeDeletedWithoutAPairing() {
+        val (manager, fake) = env.pairedManager()
+        fake.goOnline()
+        env.eventually(manager, what = "the phone to be recorded") { RelayPrefs.archivePhone(env.context) == "phone-1" }
+        fake.emitMessage(incoming("m1", "kept"))
+        manager.awaitIdleForTesting()
+
+        assertFalse("refused while paired", runBlocking { manager.deleteLocalArchive() })
+        assertEquals("kept", env.repo.message("m1")!!.text)
+
+        runBlocking { manager.unpair(deleteArchive = false) }
+        val tmpId = manager.sendText(CONV, "never sent")
+        manager.awaitIdleForTesting()
+        RelayPrefs.setBackfillDoneAt(env.context, 123)
+        assertNotNull(env.repo.outbox(tmpId))
+
+        assertTrue(runBlocking { manager.deleteLocalArchive() })
+
+        assertNull(env.repo.message("m1"))
+        assertNull(env.repo.outbox(tmpId))
+        assertTrue(env.repo.conversations(folder = null).isEmpty())
+        assertEquals("", RelayPrefs.archivePhone(env.context))
+        assertEquals(0L, RelayPrefs.backfillDoneAt(env.context))
+        assertEquals("the link's status is kept", "unpaired", env.repo.health().status)
+        assertTrue(RelayLog.read(env.context).any { it.endsWith("Local archive deleted") })
+        assertLogIsContentFree()
+    }
+
+    @Test
+    fun withoutAPairingDeletingIsLocalOnly() {
+        val (manager, fake) = env.pairedManager()
+        fake.emit("conversation", ConversationDto(id = CONV, name = "Sam").toJson())
+        fake.emit("conversation", ConversationDto(id = "conv-2", name = "Kim").toJson())
+        fake.emitMessage(incoming("m0", "zero"))
+        fake.emitMessage(incoming("m1", "one"))
+        fake.emitMessage(incoming("m2", "two"))
+        manager.awaitIdleForTesting()
+
+        // Paired: the phone is asked too.
+        runBlocking { manager.deleteMessage("m0") }
+        assertTrue(fake.calls.contains("deleteMessage"))
+        assertNull(env.repo.message("m0"))
+
+        runBlocking { manager.unpair(deleteArchive = false) }
+        fake.calls.clear()
+
+        runBlocking { manager.deleteMessage("m1") }
+        assertNull(env.repo.message("m1"))
+        assertEquals("two", env.repo.message("m2")!!.text)
+        runBlocking { manager.deleteConversation(CONV) }
+        assertNull(env.repo.conversation(CONV))
+        assertNull(env.repo.message("m2"))
+        assertTrue("the phone was not asked", fake.calls.none { it.startsWith("delete") })
+
+        // Archiving and muting still need the phone.
+        for (action in listOf<suspend () -> Unit>({ manager.setArchived("conv-2", true) }, { manager.setMuted("conv-2", true) })) {
+            try {
+                runBlocking { action() }
+                fail("expected not_paired")
+            } catch (e: RelayException) {
+                assertEquals(RelayException.NOT_PAIRED, e.code)
+            }
+        }
+        assertEquals("Kim", env.repo.conversation("conv-2")!!.name)
+        assertFalse(env.repo.conversation("conv-2")!!.muted)
+    }
+
+    @Test
+    fun mediaThatNeedsAConnectionSaysSo() {
+        val (manager, fake) = env.pairedManager()
+        val bytes = ByteArray(64) { 9 }
+        fake.media["media-1"] = bytes
+        fake.emitMessage(
+            incoming("m-video", "").copy(
+                parts = listOf(PartDto(partId = "p1", kind = "media", mediaId = "media-1", key = ByteArray(32), mime = "video/mp4"))
+            )
+        )
+        manager.awaitIdleForTesting()
+
+        // The token expired while disconnected: the caller can say "connect to load".
+        fake.downloadError = RelayException(RelayException.NOT_CONNECTED, "connect to load this media")
+        try {
+            runBlocking { manager.mediaFile("m-video", "p1") }
+            fail("expected not_connected")
+        } catch (e: RelayException) {
+            assertEquals(RelayException.NOT_CONNECTED, e.code)
+        }
+
+        // Anything else still just means "not available".
+        fake.downloadError = RelayException(RelayException.NOT_FOUND, "media is not available")
+        assertNull(runBlocking { manager.mediaFile("m-video", "p1") })
+
+        fake.downloadError = null
+        assertArrayEquals(bytes, runBlocking { manager.mediaFile("m-video", "p1") }!!.readBytes())
+    }
+
+    @Test
     fun aReplyThatComesBackAfterTheArchiveWasDeletedIsDropped() {
         val (manager, fake) = env.pairedManager()
         fake.goOnline()
@@ -523,6 +691,89 @@ class RelayManagerTest {
         Thread.sleep(150)
         assertTrue("nothing reaches the new phone's conversation", fake.sent.isEmpty())
         assertLogIsContentFree()
+    }
+
+    @Test
+    fun thePhoneIdFromPairingCountsWhenTheStatusDoesNotKnowIt() {
+        val (manager, fake) = env.pairedManager()
+        fake.goOnline()
+        env.eventually(manager, what = "the phone to be recorded") { RelayPrefs.archivePhone(env.context) == "phone-1" }
+        fake.emitMessage(incoming("m1", "from alice"))
+        manager.awaitIdleForTesting()
+        fake.loseThePairing("""{"envelope":1,"auth":"cookies-only"}""".toByteArray())
+        manager.awaitIdleForTesting()
+
+        fake.phoneId = ""
+        fake.finishPairing = { "phone-2" }
+        runBlocking { manager.startPairing(COOKIES) }
+        assertEquals("phone-2", runBlocking { manager.finishPairing() })
+        manager.awaitIdleForTesting()
+
+        assertNull("the old phone's archive is gone", env.repo.message("m1"))
+        assertEquals("phone-2", RelayPrefs.archivePhone(env.context))
+        assertEquals("phone-2", env.repo.health().phoneId)
+    }
+
+    @Test
+    fun anArchiveLeftFromAnotherPhoneIsDeletedBeforeTheLinkGoesLive() {
+        // Paired with phone-2, but the app was killed before the old phone's
+        // archive was cleared: the archive still says phone-1.
+        val (manager, fake) = env.pairedManager()
+        RelayPrefs.setArchiveOwner(env.context, "phone-1", "someone@example.com")
+        fake.emitMessage(incoming("m1", "from alice"))
+        manager.awaitIdleForTesting()
+        val tmpId = manager.sendText(CONV, "for alice")
+        manager.awaitIdleForTesting()
+        fake.phoneId = "phone-2"
+
+        val leftAtConnect = java.util.concurrent.atomic.AtomicReference<String>("not connected")
+        fake.duringConnect = { leftAtConnect.set(env.repo.message("m1")?.id.orEmpty()) }
+        RelayPrefs.setLiveEnabled(env.context, true)
+        manager.serviceRunning = true
+        manager.onServiceStarted()
+        env.eventually(manager, what = "the connect") { leftAtConnect.get() != "not connected" }
+
+        assertEquals("deleted before connecting", "", leftAtConnect.get())
+        assertNull(env.repo.outbox(tmpId))
+        assertNull(env.repo.message(MessageRow.tmpMessageId(tmpId)))
+        assertEquals("phone-2", RelayPrefs.archivePhone(env.context))
+
+        fake.goOnline()
+        manager.awaitIdleForTesting()
+        Thread.sleep(150)
+        assertTrue("nothing reaches the new phone's conversation", fake.sent.isEmpty())
+        assertLogIsContentFree()
+        manager.stopLive()
+    }
+
+    @Test
+    fun theFirstSyncDoesNotTakeOverAnotherPhonesArchive() {
+        val (manager, fake) = env.pairedManager()
+        RelayPrefs.setArchiveOwner(env.context, "phone-1", "someone@example.com")
+        fake.emitMessage(incoming("m1", "from alice"))
+        manager.awaitIdleForTesting()
+        fake.phoneId = "phone-2"
+
+        // Online without a connect of the manager's own (no check before it).
+        fake.goOnline()
+
+        env.eventually(manager, what = "the wipe") { env.repo.message("m1") == null }
+        env.eventually(manager, what = "the new owner") { RelayPrefs.archivePhone(env.context) == "phone-2" }
+    }
+
+    @Test
+    fun theFirstSyncRecordsTheOwnerOnlyOverNoneOrTheSame() {
+        val (manager, fake) = env.pairedManager()
+        fake.emitMessage(incoming("m1", "kept"))
+        manager.awaitIdleForTesting()
+        assertEquals("", RelayPrefs.archivePhone(env.context))
+
+        fake.goOnline()
+
+        env.eventually(manager, what = "the owner") {
+            RelayPrefs.archivePhone(env.context) == "phone-1" && env.repo.health().phoneId == "phone-1"
+        }
+        assertEquals("kept", env.repo.message("m1")!!.text)
     }
 
     @Test
@@ -685,6 +936,111 @@ class RelayManagerTest {
         assertTrue("no alarm left once disconnected", alarms.scheduledAlarms.isEmpty())
     }
 
+    @Test
+    fun aNetworkComingBackRestartsAStuckLinkWithoutPilingUpConnects() {
+        val (manager, fake) = env.pairedManager()
+        RelayPrefs.setLiveEnabled(env.context, true)
+        manager.serviceRunning = true
+        val connecting = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        fake.duringConnect = { connecting.countDown(); release.await() }
+        manager.onServiceStarted()
+        assertTrue(connecting.await(5, TimeUnit.SECONDS))
+
+        // Networks come and go while that connect runs: nothing more is asked for.
+        fake.emitState("reconnecting", RelayException.INTERNAL, "network error")
+        manager.awaitIdleForTesting()
+        manager.onNetworkAvailable()
+        manager.onNetworkAvailable()
+        fake.duringConnect = null
+        release.countDown()
+        env.eventually(manager, what = "the connect to end") { !manager.connectRunningForTesting() }
+        assertEquals(1, connects(fake))
+
+        // Go's long poll is down: a network coming back restarts it now, not after libgm's backoff.
+        manager.onNetworkAvailable()
+        env.eventually(manager, what = "the restart") { connects(fake) == 2 && !manager.connectRunningForTesting() }
+
+        // An unresponsive phone is reported ahead of a long poll that is down: asked too.
+        fake.emitState("phone_offline", RelayException.PHONE_NOT_RESPONDING)
+        manager.awaitIdleForTesting()
+        manager.onNetworkAvailable()
+        env.eventually(manager, what = "the restart") { connects(fake) == 3 && !manager.connectRunningForTesting() }
+
+        // Online: nothing to do.
+        fake.emitState("active")
+        manager.awaitIdleForTesting()
+        manager.onNetworkAvailable()
+        Thread.sleep(100)
+        manager.awaitIdleForTesting()
+        assertEquals(3, connects(fake))
+
+        // Errored: retried at once.
+        fake.emitState("error", RelayException.INTERNAL, "listen failed")
+        manager.awaitIdleForTesting()
+        manager.onNetworkAvailable()
+        env.eventually(manager, what = "the retry") { connects(fake) == 4 }
+        manager.stopLive()
+    }
+
+    @Test
+    fun aConnectionThatComesOnlineLateStillSyncsOnce() {
+        val (manager, fake) = env.pairedManager()
+        fake.conversations += ConversationDto(id = "c1", name = "Sam", lastMessageTs = 5_000)
+        fake.connected = true
+        fake.emitState("connecting")
+        fake.emitState("phone_offline", RelayException.PHONE_NOT_RESPONDING)
+        manager.awaitIdleForTesting()
+        Thread.sleep(100)
+        assertEquals(0, lists(fake))
+
+        // The phone answers: online for the first time on this connection.
+        fake.emitState("active")
+        env.eventually(manager, what = "the sync") { env.repo.conversation("c1")?.name == "Sam" }
+        fake.emitState("phone_offline", RelayException.PHONE_NOT_RESPONDING)
+        fake.emitState("active")
+        manager.awaitIdleForTesting()
+        Thread.sleep(100)
+        assertEquals("once per connection", 1, lists(fake))
+
+        // The next connection is taken over by another browser first; the user taps "Use here".
+        fake.emitState("connecting")
+        fake.emitState("active_elsewhere", "", "BROWSER_INACTIVE")
+        manager.awaitIdleForTesting()
+        Thread.sleep(100)
+        assertEquals(1, lists(fake))
+        runBlocking { manager.useHere() }
+        fake.emitState("active") // the phone's answer to setActiveSession
+        env.eventually(manager, what = "the second sync") { lists(fake) == 2 }
+        fake.emitState("active")
+        manager.awaitIdleForTesting()
+        Thread.sleep(100)
+        assertEquals(2, lists(fake))
+    }
+
+    @Test
+    fun aFirstSyncThePhoneDidNotAnswerIsTriedAgainWhenItDoes() {
+        val (manager, fake) = env.pairedManager()
+        fake.conversations += ConversationDto(id = "c1", name = "Sam", lastMessageTs = 5_000)
+        fake.emitState("connecting")
+        fake.connected = false // the list fails
+        fake.emitState("active")
+        env.eventually(manager, what = "the failed sync") { lists(fake) == 1 }
+        assertNull(env.repo.conversation("c1"))
+
+        fake.connected = true
+        fake.emitState("phone_offline", RelayException.PHONE_NOT_RESPONDING)
+        env.eventually(manager, what = "the retried sync") {
+            if (lists(fake) < 2) fake.emitState("active")
+            lists(fake) >= 2
+        }
+        env.eventually(manager, what = "the list stored") { env.repo.conversation("c1")?.name == "Sam" }
+        fake.emitState("active")
+        manager.awaitIdleForTesting()
+        Thread.sleep(100)
+        assertEquals("done once it worked", 2, lists(fake))
+    }
+
     // --- user actions -----------------------------------------------------------------
 
     @Test
@@ -728,6 +1084,10 @@ class RelayManagerTest {
         // markRead never throws.
         runBlocking { manager.markRead(CONV) }
     }
+
+    private fun connects(fake: FakeRelayBridge) = fake.calls.count { it == "connect" }
+
+    private fun lists(fake: FakeRelayBridge) = fake.calls.count { it == "listConversations" }
 
     private fun unpairFinished() = RelayLog.read(env.context).any { it.contains("Unpaired; local archive") }
 

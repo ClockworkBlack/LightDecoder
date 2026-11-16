@@ -33,6 +33,21 @@
             android:importantForAccessibility="no"
             android:src="@drawable/ic_play"
             android:visibility="gone" />
+
+        <!-- Shown while the picture can only be downloaded with the link connected. -->
+        <TextView
+            android:id="@+id/mediaStatus"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom|center_horizontal"
+            android:layout_margin="4dp"
+            android:background="@drawable/bg_media_status"
+            android:paddingHorizontal="8dp"
+            android:paddingVertical="2dp"
+            android:text="@string/chat_media_connect_to_load"
+            android:textAppearance="?attr/textAppearanceLabelSmall"
+            android:textColor="?attr/colorOnSecondaryContainer"
+            android:visibility="gone" />
     </FrameLayout>
 
     <LinearLayout

@@ -24,7 +24,6 @@ import com.lightdecoder.databinding.ActivityRelayStatusBinding
 import com.lightdecoder.databinding.DialogUnpairBinding
 import com.lightdecoder.relay.BackfillDepth
 import com.lightdecoder.relay.BackfillProgress
-import com.lightdecoder.relay.RelayException
 import com.lightdecoder.relay.RelayLog
 import com.lightdecoder.relay.RelayManager
 import com.lightdecoder.relay.RelayPrefs
@@ -176,8 +175,8 @@ class RelayStatusActivity : AppCompatActivity() {
             R.string.link_status_last_error,
             when {
                 error.isEmpty() -> dash()
-                // Stored errors start with a bridge code ("code: detail"); explain the known ones.
-                error.substringBefore(":").trim().let { it in RelayException.CODES || it == RelayState.NOTIFICATIONS_OFF } ->
+                // Stored errors start with a bridge or state code ("code: detail"); explain the known ones.
+                RelayErrors.isKnown(error.substringBefore(":").trim()) ->
                     RelayErrors.message(this, error.substringBefore(":").trim())
                 else -> error
             },
@@ -308,18 +307,45 @@ class RelayStatusActivity : AppCompatActivity() {
         lifecycleScope.launch {
             relayAttempt { manager.unpair(deleteArchive) }
                 .onSuccess {
-                    toast(getString(R.string.link_unpaired))
-                    startActivity(
-                        Intent(this@RelayStatusActivity, InboxActivity::class.java)
-                            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                    )
-                    finish()
+                    if (manager.state.value.code == RelayState.UNPAIR_REMOTE_FAILED) {
+                        // Google could not be told: the phone may still list this
+                        // device, and only the user can remove it there.
+                        showRemoveOnPhone()
+                    } else {
+                        toast(getString(R.string.link_unpaired))
+                        leaveToInbox()
+                    }
                 }
                 .onFailure {
                     renderState(manager.state.value)
                     toast(RelayErrors.message(this@RelayStatusActivity, it))
                 }
         }
+    }
+
+    /**
+     * After an unpair that could not reach Google: how to remove LightDecoder
+     * on the phone. Leaves for the inbox once read. If the screen is gone by
+     * then (rotated, or left during the unpair), the state's reason and the
+     * last error on this screen say the same.
+     */
+    private fun showRemoveOnPhone() {
+        if (isFinishing || isDestroyed) return
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.link_unpair_remote_failed_title)
+            .setMessage(R.string.link_unpair_remote_failed_body)
+            .setPositiveButton(android.R.string.ok, null)
+            .setOnDismissListener { leaveToInbox() }
+            .show()
+    }
+
+    private fun leaveToInbox() {
+        if (isFinishing || isChangingConfigurations) return
+        startActivity(
+            Intent(this, InboxActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        )
+        finish()
     }
 
     private fun renderBattery() {

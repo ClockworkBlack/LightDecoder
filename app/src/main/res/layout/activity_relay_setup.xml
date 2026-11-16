@@ -44,6 +44,41 @@
                     android:text="@string/link_intro_what"
                     android:textAppearance="?attr/textAppearanceBodyLarge" />
 
+                <!-- Debug builds only (shown in code): adb can read their private storage. -->
+                <com.google.android.material.card.MaterialCardView
+                    android:id="@+id/introDebugWarning"
+                    style="?attr/materialCardViewFilledStyle"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="16dp"
+                    android:visibility="gone"
+                    app:cardBackgroundColor="?attr/colorErrorContainer">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:padding="16dp">
+
+                        <TextView
+                            style="@style/TextAppearance.Material3.TitleMedium"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:accessibilityHeading="true"
+                            android:text="@string/link_intro_debug_title"
+                            android:textColor="?attr/colorOnErrorContainer" />
+
+                        <TextView
+                            android:id="@+id/introDebugWarningText"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:text="@string/link_intro_debug"
+                            android:textAppearance="?attr/textAppearanceBodyMedium"
+                            android:textColor="?attr/colorOnErrorContainer" />
+                    </LinearLayout>
+                </com.google.android.material.card.MaterialCardView>
+
                 <TextView
                     style="@style/TextAppearance.Material3.TitleMedium"
                     android:layout_width="match_parent"

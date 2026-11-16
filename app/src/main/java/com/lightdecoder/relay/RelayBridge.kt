@@ -123,8 +123,10 @@ class RelayException(val code: String, message: String) : Exception(message) {
 }
 
 /**
- * Where the app gets its [RelayBridge]. The Go-backed implementation installs
- * its factory at startup; tests install a fake one. Null until then.
+ * Where the app gets its [RelayBridge] when something other than the Go
+ * bridge should be used. Nothing installs a factory in the app: while it is
+ * null (always, outside tests), RelayManager creates a [GoRelayBridge]. Tests
+ * install a fake one.
  */
 object RelayBridges {
     @Volatile

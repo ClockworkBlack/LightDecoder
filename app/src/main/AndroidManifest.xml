@@ -45,7 +45,17 @@
             </intent-filter>
         </activity>
 
-        <!-- Shows one picture: opened, shared in, or from the inbox. -->
+        <!-- About > Licences: NOTICE and the licence texts in the app's assets. -->
+        <activity
+            android:name=".ui.LicensesActivity"
+            android:exported="false" />
+
+        <!--
+            Shows one picture: opened, shared in, or from the inbox. Only
+            content uris: the viewer refuses file paths from other apps (they
+            would be read with this app's identity), so it does not offer to
+            open them either.
+        -->
         <activity
             android:name=".ui.ViewerActivity"
             android:exported="true"
@@ -57,7 +67,6 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="content" />
-                <data android:scheme="file" />
                 <data android:mimeType="image/heic" />
                 <data android:mimeType="image/heif" />
                 <data android:mimeType="image/heic-sequence" />
@@ -78,7 +87,6 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="content" />
-                <data android:scheme="file" />
                 <data android:host="*" />
                 <data android:mimeType="application/octet-stream" />
                 <data android:pathPattern=".*\\.heic" />
@@ -125,9 +133,15 @@
         <activity
             android:name=".ui.chat.ConversationsActivity"
             android:exported="false" />
+        <!--
+            The conversation list is the thread's parent. ThreadActivity
+            handles Up (and Back from a notification-started task) itself,
+            always to that list; this only declares the hierarchy.
+        -->
         <activity
             android:name=".ui.chat.ThreadActivity"
             android:exported="false"
+            android:parentActivityName=".ui.chat.ConversationsActivity"
             android:windowSoftInputMode="adjustResize" />
         <activity
             android:name=".ui.chat.NewConversationActivity"

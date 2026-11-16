@@ -35,14 +35,22 @@ object RelayErrors {
         RelayException.TOO_LARGE -> R.string.link_error_too_large
         RelayException.SEND_FAILED -> R.string.link_error_send_failed
         RelayException.LOGGED_OUT -> R.string.link_error_logged_out
-        // Not a bridge code: the runtime's reason for not starting the link.
+        // Not bridge codes: the runtime's reason for not starting the link, and
+        // an unpair that could not reach Google (the phone may still list this device).
         RelayState.NOTIFICATIONS_OFF -> R.string.link_error_notifications_off
+        RelayState.UNPAIR_REMOTE_FAILED -> R.string.link_error_unpair_remote_failed
         else -> R.string.link_error_internal
     }
 
     fun message(context: Context, code: String): String = context.getString(messageRes(code))
 
     fun message(context: Context, t: Throwable): String = message(context, codeOf(t))
+
+    /** Codes with their own explanation that are not bridge codes, but runtime state codes. */
+    val STATE_CODES: Set<String> = setOf(RelayState.NOTIFICATIONS_OFF, RelayState.UNPAIR_REMOTE_FAILED)
+
+    /** Whether [code] has its own explanation (a bridge code or one of [STATE_CODES]). */
+    fun isKnown(code: String): Boolean = code in RelayException.CODES || code in STATE_CODES
 
     /** The bridge code of any failure; anything that is not a [RelayException] counts as "internal". */
     fun codeOf(t: Throwable): String = RelayException.fromThrowable(t).code

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -563,5 +564,199 @@ func TestConnectWhileLiveRestartsADownLongPoll(t *testing.T) {
 	}
 	if err := b.Connect(); err != nil || restarts != 1 {
 		t.Fatalf("open: err=%v restarts=%d", err, restarts)
+	}
+}
+
+// After PUSH_THROTTLE_ENDED the phone's held-back pushes may never come, so
+// Kotlin is asked to catch up once, after a pause that lets the late ones
+// arrive first, and only on the connection that heard it.
+func TestPushThrottleEndedResyncsOnce(t *testing.T) {
+	const delay = 200 * time.Millisecond
+	stub(t, &pushThrottleResyncDelay, delay)
+	alert := func(at gmproto.AlertType) *gmproto.UserAlertEvent {
+		return &gmproto.UserAlertEvent{AlertType: at}
+	}
+	resyncs := func(t *testing.T, b *GMBridge, rec *recorder) int {
+		t.Helper()
+		drain(t, b)
+		return len(rec.eventsOf(kindResync))
+	}
+	settle := func() { time.Sleep(2 * delay) }
+
+	b, rec := newPairedBridge(t)
+	gen := markLive(b)
+	h := b.handlerFor(gen)
+	h(&events.ListenRecovered{})
+	h(alert(gmproto.AlertType_BROWSER_ACTIVE))
+	h(alert(gmproto.AlertType_PUSH_THROTTLE_STARTED))
+	h(alert(gmproto.AlertType_PUSH_THROTTLE_STARTED_IN_DARK_LAUNCH))
+	h(alert(gmproto.AlertType_PUSH_THROTTLE_ENDED_IN_DARK_LAUNCH))
+	h(alert(gmproto.AlertType_PUSH_THROTTLING))
+	settle()
+	if n := resyncs(t, b, rec); n != 0 {
+		t.Fatalf("only PUSH_THROTTLE_ENDED asks for a resync: %d", n)
+	}
+
+	h(alert(gmproto.AlertType_PUSH_THROTTLE_ENDED))
+	h(alert(gmproto.AlertType_PUSH_THROTTLE_ENDED))
+	if n := resyncs(t, b, rec); n != 0 {
+		t.Fatalf("the resync waits for held-back pushes first: %d", n)
+	}
+	waitFor(t, "the delayed resync", func() bool { return len(rec.eventsOf(kindResync)) >= 1 })
+	settle()
+	if n := resyncs(t, b, rec); n != 1 {
+		t.Fatalf("reports within the delay share one resync: %d", n)
+	}
+	if s := rec.states(); s[len(s)-1] != stateActive {
+		t.Errorf("the throttle alerts must not change the state: %v", s)
+	}
+
+	h(alert(gmproto.AlertType_PUSH_THROTTLE_ENDED)) // a later throttle period
+	waitFor(t, "a second resync", func() bool { return len(rec.eventsOf(kindResync)) == 2 })
+
+	// Disconnect while waiting: nothing is sent, not even after Connect.
+	h(alert(gmproto.AlertType_PUSH_THROTTLE_ENDED))
+	drain(t, b)
+	b.Disconnect()
+	markLive(b)
+	settle()
+	if n := resyncs(t, b, rec); n != 2 {
+		t.Fatalf("a resync for a closed connection was sent: %d", n)
+	}
+
+	// A report still queued from the closed connection does nothing on the
+	// new one, and leaves the new connection's own report working.
+	b.processEvent(gen, 1, alert(gmproto.AlertType_PUSH_THROTTLE_ENDED))
+	settle()
+	if n := resyncs(t, b, rec); n != 2 || b.throttleResync.Load() {
+		t.Fatalf("stale report: resyncs=%d pending=%v", n, b.throttleResync.Load())
+	}
+	b.handlerFor(gen)(alert(gmproto.AlertType_PUSH_THROTTLE_ENDED))
+	waitFor(t, "the new connection's resync", func() bool { return len(rec.eventsOf(kindResync)) == 3 })
+}
+
+// Helpers that outlive their event are tied to the connection that raised it:
+// a late event of an older connection neither starts one nor uses up the
+// flag of the current connection.
+func TestHelpersAreTiedToTheirConnection(t *testing.T) {
+	b, _ := newPairedBridge(t)
+	gen := markLive(b)
+	oldSeq := b.connSeq
+	b.Disconnect()
+	gen = markLive(b)
+	seq := b.connSeq
+
+	var flag atomic.Bool
+	if ctx := b.claimForConnection(gen, oldSeq, &flag); ctx != nil || flag.Load() {
+		t.Fatal("an older connection claimed the current one's helper")
+	}
+	if ctx := b.claimForConnection(gen+1, seq, &flag); ctx != nil || flag.Load() {
+		t.Fatal("another client claimed the helper")
+	}
+	ctx := b.claimForConnection(gen, seq, &flag)
+	if ctx == nil || !flag.Load() {
+		t.Fatal("the live connection could not claim its helper")
+	}
+	if b.claimForConnection(gen, seq, &flag) != nil {
+		t.Fatal("a helper must run once per connection")
+	}
+
+	b.scheduleHackySetActive(gen, oldSeq)
+	b.scheduleSetActiveRetry(gen, oldSeq)
+	if b.hackyScheduled.Load() || b.setActiveRetrying.Load() {
+		t.Error("a stale event used up the current connection's retry")
+	}
+
+	b.Disconnect()
+	select {
+	case <-ctx.Done():
+	default:
+		t.Error("Disconnect must end the helpers' context")
+	}
+	if b.claimForConnection(gen, seq, new(atomic.Bool)) != nil {
+		t.Error("nothing may start while disconnected")
+	}
+}
+
+// The hacky SetActiveSession retry runs on the connection that asked for it,
+// and not after that connection was replaced.
+func TestHackySetActiveStaysOnItsConnection(t *testing.T) {
+	stub(t, &hackySetActiveDelay, 30*time.Millisecond)
+	var calls atomic.Int32
+	stub(t, &setActiveSession, func(context.Context, *libgm.Client) error { calls.Add(1); return nil })
+
+	b, _ := newPairedBridge(t)
+	h := b.handlerFor(markLive(b))
+	h(&events.HackySetActiveMayFail{})
+	waitFor(t, "the hacky SetActiveSession", func() bool { return calls.Load() == 1 })
+
+	h(&events.HackySetActiveMayFail{})
+	drain(t, b)
+	b.Disconnect()
+	markLive(b)
+	time.Sleep(150 * time.Millisecond)
+	if n := calls.Load(); n != 1 {
+		t.Errorf("once per connection, and never on a newer one: %d", n)
+	}
+}
+
+// libgm can reopen a long poll by itself after Disconnect (its ping
+// recovery calls Reconnect while the old loop sleeps in backoff). The bridge
+// closes such a long poll again, and only when no connection is wanted.
+func TestLongPollReopenedWhileDisconnectedIsClosed(t *testing.T) {
+	var mu sync.Mutex
+	var stopped []*libgm.Client
+	stub(t, &stopLongPoll, func(cli *libgm.Client) {
+		mu.Lock()
+		stopped = append(stopped, cli)
+		mu.Unlock()
+	})
+	stops := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(stopped)
+	}
+
+	b, rec := newPairedBridge(t)
+	gen := markLive(b)
+	h := b.handlerFor(gen)
+	h(&events.ListenRecovered{})
+	drain(t, b)
+	time.Sleep(50 * time.Millisecond)
+	if stops() != 0 {
+		t.Fatal("a wanted long poll was closed")
+	}
+
+	b.Disconnect()
+	h(&events.ListenRecovered{})
+	waitFor(t, "the reopened long poll to be closed", func() bool { return stops() == 1 })
+	b.mu.Lock()
+	cli := b.client
+	b.mu.Unlock()
+	if stopped[0] != cli {
+		t.Error("closed the wrong client")
+	}
+	if s := rec.states(); s[len(s)-1] != stateDisconnected {
+		t.Errorf("a reopened long poll must not report connected: %v", s)
+	}
+
+	markLive(b) // Connect again
+	h(&events.ListenRecovered{})
+	drain(t, b)
+	time.Sleep(50 * time.Millisecond)
+	if stops() != 1 {
+		t.Error("the new connection's long poll was closed")
+	}
+
+	// A dropped client's events are ignored altogether (it is retired).
+	stub(t, &unpairGaia, func(context.Context, *libgm.Client) error { return nil })
+	if err := b.Unpair(); err != nil {
+		t.Fatal(err)
+	}
+	h(&events.ListenRecovered{})
+	drain(t, b)
+	time.Sleep(50 * time.Millisecond)
+	if stops() != 1 {
+		t.Error("events of a dropped client must be ignored")
 	}
 }

@@ -234,7 +234,13 @@ class InboxActivity : AppCompatActivity() {
             val problem = RelayUi.isProblem(state.phase)
             when {
                 !paired && !problem -> {
-                    binding.relayBody.setText(R.string.link_card_not_set_up)
+                    // Right after an unpair that could not reach Google, say how
+                    // to remove LightDecoder on the phone instead of "not set up".
+                    if (state.code == RelayState.UNPAIR_REMOTE_FAILED) {
+                        binding.relayBody.text = RelayErrors.message(this@InboxActivity, state.code)
+                    } else {
+                        binding.relayBody.setText(R.string.link_card_not_set_up)
+                    }
                     binding.relayAction.setText(R.string.link_card_set_up)
                 }
                 problem -> {
@@ -317,7 +323,7 @@ class InboxActivity : AppCompatActivity() {
             R.id.action_alerts -> InboxPrefs.setAlertsEnabled(this, !InboxPrefs.alertsEnabled(this))
             R.id.action_log -> showLog()
             R.id.action_clear -> confirmClear()
-            R.id.action_about -> showMessage(getString(R.string.about_body))
+            R.id.action_about -> showAbout()
             else -> return super.onOptionsItemSelected(item)
         }
         return true
@@ -339,6 +345,17 @@ class InboxActivity : AppCompatActivity() {
             .setMessage(body)
             .setPositiveButton(android.R.string.ok, null)
             .setNeutralButton(R.string.log_clear) { _, _ -> InboxLog.clear(this) }
+            .show()
+    }
+
+    /** What the app is and what it is built from; Licences shows the full texts. */
+    private fun showAbout() {
+        AlertDialog.Builder(this)
+            .setMessage(R.string.about_body)
+            .setPositiveButton(android.R.string.ok, null)
+            .setNeutralButton(R.string.action_licenses) { _, _ ->
+                startActivity(Intent(this, LicensesActivity::class.java))
+            }
             .show()
     }
 

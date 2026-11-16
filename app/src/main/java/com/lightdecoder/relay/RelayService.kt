@@ -140,7 +140,10 @@ class RelayService : Service() {
         false
     }
 
-    /** A link that failed for lack of network retries as soon as a network comes back. */
+    /**
+     * A link that failed, or whose long poll went down, for lack of network
+     * tries again as soon as a network comes back ([RelayManager.onNetworkAvailable]).
+     */
     private fun watchNetwork(manager: RelayManager) {
         val connectivity = getSystemService(ConnectivityManager::class.java) ?: return
         val callback = object : ConnectivityManager.NetworkCallback() {

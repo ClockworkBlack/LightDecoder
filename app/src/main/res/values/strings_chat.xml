@@ -20,6 +20,8 @@
     <string name="link_intro_stop">While connected, a notification is always shown, with a Disconnect button. Disconnect stops the connection and keeps the link for later. Unpair, in the link\'s settings here, removes the link from your phone too and deletes the session; you can also remove \"LightDecoder\" under Device pairing in Google Messages on your phone at any time.</string>
     <string name="link_intro_agree">I understand, and I want to link my own Google Messages</string>
     <string name="link_intro_continue">Continue</string>
+    <string name="link_intro_debug_title">This is a debug build</string>
+    <string name="link_intro_debug">On a debug build, anyone who connects this phone to a computer with USB debugging (adb) can read LightDecoder\'s message archive and its Google sign-in session. Use it with a test Google account only, never your own.</string>
 
     <!-- Setup, step 2: sign-in -->
     <string name="link_sign_in_hint">Sign in to the Google account that Google Messages on your phone uses. Only the sign-in cookies Messages for web needs are kept; this browser is wiped right after. If Google says this browser may not be secure, use \"Paste cookies\" instead.</string>
@@ -113,6 +115,8 @@
     <string name="link_error_logged_out">The link was removed on your phone, or the Google account signed out. Set it up again to reconnect.</string>
     <string name="link_error_notifications_off">LightDecoder\'s notifications are turned off, so the link cannot connect: it always shows a notification with a Disconnect button while connected.</string>
     <string name="link_error_internal">Something went wrong in the link. Try again; if it keeps happening, the activity log in the link\'s settings may help.</string>
+    <!-- Not a bridge code: an unpair that could not tell Google (RelayState.UNPAIR_REMOTE_FAILED). -->
+    <string name="link_error_unpair_remote_failed">LightDecoder could not reach Google to remove the link from your phone. To finish, open Google Messages on your phone, go to Device pairing (in its menu), and remove \"LightDecoder\" there.</string>
 
     <!-- Link settings -->
     <string name="link_status_title">Google Messages link</string>
@@ -145,6 +149,8 @@
     <string name="link_unpair_confirm">Unpair</string>
     <string name="link_unpaired">Unpaired.</string>
     <string name="link_unpairing">Unpairing…</string>
+    <string name="link_unpair_remote_failed_title">Remove LightDecoder on your phone</string>
+    <string name="link_unpair_remote_failed_body">The link is gone from this device, but LightDecoder could not reach Google to remove it from your phone too. To finish, open Google Messages on your phone, go to Device pairing (in its menu), and remove \"LightDecoder\" there.</string>
     <string name="link_delete_archive">Delete local message archive</string>
     <string name="link_delete_archive_help">Messages and pictures kept on this device from the earlier link. The sticker inbox is not affected.</string>
     <string name="link_delete_archive_title">Delete the local message archive?</string>
@@ -231,6 +237,8 @@
     <string name="chat_media_file">Attachment</string>
     <string name="chat_media_downloading">Downloading…</string>
     <string name="chat_media_unavailable">This attachment is not available.</string>
+    <string name="chat_media_connect_to_load">Connect to load</string>
+    <string name="chat_media_needs_connection">Connect to your phone to load this attachment.</string>
     <string name="chat_load_full_size">Load full size</string>
     <string name="chat_full_size_requested">Asked your phone for the full-size picture.</string>
     <string name="chat_open_with">Open with</string>

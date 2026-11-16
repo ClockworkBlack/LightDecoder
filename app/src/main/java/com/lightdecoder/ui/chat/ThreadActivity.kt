@@ -836,7 +836,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 toast(getString(R.string.chat_media_downloading))
                 relayAttempt { manager.mediaFile(row.id, part.partId, thumbnail = part.needsFullSize) }
                     .getOrElse {
-                        toast(RelayErrors.message(this@ThreadActivity, it))
+                        // not_connected: it can be downloaded, just not until the link is connected.
+                        val code = RelayErrors.codeOf(it)
+                        toast(
+                            if (code == RelayException.NOT_CONNECTED) getString(R.string.chat_media_needs_connection)
+                            else RelayErrors.message(this@ThreadActivity, code)
+                        )
                         return@launch
                     }
             }
@@ -894,17 +899,24 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         if (Build.VERSION.SDK_INT < 33) toast(getString(R.string.chat_copied))
     }
 
-    /** With a pairing it goes on the phone too; without one (an archive an unpair kept) only here. */
+    /**
+     * With a pairing it goes on the phone too; without one (an archive an
+     * unpair kept) the manager deletes it here only. If the pairing changed
+     * while the question was up, it is asked again with the right wording.
+     */
     private fun confirmDeleteMessage(row: MessageRow) {
         val linked = manager.isPaired()
         val id = row.id
         MaterialAlertDialogBuilder(this)
             .setMessage(if (linked) R.string.chat_delete_message_question else R.string.chat_delete_message_question_local)
             .setPositiveButton(R.string.chat_action_delete) { _, _ ->
+                if (manager.isPaired() != linked) {
+                    confirmDeleteMessage(row)
+                    return@setPositiveButton
+                }
                 lifecycleScope.launch {
-                    relayAttempt {
-                        if (linked) manager.deleteMessage(id) else withContext(Dispatchers.IO) { repo.applyDeletion(id) }
-                    }.onFailure { toast(RelayErrors.message(this@ThreadActivity, it)) }
+                    relayAttempt { manager.deleteMessage(id) }
+                        .onFailure { toast(RelayErrors.message(this@ThreadActivity, it)) }
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -970,6 +982,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         )
     }
 
+    /** Like [confirmDeleteMessage]: on the phone too with a pairing, else here only. */
     private fun confirmDeleteConversation() {
         val id = conversation?.id ?: return
         val linked = manager.isPaired()
@@ -977,10 +990,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             .setTitle(R.string.chat_delete_conversation_title)
             .setMessage(if (linked) R.string.chat_delete_conversation_body else R.string.chat_delete_conversation_body_local)
             .setPositiveButton(R.string.chat_action_delete) { _, _ ->
+                if (manager.isPaired() != linked) {
+                    confirmDeleteConversation()
+                    return@setPositiveButton
+                }
                 lifecycleScope.launch {
-                    relayAttempt {
-                        if (linked) manager.deleteConversation(id) else withContext(Dispatchers.IO) { repo.deleteConversationLocal(id) }
-                    }
+                    relayAttempt { manager.deleteConversation(id) }
                         .onSuccess { finish() }
                         .onFailure { toast(RelayErrors.message(this@ThreadActivity, it)) }
                 }

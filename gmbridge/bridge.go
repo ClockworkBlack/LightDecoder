@@ -18,6 +18,7 @@ package gmbridge
 import (
 	"context"
 	"errors"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -104,6 +105,8 @@ type GMBridge struct {
 	connCancel context.CancelFunc
 	pairing    *pairingAttempt
 	closed     bool
+	// clientRetired is the network switch of client (see retirableSettings).
+	clientRetired *atomic.Bool
 
 	// Per-connection flags, written from the dispatcher and helper goroutines.
 	// Connect resets them (resetConnectionFlags).
@@ -117,6 +120,7 @@ type GMBridge struct {
 	wasInactive       atomic.Bool  // was inactive since the last BROWSER_ACTIVE: catch up when active again
 	noDataRecently    atomic.Bool  // libgm reported a data gap: catch up once data flows again
 	pollDown          atomic.Bool  // the long poll reported a temporary error and has not recovered
+	throttleResync    atomic.Bool  // the phone stopped throttling pushes; a delayed resync is pending
 
 	// Per client: libgm's phone liveness state survives Disconnect/Connect
 	// and it reports PhoneNotResponding only once per outage, so this is
@@ -152,14 +156,72 @@ func NewGMBridge(session []byte, cb Callback) (b *GMBridge, err error) {
 }
 
 // newClientLocked builds a long-lived client for b.auth with the event
-// handler installed. Callers hold b.mu (or own b exclusively).
+// handler installed, and retires the client it replaces. Callers hold b.mu
+// (or own b exclusively) and store the result in b.client.
 func (b *GMBridge) newClientLocked() *libgm.Client {
+	b.retireClientLocked()
 	b.gen++
 	b.phoneNotResponding.Store(false) // a new client starts with fresh liveness
-	cli := libgm.NewClient(b.auth, nil, zerolog.Nop(), exhttp.SensibleClientSettings)
+	retired := new(atomic.Bool)
+	cli := libgm.NewClient(b.auth, nil, zerolog.Nop(), retirableSettings(retired))
 	cli.SetEventHandler(b.handlerFor(b.gen))
+	b.clientRetired = retired
 	return cli
 }
+
+// retireClientLocked cuts the current client off the network for good.
+// Callers hold b.mu and are dropping b.client (Unpair, a lost pairing, a new
+// pairing replacing it).
+//
+// libgm has no way to stop a client completely: its 5 s ack ticker runs for
+// the life of the process and retries failed acks forever, and goroutines
+// of a connection (postConnect's SetActiveSession about 3 s after a long
+// poll opens, the ping recovery that may call Reconnect) can still act
+// after Disconnect. With the pairing gone those would keep sending the
+// account cookies to Google every few seconds. A retired client's requests
+// fail locally instead; the goroutines that remain only spin on that error.
+func (b *GMBridge) retireClientLocked() {
+	if b.clientRetired != nil {
+		b.clientRetired.Store(true)
+		b.clientRetired = nil
+	}
+}
+
+// errClientRetired is what every request of a retired client fails with.
+var errClientRetired = errors.New("client was dropped")
+
+// retirableSettings are libgm's usual HTTP settings, behind a switch: once
+// retired is set, every request fails with errClientRetired before any
+// connection is made. Both of the client's HTTP clients (calls and long
+// poll) get their own transport behind the same switch.
+func retirableSettings(retired *atomic.Bool) exhttp.ClientSettings {
+	cs := exhttp.SensibleClientSettings
+	cs.TransportOverride = func(cs exhttp.ClientSettings) http.RoundTripper {
+		// Exactly what Compile builds without an override.
+		return retirableTransport{retired: retired, next: cs.Configure(&http.Transport{})}
+	}
+	return cs
+}
+
+type retirableTransport struct {
+	retired *atomic.Bool
+	next    *http.Transport
+}
+
+func (t retirableTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.retired.Load() {
+		// A RoundTripper must close the body even when it fails.
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		return nil, errClientRetired
+	}
+	return t.next.RoundTrip(req)
+}
+
+// CloseIdleConnections keeps libgm's Disconnect (http.Client.CloseIdleConnections)
+// working through the wrapper.
+func (t retirableTransport) CloseIdleConnections() { t.next.CloseIdleConnections() }
 
 func (b *GMBridge) isCurrentGen(gen uint64) bool {
 	b.mu.Lock()
@@ -278,6 +340,7 @@ func (b *GMBridge) Connect() (err error) {
 
 // resetConnectionFlags clears what the previous connection learned. Not
 // phoneNotResponding: that follows the client (see its declaration).
+// Callers hold b.mu, which claimForConnection relies on.
 func (b *GMBridge) resetConnectionFlags() {
 	b.browserActive.Store(false)
 	b.syncingMobileDB.Store(false)
@@ -289,6 +352,7 @@ func (b *GMBridge) resetConnectionFlags() {
 	b.wasInactive.Store(false)
 	b.noDataRecently.Store(false)
 	b.pollDown.Store(false)
+	b.throttleResync.Store(false)
 }
 
 // startClient is the connector's Connect: fetch the web config first (an
@@ -372,6 +436,7 @@ func (b *GMBridge) clearPairingLocked(gen uint64) {
 	b.auth.CookiesLock.Lock()
 	b.auth.ClearPairing()
 	b.auth.CookiesLock.Unlock()
+	b.retireClientLocked()
 	b.client = nil
 	b.gen++
 	b.phoneID = ""
@@ -461,6 +526,7 @@ func (b *GMBridge) Unpair() (err error) {
 		b.teardownLocked(gen) // also ends the temporary connection
 	}
 	b.mu.Lock()
+	b.retireClientLocked() // after the revoke, which still needed it
 	b.auth, b.client, b.phoneID, b.account = nil, nil, "", ""
 	b.gen++
 	b.mu.Unlock()

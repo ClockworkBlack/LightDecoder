@@ -152,5 +152,16 @@ class InboxStore private constructor(private val dir: File) {
                 .digest("$appPackage\u0000$conversation\u0000$sender\u0000$timestampMs\u0000$uri".toByteArray())
             return digest.take(12).joinToString("") { "%02x".format(it) }
         }
+
+        /**
+         * The id for one part of a message that came over the Google Messages
+         * link. Conversation, message and part ids are only unique on the phone
+         * they came from, so the phone's id ([phoneId], the archive's owner;
+         * empty if not known) is part of it: a message of another phone with
+         * the same ids is not taken for one already seen. The same picture is
+         * still kept once, by its digest.
+         */
+        fun relayIdFor(phoneId: String, conversationId: String, messageId: String, partId: String): String =
+            idFor("${InboxItem.SOURCE_RELAY}\u0000$phoneId", conversationId, messageId, 0, partId)
     }
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
@@ -39,8 +40,9 @@ const (
 )
 
 // hackySetActiveDelay is how long the connector waits for BROWSER_ACTIVE after
-// libgm warns that its own SetActiveSession may have been swallowed.
-const hackySetActiveDelay = 7 * time.Second
+// libgm warns that its own SetActiveSession may have been swallowed. Tests
+// shorten it.
+var hackySetActiveDelay = 7 * time.Second
 
 // setActiveRetryDelays are the waits before each retry of a SetActiveSession
 // that failed right after the long poll opened. Tests shorten them.
@@ -50,6 +52,16 @@ var setActiveRetryDelays = []time.Duration{5 * time.Second, 15 * time.Second, 45
 var setActiveSession = func(ctx context.Context, cli *libgm.Client) error {
 	return cli.SetActiveSession(ctx)
 }
+
+// pushThrottleResyncDelay is how long after the phone stops throttling its
+// pushes the bridge asks Kotlin to catch up: the connector gives the pushes
+// the phone held back this long to arrive first (pendingSendResyncDelay in
+// its chatsync.go). Tests shorten it.
+var pushThrottleResyncDelay = 15 * time.Second
+
+// stopLongPoll is cli.Disconnect, used to close a long poll that libgm
+// reopened by itself after Disconnect; tests replace it.
+var stopLongPoll = (*libgm.Client).Disconnect
 
 // dispatcher is the single goroutine that calls into Kotlin.
 //
@@ -270,6 +282,15 @@ func (b *GMBridge) processEvent(gen, seq uint64, raw any) {
 	case *events.PhoneRespondingAgain:
 		b.phoneNotResponding.Store(false)
 		b.processConnectionEvent(gen, seq, raw)
+	case *events.ListenRecovered:
+		if _, live := b.liveSeq(gen); !live {
+			// A long poll opened although no connection is wanted (every
+			// new libgm long-poll loop reports ListenRecovered when it
+			// first opens). See stopUnwantedLongPoll.
+			go b.stopUnwantedLongPoll(gen)
+			return
+		}
+		b.processConnectionEvent(gen, seq, raw)
 	default:
 		b.processConnectionEvent(gen, seq, raw)
 	}
@@ -286,7 +307,7 @@ func (b *GMBridge) processConnectionEvent(gen, seq uint64, raw any) {
 	}
 	switch evt := raw.(type) {
 	case *gmproto.UserAlertEvent:
-		b.handleUserAlert(evt)
+		b.handleUserAlert(gen, seq, evt)
 	case *events.ListenRecovered:
 		b.pollDown.Store(false)
 		b.deliverEvent(kindState, b.currentState())
@@ -311,7 +332,7 @@ func (b *GMBridge) processConnectionEvent(gen, seq uint64, raw any) {
 			b.scheduleSetActiveRetry(gen, seq)
 		}
 	case *events.HackySetActiveMayFail:
-		b.scheduleHackySetActive(gen)
+		b.scheduleHackySetActive(gen, seq)
 	case *events.NoDataReceived:
 		// libgm noticed a gap (long poll down for a while, phone silent, or
 		// the phone answering again) and asked for updates; events from the
@@ -368,7 +389,7 @@ func (b *GMBridge) handleMessage(gen, seq uint64, evt *libgm.WrappedMessage) {
 	b.resyncIfDataResumed(gen, seq)
 }
 
-func (b *GMBridge) handleUserAlert(evt *gmproto.UserAlertEvent) {
+func (b *GMBridge) handleUserAlert(gen, seq uint64, evt *gmproto.UserAlertEvent) {
 	switch evt.GetAlertType() {
 	case gmproto.AlertType_BROWSER_ACTIVE:
 		b.browserActive.Store(true)
@@ -398,6 +419,80 @@ func (b *GMBridge) handleUserAlert(evt *gmproto.UserAlertEvent) {
 	case gmproto.AlertType_MOBILE_DATABASE_SYNC_COMPLETE:
 		b.syncingMobileDB.Store(false)
 		b.deliverEvent(kindResync, struct{}{})
+	case gmproto.AlertType_PUSH_THROTTLE_ENDED:
+		// The phone held back its pushes for a while (it does so in some
+		// power states), and some may never come: the connector then
+		// resyncs the chats whose sent messages still lack their echo.
+		// Kotlin's catch-up covers those and anything else missing.
+		// PUSH_THROTTLE_STARTED needs nothing (the outbox already waits
+		// long for echoes), and the *_IN_DARK_LAUNCH variants report a
+		// throttle that is not applied; the connector ignores both.
+		b.scheduleThrottleResync(gen, seq)
+	}
+}
+
+// scheduleThrottleResync emits one resync pushThrottleResyncDelay after the
+// phone reports that it stopped throttling pushes, if the connection that
+// heard it is still the live one by then. Reports within the delay share
+// that one resync.
+func (b *GMBridge) scheduleThrottleResync(gen, seq uint64) {
+	ctx := b.claimForConnection(gen, seq, &b.throttleResync)
+	if ctx == nil {
+		return
+	}
+	delay := pushThrottleResyncDelay
+	go func() {
+		defer func() { _ = recover() }()
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		b.disp.push(func() {
+			if cur, live := b.liveSeq(gen); !live || cur != seq {
+				return
+			}
+			b.throttleResync.Store(false)
+			b.deliverEvent(kindResync, struct{}{})
+		})
+	}()
+}
+
+// claimForConnection starts a helper that outlives the event that asked for
+// it. If connection seq of client gen is still the live one and flag is not
+// set yet, it sets flag and returns that connection's context, which ends
+// on Disconnect, a fatal error or Unpair; otherwise it returns nil. Connect
+// resets the flags under b.mu, so checking the connection and taking the
+// flag together under b.mu can neither tie a helper to a newer connection
+// nor use up a newer connection's flag.
+func (b *GMBridge) claimForConnection(gen, seq uint64, flag *atomic.Bool) context.Context {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.gen != gen || b.client == nil || !b.live || b.connSeq != seq || b.connCtx == nil {
+		return nil
+	}
+	if !flag.CompareAndSwap(false, true) {
+		return nil
+	}
+	return b.connCtx
+}
+
+// stopUnwantedLongPoll closes a long poll of client gen that opened while
+// no connection is wanted. libgm's ping recovery calls Reconnect by itself,
+// and after Disconnect it can still do so while the old long-poll loop sleeps
+// in its error backoff (the recovery only stops when that loop returns). The
+// reopened long poll would stay up with no foreground notification. Under
+// the lifecycle lock, so a Connect that has just started is left alone.
+func (b *GMBridge) stopUnwantedLongPoll(gen uint64) {
+	defer func() { _ = recover() }()
+	b.lifecycle.Lock()
+	defer b.lifecycle.Unlock()
+	b.mu.Lock()
+	cli := b.client
+	unwanted := b.gen == gen && cli != nil && !b.live
+	b.mu.Unlock()
+	if unwanted {
+		stopLongPoll(cli)
 	}
 }
 
@@ -422,24 +517,23 @@ func isHTTPAuthError(err error) bool {
 // scheduleHackySetActive mirrors the connector's hackyResetActive: if the
 // phone has not confirmed this session as active 7 s after libgm warned, send
 // SetActiveSession once more. Once per connection.
-func (b *GMBridge) scheduleHackySetActive(gen uint64) {
-	if !b.hackyScheduled.CompareAndSwap(false, true) {
-		return
-	}
-	b.mu.Lock()
-	ctx := b.connCtx
-	b.mu.Unlock()
+func (b *GMBridge) scheduleHackySetActive(gen, seq uint64) {
+	ctx := b.claimForConnection(gen, seq, &b.hackyScheduled)
 	if ctx == nil {
 		return
 	}
+	delay, call := hackySetActiveDelay, setActiveSession
 	go func() {
 		defer func() { _ = recover() }()
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(hackySetActiveDelay):
+		case <-time.After(delay):
 		}
-		if b.browserActive.Load() || !b.isCurrentGen(gen) {
+		if b.browserActive.Load() {
+			return
+		}
+		if cur, live := b.liveSeq(gen); !live || cur != seq {
 			return
 		}
 		cli, err := b.liveClient()
@@ -448,7 +542,7 @@ func (b *GMBridge) scheduleHackySetActive(gen uint64) {
 		}
 		callCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
 		defer cancel()
-		_ = cli.SetActiveSession(callCtx)
+		_ = call(callCtx, cli)
 	}()
 }
 
@@ -461,12 +555,7 @@ func (b *GMBridge) scheduleHackySetActive(gen uint64) {
 // whatever arrived meanwhile. Once per connection; separate from the hacky
 // retry so the two cannot race over one flag.
 func (b *GMBridge) scheduleSetActiveRetry(gen, seq uint64) {
-	if !b.setActiveRetrying.CompareAndSwap(false, true) {
-		return
-	}
-	b.mu.Lock()
-	ctx := b.connCtx
-	b.mu.Unlock()
+	ctx := b.claimForConnection(gen, seq, &b.setActiveRetrying)
 	if ctx == nil {
 		return
 	}

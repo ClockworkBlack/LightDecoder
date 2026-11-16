@@ -377,7 +377,11 @@ class ConversationsActivity : AppCompatActivity() {
         if (muted) R.string.chat_muted_done else R.string.chat_unmuted_done,
     ) { manager.setMuted(row.id, muted) }
 
-    /** With a pairing it goes on the phone too; without one (an archive an unpair kept) only here. */
+    /**
+     * With a pairing it goes on the phone too; without one (an archive an
+     * unpair kept) the manager deletes it here only. If the pairing changed
+     * while the question was up, it is asked again with the right wording.
+     */
     private fun confirmDelete(item: ConversationItem) {
         val linked = manager.isPaired()
         val id = item.row.id
@@ -385,13 +389,11 @@ class ConversationsActivity : AppCompatActivity() {
             .setTitle(R.string.chat_delete_conversation_title)
             .setMessage(if (linked) R.string.chat_delete_conversation_body else R.string.chat_delete_conversation_body_local)
             .setPositiveButton(R.string.chat_action_delete) { _, _ ->
-                runAction(R.string.chat_deleted) {
-                    if (linked) {
-                        manager.deleteConversation(id)
-                    } else {
-                        withContext(Dispatchers.IO) { repo.deleteConversationLocal(id) }
-                    }
+                if (manager.isPaired() != linked) {
+                    confirmDelete(item)
+                    return@setPositiveButton
                 }
+                runAction(R.string.chat_deleted) { manager.deleteConversation(id) }
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
