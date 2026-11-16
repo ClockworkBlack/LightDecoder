@@ -22,6 +22,25 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.8
+- **Smart cut-out** (sticker maker, "Remove background" > "Smart cut-out", on by default for new
+  stickers): `sticker/SubjectCutter` runs U-2-Net-p (`assets/models/u2netp.onnx`, Apache-2.0,
+  sha256 309c8469...) with ONNX Runtime 1.22.0 (MIT) on the phone, then fits the 320 px answer to
+  the picture's edges with a guided filter (`SubjectMask`). `StickerMaker.cutOut/make(subject =)`;
+  without a mask (`Options.smart` off, model failed, no subject found) the old flood fill is used.
+  The mask is not saved with a project; it is found again when the sticker is edited.
+  **Do not use ML Kit / Google Play services for this**: they are proprietary and cannot ship in
+  this AGPL app (the `bundleLicenses` gate rejects them). The runtime is left out for x86_64
+  (APK size); unit tests use the desktop `onnxruntime` jar and run the real model on
+  `test/resources/pictures/coffee.jpg` (CC0, scikit-image). APK is now about 100 MB.
+- Traced cuts follow a smooth curve through the finger's points (`StickerProject.outlineOf`).
+  Stickers traced before this come out very slightly different when edited and saved again.
+- **Title under a sticker**: `Options.caption` (max 40 characters), white with a thin dark edge,
+  in a 64 px band taken from the picture's height.
+- **Save as new** while editing: adds a sticker beside the one being edited ("Save changes"
+  replaces it, as before).
+- Not verified on a real phone (model speed and memory there especially).
+
 ## 0.5.7
 - **Stickers others send** (iPhone or Android): "Add to my stickers" in a message's touch-and-hold
   menu (any picture or sticker), in the picture gallery's menu and in the picture viewer's top bar

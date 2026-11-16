@@ -17,3 +17,7 @@
 -dontwarn javax.naming.**
 -dontwarn com.sun.mail.**
 -dontwarn javax.activation.**
+
+# ONNX Runtime (the sticker maker's smart cut-out): its native library finds these
+# classes, their fields and their constructors by name.
+-keep class ai.onnxruntime.** { *; }

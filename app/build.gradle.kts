@@ -38,8 +38,8 @@ android {
         applicationId = "com.lightdecoder"
         minSdk = 26
         targetSdk = 36
-        versionCode = 15
-        versionName = "0.5.7"
+        versionCode = 16
+        versionName = "0.5.8"
 
         // The decoder is plain software, so it runs on every ABI. These cover
         // phones (64- and 32-bit ARM) and the emulator.
@@ -103,6 +103,9 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = false
+            // The smart cut-out's runtime is 22 MB for x86_64 (emulators, a few Chromebooks):
+            // left out there, where the sticker maker falls back to its plain-background cut.
+            excludes += setOf("lib/x86_64/libonnxruntime.so", "lib/x86_64/libonnxruntime4j_jni.so")
         }
         resources {
             // Both Jakarta Mail jars carry the same licence files; their text ships in
@@ -316,6 +319,9 @@ val bundleLicenses by tasks.registering {
     // Jakarta Mail for Android (the Gmail tab's IMAP/SMTP): EPL-2.0 or GPL-2.0 with the Classpath Exception.
     val mailLicense = rootProject.file("third_party/licenses/EPL-2.0-OR-GPL-2.0-CPE-jakarta-mail.txt")
     val mailNotice = rootProject.file("third_party/licenses/NOTICE-jakarta-mail.md")
+    // ONNX Runtime (the sticker maker's smart cut-out): MIT.
+    val onnxLicense = rootProject.file("third_party/licenses/MIT-onnxruntime.txt")
+    val onnxLibrary = Regex("com\\.microsoft\\.onnxruntime:onnxruntime-android")
     val mailLibrary = Regex("com\\.sun\\.mail:(android-mail|android-activation)")
     val apacheLibrary = Regex(
         "(androidx\\.[^:]+|com\\.google\\.android\\.material|org\\.jetbrains\\.kotlinx?):[^:]+" +
@@ -331,7 +337,7 @@ val bundleLicenses by tasks.registering {
     }
     inputs.files(buildGoBridge).withPropertyName("goBridge")
     inputs.file(notice).withPropertyName("notice")
-    inputs.files(fixed.map { it.third } + apacheLicense + mailLicense + mailNotice).withPropertyName("licenseFiles")
+    inputs.files(fixed.map { it.third } + apacheLicense + mailLicense + mailNotice + onnxLicense).withPropertyName("licenseFiles")
     // Licence files and PATCHES.md of Go modules replaced by a copy in the repository.
     inputs.files(fileTree(File(goModuleDir, "third_party")) { exclude("**/*.go") })
         .withPropertyName("replacedGoModules").withPathSensitivity(PathSensitivity.RELATIVE)
@@ -368,7 +374,8 @@ val bundleLicenses by tasks.registering {
         val libraries = androidLibraries.get()
         if (libraries.isEmpty()) throw GradleException("No Android libraries on the release runtime classpath")
         val mail = libraries.filter { mailLibrary.matches(it.substringBeforeLast(':')) }
-        val unknown = libraries.filterNot { apacheLibrary.matches(it.substringBeforeLast(':')) || it in mail }
+        val onnx = libraries.filter { onnxLibrary.matches(it.substringBeforeLast(':')) }
+        val unknown = libraries.filterNot { apacheLibrary.matches(it.substringBeforeLast(':')) || it in mail || it in onnx }
         if (unknown.isNotEmpty()) {
             throw GradleException(
                 "Not known to be Apache-2.0: ${unknown.joinToString()}; add its licence text to bundleLicenses " +
@@ -383,9 +390,26 @@ val bundleLicenses by tasks.registering {
                 "AndroidX, Material Components, Kotlin standard library, kotlinx.coroutines (Apache-2.0, in classes.dex)",
                 listOf(apacheLicense),
                 intro = "These libraries are under the Apache License 2.0, below:\n\n" +
-                    (libraries - mail.toSet()).joinToString("\n") { "  $it" },
+                    (libraries - mail.toSet() - onnx.toSet()).joinToString("\n") { "  $it" },
             ),
         )
+        if (onnx.isNotEmpty()) {
+            File(licenses, "42-onnxruntime.txt").writeText(
+                licenceText(
+                    "ONNX Runtime (in classes.dex and libonnxruntime.so): MIT",
+                    listOf(onnxLicense),
+                    intro = onnx.joinToString("\n") { "  $it" },
+                ),
+            )
+            File(licenses, "43-u2net-model.txt").writeText(
+                licenceText(
+                    "U-2-Net (the subject-finding model, assets/models/u2netp.onnx): Apache-2.0",
+                    listOf(apacheLicense),
+                    intro = "Copyright (c) Xuebin Qin and the U-2-Net authors. https://github.com/xuebinqin/U-2-Net\n" +
+                        "The model file is unmodified, in ONNX form as published with rembg (github.com/danielgatis/rembg).",
+                ),
+            )
+        }
         if (mail.isNotEmpty()) {
             File(licenses, "41-jakarta-mail.txt").writeText(
                 licenceText(
@@ -550,6 +574,10 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     // Draws the QR code of the WhatsApp setup screen (encoding only; Apache-2.0).
     implementation("com.google.zxing:core:3.5.3")
+    // Runs the sticker maker's subject-finding model (assets/models/u2netp.onnx) on the phone.
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
+    // The same runtime for the computer the unit tests run on.
+    testImplementation("com.microsoft.onnxruntime:onnxruntime:1.22.0")
 
     // The Google Messages bridge (Go, see gmbridge/), built by buildGoBridge above.
     implementation(files(goBridgeAar).builtBy(buildGoBridge))
@@ -600,4 +628,9 @@ tasks.withType<Test>().configureEach {
         showStandardStreams = false
         exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
     }
+}
+
+// Unit tests run on a computer: the phone's ONNX Runtime (same classes, Android libraries) stays out.
+configurations.matching { it.name.endsWith("UnitTestRuntimeClasspath") || it.name.endsWith("UnitTestCompileClasspath") }.configureEach {
+    exclude(group = "com.microsoft.onnxruntime", module = "onnxruntime-android")
 }

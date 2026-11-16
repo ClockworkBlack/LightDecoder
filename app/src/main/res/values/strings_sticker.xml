@@ -32,4 +32,11 @@
     <string name="sticker_add_to_mine">Add to my stickers</string>
     <string name="sticker_added_to_mine">Added to your stickers</string>
     <string name="sticker_add_failed">This picture could not be added to your stickers.</string>
+    <string name="sticker_smart">Smart cut-out (finds the subject)</string>
+    <string name="sticker_smart_finding">Finding the subject…</string>
+    <string name="sticker_smart_unavailable">Smart cut-out is not available on this phone, so the plain-background cut is used.</string>
+    <string name="sticker_smart_nothing">No clear subject was found in this picture, so the plain-background cut is used. You can also trace around it or use Fine-tune.</string>
+    <string name="sticker_caption_hint">Title under the sticker (optional)</string>
+    <string name="sticker_save_as_new">Save as new</string>
+    <string name="sticker_save_replace">Save changes</string>
 </resources>

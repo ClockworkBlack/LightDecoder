@@ -68,6 +68,8 @@ object StickerProject {
         put("outline", e.options.outline)
         put("outlineWidth", e.options.outlineWidth)
         put("solid", e.options.solidBackground)
+        put("smart", e.options.smart)
+        put("caption", e.options.caption)
         e.trace?.let { put("trace", floats(it)) }
         put("strokes", JSONArray().apply {
             e.strokes.filter { it.points.isNotEmpty() }.forEach { s ->
@@ -84,6 +86,8 @@ object StickerProject {
             outline = o.optBoolean("outline", true),
             outlineWidth = o.optInt("outlineWidth", StickerMaker.OUTLINE),
             solidBackground = o.optBoolean("solid"),
+            smart = o.optBoolean("smart"),
+            caption = o.optString("caption"),
         ),
         trace = o.optJSONArray("trace")?.let(::floats),
         strokes = o.optJSONArray("strokes")?.let { a ->
@@ -98,7 +102,24 @@ object StickerProject {
     private fun floats(a: FloatArray) = JSONArray().apply { a.forEach { put(it.toDouble()) } }
     private fun floats(a: JSONArray) = FloatArray(a.length()) { a.optDouble(it).toFloat() }
 
-    /** A closed outline through x,y pairs. */
+    /**
+     * The traced outline through x,y pairs as a smooth closed curve: a finger's
+     * line is a run of short straight pieces, and cutting along those leaves a
+     * jagged edge. The curve passes through the middle of each piece instead.
+     */
+    fun outlineOf(points: FloatArray): Path {
+        val n = points.size / 2
+        if (n < 3) return pathOf(points, close = true)
+        fun x(i: Int) = points[2 * ((i % n + n) % n)]
+        fun y(i: Int) = points[2 * ((i % n + n) % n) + 1]
+        return Path().apply {
+            moveTo((x(n - 1) + x(0)) / 2f, (y(n - 1) + y(0)) / 2f)
+            for (i in 0 until n) quadTo(x(i), y(i), (x(i) + x(i + 1)) / 2f, (y(i) + y(i + 1)) / 2f)
+            close()
+        }
+    }
+
+    /** A line through x,y pairs, closed if asked. */
     fun pathOf(points: FloatArray, close: Boolean): Path = Path().apply {
         if (points.size < 2) return@apply
         moveTo(points[0], points[1])

@@ -103,6 +103,94 @@ class StickerEditTest {
     }
 
     @Test
+    fun savingAsNewKeepsTheStickerAndAddsAnother() {
+        val original = picture()
+        val options = StickerMaker.Options(outline = false)
+        val file = StickerLibrary.save(context, StickerMaker.make(original, options))
+        StickerProject.save(context, file, original, StickerProject.Edits(options, null, emptyList()))
+        val before = file.readBytes()
+
+        ActivityScenario.launch<StickerMakerActivity>(StickerMakerActivity.editIntent(context, file)).use { scenario ->
+            waitFor(scenario, "the sticker") { it.findViewById<View>(R.id.saveAsNew).isEnabled }
+            scenario.onActivity { a ->
+                assertTrue(a.findViewById<View>(R.id.saveAsNew).isShown)
+                // A white-background version with a title, kept beside the first.
+                a.findViewById<MaterialSwitch>(R.id.solid).isChecked = true
+                a.findViewById<android.widget.EditText>(R.id.caption).setText("Mood")
+            }
+            settle()
+            scenario.onActivity { it.findViewById<View>(R.id.saveAsNew).performClick() }
+            waitFor(scenario, "the save") { it.isFinishing }
+        }
+        val all = StickerLibrary.list(context)
+        assertEquals("one more sticker", 2, all.size)
+        assertArrayEquals("the first is as it was", before, file.readBytes())
+        assertFalse(StickerProject.load(context, file)!!.edits.options.solidBackground)
+        val added = all.first { it != file }
+        val edits = StickerProject.load(context, added)!!.edits
+        assertTrue(edits.options.solidBackground)
+        assertEquals("Mood", edits.options.caption)
+        assertEquals("white behind it", Color.WHITE, BitmapFactory.decodeFile(added.path).getPixel(1, 1))
+    }
+
+    @Test
+    fun aNewStickerHasNoSaveAsNew() {
+        ActivityScenario.launch(StickerMakerActivity::class.java).use { scenario ->
+            scenario.onActivity { assertFalse(it.findViewById<View>(R.id.saveAsNew).isShown) }
+        }
+    }
+
+    @Test
+    fun theSmartCutOutIsUsedWhenTheBackgroundIsRemoved() {
+        val original = picture()
+        val options = StickerMaker.Options(outline = false)
+        val file = StickerLibrary.save(context, StickerMaker.make(original, options))
+        StickerProject.save(context, file, original, StickerProject.Edits(options, null, emptyList()))
+        // The subject, says the model, is the picture's left half.
+        var asked = 0
+        val real = com.lightdecoder.sticker.SubjectCutter.engine
+        com.lightdecoder.sticker.SubjectCutter.engine = com.lightdecoder.sticker.SubjectCutter.Engine { _, p ->
+            asked++
+            com.lightdecoder.sticker.SubjectCutter.Result.Found(
+                com.lightdecoder.sticker.SubjectMask(p.width, p.height, ByteArray(p.width * p.height) { if (it % p.width < p.width / 2) 255.toByte() else 0 })
+            )
+        }
+        try {
+            ActivityScenario.launch<StickerMakerActivity>(StickerMakerActivity.editIntent(context, file)).use { scenario ->
+                waitFor(scenario, "the sticker") { it.findViewById<View>(R.id.save).isEnabled }
+                scenario.onActivity { a ->
+                    assertFalse("offered with background removal", a.findViewById<View>(R.id.smart).isShown)
+                    a.findViewById<MaterialSwitch>(R.id.smart).isChecked = true
+                    a.findViewById<MaterialSwitch>(R.id.removeBackground).isChecked = true
+                    assertTrue(a.findViewById<View>(R.id.smart).isShown)
+                    assertFalse("the plain-colour slider is for the other cut", a.findViewById<View>(R.id.tolerance).isShown)
+                }
+                waitFor(scenario, "the subject") { asked > 0 && !it.findViewById<View>(R.id.smartStatus).isShown }
+                settle()
+                scenario.onActivity { a ->
+                    // Changing something else does not look for the subject again.
+                    a.findViewById<MaterialSwitch>(R.id.solid).isChecked = true
+                    a.findViewById<MaterialSwitch>(R.id.solid).isChecked = false
+                }
+                settle()
+                scenario.onActivity { it.findViewById<View>(R.id.save).performClick() }
+                waitFor(scenario, "the save") { it.isFinishing }
+            }
+        } finally {
+            com.lightdecoder.sticker.SubjectCutter.engine = real
+        }
+        assertEquals("found once for the picture", 1, asked)
+        val saved = BitmapFactory.decodeFile(file.path)
+        // Only the left half was kept, so the red square's right part is gone: the sticker
+        // (fitted to what is left) is taller than wide.
+        val pixels = IntArray(saved.width * saved.height).also { saved.getPixels(it, 0, saved.width, 0, 0, saved.width, saved.height) }
+        val columns = (0 until saved.width).count { x -> (0 until saved.height).any { y -> Color.alpha(pixels[y * saved.width + x]) > 200 } }
+        val rows = (0 until saved.height).count { y -> (0 until saved.width).any { x -> Color.alpha(pixels[y * saved.width + x]) > 200 } }
+        assertTrue("$columns columns, $rows rows", columns < rows * 0.7)
+        assertTrue(StickerProject.load(context, file)!!.edits.options.smart)
+    }
+
+    @Test
     fun anOlderStickerWithoutItsPictureCanStillBeEdited() {
         val file = StickerLibrary.save(context, picture())
         ActivityScenario.launch<StickerMakerActivity>(StickerMakerActivity.editIntent(context, file)).use { scenario ->

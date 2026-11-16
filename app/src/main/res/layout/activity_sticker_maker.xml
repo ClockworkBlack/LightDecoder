@@ -213,13 +213,49 @@
                 android:text="@string/sticker_reset_original"
                 android:visibility="gone" />
 
+            <com.google.android.material.textfield.TextInputLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:hint="@string/sticker_caption_hint"
+                app:counterEnabled="true"
+                app:counterMaxLength="40">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/caption"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:imeOptions="actionDone"
+                    android:inputType="textCapSentences"
+                    android:maxLength="40"
+                    android:maxLines="1" />
+            </com.google.android.material.textfield.TextInputLayout>
+
             <com.google.android.material.materialswitch.MaterialSwitch
                 android:id="@+id/removeBackground"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
+                android:layout_marginTop="8dp"
                 android:minHeight="48dp"
                 android:text="@string/sticker_remove_background" />
+
+            <com.google.android.material.materialswitch.MaterialSwitch
+                android:id="@+id/smart"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:checked="true"
+                android:minHeight="48dp"
+                android:text="@string/sticker_smart"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/smartStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:accessibilityLiveRegion="polite"
+                android:textAppearance="?attr/textAppearanceBodySmall"
+                android:textColor="?attr/colorOnSurfaceVariant"
+                android:visibility="gone" />
 
             <TextView
                 android:id="@+id/toleranceLabel"
@@ -321,12 +357,30 @@
         </LinearLayout>
     </com.lightdecoder.ui.sticker.DrawingScrollView>
 
-    <com.google.android.material.button.MaterialButton
-        android:id="@+id/save"
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginHorizontal="16dp"
         android:layout_marginBottom="12dp"
-        android:enabled="false"
-        android:text="@string/sticker_save" />
+        android:orientation="horizontal">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/saveAsNew"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="8dp"
+            android:layout_weight="1"
+            android:enabled="false"
+            android:text="@string/sticker_save_as_new"
+            android:visibility="gone" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/save"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:enabled="false"
+            android:text="@string/sticker_save" />
+    </LinearLayout>
 </LinearLayout>

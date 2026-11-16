@@ -55,6 +55,13 @@ class StickerMakerActivity : AppCompatActivity() {
     private var sticker: Bitmap? = null
     private var renderJob: Job? = null
 
+    /** Where the picture's subject is, for the smart cut-out; found once per picture. */
+    private var subject: com.lightdecoder.sticker.SubjectMask? = null
+    private var subjectState = Subject.NOT_ASKED
+    private var subjectJob: Job? = null
+
+    private enum class Subject { NOT_ASKED, FINDING, FOUND, NOTHING, UNAVAILABLE }
+
     private val pick = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) load(uri)
     }
@@ -71,6 +78,13 @@ class StickerMakerActivity : AppCompatActivity() {
             pick.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
         }
         binding.removeBackground.setOnCheckedChangeListener { _, _ -> render() }
+        binding.smart.setOnCheckedChangeListener { _, _ -> render() }
+        binding.caption.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            override fun afterTextChanged(s: android.text.Editable?) = render(refreshBrushedPicture = false)
+        })
+        binding.saveAsNew.setOnClickListener { save(asNew = true) }
         binding.refineStart.setOnClickListener { startRefining() }
         binding.refineDone.setOnClickListener { stopRefining() }
         binding.brushMode.addOnButtonCheckedListener { _, id, isChecked ->
@@ -93,7 +107,7 @@ class StickerMakerActivity : AppCompatActivity() {
         binding.solid.setOnCheckedChangeListener { _, _ -> render() }
         binding.shape.addOnButtonCheckedListener { _, _, isChecked -> if (isChecked) render() }
         binding.tolerance.addOnChangeListener { _, _, fromUser -> if (fromUser) render() }
-        binding.save.setOnClickListener { save() }
+        binding.save.setOnClickListener { save(asNew = false) }
         binding.trace.setOnClickListener {
             stopRefining()
             startTracing()
@@ -111,7 +125,7 @@ class StickerMakerActivity : AppCompatActivity() {
             val picture = original ?: return@setOnClickListener
             undoneTrace = null
             trace = again
-            source = StickerMaker.cutToPath(picture, StickerProject.pathOf(again, close = true))
+            source = StickerMaker.cutToPath(picture, StickerProject.outlineOf(again))
             binding.traceRedo.visibility = View.GONE
             binding.traceUndo.visibility = View.VISIBLE
             render()
@@ -120,9 +134,10 @@ class StickerMakerActivity : AppCompatActivity() {
         binding.lasso.onTooSmall = {
             Toast.makeText(this, R.string.sticker_trace_too_small, Toast.LENGTH_SHORT).show()
         }
-        binding.lasso.onTraced = { outline, points ->
-            // Cut from the original, so the same cut can be made again when the sticker is edited later.
-            original?.let { source = StickerMaker.cutToPath(it, outline) }
+        binding.lasso.onTraced = { _, points ->
+            // Cut from the original, so the same cut can be made again when the sticker is edited
+            // later; along a smooth curve through the finger's line, not its straight pieces.
+            original?.let { source = StickerMaker.cutToPath(it, StickerProject.outlineOf(points)) }
             trace = points
             undoneTrace = null
             binding.traceRedo.visibility = View.GONE
@@ -136,6 +151,9 @@ class StickerMakerActivity : AppCompatActivity() {
         if (edit != null) {
             supportActionBar?.setTitle(R.string.sticker_edit_title)
             binding.pick.visibility = View.GONE
+            // Save keeps this sticker up to date; Save as new leaves it and adds another.
+            binding.save.setText(R.string.sticker_save_replace)
+            binding.saveAsNew.visibility = View.VISIBLE
             loadForEdit(edit)
         } else {
             savedInstanceState?.getString(STATE_URI)?.let { load(Uri.parse(it)) }
@@ -172,6 +190,7 @@ class StickerMakerActivity : AppCompatActivity() {
             }
             editing = file
             original = project.original
+            forgetSubject()
             applyEdits(project.edits)
             binding.trace.isEnabled = true
             binding.refineStart.isEnabled = true
@@ -186,10 +205,12 @@ class StickerMakerActivity : AppCompatActivity() {
         trace = edits.trace
         undoneTrace = null
         binding.traceRedo.visibility = View.GONE
-        source = edits.trace?.let { StickerMaker.cutToPath(picture, StickerProject.pathOf(it, close = true)) } ?: picture
+        source = edits.trace?.let { StickerMaker.cutToPath(picture, StickerProject.outlineOf(it)) } ?: picture
         binding.traceUndo.visibility = if (edits.trace != null) View.VISIBLE else View.GONE
         val o = edits.options
         binding.removeBackground.isChecked = o.removeBackground
+        binding.smart.isChecked = o.smart
+        if (binding.caption.text?.toString() != o.caption) binding.caption.setText(o.caption)
         binding.tolerance.value = o.tolerance.toFloat().coerceIn(binding.tolerance.valueFrom, binding.tolerance.valueTo)
         binding.shape.check(
             when (o.shape) {
@@ -210,7 +231,7 @@ class StickerMakerActivity : AppCompatActivity() {
     /** Every edit undone: the picture the sticker was made from, with nothing cut, brushed or outlined. */
     private fun resetToOriginal() {
         if (original == null) return
-        applyEdits(StickerProject.Edits(StickerMaker.Options(outline = false), null, emptyList()))
+        applyEdits(StickerProject.Edits(StickerMaker.Options(outline = false, smart = true), null, emptyList()))
         render()
     }
 
@@ -224,6 +245,7 @@ class StickerMakerActivity : AppCompatActivity() {
             sourceUri = uri
             source = bitmap
             original = bitmap
+            forgetSubject()
             trace = null
             undoneTrace = null
             binding.traceRedo.visibility = View.GONE
@@ -300,7 +322,7 @@ class StickerMakerActivity : AppCompatActivity() {
         refineJob = lifecycleScope.launch {
             val base = withContext(Dispatchers.Default) {
                 try {
-                    StickerMaker.cutOut(picture, options)
+                    StickerMaker.cutOut(picture, options, subject = subject)
                 } catch (e: OutOfMemoryError) {
                     null
                 }
@@ -353,10 +375,64 @@ class StickerMakerActivity : AppCompatActivity() {
         outline = binding.outline.isChecked,
         outlineWidth = binding.outlineWidth.value.toInt(),
         solidBackground = binding.solid.isChecked,
+        smart = binding.smart.isChecked,
+        caption = StickerMaker.captionOf(binding.caption.text?.toString().orEmpty()),
     )
 
+    /** A new picture: what was found in the old one does not apply. */
+    private fun forgetSubject() {
+        subjectJob?.cancel()
+        subject = null
+        subjectState = Subject.NOT_ASKED
+    }
+
+    private val wantsSubject: Boolean get() = binding.removeBackground.isChecked && binding.smart.isChecked
+
+    /**
+     * Looks for the picture's subject, once. True while the answer is still
+     * awaited: the preview is made when it arrives.
+     */
+    private fun findingSubject(): Boolean {
+        if (!wantsSubject) return false
+        if (subjectState == Subject.FINDING) return true
+        if (subjectState != Subject.NOT_ASKED) return false
+        val picture = original ?: return false
+        subjectState = Subject.FINDING
+        updateToleranceVisible()
+        subjectJob = lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                com.lightdecoder.sticker.SubjectCutter.find(applicationContext, picture)
+            }
+            if (picture !== original) return@launch
+            when (result) {
+                is com.lightdecoder.sticker.SubjectCutter.Result.Found ->
+                    if (result.mask.hasSubject) {
+                        subject = result.mask
+                        subjectState = Subject.FOUND
+                    } else {
+                        subjectState = Subject.NOTHING
+                    }
+                com.lightdecoder.sticker.SubjectCutter.Result.Unavailable -> subjectState = Subject.UNAVAILABLE
+            }
+            render()
+        }
+        return true
+    }
+
     private fun updateToleranceVisible() {
-        val shown = if (binding.removeBackground.isChecked) View.VISIBLE else View.GONE
+        val removing = binding.removeBackground.isChecked
+        binding.smart.visibility = if (removing) View.VISIBLE else View.GONE
+        val status = if (!wantsSubject) 0 else when (subjectState) {
+            Subject.FINDING -> R.string.sticker_smart_finding
+            Subject.NOTHING -> R.string.sticker_smart_nothing
+            Subject.UNAVAILABLE -> R.string.sticker_smart_unavailable
+            Subject.NOT_ASKED, Subject.FOUND -> 0
+        }
+        if (status != 0) binding.smartStatus.setText(status)
+        binding.smartStatus.visibility = if (status != 0) View.VISIBLE else View.GONE
+        // The plain-colour slider is for the cut that is actually in use.
+        val plain = removing && !(wantsSubject && subjectState in setOf(Subject.FOUND, Subject.FINDING, Subject.NOT_ASKED))
+        val shown = if (plain) View.VISIBLE else View.GONE
         binding.tolerance.visibility = shown
         binding.toleranceLabel.visibility = shown
         val outlined = if (binding.outline.isChecked) View.VISIBLE else View.GONE
@@ -368,7 +444,10 @@ class StickerMakerActivity : AppCompatActivity() {
     private fun render(refreshBrushedPicture: Boolean = true) {
         updateToleranceVisible()
         val picture = source ?: return
+        if (findingSubject()) return
+        updateToleranceVisible()
         val options = options()
+        val subject = subject
         // The options changed what the brushes paint on (a stroke alone does not).
         if (refining && refreshBrushedPicture) refreshRefineBase()
         val strokes = binding.refine.strokes.toList()
@@ -377,7 +456,7 @@ class StickerMakerActivity : AppCompatActivity() {
         renderJob = lifecycleScope.launch {
             val made = withContext(Dispatchers.Default) {
                 try {
-                    StickerMaker.make(picture, options, edits)
+                    StickerMaker.make(picture, options, edits, subject)
                 } catch (e: OutOfMemoryError) {
                     null
                 }
@@ -385,15 +464,18 @@ class StickerMakerActivity : AppCompatActivity() {
             sticker = made
             binding.preview.setFrames(listOf(HeifFrame(made, 0)))
             binding.save.isEnabled = true
+            binding.saveAsNew.isEnabled = true
         }
     }
 
-    private fun save() {
+    /** Saves the sticker; [asNew] while editing adds it beside the one being edited instead of replacing that. */
+    private fun save(asNew: Boolean) {
         val made = sticker ?: return
         val from = original
         val edits = StickerProject.Edits(options(), trace, binding.refine.strokes.toList())
-        val target = editing
+        val target = editing.takeUnless { asNew }
         binding.save.isEnabled = false
+        binding.saveAsNew.isEnabled = false
         lifecycleScope.launch {
             val file = withContext(Dispatchers.IO) {
                 runCatching {
@@ -406,6 +488,7 @@ class StickerMakerActivity : AppCompatActivity() {
             }
             if (file == null) {
                 binding.save.isEnabled = true
+                binding.saveAsNew.isEnabled = true
                 Toast.makeText(this@StickerMakerActivity, R.string.sticker_failed, Toast.LENGTH_LONG).show()
             } else {
                 setResult(Activity.RESULT_OK, Intent().putExtra(EXTRA_PATH, file.path))

@@ -27,8 +27,9 @@ import kotlin.math.sin
  * iPhone displays it as a picture in the conversation (with its transparency
  * over RCS and iMessage-free chats; a carrier that still converts MMS
  * pictures to JPEG loses transparency, which is what [Options.solidBackground]
- * is for). No network, no model download: the background removal is a flood
- * fill from the picture's edges, which suits plain backgrounds.
+ * is for). The background removal either follows the picture's subject
+ * ([SubjectMask], found on the phone by [SubjectCutter]) or, without one, is
+ * a flood fill from the picture's edges, which suits plain backgrounds.
  */
 object StickerMaker {
 
@@ -46,6 +47,10 @@ object StickerMaker {
         val outlineWidth: Int = OUTLINE,
         /** White behind the sticker instead of transparency (for carriers that turn MMS pictures into JPEG). */
         val solidBackground: Boolean = false,
+        /** Remove the background by finding the subject, when a [SubjectMask] is at hand; else by its plain colour. */
+        val smart: Boolean = false,
+        /** A short title in white letters beneath the picture; blank for none. */
+        val caption: String = "",
     )
 
     /**
@@ -72,9 +77,12 @@ object StickerMaker {
      * working size, with the plain background removed if asked, and [edits]
      * applied. A new bitmap; [source] is not changed.
      */
-    fun cutOut(source: Bitmap, options: Options, edits: Edits? = null): Bitmap {
+    fun cutOut(source: Bitmap, options: Options, edits: Edits? = null, subject: SubjectMask? = null): Bitmap {
         var work = scaledDown(source, SIZE * 2)
-        if (options.removeBackground) work = withoutBackground(work, options.tolerance)
+        if (options.removeBackground) {
+            if (options.smart && subject != null) keepSubject(work, subject)
+            else work = withoutBackground(work, options.tolerance)
+        }
         if (edits != null && edits.strokes.isNotEmpty()) {
             val scale = work.width.toFloat() / source.width
             val restore = if (edits.restoreFrom.width == work.width && edits.restoreFrom.height == work.height) {
@@ -117,14 +125,46 @@ object StickerMaker {
             }
         }
 
+    /**
+     * Multiplies [target]'s transparency by [subject] (stretched over it if
+     * their sizes differ): what is not the subject goes, and the edge between
+     * them is as soft as the mask's.
+     */
+    internal fun keepSubject(target: Bitmap, subject: SubjectMask) {
+        val w = target.width
+        val h = target.height
+        val pixels = IntArray(w * h)
+        target.getPixels(pixels, 0, w, 0, 0, w, h)
+        val same = subject.width == w && subject.height == h
+        for (y in 0 until h) {
+            val my = if (same) y else (y * subject.height / h).coerceAtMost(subject.height - 1)
+            for (x in 0 until w) {
+                val mx = if (same) x else (x * subject.width / w).coerceAtMost(subject.width - 1)
+                val keep = subject.alpha[my * subject.width + mx].toInt() and 0xFF
+                if (keep == 255) continue
+                val i = y * w + x
+                val c = pixels[i]
+                val a = (c ushr 24) * keep / 255
+                pixels[i] = if (a == 0) 0 else (a shl 24) or (c and 0xFFFFFF)
+            }
+        }
+        target.setPixels(pixels, 0, w, 0, 0, w, h)
+    }
+
+    /** The title as it is drawn: one line, trimmed, at most [MAX_CAPTION] characters. */
+    fun captionOf(text: String): String = text.replace('\n', ' ').trim().take(MAX_CAPTION)
+
     /** [source] is not changed or recycled. */
-    fun make(source: Bitmap, options: Options, edits: Edits? = null): Bitmap {
-        var work = cutOut(source, options, edits)
+    fun make(source: Bitmap, options: Options, edits: Edits? = null, subject: SubjectMask? = null): Bitmap {
+        var work = cutOut(source, options, edits, subject)
         if (options.shape != Shape.ORIGINAL) work = clipped(work, options.shape)
         work = trimmed(work)
         val border = if (options.outline) options.outlineWidth.coerceIn(MIN_OUTLINE, MAX_OUTLINE) else 0
         val inner = SIZE - 2 * (border + MARGIN)
-        val scale = min(inner.toFloat() / work.width, inner.toFloat() / work.height)
+        val caption = captionOf(options.caption)
+        // The title's band is taken from the picture's height, so both fit the square.
+        val band = if (caption.isEmpty()) 0 else CAPTION_BAND
+        val scale = min(inner.toFloat() / work.width, (inner - band).toFloat() / work.height)
         val w = max(1, (work.width * scale).roundToInt())
         val h = max(1, (work.height * scale).roundToInt())
         val fitted = if (w == work.width && h == work.height) work else Bitmap.createScaledBitmap(work, w, h, true)
@@ -132,7 +172,7 @@ object StickerMaker {
         val canvas = Canvas(out)
         if (options.solidBackground) canvas.drawColor(Color.WHITE)
         val left = (SIZE - w) / 2f
-        val top = (SIZE - h) / 2f
+        val top = (SIZE - band - h) / 2f
         if (options.outline) {
             val white = Paint(Paint.FILTER_BITMAP_FLAG).apply {
                 colorFilter = PorterDuffColorFilter(Color.WHITE, PorterDuff.Mode.SRC_IN)
@@ -150,7 +190,32 @@ object StickerMaker {
             }
         }
         canvas.drawBitmap(fitted, left, top, Paint(Paint.FILTER_BITMAP_FLAG))
+        if (caption.isNotEmpty()) drawCaption(canvas, caption, top + h + border)
         return out
+    }
+
+    /** White letters centred beneath the picture, with a thin dark edge so they read on any chat background. */
+    private fun drawCaption(canvas: Canvas, caption: String, below: Float) {
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            textAlign = Paint.Align.CENTER
+            textSize = CAPTION_TEXT
+        }
+        val room = SIZE - 4f * MARGIN
+        // A long title is written smaller rather than cut off.
+        while (paint.textSize > CAPTION_TEXT_MIN && paint.measureText(caption) > room) paint.textSize -= 2f
+        var text = caption
+        while (text.length > 1 && paint.measureText(text) > room) text = text.dropLast(2).trimEnd() + "…"
+        val metrics = paint.fontMetrics
+        val baseline = below + (CAPTION_BAND - (metrics.descent - metrics.ascent)) / 2f - metrics.ascent
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = paint.textSize / 9f
+        paint.strokeJoin = Paint.Join.ROUND
+        paint.color = 0xD9000000.toInt()
+        canvas.drawText(text, SIZE / 2f, baseline, paint)
+        paint.style = Paint.Style.FILL
+        paint.color = Color.WHITE
+        canvas.drawText(text, SIZE / 2f, baseline, paint)
     }
 
     private fun scaledDown(source: Bitmap, maxSide: Int): Bitmap {
@@ -297,5 +362,11 @@ object StickerMaker {
     private const val OUTLINE_RING_STEP = 6f
     private const val MARGIN = 4
     private const val OUTLINE_STEPS = 32
+
+    /** The longest title, and the room it takes beneath the picture (pixels of the 512 px sticker). */
+    const val MAX_CAPTION = 40
+    private const val CAPTION_BAND = 64
+    private const val CAPTION_TEXT = 44f
+    private const val CAPTION_TEXT_MIN = 22f
 
 }
