@@ -377,29 +377,35 @@ class RelaySetupActivity : AppCompatActivity() {
 
     /**
      * The cookies the user pasted are as good as their password: once used,
-     * they come off the clipboard too, if that is still where they came from
-     * (the same text, or text that reads as the same cookies). The keyboard's
-     * own clipboard history is out of reach, so the user is told about it.
-     * The clip is only compared, never logged or kept.
+     * any clip that still carries one of them comes off the clipboard (the
+     * whole paste, or a piece of it such as a separately copied OSID); an
+     * unrelated clip is left alone. The keyboard's own clipboard history is
+     * out of reach whatever the clip held (the paste may have come from
+     * there), so the user is always told about it. The clip is only compared,
+     * never logged or kept.
      */
     private fun clearClipboardIfHolds(pasted: String, cookies: Map<String, String>) {
-        val clipboard = getSystemService(ClipboardManager::class.java) ?: return
-        val clip = runCatching { clipboard.primaryClip }.getOrNull() ?: return
-        val text = runCatching {
-            (0 until clip.itemCount).joinToString("") { clip.getItemAt(it).coerceToText(this) }
-        }.getOrNull()
-        if (text.isNullOrBlank()) return
-        val same = text.trim() == pasted.trim() || CookieParser.parse(text) == cookies
-        if (!same) return
-        runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                clipboard.clearPrimaryClip()
-            } else {
-                clipboard.setPrimaryClip(ClipData.newPlainText("", ""))
-            }
-        }.onSuccess {
-            Toast.makeText(this, R.string.link_paste_clipboard_cleared, Toast.LENGTH_LONG).show()
+        val clipboard = getSystemService(ClipboardManager::class.java)
+        val text = clipboard?.let { cb ->
+            runCatching {
+                cb.primaryClip?.let { clip ->
+                    (0 until clip.itemCount).joinToString("") { clip.getItemAt(it).coerceToText(this) }
+                }
+            }.getOrNull()
         }
+        val cleared = clipboard != null && !text.isNullOrBlank() && clipHoldsCookies(text, pasted, cookies) &&
+            runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    clipboard.clearPrimaryClip()
+                } else {
+                    clipboard.setPrimaryClip(ClipData.newPlainText("", ""))
+                }
+            }.isSuccess
+        Toast.makeText(
+            this,
+            if (cleared) R.string.link_paste_clipboard_cleared else R.string.link_paste_clipboard_history,
+            Toast.LENGTH_LONG,
+        ).show()
     }
 
     companion object {
@@ -429,6 +435,21 @@ class RelaySetupActivity : AppCompatActivity() {
         }
 
         private val REGIONAL_ACCOUNTS = Regex("accounts\\.google\\.(com?\\.)?[a-z]{2,3}")
+
+        /** Shorter values are not matched as bare text: they could turn up in an unrelated clip. */
+        private const val MIN_BARE_VALUE = 16
+
+        /**
+         * Whether [clip] carries any of the [cookies] just used: the pasted text
+         * itself, a cookie of the same name and value in any form the parser
+         * reads, or a long cookie value copied on its own.
+         */
+        internal fun clipHoldsCookies(clip: String, pasted: String, cookies: Map<String, String>): Boolean {
+            if (clip.isBlank() || cookies.isEmpty()) return false
+            if (clip.trim() == pasted.trim()) return true
+            if (CookieParser.parse(clip).any { (name, value) -> cookies[name] == value }) return true
+            return cookies.values.any { it.length >= MIN_BARE_VALUE && clip.contains(it) }
+        }
 
         /**
          * A debuggable build: anyone with adb can run code as the app

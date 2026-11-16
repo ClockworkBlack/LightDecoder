@@ -7,9 +7,18 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Release signing is for builds of main only (see "Decode release
+    # keystore"). Those runs, and only those, enter the `release` environment;
+    # keep the four LIGHTDECODER_* secrets there, with a deployment branch
+    # policy that allows only main, so that a workflow edited on another branch
+    # cannot read them either.
+    environment: ${{ github.ref == 'refs/heads/main' && 'release' || '' }}
     steps:
       - name: Check out with submodules
         uses: actions/checkout@v4
@@ -55,7 +64,7 @@ jobs:
           have=$(go env GOVERSION)
           test "$have" = "$want" || { echo "Go is $have, gmbridge/go.mod pins $want" >&2; exit 1; }
           go vet ./...
-          go test ./...
+          go test -count=1 -race -timeout 5m ./...
           CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build ./...
 
       # gomobile silently drops methods whose types it cannot bind and only
@@ -94,15 +103,43 @@ jobs:
             done
           done
 
+      # bundleLicenses first runs here, with gmbridge.aar already up to date.
+      # An empty module cache checks that it fetches the Go modules whose
+      # licences it needs instead of failing (`go list -m` only reports the
+      # directories of modules already extracted).
       - name: Unit tests (decode real HEIC through the Bitmap path)
+        env:
+          GOMODCACHE: ${{ runner.temp }}/empty-gomodcache
         run: ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace
 
-      # The release key comes from repository secrets when they are set:
-      # LIGHTDECODER_KEYSTORE_BASE64 (base64 of the keystore file),
+      # gmbridge.go may name a Go that is not called `go` (a golang.org/dl
+      # wrapper such as go1.26.11); gomobile must then still run that exact
+      # toolchain, not the `go` on PATH (here one that only fails). Same Go,
+      # same sources: the same aar. (After the unit tests, so that
+      # bundleLicenses above ran against the aar of the first build.)
+      - name: Go bridge again through a Go wrapper, not the go on PATH
+        run: |
+          wrapper="$RUNNER_TEMP/godl/go${{ steps.go-pin.outputs.version }}"
+          shim="$RUNNER_TEMP/notgo"
+          mkdir -p "$(dirname "$wrapper")" "$shim"
+          printf '#!/bin/sh\nexec "%s" "$@"\n' "$(command -v go)" > "$wrapper"
+          printf '#!/bin/sh\necho "the go on PATH ran instead of gmbridge.go" >&2\nexit 1\n' > "$shim/go"
+          chmod +x "$wrapper" "$shim/go"
+          before=$(sha256sum < app/libs/gmbridge.aar)
+          PATH="$shim:$PATH" ./gradlew :app:buildGoBridge --rerun --no-daemon --stacktrace -Pgmbridge.go="$wrapper"
+          test "$(sha256sum < app/libs/gmbridge.aar)" = "$before" || { echo "the wrapper build differs" >&2; exit 1; }
+
+      # Only builds of main are signed with the release key. Pull requests
+      # (from forks or from branches of this repository) and manual runs on
+      # other branches never decode it or see its passwords: their APK is
+      # signed with this runner's throwaway debug key, which the APK check
+      # below enforces, and is uploaded as lightdecoder-preview, which cannot
+      # update an installed release.
+      # The secrets: LIGHTDECODER_KEYSTORE_BASE64 (base64 of the keystore file),
       # LIGHTDECODER_KEYSTORE_PASSWORD, LIGHTDECODER_KEY_ALIAS and optionally
-      # LIGHTDECODER_KEY_PASSWORD. Without them (forks, pull requests) the
-      # release APK is signed with this runner's throwaway debug key.
-      - name: Decode release keystore
+      # LIGHTDECODER_KEY_PASSWORD, in the `release` environment (see the job).
+      - name: Decode release keystore (main only)
+        if: github.ref == 'refs/heads/main'
         env:
           KEYSTORE_BASE64: ${{ secrets.LIGHTDECODER_KEYSTORE_BASE64 }}
         run: |
@@ -118,9 +155,9 @@ jobs:
       # and are not published.
       - name: Build release APK
         env:
-          LIGHTDECODER_KEYSTORE_PASSWORD: ${{ secrets.LIGHTDECODER_KEYSTORE_PASSWORD }}
-          LIGHTDECODER_KEY_ALIAS: ${{ secrets.LIGHTDECODER_KEY_ALIAS }}
-          LIGHTDECODER_KEY_PASSWORD: ${{ secrets.LIGHTDECODER_KEY_PASSWORD }}
+          LIGHTDECODER_KEYSTORE_PASSWORD: ${{ github.ref == 'refs/heads/main' && secrets.LIGHTDECODER_KEYSTORE_PASSWORD || '' }}
+          LIGHTDECODER_KEY_ALIAS: ${{ github.ref == 'refs/heads/main' && secrets.LIGHTDECODER_KEY_ALIAS || '' }}
+          LIGHTDECODER_KEY_PASSWORD: ${{ github.ref == 'refs/heads/main' && secrets.LIGHTDECODER_KEY_PASSWORD || '' }}
         run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
 
       - name: Check the release APK (not debuggable, signed, 16 KB pages, licences)
@@ -133,18 +170,30 @@ jobs:
             echo "release APK is debuggable" >&2
             exit 1
           fi
-          "$bt/apksigner" verify --print-certs "$apk" | grep -E '^Signer #1 certificate (DN|SHA-256)'
+          certs=$("$bt/apksigner" verify --print-certs "$apk")
+          printf '%s\n' "$certs" | grep -E '^Signer #1 certificate (DN|SHA-256)'
+          if printf '%s\n' "$certs" | grep -q '^Signer #2 '; then echo "more than one signer" >&2; exit 1; fi
+          if [ "$GITHUB_REF" != refs/heads/main ] &&
+             ! printf '%s\n' "$certs" | grep -qxF 'Signer #1 certificate DN: C=US, O=Android, CN=Android Debug'; then
+            echo "a build of $GITHUB_REF is signed with a key other than the runner's debug key" >&2
+            exit 1
+          fi
           "$bt/zipalign" -c -P 16 -v 4 "$apk" > /dev/null || { echo "APK is not 16 KB zip-aligned" >&2; exit 1; }
           files=$(unzip -Z1 "$apk")
           for f in assets/NOTICE assets/licenses/00-lightdecoder.txt assets/licenses/10-libheif.txt \
                    assets/licenses/11-libde265.txt assets/licenses/20-go-go.mau.fi_mautrix-gmessages.txt \
-                   assets/licenses/30-go.txt lib/arm64-v8a/libgojni.so lib/arm64-v8a/liblightdecoder.so; do
+                   assets/licenses/30-go.txt assets/licenses/40-android-libraries.txt \
+                   lib/arm64-v8a/libgojni.so lib/arm64-v8a/liblightdecoder.so; do
             printf '%s\n' "$files" | grep -qxF "$f" || { echo "release APK lacks $f" >&2; exit 1; }
+          done
+          apache=$(unzip -p "$apk" assets/licenses/40-android-libraries.txt)
+          for want in 'Apache License' 'androidx.core:core:' 'org.jetbrains.kotlin:kotlin-stdlib:'; do
+            printf '%s\n' "$apache" | grep -qF "$want" || { echo "40-android-libraries.txt lacks $want" >&2; exit 1; }
           done
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: lightdecoder
+          name: ${{ github.ref == 'refs/heads/main' && 'lightdecoder' || 'lightdecoder-preview' }}
           path: app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error

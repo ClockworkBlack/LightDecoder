@@ -44,7 +44,9 @@ itself.
 - **Animation.** Image sequences play on the view's frame clock.
 - **Receive / open.** Registers for `image/heic`, `image/heif`, their
   `-sequence` variants, and `.heic` / `.heif` / `.heics` by name, for both
-  "open with" and "share into".
+  "open with" and "share into". From other apps it takes `content://` links
+  only: `file://` paths, and links into LightDecoder's own storage, are
+  refused.
 - **Save / share.** Export the current frame to the gallery (scoped storage on
   Android 10+) or share it as a PNG via `FileProvider`.
 - **Details.** Reports container brands, size, bit depth, alpha, colour profile,
@@ -59,8 +61,8 @@ Verified against real iPhone sticker files and against synthetic files whose
 every pixel is known: still, opaque, transparent, animated (intra- and
 inter-coded) all decode correctly — through the native probe, through the JVM
 across the real JNI boundary (`tools/jni-smoke/`), and through the Android
-`Bitmap` path under Robolectric (`app/src/test/`: 16 decoder tests, out of 153
-unit tests in all; the Go bridge has another 40 of its own).
+`Bitmap` path under Robolectric (`app/src/test/`: 16 decoder tests, out of 253
+unit tests in all; the Go bridge has another 63 of its own).
 
 ## Automatic sticker inbox
 
@@ -112,40 +114,59 @@ connection and loads nothing.
 1. Setup first says plainly what the link is: that it emulates Messages for web
    over Google's private protocol, against Google's Terms of Service; that your
    data stays on the phone; that you confirm it on your phone; and how to stop
-   it. You tick a box to continue. On Android 13+ it then asks for notification
-   permission, because the connection's notification is how you see and stop it.
+   it. You tick a box to continue. Setup goes on only once the link's
+   notification can be shown, because that notification is how you see and
+   stop the connection: on Android 13+ it asks for notification permission,
+   and if notifications are off it explains why and opens the settings. On a
+   debug build it also warns that adb can read what the link stores, so use a
+   test account there.
 2. You sign in to the Google account that Google Messages on your phone uses,
    in a sign-in page inside the app. It is there only to obtain the cookies
    Messages for web uses (`SID`, `HSID`, `SSID`, `APISID`, `SAPISID`, `OSID`);
    only Google's own sites load in it, and its cookies and storage are wiped
-   before and after. Google sometimes refuses sign-in inside an embedded page;
-   then you can paste cookies copied from your own browser instead (as JSON, a
-   `Cookie:` header, or a "Copy as cURL" command). These are the only two places
-   cookies ever come from.
+   before and after (if the app is killed during sign-in, they are wiped the
+   next time it starts). Google sometimes refuses sign-in inside an embedded
+   page; then you can paste cookies copied from your own browser instead (as
+   JSON, a `Cookie:` header, or a "Copy as cURL" command), and the app takes
+   them off the clipboard afterwards if they are still there. These are the
+   only two places cookies ever come from.
 3. The app shows an emoji. Nothing is linked until **you** tap the same emoji in
    Google Messages on your phone. The app has no way to answer that prompt and
    does not try; it waits up to three minutes, and a wrong emoji or a timeout
    just means trying again. (This is Google-account pairing; QR-code pairing is
-   not offered.)
+   not offered.) Your phone then lists the link as "LightDecoder" under Device
+   pairing; a link made with an earlier 0.3.0 build shows as "libgm" until you
+   pair again.
 
 ### What it does once paired
 
 - **Conversations and threads.** Inbox, archived and spam folders; messages with
   sender names, delivery ticks, reply quotes, reactions, a typing indicator, and
-  pictures (HEIC included, through the app's own decoder).
+  pictures (HEIC included, through the app's own decoder). Pictures are
+  downloaded when shown. While disconnected that keeps working as long as the
+  sign-in token from the last connection is valid (up to about a day); after
+  that a picture shows "Connect to load" and loads once the link is back.
+- **Catching up.** Messages that arrived while the link was down are fetched
+  when it reconnects, newest first, up to 500 per conversation; anything older
+  is left to the history import or to scrolling up.
 - **Sending and managing.** Text and attachments (up to 100 MB), replies,
   reactions, deleting messages, archiving, muting and deleting conversations,
   and new conversations and groups. Sends go into an on-device queue that
-  survives restarts and waits for the connection.
+  survives restarts and waits for the connection. A send whose fate is
+  unclear (Google took it but the phone's answer never came, the app was
+  killed in the middle of it, or the phone never confirmed it within an hour,
+  even when asked) is never sent again by itself: it shows as not sent, and
+  you decide whether to try again, which may deliver it twice.
 - **Read and typing.** Opening a thread marks it read on the phone; typing sends
   the "is typing" signal.
 - **Search.** Full-text search over everything in the local archive.
 - **History import.** After pairing, the 25 newest conversations with 50
   messages each by default; "deep" imports 200 conversations with 1000 messages
   each, or it can be off. Scrolling up in a thread fetches older messages on demand.
-- **Stickers.** HEIC stickers that arrive through the link go into the sticker
-  inbox like the ones from notifications, without notification access. A
-  sticker caught both ways is kept once.
+- **Stickers.** HEIC stickers that arrive through the link (live, or fetched
+  when catching up) go into the sticker inbox like the ones from
+  notifications, without notification access. A sticker caught both ways is
+  kept once.
 - **Notifications for new messages** with Reply and Mark as read, off by default
   because Google Messages on the phone already notifies.
 
@@ -153,17 +174,28 @@ connection and loads nothing.
 
 - While connected, a notification is always shown, saying what the link is
   doing, with a one-tap **Disconnect**. The app only connects while that
-  foreground service runs.
+  foreground service runs and its notification can be seen: if you turn the
+  app's notifications (or the link's notification channel) off, the link
+  disconnects and does not connect until they are back on; the status
+  screen says "Notifications are off" and opens the settings for you. On Android
+  14+, where the notification can be swiped away, it comes straight back while
+  connected.
 - **Disconnect** closes the connection and keeps the pairing. **Unpair**, in the
   link's status screen, revokes the pairing on the phone, deletes the session,
   and optionally deletes the local archive; it stays available even after
-  Google has signed the link out. You can also remove the link on your phone in
-  Google Messages under Device pairing; once Google reports that, the app stops
-  and tells you to pair again.
+  Google has signed the link out. If the sign-in token expired while
+  disconnected, the revoke needs a short connection of its own, made while the
+  link's notification (or the unpair in progress on screen) is showing. If the
+  phone could not be told (no network, Google unreachable), the app says so
+  and asks you to remove "LightDecoder" under Device pairing in Google
+  Messages yourself. You can also remove the link there at any time; once
+  Google reports that, the app stops and tells you to pair again.
 - After the phone restarts, the link reconnects only if you left "stay
-  connected" and "start automatically" on. If Google signs the link out or
-  rejects the cookies, it stops and tells you to pair again. It never pairs
-  again by itself.
+  connected" and "start automatically" on, and the same goes for opening the
+  app while the link is not running, except that a start you asked for which
+  Android refused is tried again then. If Google signs the link out or rejects
+  the cookies, it stops and tells you to pair again. It never pairs again by
+  itself.
 
 ### What it costs
 
@@ -182,8 +214,8 @@ connection and loads nothing.
   open and the phone is pinged about once a minute, which costs battery on both
   devices. Battery optimisation can pause it; the status screen links to the
   setting.
-- **Size.** The Go library (`libgojni.so`) is 9.7 MB for `armeabi-v7a`, 9.8 MB
-  for `arm64-v8a` and 10.5 MB for `x86_64`, stored uncompressed. The APK carries
+- **Size.** The Go library (`libgojni.so`) is 9.8 MB for `armeabi-v7a`, 9.9 MB
+  for `arm64-v8a` and 10.6 MB for `x86_64`, stored uncompressed. The APK carries
   all three, so about 30 MB of the release APK's 38 MB is the link.
 - **Licence.** libgm is AGPL-3.0; see "Licence".
 
@@ -200,13 +232,21 @@ connection and loads nothing.
   `files/relay-media/`. The app does not encrypt the archive itself beyond
   Android's own storage encryption. It is excluded from cloud backup and from
   device-to-device transfer, like everything else the app stores.
+- **One phone per archive.** Conversation ids only mean something on the phone
+  they came from, so if you link a different phone or Google account, the
+  archive kept from the previous one is deleted before anything of the new one
+  is stored or sent.
 - **Logs record kinds only.** The link's activity log (on its status screen)
   records kinds and outcomes ("State: connected", "Send of a message failed:
   phone_not_responding"), never message text, names, numbers, the pairing emoji,
   cookies or keys. The Go side logs nothing: libgm's logger is turned off,
   because at its more detailed levels it logs decrypted data.
 - **Unpair cleans up.** It deletes the session, and with the checkbox the
-  archive and its media too. It never touches the sticker inbox.
+  archive and its media too. An archive you kept can be deleted later without
+  pairing again ("Delete local message archive" on the link's status screen,
+  or in the conversations menu); without a pairing, deleting a message or a
+  conversation removes it from this device only. None of this touches the
+  sticker inbox.
 
 How the link is built, and how to maintain it: `docs/google-messages-link.md`.
 
@@ -217,7 +257,11 @@ links `libgm` (`go.mau.fi/mautrix-gmessages`), which is AGPL-3.0, so the whole
 app is AGPL and its source stays available. Bundled decoder libraries libde265
 and libheif are each LGPL-3.0 and are used unmodified as git submodules under
 `third_party/`. Every third-party component and its licence is listed in
-[`NOTICE`](NOTICE).
+[`NOTICE`](NOTICE). The app ships the full texts too: About > Licences shows
+NOTICE and the licence of everything compiled into the APK (the app, the
+decoder libraries, each Go module and the Go runtime, and the Apache-2.0
+AndroidX, Material and Kotlin libraries), which the build collects into the
+APK's assets.
 
 ## Building
 
@@ -226,8 +270,11 @@ CMake 3.31+, JDK 17, and Go.
 
 - **Go.** `gmbridge/go.mod` pins `toolchain go1.26.11`, and the build uses
   exactly that toolchain: any Go 1.21 or newer on `PATH` downloads it by
-  itself. If Gradle does not see your Go, pass `-Pgmbridge.go=/path/to/go` (or
-  set `gmbridge.go` in `~/.gradle/gradle.properties`).
+  itself, and the build checks the result. If Gradle does not see your Go, or
+  you want another one, pass `-Pgmbridge.go=/path/to/go` (or set `gmbridge.go`
+  in `~/.gradle/gradle.properties`); it may name any Go 1.21+ binary or a
+  golang.org/dl wrapper such as `go1.26.11`, and gomobile then runs exactly
+  that toolchain.
 - **SDK location.** Set `ANDROID_HOME` (or `sdk.dir` in `local.properties`).
   The Go build passes it on to gomobile, which needs the NDK and an SDK
   platform of at least 26.
@@ -240,6 +287,13 @@ CMake 3.31+, JDK 17, and Go.
 - **Unit tests** also need the Go bridge (the app does not compile without the
   aar), and they build the native decoder for the build machine, so they need
   `cmake` and a C++20 compiler as well.
+- **16 KB pages.** Both native libraries are linked with 16 KB-aligned
+  segments and the APK is zip-aligned for 16 KB pages, as Android 15+ devices
+  with 16 KB pages need.
+- **Licences.** The build writes NOTICE and the licence texts into the APK's
+  assets (`bundleLicenses`). It fails if a Go module linked into the app has no
+  licence file, or an Android library outside the known Apache-2.0 ones is
+  added.
 
 ```sh
 git clone --recurse-submodules https://github.com/ClockworkBlack/lightdecoder
@@ -249,20 +303,28 @@ export ANDROID_HOME=/path/to/android-sdk
 # → app/build/outputs/apk/release/app-release.apk (install this one)
 
 ./gradlew :app:testDebugUnitTest                 # Robolectric unit tests
-(cd gmbridge && go vet ./... && go test ./...)   # Go bridge tests
+(cd gmbridge && go vet ./... && go test -race -count=1 ./...)   # Go bridge tests (-race needs cgo)
 ```
 
 Release signing: set `LIGHTDECODER_KEYSTORE`, `LIGHTDECODER_KEYSTORE_PASSWORD`,
 `LIGHTDECODER_KEY_ALIAS` and optionally `LIGHTDECODER_KEY_PASSWORD` (or the
 Gradle properties `lightdecoder.keystore`, `lightdecoder.keystorePassword`,
 `lightdecoder.keyAlias`, `lightdecoder.keyPassword`). Without them the release
-APK is signed with the local debug key; it is still not debuggable. The CI
-artifact is `lightdecoder` (the release APK).
+APK is signed with the local debug key; it is still not debuggable.
+
+CI (`.github/workflows/android.yml`) runs the Go checks with `-race`, the unit
+tests, and checks on the release APK (not debuggable, signer, 16 KB
+alignment, licence files). Only builds of `main` are signed with the release
+key (its secrets belong in the repository's `release` environment, limited
+to `main`); the artifact is then `lightdecoder`. Pull requests and other
+branches build `lightdecoder-preview`, signed with the CI runner's throwaway
+debug key, so it cannot update an installed release.
 
 Debug builds (`assembleDebug`, installed side by side as
 `com.lightdecoder.debug`) are debuggable: anyone with adb on the phone can read
 their message archive and Google Messages session. Use them only for
-development, with test accounts.
+development, with test accounts; the pairing screen of a debug build says so
+too.
 
 If you cloned without `--recurse-submodules`:
 
@@ -281,7 +343,7 @@ app/src/main/java/
   .../relay/             the Google Messages link at runtime: GoRelayBridge, RelayManager,
                          RelayService, outbox, history import, encrypted session vault
   .../archive/           local SQLite message archive with FTS4 search, media cache
-  .../ui/                inbox + viewer screens
+  .../ui/                inbox, viewer and licence screens
   .../ui/relay/          link setup (disclosure, sign-in, emoji) and status screens
   .../ui/chat/           conversations, thread, new conversation
 app/src/test/            Robolectric unit tests: decoder, archive, link runtime (against a
@@ -289,6 +351,7 @@ app/src/test/            Robolectric unit tests: decoder, archive, link runtime 
 gmbridge/                Go module wrapping libgm; gomobile binds it into app/libs/gmbridge.aar
 third_party/libde265     HEVC decoder (submodule, pinned)
 third_party/libheif      HEIF container (submodule, pinned)
+third_party/licenses/    the Apache-2.0 text shipped for the Android libraries
 tools/jni-smoke/         host-side decode/JNI verification harness
 tools/make-test-media/   generator of the unit tests' synthetic HEIC files
 docs/rcs-integration.md  the five RCS access pathways, which two LightDecoder uses, and why

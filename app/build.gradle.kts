@@ -151,10 +151,12 @@ val goToolchain: String = File(goModuleDir, "go.mod").readLines()
     ?: throw GradleException("gmbridge/go.mod has no toolchain line; the Go bridge build needs one.")
 
 // Optional override: -Pgmbridge.go=/path/to/go, or gmbridge.go=... in ~/.gradle/gradle.properties.
+// It may name any Go 1.21+ binary, including a golang.org/dl wrapper such as go1.26.11.
 val goExe: String = providers.gradleProperty("gmbridge.go").orNull?.takeIf { it.isNotBlank() } ?: "go"
 val goHint = "The Google Messages bridge needs Go 1.21 or newer: it builds with $goToolchain " +
     "(the toolchain line of gmbridge/go.mod), which Go downloads by itself unless it is the Go " +
-    "installed. Put Go on the PATH that Gradle sees, or set gmbridge.go=/path/to/go " +
+    "installed. Put Go on the PATH that Gradle sees, or set gmbridge.go to any Go 1.21+ binary " +
+    "or golang.org/dl wrapper, e.g. gmbridge.go=/path/to/go or gmbridge.go=$goToolchain " +
     "(-P on the command line, or in ~/.gradle/gradle.properties)."
 
 val buildGomobileTools by tasks.registering(Exec::class) {
@@ -207,7 +209,9 @@ val buildGoBridge by tasks.registering(Exec::class) {
     val aar = goBridgeAar
     val tools = goToolsDir
     val toolchain = goToolchain
-    val goBin = File(goExe).takeIf { it.isAbsolute }?.parentFile?.path // gomobile runs `go` from PATH
+    val exe = goExe
+    val modDir = goModuleDir
+    val hint = goHint
     val sdk = androidComponents.sdkComponents.sdkDirectory
     val ndk = androidComponents.sdkComponents.ndkDirectory // honours ndkVersion
 
@@ -228,17 +232,43 @@ val buildGoBridge by tasks.registering(Exec::class) {
     environment("ANDROID_HOME", sdk.get().asFile.path)
     environment("ANDROID_NDK_HOME", ndk.get().asFile.path)
     environment("GOTOOLCHAIN", toolchain) // inherited by every `go` that gomobile runs
-    environment(
-        "PATH",
-        listOfNotNull(tools.path, goBin, File(System.getProperty("java.home"), "bin").path, System.getenv("PATH"))
-            .joinToString(File.pathSeparator), // gobind + go + javac
-    )
     commandLine(
         File(tools, "gomobile").path, "bind",
         "-target=$targets", "-androidapi", androidApi, "-javapkg", javaPkg,
         "-trimpath", "-ldflags=$ldflags",
         "-o", aar.path, ".",
     )
+    doFirst {
+        // gomobile and gobind always run `go` from PATH, whatever gmbridge.go
+        // names (e.g. a golang.org/dl wrapper called go1.26.11, with an older
+        // Go or none at all on PATH). So ask the configured Go for the root of
+        // the pinned toolchain (after any toolchain switch) and put that root's
+        // bin first on PATH, so every `go` they run is exactly that binary.
+        fun run(cmd: String, vararg args: String): String {
+            val (code, out) = try {
+                val p = ProcessBuilder(cmd, *args).directory(modDir).redirectErrorStream(true)
+                    .apply { environment()["GOTOOLCHAIN"] = toolchain }.start()
+                val text = p.inputStream.bufferedReader().readText()
+                p.waitFor() to text.trim()
+            } catch (e: IOException) {
+                throw GradleException("Could not run '$cmd'. $hint", e)
+            }
+            if (code != 0) throw GradleException("'$cmd ${args.joinToString(" ")}' failed: $out\n$hint")
+            return out.lineSequence().last().trim() // a toolchain download may print "go: downloading ..." first
+        }
+        val goroot = File(run(exe, "env", "GOROOT"))
+        val goBin = File(goroot, "bin")
+        val go = File(goBin, if (System.getProperty("os.name").startsWith("Windows")) "go.exe" else "go")
+        if (!go.isFile) throw GradleException("'$exe env GOROOT' gave $goroot, which has no $go. $hint")
+        val version = run(go.path, "env", "GOVERSION").substringBefore(' ')
+        if (version != toolchain) throw GradleException("$go runs $version instead of $toolchain. $hint")
+        environment("GOROOT", goroot.path) // not one inherited from a different Go
+        environment(
+            "PATH",
+            listOfNotNull(tools.path, goBin.path, File(System.getProperty("java.home"), "bin").path, System.getenv("PATH"))
+                .joinToString(File.pathSeparator), // gobind + go + javac
+        )
+    }
 }
 
 // --- licence notices in the APK ----------------------------------------------
@@ -248,6 +278,9 @@ val buildGoBridge by tasks.registering(Exec::class) {
 // are read from the build info of the libgojni.so files just built, so a new or
 // updated dependency cannot be missed, and one without a licence file fails the
 // build. It also checks that each libgojni.so was built with the pinned Go.
+// The Android libraries compiled into classes.dex are read from the release
+// runtime classpath; all are Apache-2.0, and one outside the known Apache-2.0
+// groups fails the build until its licence is added here.
 
 val generatedLicensesDir: File = layout.buildDirectory.dir("generated/licenses").get().asFile
 
@@ -264,10 +297,26 @@ val bundleLicenses by tasks.registering {
         Triple("10-libheif.txt", "libheif (in liblightdecoder.so)", rootProject.file("third_party/libheif/COPYING")),
         Triple("11-libde265.txt", "libde265 (in liblightdecoder.so)", rootProject.file("third_party/libde265/COPYING")),
     )
+    // AndroidX, Material Components, Kotlin and kotlinx.coroutines ship no
+    // licence text in their artifacts (and AGP drops META-INF licence files),
+    // so the Apache-2.0 text they are under is kept in the repository.
+    val apacheLicense = rootProject.file("third_party/licenses/Apache-2.0.txt")
+    val apacheLibrary = Regex(
+        "(androidx\\.[^:]+|com\\.google\\.android\\.material|org\\.jetbrains\\.kotlinx?):[^:]+" +
+            "|org\\.jetbrains:annotations|org\\.jspecify:jspecify" +
+            "|com\\.google\\.guava:listenablefuture|com\\.google\\.errorprone:error_prone_annotations",
+    )
+    val androidLibraries = provider { configurations.getByName("releaseRuntimeClasspath") }.map { classpath ->
+        classpath.incoming.resolutionResult.allComponents
+            .mapNotNull { it.id as? ModuleComponentIdentifier }
+            .map { "${it.group}:${it.module}:${it.version}" }
+            .sorted()
+    }
     inputs.files(buildGoBridge).withPropertyName("goBridge")
     inputs.file(notice).withPropertyName("notice")
-    inputs.files(fixed.map { it.third }).withPropertyName("licenseFiles")
+    inputs.files(fixed.map { it.third } + apacheLicense).withPropertyName("licenseFiles")
     inputs.property("goToolchain", toolchain)
+    inputs.property("androidLibraries", androidLibraries)
     outputs.dir(out)
 
     doLast {
@@ -280,8 +329,9 @@ val bundleLicenses by tasks.registering {
         }
         val licenceName = Regex("(?i)^(licen[cs]e|copying|unlicense)([._-].*)?$")
         val extraName = Regex("(?i)^(notice|patents)([._-].*)?$")
-        fun licenceText(heading: String, files: List<File>): String = buildString {
+        fun licenceText(heading: String, files: List<File>, intro: String = ""): String = buildString {
             append(heading).append("\n")
+            if (intro.isNotEmpty()) append("\n").append(intro.trimEnd()).append("\n")
             for (f in files) append("\n==== ").append(f.name).append(" ====\n\n").append(f.readText().trimEnd()).append("\n")
         }
 
@@ -291,6 +341,28 @@ val bundleLicenses by tasks.registering {
         for ((name, heading, file) in fixed) {
             File(licenses, name).writeText(licenceText(heading, listOf(file)))
         }
+
+        // The Android libraries compiled into classes.dex.
+        val libraries = androidLibraries.get()
+        if (libraries.isEmpty()) throw GradleException("No Android libraries on the release runtime classpath")
+        val unknown = libraries.filterNot { apacheLibrary.matches(it.substringBeforeLast(':')) }
+        if (unknown.isNotEmpty()) {
+            throw GradleException(
+                "Not known to be Apache-2.0: ${unknown.joinToString()}; add its licence text to bundleLicenses " +
+                    "(app/build.gradle.kts) and NOTICE before shipping it",
+            )
+        }
+        if (!Regex("Apache License\\s+Version 2\\.0, January 2004").containsMatchIn(apacheLicense.readText())) {
+            throw GradleException("$apacheLicense is not the Apache License 2.0 text")
+        }
+        File(licenses, "40-android-libraries.txt").writeText(
+            licenceText(
+                "AndroidX, Material Components, Kotlin standard library, kotlinx.coroutines (Apache-2.0, in classes.dex)",
+                listOf(apacheLicense),
+                intro = "These libraries are under the Apache License 2.0, below:\n\n" +
+                    libraries.joinToString("\n") { "  $it" },
+            ),
+        )
 
         // The Go modules linked into libgojni.so, from each ABI's build info.
         val work = temporaryDir.apply { listFiles()?.forEach { it.deleteRecursively() } }
@@ -314,15 +386,33 @@ val bundleLicenses by tasks.registering {
         }
 
         // Where each module's source is (its licence files are at its root).
-        val modules = go(
+        fun moduleList() = go(
             modDir, "list", "-m", "-f",
             "{{.Main}}\t{{.Path}}\t{{.Version}}\t{{with .Replace}}{{.Dir}}{{else}}{{.Dir}}{{end}}", "all",
         ).lines().map { it.split('\t') }.filter { it.size == 4 }.associateBy { it[1] }
+        var modules = moduleList()
+        // `go list -m` reports .Dir only for a module already extracted in the
+        // module cache (and exits 0 with an empty one otherwise): the cache may
+        // have been cleaned, or be another GOMODCACHE, since libgojni.so was
+        // built. Fetch the linked modules it lacks, then look again.
+        val absent = linked.filter { (path, version) ->
+            modules[path]?.let { it[0] != "true" && it[2] == version && it[3].isBlank() } == true
+        }
+        if (absent.isNotEmpty()) {
+            go(modDir, "mod", "download", *absent.map { (path, version) -> "$path@$version" }.toTypedArray())
+            modules = moduleList()
+        }
         for ((path, version) in linked) {
             val m = modules[path]
                 ?: throw GradleException("Go module $path is in libgojni.so but not in gmbridge's module list")
             if (m[0] == "true") continue // gmbridge itself: this app's code, under its LICENSE
             if (m[2] != version) throw GradleException("Go module $path: libgojni.so has $version, go.mod ${m[2]}")
+            if (m[3].isBlank()) {
+                throw GradleException(
+                    "Go module $path $version is not in the Go module cache (GOMODCACHE), and " +
+                        "'go mod download' in gmbridge/ did not put it there",
+                )
+            }
             val dir = File(m[3])
             val files = dir.listFiles().orEmpty().filter { it.isFile }.sortedBy { it.name }
             val texts = files.filter { licenceName.matches(it.name) }

@@ -25,9 +25,17 @@ type stateCache struct {
 	// isDefaultSMSApp is optional in the settings proto and missing from some
 	// events, so the last value seen is kept (connector mergeSettings).
 	isDefaultSMSApp bool
-	// forceRCS: conversations whose latest protocol-switch tombstone says
-	// they became end-to-end encrypted (connector PortalMetadata.ForceRCS).
-	forceRCS map[string]bool
+	// forceRCS: per conversation, what its newest protocol-switch tombstone
+	// seen so far says (connector PortalMetadata.ForceRCS). The connector
+	// keeps that in its database; here it comes from live events, history
+	// pages and the archive (SeedProtocolSwitches), in any order, so each
+	// entry keeps its tombstone's time and an older one never overrides it.
+	forceRCS map[string]protocolSwitch
+}
+
+type protocolSwitch struct {
+	force bool
+	tsMs  int64
 }
 
 type indexedMessage struct {
@@ -50,7 +58,7 @@ func (c *stateCache) reset() {
 	c.msgIndex = make(map[string]indexedMessage)
 	c.msgOrder = nil
 	c.isDefaultSMSApp = false
-	c.forceRCS = make(map[string]bool)
+	c.forceRCS = make(map[string]protocolSwitch)
 }
 
 func (c *stateCache) putConversation(conv *gmproto.Conversation) {
@@ -152,36 +160,49 @@ func (c *stateCache) message(id string) (indexedMessage, bool) {
 // saying the chat switched to end-to-end encryption (235/237) turns ForceRCS
 // on for it, one saying it switched away (236/238) turns it off. Like the
 // connector it looks only at these one-to-one tombstones, not the group
-// variants. Other messages change nothing.
+// variants. Other messages change nothing, and so does a tombstone older
+// than the one already recorded for the chat.
 func (c *stateCache) noteProtocolSwitch(msg *gmproto.Message) {
-	var force bool
-	switch msg.GetMessageStatus().GetStatus() {
-	case gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_RCS_TO_E2EE,
-		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_TEXT_TO_E2EE:
-		force = true
-	case gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_E2EE_TO_RCS,
-		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_E2EE_TO_TEXT:
-		force = false
-	default:
+	force, ok := protocolSwitchForce(msg.GetMessageStatus().GetStatus())
+	if !ok {
 		return
 	}
-	id := msg.GetConversationID()
-	if id == "" {
+	c.recordProtocolSwitch(msg.GetConversationID(), force, microsToMillis(msg.GetTimestamp()))
+}
+
+// protocolSwitchForce reports whether a protocol-switch tombstone status
+// turns ForceRCS on; ok is false for any other status.
+func protocolSwitchForce(st gmproto.MessageStatusType) (force, ok bool) {
+	switch st {
+	case gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_RCS_TO_E2EE,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_TEXT_TO_E2EE:
+		return true, true
+	case gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_E2EE_TO_RCS,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_E2EE_TO_TEXT:
+		return false, true
+	}
+	return false, false
+}
+
+// recordProtocolSwitch records what a tombstone at tsMs says, unless a newer
+// one was recorded for the conversation already. At equal times the later
+// report wins.
+func (c *stateCache) recordProtocolSwitch(conversationID string, force bool, tsMs int64) {
+	if conversationID == "" {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if force {
-		c.forceRCS[id] = true
-	} else {
-		delete(c.forceRCS, id)
+	if cur, known := c.forceRCS[conversationID]; known && tsMs < cur.tsMs {
+		return
 	}
+	c.forceRCS[conversationID] = protocolSwitch{force: force, tsMs: tsMs}
 }
 
-// shouldForceRCS reports what noteProtocolSwitch last recorded for the
-// conversation (false if nothing was seen, as for a new connector portal).
+// shouldForceRCS reports what the conversation's newest known tombstone says
+// (false if none is known, as for a new connector portal).
 func (c *stateCache) shouldForceRCS(conversationID string) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.forceRCS[conversationID]
+	return c.forceRCS[conversationID].force
 }

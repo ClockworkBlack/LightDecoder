@@ -76,6 +76,39 @@ class RelayServiceTest {
     }
 
     @Test
+    fun aStopThatFoundNoStartPendingCannotOvertakeANewStart() {
+        // stop() and start() run on different threads. A stop that checked
+        // "no start pending" must reach Android before a start that came
+        // after that check, or Android stops a service that still has to go
+        // foreground (and crashes the app).
+        env.pairedManager()
+        val order = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val stopping = java.util.concurrent.CountDownLatch(1)
+        val started = java.util.concurrent.CountDownLatch(1)
+        val context = object : android.content.ContextWrapper(env.context) {
+            override fun startForegroundService(service: Intent?): android.content.ComponentName? {
+                order += "start"
+                started.countDown()
+                return super.startForegroundService(service)
+            }
+
+            override fun stopService(name: Intent?): Boolean {
+                stopping.countDown()
+                // Gives a start racing with this stop the time to get through, if it can.
+                started.await(300, java.util.concurrent.TimeUnit.MILLISECONDS)
+                order += "stop"
+                return super.stopService(name)
+            }
+        }
+        val stopper = Thread { RelayService.stop(context) }.apply { start() }
+        assertTrue(stopping.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        val starter = Thread { RelayService.start(context) }.apply { start() }
+        stopper.join(5_000)
+        starter.join(5_000)
+        assertEquals(listOf("stop", "start"), order.toList())
+    }
+
+    @Test
     fun stopsItselfWhenTheUserDoesNotWantTheLinkLive() {
         env.pairedManager()
         RelayPrefs.setLiveEnabled(env.context, false)

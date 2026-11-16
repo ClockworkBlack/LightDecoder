@@ -112,8 +112,6 @@ type GMBridge struct {
 	// Connect resets them (resetConnectionFlags).
 	browserActive     atomic.Bool
 	syncingMobileDB   atomic.Bool
-	hackyScheduled    atomic.Bool
-	setActiveRetrying atomic.Bool  // postConnect's SetActiveSession failed; retry running
 	needResync        atomic.Bool  // a retried SetActiveSession went through; resync on BROWSER_ACTIVE
 	inactiveElsewhere atomic.Bool  // another browser is the phone's active session
 	inactiveDetail    atomic.Value // string: the last BROWSER_INACTIVE* alert name
@@ -121,6 +119,16 @@ type GMBridge struct {
 	noDataRecently    atomic.Bool  // libgm reported a data gap: catch up once data flows again
 	pollDown          atomic.Bool  // the long poll reported a temporary error and has not recovered
 	throttleResync    atomic.Bool  // the phone stopped throttling pushes; a delayed resync is pending
+
+	// Each libgm long-poll loop (Connect, Connect's restart, libgm's ping
+	// recovery) sends its own SetActiveSession, with a new session ID, so the
+	// helpers that follow one up run once per loop, not once per connection:
+	// a newer request supersedes an older one (see supersedeForConnection).
+	// Never reset; activations counts BROWSER_ACTIVE alerts, so a helper can
+	// tell whether the phone confirmed a session after it was started.
+	hackyEpoch     atomic.Uint64
+	setActiveEpoch atomic.Uint64
+	activations    atomic.Uint64
 
 	// Per client: libgm's phone liveness state survives Disconnect/Connect
 	// and it reports PhoneNotResponding only once per outage, so this is
@@ -303,7 +311,14 @@ func (b *GMBridge) Connect() (err error) {
 		b.mu.Unlock()
 		if b.pollDown.Load() && !longPollOpen(cli) {
 			// Reconnect ends the sleeping loop (it exits when it wakes) and
-			// starts a fresh one whose first attempt is immediate.
+			// starts a fresh one whose first attempt is immediate. The fresh
+			// loop does not know how long the poll was down, so libgm's
+			// catch-up after a gap (NoDataReceived) never runs, and Kotlin's
+			// once-per-Connect sync does not run either (no "connecting").
+			// What the phone sent meanwhile may not be redelivered: catch up
+			// on the first data or BROWSER_ACTIVE, as after a reported gap.
+			// Set first, so no event of the new loop can come before it.
+			b.noDataRecently.Store(true)
 			if rerr := restartLongPoll(cli); rerr != nil {
 				return toBridgeError(rerr)
 			}
@@ -344,8 +359,6 @@ func (b *GMBridge) Connect() (err error) {
 func (b *GMBridge) resetConnectionFlags() {
 	b.browserActive.Store(false)
 	b.syncingMobileDB.Store(false)
-	b.hackyScheduled.Store(false)
-	b.setActiveRetrying.Store(false)
 	b.needResync.Store(false)
 	b.inactiveElsewhere.Store(false)
 	b.inactiveDetail.Store("")

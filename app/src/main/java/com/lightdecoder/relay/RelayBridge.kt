@@ -34,6 +34,14 @@ interface RelayBridge : java.io.Closeable {
     fun unpair()
     fun exportSession(): ByteArray?
 
+    /**
+     * Tells the bridge each chat's newest protocol-switch tombstone that the
+     * archive holds, so that after a restart a send keeps an end-to-end
+     * encrypted chat on RCS before that tombstone shows up again (Go:
+     * SeedProtocolSwitches). Never touches the network.
+     */
+    fun seedProtocolSwitches(seed: List<ProtocolSwitchSeed>)
+
     fun listConversations(folder: Folder, count: Int): List<ConversationDto>
     fun getConversation(id: String): ConversationDto
     fun fetchMessages(conversationId: String, count: Int, cursor: Cursor?): MessagePage

@@ -170,27 +170,37 @@ class RelayService : Service() {
 
         /** Starts the service in the foreground. False if Android refused (e.g. started from the background). */
         fun start(context: Context): Boolean {
-            val pending = RelayManager.get(context).serviceStartsPending
-            pending.incrementAndGet()
-            return try {
-                ContextCompat.startForegroundService(
-                    context,
-                    Intent(context, RelayService::class.java).putExtra(EXTRA_FOREGROUND_START, true),
-                )
-                true
-            } catch (e: IllegalStateException) {
-                pending.decrementAndGet()
-                // Includes ForegroundServiceStartNotAllowedException (Android 12+).
-                // The next screen the user opens starts it again.
-                RelayManager.get(context).resumeOnVisible = true
-                RelayLog.add(context, "Android did not allow starting the link now: ${e.javaClass.simpleName}")
-                false
-            } catch (e: SecurityException) {
-                pending.decrementAndGet()
-                RelayManager.get(context).resumeOnVisible = true
-                RelayLog.add(context, "Android did not allow starting the link: ${e.javaClass.simpleName}")
-                false
-            }
+            val manager = RelayManager.get(context)
+            val pending = manager.serviceStartsPending
+            // Counted and handed to Android in one step as far as stop() can tell.
+            val refused = synchronized(manager.serviceStartLock) {
+                pending.incrementAndGet()
+                try {
+                    ContextCompat.startForegroundService(
+                        context,
+                        Intent(context, RelayService::class.java).putExtra(EXTRA_FOREGROUND_START, true),
+                    )
+                    null
+                } catch (e: IllegalStateException) {
+                    // Includes ForegroundServiceStartNotAllowedException (Android 12+).
+                    pending.decrementAndGet()
+                    e
+                } catch (e: SecurityException) {
+                    pending.decrementAndGet()
+                    e
+                }
+            } ?: return true
+            // The next screen the user opens starts it again.
+            manager.resumeOnVisible = true
+            RelayLog.add(
+                context,
+                if (refused is SecurityException) {
+                    "Android did not allow starting the link: ${refused.javaClass.simpleName}"
+                } else {
+                    "Android did not allow starting the link now: ${refused.javaClass.simpleName}"
+                },
+            )
+            return false
         }
 
         /**
@@ -199,8 +209,12 @@ class RelayService : Service() {
          * requires it) and then stops, since the link is no longer wanted.
          */
         fun stop(context: Context) {
-            if (RelayManager.get(context).serviceStartsPending.get() > 0) return
-            context.stopService(Intent(context, RelayService::class.java))
+            val manager = RelayManager.get(context)
+            // Checked and asked in one step as far as start() can tell (see serviceStartLock).
+            synchronized(manager.serviceStartLock) {
+                if (manager.serviceStartsPending.get() > 0) return
+                context.stopService(Intent(context, RelayService::class.java))
+            }
         }
 
         /** The notification's Disconnect button. */

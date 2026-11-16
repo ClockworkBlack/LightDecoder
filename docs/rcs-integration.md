@@ -90,28 +90,54 @@ Each one is enforced in code, not just in the UI copy.
   read cookies or accounts from other apps, from browsers, or from Android's
   account manager. Once read, cookies are wiped from the WebView, held in
   memory until pairing ends, and from then on stored only inside the encrypted
-  session. They are never logged.
-- **Visible.** The app only connects while its foreground service runs, and
-  that service always shows a notification with what the link is doing and a
-  one-tap Disconnect. On Android 13+ notification permission is asked for
-  before the link goes live, so that notification is not hidden. The paired
-  session also shows on the phone, in Google Messages under Device pairing.
+  session. A sign-in cut short (the app killed mid-way) leaves a marker, and
+  the next start of the app deletes the WebView's data. Pasted cookies are
+  taken off the clipboard if it still holds them. They are never logged.
+- **Visible.** The app only connects while its foreground service runs and
+  that service's notification, with what the link is doing and a one-tap
+  Disconnect, can be seen. Setup does not go on until it can (on Android 13+
+  it asks for the permission). If the user later turns the app's
+  notifications or the link's channel off, the link goes down (at once on
+  Android 9+, which reports the change; on Android 8 when a screen of the app
+  is next shown) and stays down, with "Notifications are off" on its status
+  screen, until they are back on. On Android 14+, where the
+  notification can be swiped away, it is posted again while connected. The
+  paired session also shows on the phone, in Google Messages under Device
+  pairing, as "LightDecoder" (a pairing made with an earlier 0.3.0 build shows
+  as "libgm" until paired again).
 - **Revocable.** Disconnect (keeps the pairing) is offered in the
   notification and the app whenever the link is up or trying to connect.
   Unpair (revokes the pairing on the phone, deletes the session, and
   optionally the local archive) is offered whenever a pairing exists, and
-  still after Google has signed the link out or rejected its cookies.
-  Removing the session on the phone ends it too.
+  still after Google has signed the link out or rejected its cookies. If the
+  revoke needs a short connection first (the sign-in token expired while
+  disconnected), it is made while the link's notification, or the unpair in
+  progress on screen, is showing. If the phone cannot be told, the app says so
+  and asks the user to remove "LightDecoder" under Device pairing themselves.
+  Removing the session on the phone ends it too. Once the bridge drops a
+  client (Unpair, a lost pairing, a new pairing), that client's requests fail
+  inside the app, so libgm's background goroutines can no longer send the
+  account's cookies to Google; a long poll libgm reopens by itself after
+  Disconnect is closed again.
 - **Local-only.** No LightDecoder servers, no analytics, no crash reporting. The
   session is encrypted at rest with an Android Keystore AES-256-GCM key. The
   message archive is app-private SQLite. Backup and device-to-device transfer
-  exclude everything the app stores.
+  exclude everything the app stores. The archive belongs to one phone: linking
+  a different phone or Google account deletes it before anything of the new
+  one is stored or sent, and an archive kept after Unpair can be deleted
+  without pairing again. Release builds are not debuggable; debug builds
+  (installed separately as `com.lightdecoder.debug`) are, and their pairing
+  screen warns that adb can read the archive and the session.
 - **No covert mode.** There is no setting that hides the notification, connects
   without the service, pairs without the emoji step, exports the session, or
-  lets another app drive the link. The link's service, screens and reply
-  receiver are not exported; its one exported receiver reacts only to the
-  system's boot and app-update broadcasts, and then only starts the visible
-  service if the user chose to stay connected.
+  lets another app drive the link. The link's service, screens, reply receiver
+  and reconnect alarm receiver are not exported. Its two exported receivers
+  react only to protected system broadcasts (boot and app update; the user
+  turning the app's notifications or a channel off or on), and at most start
+  the visible service, only if the user chose to stay connected (and, after a
+  boot, to start automatically). A screen another app opens starts the link
+  only if "start automatically" is on, or a start the user asked for was
+  refused by Android and is still due.
 - **Content-free logs.** The link's activity log and the Go side record kinds
   and outcomes only: never message text, names, numbers, the pairing emoji,
   cookies or keys. libgm's own logging is turned off, because at its detailed
@@ -136,14 +162,16 @@ What it costs:
   the app, that can no longer be assumed.
 - **Licence.** libgm is AGPL-3.0 and is now actually linked, so the app is
   AGPL-3.0-or-later (it already was, in anticipation) and its source stays
-  public. Attribution is in `NOTICE`.
-- **Permissions and size.** The app now needs `INTERNET` (0.2 had no network
-  permission at all), foreground-service and boot permissions. The Go library
-  adds about 10 MB per CPU type, about 30 MB to an APK carrying three.
+  public. Attribution is in `NOTICE`, and the app ships every licence text of
+  what it contains (About > Licences).
+- **Permissions and size.** The app now needs `INTERNET` and
+  `ACCESS_NETWORK_STATE` (0.2 had no network permission at all),
+  foreground-service and boot permissions. The Go library adds about 10 MB
+  per CPU type, about 30 MB to an APK carrying three.
 - **Battery and dependence on the phone.** While connected, the app keeps a
   long-poll connection to Google open and the phone answers a ping about once
-  a minute. The phone has to be on and online, and only one web session can be
-  active at a time.
+  a minute; after an error it reconnects on a wake-up alarm. The phone has to
+  be on and online, and only one web session can be active at a time.
 - **Sign-in friction.** Google may refuse sign-in inside an embedded WebView;
   the fallback is pasting cookies, which is less friendly.
 

@@ -46,6 +46,13 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
     val pages = ConcurrentHashMap<String, ConcurrentLinkedQueue<MessagePage>>()
     val fetches = CopyOnWriteArrayList<Triple<String, Int, Cursor?>>()
 
+    /**
+     * When set, fetches of its conversations are answered from it as the
+     * phone does (the newest [count] below the cursor, oldest first, with a
+     * cursor while more remain) instead of from [pages].
+     */
+    val history = ConcurrentHashMap<String, List<MessageDto>>()
+
     /** Conversations whose every fetch fails with this. */
     val failFetches = ConcurrentHashMap<String, RelayException>()
 
@@ -77,6 +84,13 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
     /** Runs inside unpair() before the pairing is dropped (Go may hold a short connection here). */
     @Volatile
     var duringUnpair: (() -> Unit)? = null
+
+    /**
+     * How long after unpair() returned its callbacks arrive. Go's Unpair
+     * only queues them on its dispatcher, which calls into the app later.
+     */
+    @Volatile
+    var unpairCallbackDelayMs = 50L
 
     // --- media
     val media = ConcurrentHashMap<String, ByteArray>()
@@ -143,11 +157,24 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
         duringUnpair?.invoke()
         paired = false
         connected = false
-        sink.onSession(null)
-        emitState("unpaired", unpairCode, if (unpairCode.isEmpty()) "" else "the phone may still list this device")
+        val code = unpairCode
+        val delayMs = unpairCallbackDelayMs
+        // As Go's dispatcher would: in order, from its own thread, after unpair() returned.
+        Thread {
+            Thread.sleep(delayMs)
+            sink.onSession(null)
+            emitState("unpaired", code, if (code.isEmpty()) "" else "the phone may still list this device")
+        }.apply { isDaemon = true }.start()
     }
 
     override fun exportSession(): ByteArray? = if (paired) SESSION else null
+
+    /** Every seedProtocolSwitches() call's seed, in order (kept out of [calls]). */
+    val seeds = CopyOnWriteArrayList<List<ProtocolSwitchSeed>>()
+
+    override fun seedProtocolSwitches(seed: List<ProtocolSwitchSeed>) {
+        seeds += seed
+    }
 
     override fun listConversations(folder: Folder, count: Int): List<ConversationDto> {
         calls += "listConversations"
@@ -167,6 +194,12 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
         requireConnected()
         failFetches[conversationId]?.let { throw it }
         fetches += Triple(conversationId, count, cursor)
+        history[conversationId]?.let { all ->
+            val below = all.filter { cursor == null || it.timestampMs < cursor.lastItemTimestampMs }.sortedByDescending { it.timestampMs }
+            val page = below.take(count)
+            val next = if (below.size > count) page.last().let { Cursor(it.id, it.timestampMs) } else null
+            return MessagePage(page.reversed(), next)
+        }
         return pages[conversationId]?.poll() ?: MessagePage(emptyList(), null)
     }
 
@@ -226,22 +259,23 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
 
     override fun deleteMessage(messageId: String) {
         calls += "deleteMessage"
-        requirePaired()
+        // Go sends these to the phone: they need a live link, like the other calls.
+        requireConnected()
     }
 
     override fun setConversationStatus(conversationId: String, status: String) {
         calls += "setConversationStatus:$status"
-        requirePaired()
+        requireConnected()
     }
 
     override fun setConversationMuted(conversationId: String, muted: Boolean) {
         calls += "setConversationMuted:$muted"
-        requirePaired()
+        requireConnected()
     }
 
     override fun deleteConversation(conversationId: String) {
         calls += "deleteConversation"
-        requirePaired()
+        requireConnected()
     }
 
     override fun getOrCreateConversation(numbers: List<String>, rcsGroupName: String?): ConversationDto {
@@ -251,10 +285,6 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
 
     override fun close() {
         calls += "close"
-    }
-
-    private fun requirePaired() {
-        if (!paired) throw RelayException(RelayException.NOT_PAIRED, "")
     }
 
     private fun requireConnected() {

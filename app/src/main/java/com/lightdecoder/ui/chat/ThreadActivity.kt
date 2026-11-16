@@ -1,5 +1,6 @@
 package com.lightdecoder.ui.chat
 
+import android.app.Dialog
 import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -109,6 +110,13 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private var replyTarget: MessageRow? = null
     private var attachment: Uri? = null
 
+    /**
+     * The long-press sheet and the open delete question, if any. Both belong
+     * to the conversation they were opened in, so a thread switch closes them.
+     */
+    private var actionSheet: Dialog? = null
+    private var confirmDialog: Dialog? = null
+
     private var started = false
     private var paired = true
     private var online = false
@@ -182,6 +190,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             // a half-typed reply: one tap on Send would deliver it to the wrong person.
             // A paging call still running for it is dropped when it returns (loadOlderFromPhone).
             conversationId = id
+            // The long-press sheet and a delete question still act on the old conversation's
+            // message or id: close them, and the overflow menu built from its row.
+            actionSheet?.dismiss()
+            confirmDialog?.dismiss()
+            closeOptionsMenu()
             windowSize = PAGE
             growWindow = false
             growPending = false
@@ -190,6 +203,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             remoteExhausted = false
             remoteFailedAtMs = 0L
             lastMarkedId = null
+            lastMarkAtMs = 0L
             highlightId = null
             binding.input.setText("")
             clearReply()
@@ -198,6 +212,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             submitSeq++
             pendingScrollTo = null
             adapter.submitList(emptyList())
+            // The old conversation's row must not decide the title, the menu, mark-read
+            // or who can be replied to until the new one's has been read.
+            conversation = null
+            participants = emptyList()
+            renderConversation()
         }
         targetMessageId = intent.getStringExtra(RelayIntents.EXTRA_MESSAGE_ID)
         reload()
@@ -350,6 +369,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         if (target != null) targetMessageId = null
         if (scrollTo != null) highlight(scrollTo)
         submit(snapshot.quotes, scrollTo)
+        // submit() suspends while it builds the list: a notification tap may have switched
+        // threads meanwhile. The reload onNewIntent queued handles the new conversation.
+        // (Not "skip unless submit applied": a resubmit() in the same conversation also
+        // supersedes it, and mark-read and auto-paging must still run then.)
+        if (id != conversationId) return@withLock
         markReadIfNeeded()
         // The archive has no more: ask the phone (also fills a thread that was never imported).
         if ((grow && localExhausted) || snapshot.rows.size < PAGE) loadOlderFromPhone(auto = !grow)
@@ -655,8 +679,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val text = binding.input.text?.toString()?.trim().orEmpty()
         val file = attachment
         if (text.isEmpty() && file == null) return
-        val replyTo = replyTarget?.id
         val id = conversationId
+        // Only ever a message of this conversation (onReply checks too).
+        val replyTo = replyTarget?.takeIf { it.conversationId == id }?.id
         scrollToBottomNext = true
         binding.input.setText("")
         clearReply()
@@ -733,8 +758,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     // --- message callbacks ---------------------------------------------------
 
+    /** Whether [row] belongs to the conversation on screen (a sheet may outlive a thread switch). */
+    private fun isShown(row: MessageRow) = row.conversationId == conversationId
+
     override fun onReply(row: MessageRow) {
-        if (!canReplyTo(row)) return
+        if (!isShown(row) || !canReplyTo(row)) return
         replyTarget = row
         binding.replyBar.visibility = View.VISIBLE
         val who = if (row.isOutgoing) getString(R.string.chat_you)
@@ -746,6 +774,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     override fun onMessageLongPress(row: MessageRow) {
         if (row.direction == "system") return
+        actionSheet?.dismiss()
         val sheet = BottomSheetDialog(this)
         val b = SheetMessageActionsBinding.inflate(layoutInflater)
         val real = !row.isLocal
@@ -760,7 +789,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 view.contentDescription = getString(R.string.chat_react_with, emoji)
                 view.setOnClickListener {
                     sheet.dismiss()
-                    react(row, emoji, remove = emoji == mine)
+                    if (isShown(row)) react(row, emoji, remove = emoji == mine)
                 }
                 b.reactionRow.addView(view)
             }
@@ -768,7 +797,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         b.actionRemoveReaction.visibility = if (real && mine != null) View.VISIBLE else View.GONE
         b.actionRemoveReaction.setOnClickListener {
             sheet.dismiss()
-            if (mine != null) react(row, mine, remove = true)
+            if (mine != null && isShown(row)) react(row, mine, remove = true)
         }
         b.actionReply.visibility = if (canReplyTo(row)) View.VISIBLE else View.GONE
         b.actionReply.setOnClickListener {
@@ -783,12 +812,13 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         b.actionRetry.visibility = if (MessageStatus.canRetryLocally(row)) View.VISIBLE else View.GONE
         b.actionRetry.setOnClickListener {
             sheet.dismiss()
-            retry(row)
+            if (isShown(row)) retry(row)
         }
         val discardable = row.isLocal && row.localState == LocalState.FAILED
         b.actionDiscard.visibility = if (discardable) View.VISIBLE else View.GONE
         b.actionDiscard.setOnClickListener {
             sheet.dismiss()
+            if (!isShown(row)) return@setOnClickListener
             val tmpId = row.tmpId
             runInBackground { manager.discardFailed(tmpId) }
         }
@@ -798,6 +828,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             confirmDeleteMessage(row)
         }
         sheet.setContentView(b.root)
+        sheet.setOnDismissListener { if (actionSheet === sheet) actionSheet = null }
+        actionSheet = sheet
         sheet.show()
     }
 
@@ -905,11 +937,14 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      * while the question was up, it is asked again with the right wording.
      */
     private fun confirmDeleteMessage(row: MessageRow) {
+        if (!isShown(row)) return
         val linked = manager.isPaired()
         val id = row.id
         MaterialAlertDialogBuilder(this)
             .setMessage(if (linked) R.string.chat_delete_message_question else R.string.chat_delete_message_question_local)
             .setPositiveButton(R.string.chat_action_delete) { _, _ ->
+                // The thread switched under the question (onNewIntent closes it; this is the backstop).
+                if (!isShown(row)) return@setPositiveButton
                 if (manager.isPaired() != linked) {
                     confirmDeleteMessage(row)
                     return@setPositiveButton
@@ -921,6 +956,14 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
+            .let(::trackConfirm)
+    }
+
+    /** Keeps [dialog] as the open delete question until it is dismissed. */
+    private fun trackConfirm(dialog: Dialog) {
+        confirmDialog?.takeIf { it !== dialog }?.dismiss()
+        confirmDialog = dialog
+        dialog.setOnDismissListener { if (confirmDialog === dialog) confirmDialog = null }
     }
 
     // --- menu ----------------------------------------------------------------
@@ -990,18 +1033,21 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             .setTitle(R.string.chat_delete_conversation_title)
             .setMessage(if (linked) R.string.chat_delete_conversation_body else R.string.chat_delete_conversation_body_local)
             .setPositiveButton(R.string.chat_action_delete) { _, _ ->
+                // Deleting is final: never for a conversation that is no longer the one on screen.
+                if (id != conversationId) return@setPositiveButton
                 if (manager.isPaired() != linked) {
                     confirmDeleteConversation()
                     return@setPositiveButton
                 }
                 lifecycleScope.launch {
                     relayAttempt { manager.deleteConversation(id) }
-                        .onSuccess { finish() }
+                        .onSuccess { if (id == conversationId) finish() }
                         .onFailure { toast(RelayErrors.message(this@ThreadActivity, it)) }
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
+            .let(::trackConfirm)
     }
 
     private fun runAction(doneMessage: Int, block: suspend () -> Unit) {

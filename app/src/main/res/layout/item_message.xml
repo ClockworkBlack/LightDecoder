@@ -126,13 +126,13 @@
             </LinearLayout>
         </LinearLayout>
 
-        <LinearLayout
+        <!-- Wraps onto more lines: six 48dp chips do not fit one line under a bubble on a small phone. -->
+        <com.lightdecoder.ui.chat.ReactionRow
             android:id="@+id/reactions"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginHorizontal="8dp"
             android:layout_marginTop="-8dp"
-            android:orientation="horizontal"
             android:visibility="gone" />
 
         <TextView

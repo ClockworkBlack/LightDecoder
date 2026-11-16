@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http/httptrace"
 	"net/url"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	"go.mau.fi/util/ptr"
 
@@ -139,6 +141,42 @@ func (b *GMBridge) FetchMessages(conversationID string, count int64, cursorJSON 
 	return toJSON(b.messagePage(resp, cursor)), nil
 }
 
+// SeedProtocolSwitches tells the bridge which chats the archive knows to be
+// end-to-end encrypted, so that after a restart a send keeps such a chat on
+// RCS (ForceRCS) before its protocol-switch tombstone shows up again. That
+// tombstone may lie far back in the history, where neither live events nor
+// the newest page reach. seedJSON is a JSON array of the protocol-switch
+// tombstones stored in the archive, {"conversationId","status","statusCode",
+// "timestampMs"} as in MessageDTO (status or statusCode is enough; other
+// statuses are ignored). Passing only each chat's newest one is enough. A
+// chat follows its newest tombstone, whether seeded, live or in a history
+// page. Call it after NewGMBridge; it never touches the network.
+func (b *GMBridge) SeedProtocolSwitches(seedJSON []byte) (err error) {
+	defer recoverInto(&err)
+	if len(strings.TrimSpace(string(seedJSON))) == 0 {
+		return nil
+	}
+	var seeds []struct {
+		ConversationID string `json:"conversationId"`
+		Status         string `json:"status"`
+		StatusCode     int32  `json:"statusCode"`
+		TimestampMs    int64  `json:"timestampMs"`
+	}
+	if err := json.Unmarshal(seedJSON, &seeds); err != nil {
+		return newError(codeInvalidArgument, "protocol switches must be a JSON array of messages")
+	}
+	for _, s := range seeds {
+		st := gmproto.MessageStatusType(s.StatusCode)
+		if code, ok := gmproto.MessageStatusType_value[s.Status]; ok {
+			st = gmproto.MessageStatusType(code)
+		}
+		if force, ok := protocolSwitchForce(st); ok {
+			b.cache.recordProtocolSwitch(s.ConversationID, force, s.TimestampMs)
+		}
+	}
+	return nil
+}
+
 // messagePage turns a ListMessagesResponse (newest first) into a page sorted
 // oldest first. Like the connector's backfill it drops the overlap with the
 // previous page and derives a cursor from the oldest message when the phone
@@ -150,12 +188,11 @@ func (b *GMBridge) messagePage(resp *gmproto.ListMessagesResponse, cursor *gmpro
 	slices.Reverse(raw)
 	page := messagePageDTO{Messages: make([]messageDTO, 0, len(raw)), Total: resp.GetTotalMessages()}
 	var oldest *gmproto.Message
-	if cursor == nil {
-		// The newest page, oldest first: the last protocol-switch tombstone
-		// wins. Older pages must not overwrite what newer messages said.
-		for _, msg := range raw {
-			b.cache.noteProtocolSwitch(msg)
-		}
+	for _, msg := range raw {
+		// Older pages count too (the switch may lie far back, and the cache
+		// starts empty after a restart); a tombstone never overrides a newer
+		// one already recorded, whatever order the pages come in.
+		b.cache.noteProtocolSwitch(msg)
 	}
 	for _, msg := range raw {
 		if cursor != nil {
@@ -300,9 +337,10 @@ func (b *GMBridge) send(ctx context.Context, cli *libgm.Client, conv *gmproto.Co
 		}
 		return nil, newError(codeConnectionClosed, "disconnected before sending")
 	}
-	resp, err := cli.SendMessage(ctx, req)
+	ctx, wrote := traceRequestWrites(ctx)
+	resp, err := sendMessage(ctx, cli, req)
 	if err != nil {
-		return nil, sendError(err)
+		return nil, sendError(err, wrote.Load())
 	}
 	result := sendResultDTO{TmpID: tmpID, Status: resp.GetStatus().String()}
 	if resp.GetStatus() == gmproto.SendMessageResponse_SUCCESS {
@@ -313,24 +351,54 @@ func (b *GMBridge) send(ctx context.Context, cli *libgm.Client, conv *gmproto.Co
 	return toJSON(result), nil
 }
 
-// sendError maps a SendMessage failure. libgm returns ErrConnectionClosed
-// only from its wait for the phone's reply, and a bare context.Canceled from
-// that wait or from reading the POST's response body: in both cases Google
-// has already accepted the POST, and the phone may still send the message
-// from the server's queue. (The one other bare context.Canceled, libgm's
-// pause before retrying a 5xx, is ambiguous too and treated the same.) That
-// is reported like phone_not_responding, which the outbox does not retry by
-// itself (a retry could send it twice); if the phone does send it, the tmpId
-// echo clears the failure. A POST that was cancelled or failed in flight
-// comes back as *url.Error and stays connection_closed, which the outbox
-// sends again on the next connection. classify is left alone: pairing also
-// gets ErrConnectionClosed, and there it does mean connection_closed.
-func sendError(err error) error {
+// sendError maps a SendMessage failure; wrote says whether any HTTP request
+// of the call started going out (see traceRequestWrites).
+//
+// Once the POST may have reached Google, the phone may still send the
+// message from the server's queue, so the failure is reported like
+// phone_not_responding, which the outbox does not retry by itself (a retry
+// could send it twice); if the phone does send it, the tmpId echo clears the
+// failure. That covers:
+//   - ErrConnectionClosed, which libgm returns only from its wait for the
+//     phone's reply, and a bare context.Canceled from that wait or from
+//     reading the POST's response body: Google had accepted the POST. (The
+//     one other bare context.Canceled, libgm's pause before retrying a 5xx,
+//     is ambiguous too and treated the same.)
+//   - any failure without an HTTP status after the request's headers were
+//     written: a response-header timeout (over HTTP/2 not a
+//     context.DeadlineExceeded), a stream or connection reset, a cancel or
+//     deadline while waiting for the response. Google may have the whole
+//     request.
+//
+// A failure before anything was written (dial, DNS, TLS, a retired client, a
+// cancel before sending) keeps the plain mapping, e.g. connection_closed or
+// internal, which the outbox sends again. So does a status Google answered
+// with. classify is left alone: pairing also gets ErrConnectionClosed, and
+// there it does mean connection_closed.
+func sendError(err error, wrote bool) error {
 	var ue *url.Error
 	if errors.Is(err, libgm.ErrConnectionClosed) || (errors.Is(err, context.Canceled) && !errors.As(err, &ue)) {
 		return &bridgeError{code: codePhoneNotResponding, detail: "disconnected after Google accepted the message", cause: err}
 	}
-	return exported(err)
+	be := toBridgeError(err)
+	if wrote && httpStatus(err) == 0 && be.code != codePhoneNotResponding {
+		return &bridgeError{code: codePhoneNotResponding, detail: "connection lost after the message went out", cause: err}
+	}
+	return be
+}
+
+// sendMessage is cli.SendMessage; tests replace it.
+var sendMessage = func(ctx context.Context, cli *libgm.Client, req *gmproto.SendMessageRequest) (*gmproto.SendMessageResponse, error) {
+	return cli.SendMessage(ctx, req)
+}
+
+// traceRequestWrites returns ctx with an HTTP client trace that sets the
+// returned flag once a request made with it has its headers written to a
+// connection (HTTP/1 and HTTP/2 both report it). libgm builds its requests
+// with the call's context, so the trace reaches the transport.
+func traceRequestWrites(ctx context.Context) (context.Context, *atomic.Bool) {
+	wrote := new(atomic.Bool)
+	return httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{WroteHeaders: func() { wrote.Store(true) }}), wrote
 }
 
 // buildSendRequest builds the SendMessageRequest as the connector's

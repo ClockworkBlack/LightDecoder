@@ -1,6 +1,7 @@
 package com.lightdecoder.ui.relay
 
 import android.widget.Toast
+import androidx.annotation.VisibleForTesting
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -20,7 +21,15 @@ import kotlinx.coroutines.withContext
 internal object LocalArchive {
 
     /** Whether the archive holds any conversation. Reads the database: call off the main thread. */
-    fun hasAny(repo: ArchiveRepository): Boolean = repo.conversations(null, 1).isNotEmpty()
+    fun hasAny(repo: ArchiveRepository): Boolean {
+        beforeHasAny?.invoke()
+        return repo.conversations(null, 1).isNotEmpty()
+    }
+
+    /** Tests only: runs at the start of every [hasAny] (e.g. to hold one, as a busy database would). */
+    @VisibleForTesting
+    @Volatile
+    internal var beforeHasAny: (() -> Unit)? = null
 
     /**
      * Deletes every conversation, message, media file and queued attachment

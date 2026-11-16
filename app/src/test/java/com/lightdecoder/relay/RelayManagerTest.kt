@@ -3,6 +3,7 @@ package com.lightdecoder.relay
 import android.app.AlarmManager
 import android.app.Application
 import android.app.NotificationManager
+import android.os.Looper
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.lightdecoder.TestMedia
 import com.lightdecoder.archive.LocalState
@@ -559,7 +560,9 @@ class RelayManagerTest {
         fake.emitMessage(incoming("m2", "two"))
         manager.awaitIdleForTesting()
 
-        // Paired: the phone is asked too.
+        // Paired and connected: the phone is asked too.
+        fake.goOnline()
+        manager.awaitIdleForTesting()
         runBlocking { manager.deleteMessage("m0") }
         assertTrue(fake.calls.contains("deleteMessage"))
         assertNull(env.repo.message("m0"))
@@ -586,6 +589,33 @@ class RelayManagerTest {
         }
         assertEquals("Kim", env.repo.conversation("conv-2")!!.name)
         assertFalse(env.repo.conversation("conv-2")!!.muted)
+    }
+
+    @Test
+    fun pairedButNotConnectedWhatThePhoneMustDoSaysSoAndChangesNothing() {
+        val (manager, fake) = env.pairedManager() // never connected
+        fake.emit("conversation", ConversationDto(id = CONV, name = "Sam").toJson())
+        fake.emitMessage(incoming("m0", "zero"))
+        manager.awaitIdleForTesting()
+
+        val actions = listOf<Pair<String, suspend () -> Unit>>(
+            "delete a message" to { manager.deleteMessage("m0") },
+            "delete a conversation" to { manager.deleteConversation(CONV) },
+            "archive" to { manager.setArchived(CONV, true) },
+            "mute" to { manager.setMuted(CONV, true) },
+        )
+        for ((what, action) in actions) {
+            try {
+                runBlocking { action() }
+                fail("$what: expected not_connected")
+            } catch (e: RelayException) {
+                assertEquals(what, RelayException.NOT_CONNECTED, e.code)
+            }
+        }
+        assertEquals("zero", env.repo.message("m0")!!.text)
+        val conversation = env.repo.conversation(CONV)!!
+        assertEquals(Folder.INBOX.wire, conversation.folder)
+        assertFalse(conversation.muted)
     }
 
     @Test
@@ -816,6 +846,96 @@ class RelayManagerTest {
         env.eventually(manager, what = "the send") { fake.sent.map { it.tmpId } == listOf(tmpId) }
     }
 
+    @Test
+    fun anotherPhonesArchiveThatCannotBeDeletedInTimeKeepsTheLinkDownAndIsNotDeletedLate() {
+        val (manager, fake) = env.pairedManager(RelayTestEnv.FAST.copy(archiveWipeWaitMs = 200, holdSendsWaitMs = 200))
+        RelayPrefs.setArchiveOwner(env.context, "phone-1", "someone@example.com")
+        fake.emitMessage(incoming("m1", "from alice"))
+        manager.awaitIdleForTesting()
+        val queued = manager.sendText(CONV, "for alice")
+        manager.awaitIdleForTesting()
+        fake.phoneId = "phone-2"
+        // The intake thread is busy copying a large attachment from a slow (cloud) provider.
+        val copying = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val slow = android.net.Uri.parse("content://com.example.cloud/video")
+        shadowOf(env.context.contentResolver).registerInputStreamSupplier(slow) {
+            object : java.io.InputStream() {
+                override fun read(): Int = read(ByteArray(1), 0, 1)
+                override fun read(b: ByteArray, off: Int, len: Int): Int {
+                    copying.countDown()
+                    release.await()
+                    return -1
+                }
+            }
+        }
+        manager.sendMedia(CONV, slow)
+        assertTrue(copying.await(5, TimeUnit.SECONDS))
+
+        RelayPrefs.setLiveEnabled(env.context, true)
+        manager.serviceRunning = true
+        manager.onServiceStarted()
+        waitFor("the refusal") { RelayLog.read(env.context).any { it.endsWith("Not connecting until the previous phone's archive is deleted") } }
+        assertEquals("not connected while the old archive is there", 0, connects(fake))
+
+        // Online all the same (Go's own reconnect, say): nothing is fetched into it, nothing is sent.
+        fake.goOnline()
+        waitFor("the first sync's try") {
+            RelayLog.read(env.context).count { it.contains("Could not hold queued sends") } >= 2
+        }
+        assertTrue(fake.sent.isEmpty())
+
+        // The thread frees up: the deletions that timed out do not run late, mid-connection.
+        release.countDown()
+        manager.awaitIdleForTesting()
+        assertEquals("from alice", env.repo.message("m1")?.text)
+        assertTrue(fake.sent.isEmpty())
+        assertEquals("held for the user", LocalState.FAILED, env.repo.message(MessageRow.tmpMessageId(queued))!!.localState)
+
+        // The next try deletes it, then connects.
+        assertNotNull(manager.onReconnectDue())
+        env.eventually(manager, what = "the connect") { connects(fake) == 1 }
+        assertNull(env.repo.message("m1"))
+        assertNull(env.repo.message(MessageRow.tmpMessageId(queued)))
+        assertEquals("phone-2", RelayPrefs.archivePhone(env.context))
+        assertTrue(fake.sent.isEmpty())
+        assertLogIsContentFree()
+        manager.stopLive()
+    }
+
+    @Test
+    fun anImportUnderWayWhenTheArchiveTurnsOutToBeAnotherPhonesEnds() {
+        val (manager, fake) = env.pairedManager()
+        RelayPrefs.setArchiveOwner(env.context, "phone-1", "someone@example.com")
+        fake.conversations += ConversationDto(id = CONV, name = "Sam", lastMessageTs = 100_000)
+        fake.emitMessage(incoming("m1", "from alice"))
+        manager.awaitIdleForTesting()
+        fake.goOnline()
+        env.eventually(manager, what = "the first sync") { env.repo.conversation(CONV)?.name == "Sam" }
+        // An import starts; the phone takes its time with the list.
+        val listing = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        fake.beforeListReturns = { listing.countDown(); release.await() }
+        manager.startBackfill(BackfillDepth.RECENT)
+        assertTrue(listing.await(5, TimeUnit.SECONDS))
+        fake.beforeListReturns = null
+
+        // Meanwhile the pairing turns out to be another phone's: the archive goes.
+        fake.phoneId = "phone-2"
+        RelayPrefs.setLiveEnabled(env.context, true)
+        manager.serviceRunning = true
+        manager.onServiceStarted()
+        env.eventually(manager, what = "the deletion") { env.repo.message("m1") == null }
+        release.countDown()
+
+        env.eventually(manager, what = "the import to end") { !manager.backfill.value.running }
+        Thread.sleep(100)
+        manager.awaitIdleForTesting()
+        assertFalse("not left 'running'", manager.backfill.value.running)
+        assertEquals("the import starts over for the new phone", 0L, RelayPrefs.backfillDoneAt(env.context))
+        manager.stopLive()
+    }
+
     // --- a session that cannot be used ------------------------------------------------
 
     @Test
@@ -872,6 +992,46 @@ class RelayManagerTest {
     // --- connecting -------------------------------------------------------------------
 
     @Test
+    fun theArchivesProtocolSwitchesReachTheBridgeOnceBeforeItConnects() {
+        val (manager, fake) = env.pairedManager()
+        fun tombstone(id: String, conversationId: String, status: String, ts: Long) =
+            MessageDto(id = id, conversationId = conversationId, timestampMs = ts, direction = "system", status = status)
+        env.repo.upsertMessages(
+            listOf(
+                tombstone("t1", "c1", "MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_RCS_TO_E2EE", 1_000),
+                tombstone("t2", "c1", "MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_E2EE_TO_RCS", 3_000),
+                tombstone("t3", "c2", "MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_TEXT_TO_E2EE", 2_000),
+                tombstone("t4", "c3", "MESSAGE_STATUS_TOMBSTONE_RCS_GROUP_CREATED", 2_500),
+                incoming("m1", "hi", ts = 4_000),
+            ),
+        )
+        var seededBeforeConnect = -1
+        fake.duringConnect = { seededBeforeConnect = fake.seeds.size }
+        RelayPrefs.setLiveEnabled(env.context, true)
+        manager.serviceRunning = true
+        manager.onServiceStarted()
+        env.eventually(manager, what = "the connect") { connects(fake) == 1 }
+
+        assertEquals("seeded before connect()", 1, seededBeforeConnect)
+        assertEquals(
+            "each chat's newest switch only",
+            setOf(
+                ProtocolSwitchSeed("c1", "MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_E2EE_TO_RCS", 0, 3_000),
+                ProtocolSwitchSeed("c2", "MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_TEXT_TO_E2EE", 0, 2_000),
+            ),
+            fake.seeds.single().toSet(),
+        )
+
+        // A reconnect of the same pairing does not seed again.
+        fake.emitState("error", RelayException.INTERNAL, "listen failed")
+        manager.awaitIdleForTesting()
+        manager.onAppVisible()
+        env.eventually(manager, what = "the retry") { connects(fake) == 2 }
+        assertEquals(1, fake.seeds.size)
+        assertLogIsContentFree()
+    }
+
+    @Test
     fun offThenOnDuringAConnectLeavesTheLinkUp() {
         val (manager, fake) = env.pairedManager()
         val connecting = CountDownLatch(1)
@@ -918,22 +1078,46 @@ class RelayManagerTest {
         manager.awaitIdleForTesting()
         val alarms = shadowOf(env.context.getSystemService(AlarmManager::class.java))
         val alarm = alarms.scheduledAlarms.single()
-        assertEquals(AlarmManager.ELAPSED_REALTIME_WAKEUP, alarm.type)
+        assertEquals(AlarmManager.ELAPSED_REALTIME_WAKEUP, alarm.getType())
+        // It wakes the app's own receiver, with the action that receiver acts on.
+        val wakes = shadowOf(alarm.operation).savedIntent
+        assertEquals(ReconnectReceiver::class.java.name, wakes.component?.className)
+        assertEquals(ReconnectReceiver.ACTION_RECONNECT, wakes.action)
 
-        // The phone slept through the coroutine timer; the alarm fires.
-        val connect = manager.onReconnectDue()
-        assertNotNull(connect)
-        runBlocking { connect!!.join() }
-        assertEquals(1, fake.calls.count { it == "connect" })
+        // The phone slept through the coroutine timer; the alarm fires and its receiver reconnects.
+        alarms.fireAlarm(alarm)
+        shadowOf(Looper.getMainLooper()).idle()
+        env.eventually(manager, what = "the reconnect") { connects(fake) == 1 }
 
         // Errored again; opening the app retries at once.
         fake.emitState("error", RelayException.INTERNAL, "listen failed")
         manager.awaitIdleForTesting()
         manager.onAppVisible()
-        env.eventually(manager, what = "the retry") { fake.calls.count { it == "connect" } == 2 }
+        env.eventually(manager, what = "the retry") { connects(fake) == 2 }
 
+        // Errored once more: an alarm is armed, and disconnecting removes it.
+        fake.emitState("error", RelayException.INTERNAL, "listen failed")
+        manager.awaitIdleForTesting()
+        assertEquals(1, alarms.scheduledAlarms.size)
         manager.stopLive()
         assertTrue("no alarm left once disconnected", alarms.scheduledAlarms.isEmpty())
+    }
+
+    @Test
+    fun theReconnectReceiverIgnoresOtherActions() {
+        val (manager, fake) = env.pairedManager()
+        RelayPrefs.setLiveEnabled(env.context, true)
+        manager.serviceRunning = true
+        fake.emitState("error", RelayException.INTERNAL, "listen failed")
+        manager.awaitIdleForTesting()
+        env.context.sendBroadcast(
+            android.content.Intent("com.example.SOMETHING_ELSE").setClass(env.context, ReconnectReceiver::class.java)
+        )
+        shadowOf(Looper.getMainLooper()).idle()
+        Thread.sleep(100)
+        manager.awaitIdleForTesting()
+        assertEquals(0, connects(fake))
+        manager.stopLive()
     }
 
     @Test
@@ -1022,13 +1206,18 @@ class RelayManagerTest {
     fun aFirstSyncThePhoneDidNotAnswerIsTriedAgainWhenItDoes() {
         val (manager, fake) = env.pairedManager()
         fake.conversations += ConversationDto(id = "c1", name = "Sam", lastMessageTs = 5_000)
+        fake.connected = true
+        // The first list fails from inside the call: the phone did not answer.
+        val failOnce = java.util.concurrent.atomic.AtomicBoolean(true)
+        fake.beforeListReturns = {
+            if (failOnce.getAndSet(false)) throw RelayException(RelayException.PHONE_NOT_RESPONDING, "")
+        }
         fake.emitState("connecting")
-        fake.connected = false // the list fails
         fake.emitState("active")
         env.eventually(manager, what = "the failed sync") { lists(fake) == 1 }
+        manager.awaitIdleForTesting()
         assertNull(env.repo.conversation("c1"))
 
-        fake.connected = true
         fake.emitState("phone_offline", RelayException.PHONE_NOT_RESPONDING)
         env.eventually(manager, what = "the retried sync") {
             if (lists(fake) < 2) fake.emitState("active")
@@ -1039,6 +1228,32 @@ class RelayManagerTest {
         manager.awaitIdleForTesting()
         Thread.sleep(100)
         assertEquals("done once it worked", 2, lists(fake))
+    }
+
+    @Test
+    fun aFirstSyncThatEndsAfterDisconnectStartsNoImportAndNoCatchUp() {
+        val (manager, fake) = env.pairedManager()
+        RelayPrefs.setBackfillDepth(env.context, BackfillDepth.RECENT)
+        // A gap to catch up on, and no import yet.
+        env.repo.upsertMessage(incoming("m-old", "old", ts = 1_000))
+        fake.conversations += ConversationDto(id = CONV, name = "Sam", lastMessageTs = 5_000, latestMessageId = "m-new")
+        val asked = java.util.concurrent.atomic.AtomicInteger()
+        fake.beforeFetch = { asked.incrementAndGet() }
+        val listing = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        fake.beforeListReturns = { listing.countDown(); release.await() }
+        fake.goOnline()
+        assertTrue(listing.await(5, TimeUnit.SECONDS))
+
+        // Disconnect while the phone is still answering the list (that call cannot be interrupted).
+        manager.stopLive()
+        release.countDown()
+        Thread.sleep(300)
+        manager.awaitIdleForTesting()
+        assertFalse("no import started", manager.backfill.value.running)
+        assertEquals("", manager.backfill.value.error)
+        assertEquals("no catch-up", 0, asked.get())
+        assertFalse(RelayLog.read(env.context).any { it.contains("History import") })
     }
 
     // --- user actions -----------------------------------------------------------------
@@ -1086,6 +1301,15 @@ class RelayManagerTest {
     }
 
     private fun connects(fake: FakeRelayBridge) = fake.calls.count { it == "connect" }
+
+    /** Polls without waiting for the manager's threads (for when one of them is meant to be busy). */
+    private fun waitFor(what: String, timeoutMs: Long = 5_000, condition: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (!condition()) {
+            if (System.currentTimeMillis() > deadline) fail("timed out waiting for $what")
+            Thread.sleep(20)
+        }
+    }
 
     private fun lists(fake: FakeRelayBridge) = fake.calls.count { it == "listConversations" }
 

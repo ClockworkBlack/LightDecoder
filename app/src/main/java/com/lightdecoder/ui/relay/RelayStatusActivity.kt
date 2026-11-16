@@ -50,6 +50,13 @@ class RelayStatusActivity : AppCompatActivity() {
     private var paired = false
     private var health = HealthRow()
 
+    /**
+     * Bumped by every render. Each render reads the pairing and the archive
+     * on IO, and those reads can finish out of order: only the newest render
+     * may write the screen.
+     */
+    private var renderSeq = 0
+
     private val onArchiveChange: (ArchiveChange) -> Unit = { change ->
         if (change.kind == ArchiveChange.Kind.HEALTH) refreshHealth()
     }
@@ -74,14 +81,19 @@ class RelayStatusActivity : AppCompatActivity() {
         binding.unpair.setOnClickListener { confirmUnpair() }
         binding.turnOnNotifications.setOnClickListener { notifications.openSettings() }
         binding.deleteArchive.setOnClickListener {
-            LocalArchive.confirmDelete(this) { binding.archiveCard.visibility = View.GONE }
+            LocalArchive.confirmDelete(this) {
+                binding.archiveCard.visibility = View.GONE
+                // Supersedes a render still reading the archive from before the delete,
+                // which would bring the card back.
+                renderState()
+            }
         }
         binding.batterySettings.setOnClickListener { openBatterySettings() }
         binding.showLog.setOnClickListener { showLog() }
 
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                launch { manager.state.collect { renderState(it) } }
+                launch { manager.state.collect { renderState() } }
                 launch { manager.backfill.collect { renderBackfill(it) } }
                 launch { manager.unpairing.collect { renderUnpairing(it) } }
             }
@@ -111,11 +123,19 @@ class RelayStatusActivity : AppCompatActivity() {
 
     // --- state and health ----------------------------------------------------
 
-    private fun renderState(state: RelayState) {
+    /**
+     * Renders the link's current state. The state is read after the IO hop,
+     * so the render that writes the screen also shows the newest state.
+     */
+    private fun renderState() {
+        val seq = ++renderSeq
         lifecycleScope.launch {
             val (isPaired, hasArchive) = withContext(Dispatchers.IO) {
                 manager.isPaired() to runCatching { LocalArchive.hasAny(repo) }.getOrDefault(false)
             }
+            // A newer render began meanwhile (a state change, or the archive deleted): it writes the screen.
+            if (seq != renderSeq) return@launch
+            val state = manager.state.value
             paired = isPaired
             val phase = if (paired || RelayUi.isProblem(state.phase)) state.phase else RelayState.Phase.UNPAIRED
             // Re-read on every render: this runs again whenever the screen comes back
@@ -154,7 +174,7 @@ class RelayStatusActivity : AppCompatActivity() {
             binding.unpair.isEnabled = false
             binding.disconnect.isEnabled = false
         } else {
-            renderState(manager.state.value)
+            renderState()
         }
     }
 
@@ -317,7 +337,7 @@ class RelayStatusActivity : AppCompatActivity() {
                     }
                 }
                 .onFailure {
-                    renderState(manager.state.value)
+                    renderState()
                     toast(RelayErrors.message(this@RelayStatusActivity, it))
                 }
         }

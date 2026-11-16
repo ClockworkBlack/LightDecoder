@@ -45,6 +45,8 @@ internal class Outbox(
     private val unconfirmedGiveUpMs: Long = 3_600_000,
     /** Asks for another [drain] after this many ms (to look at unconfirmed sends again). */
     private val drainLater: (Long) -> Unit = {},
+    /** Pause between the pages of one lookup on the phone. */
+    private val lookupPagePauseMs: Long = 400,
     /** The bridge said the link is down: stop trying until the next connection. */
     private val onOffline: () -> Unit,
 ) {
@@ -175,27 +177,34 @@ internal class Outbox(
     /**
      * Asks the phone about sends whose outcome is unknown: [interrupted]
      * entries, and accepted sends without an echo for [unconfirmedCheckMs].
-     * The newest page of their conversations carries the echo (with its
-     * tmpId) if the phone has the message; storing it replaces the local copy,
-     * which retires the entry. Sends still unconfirmed after
-     * [unconfirmedGiveUpMs] are marked failed ("unconfirmed") for the user to
-     * retry or discard; a late echo still clears them. Returns false if the
-     * link went down.
+     * Their conversations are paged back from the newest message to when
+     * they were sent ([lookUpEchoes]); an echo found there (with its tmpId)
+     * replaces the local copy, which retires the entry. Sends still
+     * unconfirmed after [unconfirmedGiveUpMs] are marked failed
+     * ("unconfirmed") for the user to retry or discard, but only once the
+     * phone has answered the lookup: one it did not answer says nothing
+     * about them. A late echo still clears them. Returns false if the link
+     * went down.
      */
-    private fun reconcile(interrupted: Set<String>): Boolean {
+    private suspend fun reconcile(interrupted: Set<String>): Boolean {
         val now = System.currentTimeMillis()
         val unconfirmed = pruneUnconfirmed()
         val giveUp = unconfirmed.filterValues { now - it >= unconfirmedGiveUpMs }.keys
         val ask = unconfirmed.filter { (key, sentAt) ->
             key in giveUp || (now - sentAt >= unconfirmedCheckMs && key !in lookedUp)
         }.keys + interrupted
-        val conversations = ask.mapNotNullTo(LinkedHashSet()) { repo.outbox(it)?.conversationId }
-        for (conversationId in conversations) {
+        val byConversation = LinkedHashMap<String, MutableMap<String, Long>>()
+        for (key in ask) {
+            val row = repo.outbox(key) ?: continue
+            // When it was sent, as far as known (an interrupted one: no later than now, no earlier than queued).
+            byConversation.getOrPut(row.conversationId) { HashMap() }[key] = unconfirmed[key] ?: row.createdAt
+        }
+        val answered = HashSet<String>()
+        for ((conversationId, keys) in byConversation) {
             if (!canSend()) return false
-            val since = gate.epoch()
             try {
-                val page = bridge().fetchMessages(conversationId, RECONCILE_PAGE, null)
-                gate.ifCurrent(since) { repo.upsertMessages(page.messages) }
+                lookUpEchoes(conversationId, keys.keys, keys.values.min() - ECHO_CLOCK_SLACK_MS)
+                answered += keys.keys
             } catch (e: RelayException) {
                 if (verdictFor(e.code) is Verdict.Offline) {
                     onOffline()
@@ -205,9 +214,12 @@ internal class Outbox(
                 RelayLog.add(context, "Could not check sends with the phone: ${e.code}")
             }
         }
+        // Asked once each, answered or not (a phone that does not answer is not asked on every drain);
+        // only the give-up time asks again, and then until it gets an answer.
         lookedUp.addAll(ask)
         var gaveUp = 0
         for (key in giveUp) {
+            if (key !in answered) continue
             val held = synchronized(claimLock) {
                 if (repo.outbox(key)?.status != OutboxStatus.SENT || repo.message(MessageRow.tmpMessageId(key)) == null) {
                     false
@@ -224,15 +236,60 @@ internal class Outbox(
         return true
     }
 
-    /** The unconfirmed sends still waiting for their echo; forgets the ones that are settled. */
-    private fun pruneUnconfirmed(): Map<String, Long> = synchronized(unconfirmedLock) {
-        val all = RelayPrefs.unconfirmedSends(context)
-        val waiting = all.filterKeys { repo.outbox(it)?.status == OutboxStatus.SENT }
-        if (waiting.size != all.size) {
-            RelayPrefs.setUnconfirmedSends(context, waiting)
-            lookedUp.retainAll(waiting.keys)
+    /**
+     * Pages back through a conversation, from its newest message, until the
+     * echoes of [keys] are found, or the pages reach [notBefore] (before any
+     * of them can have been sent), or the conversation's start, or
+     * [LOOKUP_PAGES] pages. Only the echoes are stored: a partial page of
+     * what the phone has would look like the archive is up to date, while
+     * the conversation's catch-up still has a gap to fill below it. Throws
+     * [RelayException] if the phone did not answer.
+     */
+    private suspend fun lookUpEchoes(conversationId: String, keys: Set<String>, notBefore: Long) {
+        val missing = HashSet(keys)
+        var cursor: Cursor? = null
+        repeat(LOOKUP_PAGES) { index ->
+            if (index > 0) delay(lookupPagePauseMs)
+            val since = gate.epoch()
+            val page = bridge().fetchMessages(conversationId, LOOKUP_PAGE, cursor)
+            val echoes = page.messages.filter { it.tmpId.isNotEmpty() && it.tmpId in missing }
+            if (echoes.isNotEmpty()) {
+                gate.ifCurrent(since) { repo.upsertMessages(echoes) }
+                echoes.forEach { missing.remove(it.tmpId) }
+            }
+            val reachedStart = page.messages.isEmpty() || page.cursor == null
+            if (missing.isEmpty() || reachedStart || page.messages.any { it.timestampMs < notBefore }) return
+            cursor = page.cursor
         }
-        waiting
+    }
+
+    /**
+     * The unconfirmed sends still waiting for their echo; forgets the ones
+     * that are settled. A send recorded SENT whose entry here was lost (the
+     * app died before it reached the disk) is taken in again, as sent now,
+     * so it is still looked up and given up on.
+     */
+    private fun pruneUnconfirmed(): Map<String, Long> {
+        val adopted: Int
+        val waiting = synchronized(unconfirmedLock) {
+            val all = RelayPrefs.unconfirmedSends(context)
+            val sent = repo.sentOutboxKeys().toSet()
+            val now = System.currentTimeMillis()
+            val orphans = sent - all.keys
+            adopted = orphans.size
+            val waiting = all.filterKeys { it in sent } + orphans.associateWith { now }
+            if (waiting != all) {
+                RelayPrefs.setUnconfirmedSends(context, waiting)
+                lookedUp.retainAll(waiting.keys)
+            }
+            waiting
+        }
+        if (adopted > 0) {
+            RelayLog.add(context, "$adopted sent message(s) were missing from the list waiting for the phone")
+            drainLater(unconfirmedCheckMs + RECHECK_SLACK_MS)
+            drainLater(unconfirmedGiveUpMs + RECHECK_SLACK_MS)
+        }
+        return waiting
     }
 
     /** Google accepted this send but the phone's echo has not arrived yet. */
@@ -490,8 +547,16 @@ internal class Outbox(
         const val INTERRUPTED = "interrupted"
         const val UNCONFIRMED = "unconfirmed"
 
-        /** Messages fetched per conversation to look for echoes. */
-        private const val RECONCILE_PAGE = 20
+        /** Messages per page, and at most this many pages, when looking for echoes. */
+        private const val LOOKUP_PAGE = Backfill.PAGE_SIZE
+        private const val LOOKUP_PAGES = Backfill.CATCH_UP_PAGES
+
+        /**
+         * An echo carries the phone's time, which can be a little off this
+         * device's (and the phone may send just before Google's answer comes
+         * back): lookups page this much further back than the send.
+         */
+        private const val ECHO_CLOCK_SLACK_MS = 10 * 60 * 1000L
         private const val RECHECK_SLACK_MS = 1_000L
 
         private val TRANSIENT_STATUSES = setOf("FAILURE_2", "FAILURE_3")

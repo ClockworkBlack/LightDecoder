@@ -286,13 +286,19 @@ class MessagesAdapter(
             return
         }
         box.visibility = View.VISIBLE
+        box.alignEnd = row.isOutgoing || row.direction == "out"
         val inflater = LayoutInflater.from(box.context)
         for (reaction in shown) {
             val chip = inflater.inflate(R.layout.item_reaction, box, false) as TextView
             val count = reaction.participantIds.size.coerceAtLeast(1)
             chip.text = if (count > 1) "${reaction.emoji} $count" else reaction.emoji
             // A 48dp touch target around a smaller pill (the inset drawables keep the pill's size).
+            // A background with padding replaces the view's own: the inset's top and bottom
+            // centre the label in the pill, and the layout's side padding is put back.
+            val padStart = chip.paddingStart
+            val padEnd = chip.paddingEnd
             chip.setBackgroundResource(if (reaction.fromMe) R.drawable.bg_reaction_mine_target else R.drawable.bg_reaction_target)
+            chip.setPaddingRelative(padStart, chip.paddingTop, padEnd, chip.paddingBottom)
             chip.contentDescription = box.context.resources.getQuantityString(
                 if (reaction.fromMe) R.plurals.chat_reaction_mine else R.plurals.chat_reaction, count, reaction.emoji, count,
             )

@@ -45,10 +45,16 @@ object MediaCache {
      * Writes [bytes] to [file] whole or not at all: into a [PART_SUFFIX] file
      * first, renamed into place once complete. If anything fails the partial
      * file is removed before the exception is passed on.
+     *
+     * Each write has a temporary file of its own: two downloads of the same
+     * media (the sticker check and the conversation screen, say) can run at
+     * once, and with one shared name each would truncate and rename the
+     * other's half-written file. Whichever renames last wins, with a whole
+     * file either way.
      */
     @Throws(IOException::class)
     fun writeAtomically(file: File, bytes: ByteArray) {
-        val tmp = File(file.parentFile, file.name + PART_SUFFIX)
+        val tmp = File.createTempFile(file.name + ".", PART_SUFFIX, file.parentFile)
         var done = false
         try {
             FileOutputStream(tmp).use { it.write(bytes) }

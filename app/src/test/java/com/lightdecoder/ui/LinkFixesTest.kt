@@ -341,12 +341,49 @@ class LinkFixesTest {
 
     @Test
     fun pastedCookiesAreTakenOffTheClipboard() {
+        val cookies = "SID=a; HSID=b; SSID=c; APISID=d; SAPISID=e; OSID=f"
+        val (left, toast) = pasteCookies(clip = cookies, pasted = cookies)
+        assertEquals("", left)
+        assertEquals(app.getString(R.string.link_paste_clipboard_cleared), toast)
+    }
+
+    @Test
+    fun aClipHoldingOneOfTheUsedCookiesIsTakenOffToo() {
+        // The paste dialog said OSID was missing, so the user copied it on its own and added it.
+        val (left, toast) = pasteCookies(clip = "OSID=f", pasted = "SID=a; HSID=b; SSID=c; APISID=d; SAPISID=e; OSID=f")
+        assertEquals("", left)
+        assertEquals(app.getString(R.string.link_paste_clipboard_cleared), toast)
+    }
+
+    @Test
+    fun anUnrelatedClipStaysButTheKeyboardHistoryIsStillMentioned() {
+        // Pasted from the keyboard's clipboard history; the clip is something else since.
+        val url = "https://example.com/some/page"
+        val (left, toast) = pasteCookies(clip = url, pasted = "SID=a; HSID=b; SSID=c; APISID=d; SAPISID=e; OSID=f")
+        assertEquals(url, left)
+        assertEquals(app.getString(R.string.link_paste_clipboard_history), toast)
+    }
+
+    @Test
+    fun whatCountsAsAClipThatHoldsTheCookies() {
+        val used = mapOf("SID" to "a".repeat(40), "OSID" to "f")
+        val pasted = "SID=${"a".repeat(40)}; OSID=f"
+        assertTrue(RelaySetupActivity.clipHoldsCookies(" $pasted\n", pasted, used))
+        assertTrue("a superset", RelaySetupActivity.clipHoldsCookies("$pasted; HSID=b", "x", used))
+        assertTrue("a long value alone", RelaySetupActivity.clipHoldsCookies("a".repeat(40), "x", used))
+        assertFalse("a short value alone could be anything", RelaySetupActivity.clipHoldsCookies("f", "x", used))
+        assertFalse("another value", RelaySetupActivity.clipHoldsCookies("OSID=g", "x", used))
+        assertFalse(RelaySetupActivity.clipHoldsCookies("https://example.com", "x", used))
+    }
+
+    /** Pastes [pasted] in the setup screen with [clip] on the clipboard: what is left there, and what the user is told. */
+    private fun pasteCookies(clip: String, pasted: String): Pair<String, String?> {
         // The pairing itself is not under test: let it fail at once.
         env.setUpFake = { it.startPairingError = RelayException(RelayException.NO_DEVICES, "") }
         env.manager()
-        val cookies = "SID=a; HSID=b; SSID=c; APISID=d; SAPISID=e; OSID=f"
         val clipboard = app.getSystemService(ClipboardManager::class.java)
-        clipboard.setPrimaryClip(ClipData.newPlainText("cookies", cookies))
+        clipboard.setPrimaryClip(ClipData.newPlainText("clip", clip))
+        var result: Pair<String, String?>? = null
         ActivityScenario.launch(RelaySetupActivity::class.java).use { scenario ->
             scenario.onActivity { activity ->
                 activity.findViewById<CompoundButton>(R.id.introAgree).isChecked = true
@@ -355,15 +392,17 @@ class LinkFixesTest {
             scenario.waitFor("the sign-in step") { it.findViewById<View>(R.id.stepSignIn).isShown }
             scenario.onActivity { it.findViewById<View>(R.id.signInPaste).performClick() }
             settle() // the dialog's own buttons are wired when it has been shown
-            scenario.onActivity { activity ->
+            scenario.onActivity {
+                ShadowToast.reset()
                 val dialog = latestDialog()
-                dialog.findViewById<EditText>(R.id.pasteInput)!!.setText(cookies)
+                dialog.findViewById<EditText>(R.id.pasteInput)!!.setText(pasted)
                 dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+                assertFalse("the cookies were used", dialog.isShowing)
                 val left = clipboard.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString().orEmpty()
-                assertEquals("", left)
-                assertEquals(activity.getString(R.string.link_paste_clipboard_cleared), ShadowToast.getTextOfLatestToast())
+                result = left to ShadowToast.getTextOfLatestToast()
             }
         }
+        return result!!
     }
 
     // --- pictures of rows scrolled away stop loading -----------------------------------

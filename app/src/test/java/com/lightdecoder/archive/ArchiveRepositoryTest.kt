@@ -22,6 +22,7 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 
 /** The archive's upsert rules, search, and bookkeeping tables, against real SQLite. */
@@ -386,7 +387,7 @@ class ArchiveRepositoryTest {
         val file = MediaCache.fileFor(context, "atomic-M", "heic")
         MediaCache.writeAtomically(file, byteArrayOf(1, 2, 3))
         assertArrayEquals(byteArrayOf(1, 2, 3), file.readBytes())
-        assertFalse(File(file.parentFile, file.name + ".part").exists())
+        assertTrue(partFiles(file.parentFile!!).isEmpty())
 
         // The rename fails (a non-empty directory is in the way): the partial file goes too.
         val blocked = MediaCache.fileFor(context, "atomic-blocked", "heic").apply { mkdirs() }
@@ -397,9 +398,27 @@ class ArchiveRepositoryTest {
         } catch (e: IOException) {
             // expected
         }
-        assertFalse(File(blocked.parentFile, blocked.name + ".part").exists())
+        assertTrue(partFiles(blocked.parentFile!!).isEmpty())
         blocked.deleteRecursively()
     }
+
+    @Test
+    fun writersOfTheSameMediaDoNotShareAPartialFile() {
+        // Two downloads of the same media at once (the sticker check and the
+        // conversation screen). Another writer is still writing its partial
+        // file, under the name a shared temporary file would have had.
+        val file = MediaCache.fileFor(context, "atomic-twice", "heic")
+        val shared = File(file.parentFile, file.name + MediaCache.PART_SUFFIX)
+        FileOutputStream(shared).use { other ->
+            MediaCache.writeAtomically(file, byteArrayOf(1, 2, 3, 4))
+            other.write(byteArrayOf(9, 9)) // the other writer carries on
+        }
+        assertArrayEquals("the finished file is whole and stays so", byteArrayOf(1, 2, 3, 4), file.readBytes())
+        shared.delete()
+        assertTrue(partFiles(file.parentFile!!).isEmpty())
+    }
+
+    private fun partFiles(dir: File) = dir.listFiles().orEmpty().filter { it.name.endsWith(MediaCache.PART_SUFFIX) }
 
     @Test
     fun stalePartialFilesAreDeletedOnTheFirstWrite() {

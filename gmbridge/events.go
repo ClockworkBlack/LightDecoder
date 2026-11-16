@@ -310,9 +310,11 @@ func (b *GMBridge) processConnectionEvent(gen, seq uint64, raw any) {
 		b.handleUserAlert(gen, seq, evt)
 	case *events.ListenRecovered:
 		b.pollDown.Store(false)
-		b.deliverEvent(kindState, b.currentState())
+		b.deliverCurrentState()
 	case *events.PhoneRespondingAgain, *events.PhoneNotResponding:
-		b.deliverEvent(kindState, b.currentState())
+		// processEvent has recorded the phone's liveness; while the long
+		// poll is down "reconnecting" stays (see deliverCurrentState).
+		b.deliverCurrentState()
 	case *events.ListenTemporaryError:
 		b.pollDown.Store(true)
 		be := toBridgeError(evt.Error)
@@ -325,10 +327,16 @@ func (b *GMBridge) processConnectionEvent(gen, seq uint64, raw any) {
 	case *events.PingFailed:
 		if errors.Is(evt.Error, events.ErrRequestedEntityNotFound) {
 			go b.invalidate(gen, seq, stateLoggedOut, newError(codeLoggedOut, "pairing no longer exists"))
-		} else if evt.ErrorCount == 0 && !b.browserActive.Load() {
+		} else if evt.ErrorCount == 0 {
 			// ErrorCount 0 only comes from libgm's postConnect, whose
 			// SetActiveSession failed (ditto ping failures count from 1).
-			// Without it the phone does not push to this session.
+			// Without it the phone does not push to this session. That
+			// call had already replaced the session ID, so a BROWSER_ACTIVE
+			// seen before (on an earlier long-poll loop of this connection:
+			// Connect's restart, libgm's ping recovery) no longer holds.
+			if b.browserActive.Swap(false) {
+				b.deliverCurrentState()
+			}
 			b.scheduleSetActiveRetry(gen, seq)
 		}
 	case *events.HackySetActiveMayFail:
@@ -339,6 +347,18 @@ func (b *GMBridge) processConnectionEvent(gen, seq uint64, raw any) {
 		// gap may not be redelivered. Catch up once data flows again.
 		b.noDataRecently.Store(true)
 	}
+}
+
+// deliverCurrentState reports currentState, except while the long poll is
+// down: "reconnecting" (with its error) then stays until ListenRecovered,
+// which reports currentState itself. Conditions that change meanwhile (the
+// phone's liveness, the active session) are recorded and show up then; the
+// connector likewise lets a long-poll error win over phone-not-responding.
+func (b *GMBridge) deliverCurrentState() {
+	if b.pollDown.Load() {
+		return
+	}
+	b.deliverEvent(kindState, b.currentState())
 }
 
 // currentState is the state that holds now, given everything still in
@@ -392,6 +412,7 @@ func (b *GMBridge) handleMessage(gen, seq uint64, evt *libgm.WrappedMessage) {
 func (b *GMBridge) handleUserAlert(gen, seq uint64, evt *gmproto.UserAlertEvent) {
 	switch evt.GetAlertType() {
 	case gmproto.AlertType_BROWSER_ACTIVE:
+		b.activations.Add(1)
 		b.browserActive.Store(true)
 		b.inactiveElsewhere.Store(false)
 		b.deliverEvent(kindState, b.currentState())
@@ -468,10 +489,34 @@ func (b *GMBridge) scheduleThrottleResync(gen, seq uint64) {
 func (b *GMBridge) claimForConnection(gen, seq uint64, flag *atomic.Bool) context.Context {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.gen != gen || b.client == nil || !b.live || b.connSeq != seq || b.connCtx == nil {
+	ctx := b.liveConnCtxLocked(gen, seq)
+	if ctx == nil || !flag.CompareAndSwap(false, true) {
 		return nil
 	}
-	if !flag.CompareAndSwap(false, true) {
+	return ctx
+}
+
+// supersedeForConnection starts a helper that replaces any earlier one of
+// its kind: if connection seq of client gen is still the live one, it moves
+// epoch on and returns the new value with that connection's context;
+// otherwise it returns nil and leaves epoch alone. The earlier helper sees
+// the epoch move and stops. Checking and moving under b.mu, like
+// claimForConnection, means an event of an older connection can never
+// supersede the current connection's helper.
+func (b *GMBridge) supersedeForConnection(gen, seq uint64, epoch *atomic.Uint64) (context.Context, uint64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	ctx := b.liveConnCtxLocked(gen, seq)
+	if ctx == nil {
+		return nil, 0
+	}
+	return ctx, epoch.Add(1)
+}
+
+// liveConnCtxLocked returns the context of connection seq of client gen if
+// that is still the live connection, else nil. Callers hold b.mu.
+func (b *GMBridge) liveConnCtxLocked(gen, seq uint64) context.Context {
+	if b.gen != gen || b.client == nil || !b.live || b.connSeq != seq {
 		return nil
 	}
 	return b.connCtx
@@ -515,13 +560,17 @@ func isHTTPAuthError(err error) bool {
 }
 
 // scheduleHackySetActive mirrors the connector's hackyResetActive: if the
-// phone has not confirmed this session as active 7 s after libgm warned, send
-// SetActiveSession once more. Once per connection.
+// phone has not confirmed a session as active (BROWSER_ACTIVE) 7 s after
+// libgm warned, send SetActiveSession once more. libgm warns from the
+// postConnect of each long-poll loop, before that loop's SetActiveSession,
+// so a BROWSER_ACTIVE from before the warning (an earlier loop) does not
+// count, and a warning from a later loop replaces a pending one.
 func (b *GMBridge) scheduleHackySetActive(gen, seq uint64) {
-	ctx := b.claimForConnection(gen, seq, &b.hackyScheduled)
+	ctx, epoch := b.supersedeForConnection(gen, seq, &b.hackyEpoch)
 	if ctx == nil {
 		return
 	}
+	activations := b.activations.Load()
 	delay, call := hackySetActiveDelay, setActiveSession
 	go func() {
 		defer func() { _ = recover() }()
@@ -530,7 +579,7 @@ func (b *GMBridge) scheduleHackySetActive(gen, seq uint64) {
 			return
 		case <-time.After(delay):
 		}
-		if b.browserActive.Load() {
+		if b.hackyEpoch.Load() != epoch || b.activations.Load() != activations {
 			return
 		}
 		if cur, live := b.liveSeq(gen); !live || cur != seq {
@@ -552,13 +601,16 @@ func (b *GMBridge) scheduleHackySetActive(gen, seq uint64) {
 // would only notice about 10 minutes later. Retries stop once the phone
 // confirms the session (BROWSER_ACTIVE) or the connection changes. A retry
 // that goes through makes the next BROWSER_ACTIVE ask Kotlin to resync, for
-// whatever arrived meanwhile. Once per connection; separate from the hacky
-// retry so the two cannot race over one flag.
+// whatever arrived meanwhile. Every failure is retried, since each long-poll
+// loop of a connection sends its own (Connect's restart and libgm's ping
+// recovery start new loops); a newer failure's retries replace an older
+// one's. Separate from the hacky retry so the two cannot interfere.
 func (b *GMBridge) scheduleSetActiveRetry(gen, seq uint64) {
-	ctx := b.claimForConnection(gen, seq, &b.setActiveRetrying)
+	ctx, epoch := b.supersedeForConnection(gen, seq, &b.setActiveEpoch)
 	if ctx == nil {
 		return
 	}
+	activations := b.activations.Load()
 	delays := slices.Clone(setActiveRetryDelays)
 	call := setActiveSession
 	go func() {
@@ -569,7 +621,8 @@ func (b *GMBridge) scheduleSetActiveRetry(gen, seq uint64) {
 				return
 			case <-time.After(delay):
 			}
-			if b.browserActive.Load() {
+			// Confirmed since the failure, or a newer failure took over.
+			if b.activations.Load() != activations || b.setActiveEpoch.Load() != epoch {
 				return
 			}
 			if cur, live := b.liveSeq(gen); !live || cur != seq {

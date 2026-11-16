@@ -7,6 +7,8 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Imports message history from the phone into the archive, page by page.
@@ -24,6 +26,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
  *
  * Only plain bridge reads and archive writes happen here; the caller decides
  * when to run, and catches [RelayException].
+ *
+ * [pager] is shared with the connection's catch-ups, which page through the
+ * phone too: never both at once. An import holds it for one conversation at
+ * a time, so a catch-up waits for one conversation, not the whole import.
  */
 internal class Backfill(
     private val repo: ArchiveRepository,
@@ -32,6 +38,7 @@ internal class Backfill(
     private val pagePauseMs: Long,
     private val conversationPauseMs: Long,
     private val progress: MutableStateFlow<BackfillProgress>,
+    private val pager: Mutex = Mutex(),
 ) {
     /** What a run did: messages fetched, and conversations skipped because the phone kept failing on them. */
     data class Outcome(val messages: Int, val skipped: Int)
@@ -50,9 +57,13 @@ internal class Backfill(
     suspend fun run(depth: BackfillDepth): Outcome {
         if (depth == BackfillDepth.OFF) return Outcome(0, 0)
         val since = gate.epoch()
-        val conversations = bridge().listConversations(Folder.INBOX, depth.conversations).take(depth.conversations)
+        val conversations = pager.withLock {
+            bridge().listConversations(Folder.INBOX, depth.conversations).take(depth.conversations)
+        }
         currentCoroutineContext().ensureActive()
         gate.ifCurrent(since) { repo.upsertConversations(conversations) } ?: throw ArchiveWiped()
+        // Cancelled during that write: the progress belongs to whoever cancelled it now.
+        currentCoroutineContext().ensureActive()
         var messages = 0
         var skipped = 0
         var failedInARow = 0
@@ -60,7 +71,7 @@ internal class Backfill(
         for ((index, conversation) in conversations.withIndex()) {
             currentCoroutineContext().ensureActive()
             try {
-                messages += importConversation(conversation.id, depth.messagesPerConversation)
+                messages += pager.withLock { importConversation(conversation.id, depth.messagesPerConversation) }
                 failedInARow = 0
             } catch (e: RelayException) {
                 if (e.code in ABORT_CODES || ++failedInARow >= 2) throw e
@@ -99,42 +110,40 @@ internal class Backfill(
     }
 
     /**
-     * Fills the gap between the newest message the archive has for a
-     * conversation and the phone's newest: what arrived while the link was
-     * down. Live events after a gap are not replayed, so without this those
-     * messages would never be in the thread or in search.
+     * Fills a conversation's gap between [bound] and the phone's newest
+     * message: what arrived while the link was down. Live events after a gap
+     * are not replayed, so without this those messages would never be in
+     * the thread or in search.
      *
-     * Pages back from the newest until a page reaches what is stored (at
-     * most [maxPages]). A conversation with nothing stored has no gap to
-     * fill (its history is the import's, or "load older"'s, to fetch), and
-     * the import's cursor is never touched. [onStored] is told about each
-     * message stored (for the sticker inbox); no notifications. Returns the
-     * number of messages fetched.
+     * [bound] is the timestamp of the newest message the archive had from
+     * the phone when the link came back (the caller notes it then). Pages
+     * back from the newest until a page reaches it (at most [maxPages]).
+     * Only the bound ends the paging: messages stored since the link came
+     * back (live ones, say) are on the first pages and are stored again
+     * harmlessly, so they cannot hide the rest of the gap. The import's
+     * cursor is never touched. [onStored] is told about each message stored
+     * (for the sticker inbox); no notifications. Returns the number of
+     * messages fetched.
      */
     suspend fun catchUp(
-        conversation: ConversationDto,
+        conversationId: String,
+        bound: Long,
         onStored: (MessageDto, ArchiveRepository.UpsertResult) -> Unit = { _, _ -> },
         maxPages: Int = CATCH_UP_PAGES,
     ): Int {
-        if (conversation.latestMessageId.isEmpty()) return 0
-        if (repo.message(conversation.latestMessageId) != null) return 0
-        val newestStored = repo.messages(conversation.id, limit = PAGE_SIZE).lastOrNull { !it.isLocal }?.timestampMs
-            ?: return 0
         var cursor: Cursor? = null
         var fetched = 0
         repeat(maxPages) {
             currentCoroutineContext().ensureActive()
             val since = gate.epoch()
-            val page = bridge().fetchMessages(conversation.id, PAGE_SIZE, cursor)
+            val page = bridge().fetchMessages(conversationId, PAGE_SIZE, cursor)
             currentCoroutineContext().ensureActive()
             if (page.messages.isEmpty()) return fetched
-            val reached = gate.ifCurrent(since) {
-                val reached = page.messages.any { it.timestampMs <= newestStored || repo.message(it.id) != null }
+            gate.ifCurrent(since) {
                 for (message in page.messages) onStored(message, repo.upsertMessage(message))
-                reached
             } ?: throw ArchiveWiped()
             fetched += page.messages.size
-            if (reached || page.cursor == null) return fetched
+            if (page.messages.any { it.timestampMs <= bound } || page.cursor == null) return fetched
             cursor = page.cursor
             delay(pagePauseMs)
         }

@@ -427,6 +427,11 @@ func TestUnpairDropsTheClientsEvents(t *testing.T) {
 	stub(t, &refreshForUnpair, func(*libgm.Client) error {
 		h(&events.AuthTokenRefreshed{})
 		h(&gmproto.Conversation{ConversationID: "c9"})
+		// Judge the events now, while Unpair still has the client: Unpair
+		// holds only the lifecycle lock here, which the dispatcher never
+		// takes. (Left queued, they would be dropped anyway once Unpair has
+		// dropped the client, and the test could not tell.)
+		drain(t, b)
 		return nil
 	})
 	stub(t, &unpairGaia, func(context.Context, *libgm.Client) error { return nil })
@@ -508,11 +513,13 @@ func TestDroppedClientsAreCutOffTheNetwork(t *testing.T) {
 	})
 	t.Run("unpair keeps the client for the revoke", func(t *testing.T) {
 		b, _ := newPairedBridge(t)
+		// The switch itself, taken now: retiring sets it before dropping
+		// b.clientRetired, and reading it needs no lock that Unpair takes.
+		b.mu.Lock()
+		retired := b.clientRetired
+		b.mu.Unlock()
 		stub(t, &unpairGaia, func(ctx context.Context, cli *libgm.Client) error {
-			b.mu.Lock()
-			retired := b.clientRetired.Load()
-			b.mu.Unlock()
-			if retired {
+			if retired.Load() {
 				t.Error("retired before the revoke went out")
 			}
 			return nil

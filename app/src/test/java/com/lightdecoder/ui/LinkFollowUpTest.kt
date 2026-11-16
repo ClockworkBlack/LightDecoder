@@ -222,6 +222,33 @@ class LinkFollowUpTest {
     }
 
     @Test
+    fun theThreadLoadsAPictureThatNeededTheLinkOnceItConnects() {
+        // The real screen this time: its own reaction to the link coming up does the retry.
+        val (manager, fake) = env.pairedManager()
+        seedConversation("c1", "Alice")
+        fake.media["x1"] = png()
+        fake.downloadError = RelayException(RelayException.NOT_CONNECTED, "connect to load this media")
+        env.repo.upsertMessage(pictureMessage("m1", "x1"))
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("Connect to load") { activity ->
+                val status = firstMessage(activity)?.let(::status)
+                status?.visibility == View.VISIBLE &&
+                    status.text.toString() == activity.getString(R.string.chat_media_connect_to_load)
+            }
+            val tries = fake.downloads.size
+            // Nothing in the list or the loader is touched: only the link connects.
+            fake.downloadError = null
+            fake.goOnline()
+            env.eventually(manager, what = "online") { manager.state.value.isOnline }
+            scenario.waitFor("the picture") { activity ->
+                val holder = firstMessage(activity)
+                holder != null && image(holder)?.drawable is BitmapDrawable && status(holder)?.visibility == View.GONE
+            }
+            assertTrue(fake.downloads.size > tries)
+        }
+    }
+
+    @Test
     fun aPictureThatIsGoneIsNotOfferedAConnection() {
         val (manager, fake) = env.pairedManager()
         seedConversation("c1", "Alice")
@@ -281,6 +308,13 @@ class LinkFollowUpTest {
         assertEquals(1 + Licenses.files(assets).size, texts.size)
         val gm = texts.single { it.first.startsWith("go.mau.fi/mautrix-gmessages ") }
         assertTrue(gm.second.contains("GNU AFFERO GENERAL PUBLIC LICENSE"))
+
+        // The Apache-2.0 text for AndroidX, Material, Kotlin and coroutines, with their exact modules.
+        assertTrue("$files", "40-android-libraries.txt" in files)
+        val android = assets.open("${Licenses.DIR}/40-android-libraries.txt").bufferedReader().use { it.readText() }
+        assertTrue(android.contains("Apache License"))
+        assertTrue(android.contains("androidx.core:core:"))
+        assertTrue(notice.contains("40-android-libraries.txt"))
     }
 
     @Test
@@ -391,6 +425,13 @@ class LinkFollowUpTest {
         id = id, conversationId = "c1", senderId = "p1", senderName = "Alice", timestampMs = 1_000L, isOld = true,
         parts = listOf(PartDto(partId = "0", kind = "media", mediaId = mediaId, mime = "image/png", size = 100)),
     )
+
+    /** The first message row the thread's list shows. */
+    private fun firstMessage(activity: Activity): MessagesAdapter.MessageHolder? {
+        val list = activity.findViewById<RecyclerView>(R.id.messages)
+        return (0 until list.childCount).map { list.getChildViewHolder(list.getChildAt(it)) }
+            .filterIsInstance<MessagesAdapter.MessageHolder>().firstOrNull()
+    }
 
     private fun status(holder: RecyclerView.ViewHolder): TextView? =
         (holder as MessagesAdapter.MessageHolder).binding.mediaContainer.getChildAt(0)?.findViewById(R.id.mediaStatus)

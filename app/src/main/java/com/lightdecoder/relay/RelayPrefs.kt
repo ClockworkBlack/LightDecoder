@@ -108,8 +108,15 @@ object RelayPrefs {
             }
             .toMap()
 
-    fun setUnconfirmedSends(context: Context, sends: Map<String, Long>) =
+    /**
+     * Written to disk before it returns (the outbox calls it off the main
+     * thread): an entry lost to the app being killed right after a send
+     * would leave that send "sending" with no look-up planned.
+     */
+    @SuppressLint("ApplySharedPref")
+    fun setUnconfirmedSends(context: Context, sends: Map<String, Long>) {
         prefs(context).edit()
             .putString(KEY_UNCONFIRMED_SENDS, sends.entries.joinToString(";") { "${it.key}=${it.value}" })
-            .apply()
+            .commit()
+    }
 }

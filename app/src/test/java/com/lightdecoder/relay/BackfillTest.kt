@@ -267,6 +267,86 @@ class BackfillTest {
     }
 
     @Test
+    fun aLiveMessageStoredBeforeTheCatchUpDoesNotSkipTheConversation() {
+        val (manager, fake) = env.pairedManager()
+        // The archive has m-60..m-70 from before; while the link was down the phone got up to m-99.
+        env.repo.upsertMessages(page(60..70, null).messages)
+        env.repo.setSyncState(SyncStateRow(CONV, "m-60", 60_000, historyComplete = true, lastBackfillAt = 1))
+        fake.conversations += ConversationDto(id = CONV, name = "Sam", lastMessageTs = 100_000, latestMessageId = "m-100")
+        fake.pages[CONV] = ConcurrentLinkedQueue(listOf(page(81..100, Cursor("m-81", 81_000)), page(65..80, Cursor("m-65", 65_000))))
+        // Before the catch-up gets to it, m-100 arrives live and is stored: the phone's newest is "known".
+        fake.beforeListReturns = {
+            fake.emitMessage(incoming("m-100", "live", ts = 100_000))
+            manager.awaitIdleForTesting()
+        }
+
+        fake.goOnline()
+        env.eventually(manager, what = "the gap to be filled") { RelayLog.read(env.context).any { it.contains("Caught up") } }
+        assertEquals(listOf(null, Cursor("m-81", 81_000)), fake.fetches.map { it.third })
+        for (n in 71..99) assertNotNull("m-$n", env.repo.message("m-$n"))
+    }
+
+    @Test
+    fun aLiveMessageInsideTheGapDoesNotEndTheCatchUpEarly() {
+        val (manager, fake) = env.pairedManager()
+        env.repo.upsertMessages(page(60..70, null).messages)
+        env.repo.setSyncState(SyncStateRow(CONV, "m-60", 60_000, historyComplete = true, lastBackfillAt = 1))
+        fake.conversations += ConversationDto(id = CONV, name = "Sam", lastMessageTs = 99_000, latestMessageId = "m-99")
+        fake.pages[CONV] = ConcurrentLinkedQueue(listOf(page(80..99, Cursor("m-80", 80_000)), page(65..79, Cursor("m-65", 65_000))))
+        // m-90 (an IsOld replay, say) is stored before the catch-up pages through it.
+        fake.beforeListReturns = {
+            fake.emitMessage(incoming("m-90", "replayed", ts = 90_000).copy(isOld = true))
+            manager.awaitIdleForTesting()
+        }
+
+        fake.goOnline()
+        env.eventually(manager, what = "the gap to be filled") { RelayLog.read(env.context).any { it.contains("Caught up") } }
+        assertEquals(2, fake.fetches.size)
+        for (n in 71..79) assertNotNull("m-$n", env.repo.message("m-$n"))
+    }
+
+    @Test
+    fun aCatchUpWaitsForOneConversationOfARunningImportNotAllOfIt() {
+        val (manager, fake) = env.pairedManager()
+        // CONV's history is complete up to m-70; the import has A and B to do.
+        env.repo.upsertMessages(page(60..70, null).messages)
+        env.repo.setSyncState(SyncStateRow(CONV, "m-60", 60_000, historyComplete = true, lastBackfillAt = 1))
+        fake.conversations += ConversationDto(id = "a", name = "A", lastMessageTs = 300_000)
+        fake.conversations += ConversationDto(id = "b", name = "B", lastMessageTs = 200_000)
+        fake.conversations += ConversationDto(id = CONV, name = "Sam", lastMessageTs = 70_000, latestMessageId = "m-70")
+        fake.goOnline()
+        env.eventually(manager, what = "the first sync") { env.repo.conversation("a")?.name == "A" }
+        Thread.sleep(100)
+        manager.awaitIdleForTesting()
+
+        // The import is busy with A (the phone is slow).
+        val inA = CountDownLatch(1)
+        val releaseA = CountDownLatch(1)
+        val firstA = java.util.concurrent.atomic.AtomicBoolean(true)
+        fake.beforeFetch = { id -> if (id == "a" && firstA.getAndSet(false)) { inA.countDown(); releaseA.await() } }
+        manager.startBackfill(BackfillDepth.RECENT)
+        assertTrue(inA.await(5, TimeUnit.SECONDS))
+
+        // New messages in CONV: the phone asks for a resync, and its catch-up waits for the pager.
+        fake.conversations.replaceAll {
+            if (it.id == CONV) it.copy(lastMessageTs = 99_000, latestMessageId = "m-99") else it
+        }
+        fake.pages[CONV] = ConcurrentLinkedQueue(listOf(page(71..99, Cursor("m-71", 71_000)), page(60..70, null)))
+        val listsBefore = fake.calls.count { it == "listConversations" }
+        fake.emit("resync", org.json.JSONObject())
+        env.eventually(manager, what = "the resync's list") { fake.calls.count { it == "listConversations" } > listsBefore }
+        Thread.sleep(300) // the catch-up queues for the pager (it does so right after its list call)
+        releaseA.countDown()
+
+        env.eventually(manager, what = "both to finish") {
+            RelayPrefs.backfillDoneAt(env.context) > 0 && RelayLog.read(env.context).any { it.contains("Caught up") }
+        }
+        val order = fake.fetches.map { it.first }
+        assertTrue("the catch-up ran between A and B: $order", order.indexOf(CONV) in 1 until order.indexOf("b"))
+        for (n in 71..99) assertNotNull("m-$n", env.repo.message("m-$n"))
+    }
+
+    @Test
     fun loadOlderWithNothingStoredStartsAtTheNewest() {
         val (manager, fake) = env.pairedManager()
         fake.goOnline()

@@ -66,6 +66,10 @@ class GoRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) : R
 
     override fun exportSession(): ByteArray? = call { go.exportSession()?.takeIf { it.isNotEmpty() } }
 
+    override fun seedProtocolSwitches(seed: List<ProtocolSwitchSeed>) = call {
+        go.seedProtocolSwitches(JSONArray(seed.map { it.toJson() }).toString().toByteArray())
+    }
+
     override fun listConversations(folder: Folder, count: Int): List<ConversationDto> = call {
         ConversationDto.listFromJson(array(go.listConversations(folder.wire, count.toLong())))
     }

@@ -9,6 +9,7 @@ import com.lightdecoder.relay.ConversationDto
 import com.lightdecoder.relay.Folder
 import com.lightdecoder.relay.MessageDto
 import com.lightdecoder.relay.PartDto
+import com.lightdecoder.relay.ProtocolSwitchSeed
 import com.lightdecoder.relay.ReactionDto
 import org.json.JSONArray
 import org.json.JSONException
@@ -111,6 +112,37 @@ class ArchiveRepository private constructor(private val helper: ArchiveDb) {
 
     fun message(id: String): MessageRow? =
         withMedia(query("SELECT * FROM messages WHERE message_id = ?", arrayOf(id)) { it.toMessage() }).firstOrNull()
+
+    /**
+     * Per conversation, the timestamp of the newest message from the phone
+     * (local copies of sends not counted); conversations with none are left
+     * out. One indexed look per conversation, so cheap enough to take on
+     * every connection.
+     */
+    fun newestStoredTimestamps(): Map<String, Long> = query(
+        "SELECT c.conversation_id, (SELECT m.timestamp_ms FROM messages m WHERE m.conversation_id = c.conversation_id " +
+            "AND substr(m.message_id, 1, ${MessageRow.TMP_PREFIX.length}) != ? ORDER BY m.timestamp_ms DESC LIMIT 1) " +
+            "FROM conversations c",
+        arrayOf(MessageRow.TMP_PREFIX),
+    ) { c -> if (c.isNull(1)) null else c.getString(0) to c.getLong(1) }.filterNotNull().toMap()
+
+    /**
+     * Each conversation's newest protocol-switch tombstone, for
+     * [com.lightdecoder.relay.RelayBridge.seedProtocolSwitches]. (SQLite takes
+     * the bare columns from the row that has the MAX.)
+     */
+    fun protocolSwitchSeeds(): List<ProtocolSwitchSeed> = query(
+        "SELECT conversation_id, message_status, status_code, MAX(timestamp_ms) FROM messages " +
+            "WHERE message_status IN (${ProtocolSwitchSeed.STATUSES.joinToString { "?" }}) GROUP BY conversation_id",
+        ProtocolSwitchSeed.STATUSES.toTypedArray(),
+    ) { c -> ProtocolSwitchSeed(c.getString(0), c.getString(1), c.getInt(2), c.getLong(3)) }
+
+    /** The timestamp of the newest message from the phone in one conversation, or null if there is none. */
+    fun newestStoredTimestamp(conversationId: String): Long? = query(
+        "SELECT timestamp_ms FROM messages WHERE conversation_id = ? AND substr(message_id, 1, ${MessageRow.TMP_PREFIX.length}) != ? " +
+            "ORDER BY timestamp_ms DESC LIMIT 1",
+        arrayOf(conversationId, MessageRow.TMP_PREFIX),
+    ) { it.getLong(0) }.firstOrNull()
 
     /**
      * Stores one message from the phone, in one transaction:
@@ -221,6 +253,10 @@ class ArchiveRepository private constructor(private val helper: ArchiveDb) {
         "SELECT * FROM outbox_queue WHERE status IN (?, ?) ORDER BY created_at, rowid",
         arrayOf(OutboxStatus.PENDING, OutboxStatus.SENDING),
     ) { it.toOutbox() }
+
+    /** Keys of sends Google accepted that still wait for the phone's echo (status SENT). */
+    fun sentOutboxKeys(): List<String> =
+        query("SELECT idempotency_key FROM outbox_queue WHERE status = ?", arrayOf(OutboxStatus.SENT)) { it.getString(0) }
 
     fun outbox(key: String): OutboxRow? =
         query("SELECT * FROM outbox_queue WHERE idempotency_key = ?", arrayOf(key)) { it.toOutbox() }.firstOrNull()

@@ -406,6 +406,28 @@ func TestRecoveryKeepsConditionsInForce(t *testing.T) {
 		}
 	})
 
+	// Pings go out as POSTs but their replies come back over the long poll,
+	// so while it is down they time out: that is not the phone's fault, and
+	// "reconnecting" stays until the poll is back.
+	t.Run("phone liveness while the long poll is down", func(t *testing.T) {
+		b, rec := newPairedBridge(t)
+		h := b.handlerFor(markLive(b))
+		h(&events.ListenRecovered{})
+		h(&events.ListenTemporaryError{Error: fmt.Errorf("receive endpoint down")})
+		h(&events.PhoneNotResponding{})
+		h(&events.PhoneRespondingAgain{})
+		h(&events.PhoneNotResponding{})
+		drain(t, b)
+		if s := rec.states(); len(s) != 2 || s[1] != stateReconnecting {
+			t.Fatalf("phone liveness overrode reconnecting: %v", s)
+		}
+		h(&events.ListenRecovered{})
+		drain(t, b)
+		if st := last(rec); st.State != statePhoneOffline || st.Code != codePhoneNotResponding {
+			t.Errorf("the phone's condition shows once the poll is back: %+v (states %v)", st, rec.states())
+		}
+	})
+
 	t.Run("new client starts fresh", func(t *testing.T) {
 		b, _ := newPairedBridge(t)
 		b.phoneNotResponding.Store(true)
@@ -493,6 +515,8 @@ func TestSetActiveSessionRetriedAfterPostConnectFailure(t *testing.T) {
 		defer mu.Unlock()
 		return calls
 	}
+	postConnectFailed := &events.PingFailed{Error: fmt.Errorf("failed to set active session: boom")}
+	active := &gmproto.UserAlertEvent{AlertType: gmproto.AlertType_BROWSER_ACTIVE}
 
 	b, rec := newPairedBridge(t)
 	h := b.handlerFor(markLive(b))
@@ -504,30 +528,87 @@ func TestSetActiveSessionRetriedAfterPostConnectFailure(t *testing.T) {
 		t.Fatal("ping failures must not trigger SetActiveSession retries")
 	}
 
-	h(&events.PingFailed{Error: fmt.Errorf("failed to set active session: boom")})
+	h(postConnectFailed)
 	waitFor(t, "a successful retry", func() bool { return callCount() == 2 })
 	time.Sleep(50 * time.Millisecond)
 	if callCount() != 2 {
 		t.Errorf("retries must stop after one goes through: %d", callCount())
 	}
-	h(&events.PingFailed{Error: fmt.Errorf("failed to set active session: again")})
-	drain(t, b)
-	time.Sleep(50 * time.Millisecond)
-	if callCount() != 2 {
-		t.Errorf("once per connection: %d", callCount())
-	}
-	h(&gmproto.UserAlertEvent{AlertType: gmproto.AlertType_BROWSER_ACTIVE})
+	h(active)
 	waitFor(t, "resync after the retried activation", func() bool { return len(rec.eventsOf(kindResync)) == 1 })
 
-	// Already active: nothing to retry.
-	b2, _ := newPairedBridge(t)
-	h2 := b2.handlerFor(markLive(b2))
-	h2(&gmproto.UserAlertEvent{AlertType: gmproto.AlertType_BROWSER_ACTIVE})
-	h2(&events.PingFailed{Error: fmt.Errorf("failed to set active session: boom")})
-	drain(t, b2)
-	time.Sleep(50 * time.Millisecond)
-	if callCount() != 2 {
-		t.Errorf("no retry when the session is already active: %d", callCount())
+	// A later long-poll loop of this connection (libgm's ping recovery,
+	// Connect's restart) sends its own SetActiveSession with a new session
+	// ID. Its failure is retried too, though the phone had confirmed the
+	// earlier session, and "active" no longer holds meanwhile.
+	h(postConnectFailed)
+	waitFor(t, "the later loop's retry", func() bool { return callCount() == 3 })
+	drain(t, b)
+	if st := rec.stateEvents(); st[len(st)-1].State != stateConnected {
+		t.Errorf("the replaced session must not read as active: %v", rec.states())
+	}
+	h(active)
+	waitFor(t, "resync after the second retried activation", func() bool { return len(rec.eventsOf(kindResync)) == 2 })
+	if st := rec.stateEvents(); st[len(st)-1].State != stateActive {
+		t.Errorf("confirmed again: %v", rec.states())
+	}
+}
+
+// The scenario from the review: the link was active, the network dropped,
+// Connect restarted the long poll, and the new loop's SetActiveSession
+// failed. browserActive from before the outage must not suppress the retry.
+func TestSetActiveRetriedAfterLongPollRestart(t *testing.T) {
+	stub(t, &longPollOpen, func(*libgm.Client) bool { return false })
+	stub(t, &restartLongPoll, func(*libgm.Client) error { return nil })
+	stub(t, &setActiveRetryDelays, []time.Duration{10 * time.Millisecond})
+	var calls atomic.Int32
+	stub(t, &setActiveSession, func(context.Context, *libgm.Client) error { calls.Add(1); return nil })
+
+	b, rec := newPairedBridge(t)
+	h := b.handlerFor(markLive(b))
+	h(&events.ListenRecovered{})
+	h(&gmproto.UserAlertEvent{AlertType: gmproto.AlertType_BROWSER_ACTIVE})
+	h(&events.ListenTemporaryError{Error: fmt.Errorf("network down")})
+	drain(t, b)
+	if err := b.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	h(&events.ListenRecovered{})
+	h(&events.PingFailed{Error: fmt.Errorf("failed to set active session: boom")})
+	waitFor(t, "the retry", func() bool { return calls.Load() == 1 })
+	drain(t, b)
+	if st := rec.stateEvents(); st[len(st)-1].State != stateConnected {
+		t.Errorf("states %v: want connected until the phone confirms the new session", rec.states())
+	}
+}
+
+// Each postConnect failure gets its retries, and a newer one replaces an
+// older one's; a confirmation after the failure ends them.
+func TestSetActiveRetriesFollowTheNewestFailure(t *testing.T) {
+	const delay = 100 * time.Millisecond
+	stub(t, &setActiveRetryDelays, []time.Duration{delay, delay, delay})
+	var calls atomic.Int32
+	stub(t, &setActiveSession, func(context.Context, *libgm.Client) error { calls.Add(1); return fmt.Errorf("still failing") })
+	postConnectFailed := &events.PingFailed{Error: fmt.Errorf("failed to set active session: boom")}
+
+	b, _ := newPairedBridge(t)
+	h := b.handlerFor(markLive(b))
+	h(&events.ListenRecovered{})
+	h(postConnectFailed)
+	h(postConnectFailed) // a newer loop failed too, before the first retry
+	drain(t, b)
+	time.Sleep(4*delay + delay/2)
+	if n := calls.Load(); n != 3 {
+		t.Errorf("one set of retries for the newest failure, not one per failure: %d calls", n)
+	}
+
+	calls.Store(0)
+	h(postConnectFailed)
+	h(&gmproto.UserAlertEvent{AlertType: gmproto.AlertType_BROWSER_ACTIVE})
+	drain(t, b)
+	time.Sleep(4 * delay)
+	if n := calls.Load(); n != 0 {
+		t.Errorf("confirmed after the failure: no retry expected, got %d", n)
 	}
 }
 
@@ -567,6 +648,66 @@ func TestConnectWhileLiveRestartsADownLongPoll(t *testing.T) {
 	}
 }
 
+// A restarted long poll is a new libgm loop: it never runs libgm's catch-up
+// after a gap, and without "connecting" Kotlin does not sync either. What
+// the phone sent during the outage is caught up once, on the first data or
+// BROWSER_ACTIVE of the new loop.
+func TestRestartedLongPollCatchesUp(t *testing.T) {
+	stub(t, &longPollOpen, func(*libgm.Client) bool { return false })
+	stub(t, &restartLongPoll, func(*libgm.Client) error { return nil })
+	active := &gmproto.UserAlertEvent{AlertType: gmproto.AlertType_BROWSER_ACTIVE}
+	msg := func(id string) *libgm.WrappedMessage {
+		return &libgm.WrappedMessage{Message: &gmproto.Message{MessageID: id, ConversationID: "c1",
+			MessageStatus: &gmproto.MessageStatus{Status: gmproto.MessageStatusType_INCOMING_COMPLETE}}}
+	}
+	resyncs := func(t *testing.T, b *GMBridge, rec *recorder) int {
+		t.Helper()
+		drain(t, b)
+		return len(rec.eventsOf(kindResync))
+	}
+	outage := func(t *testing.T, b *GMBridge, h libgm.EventHandler) {
+		t.Helper()
+		h(&events.ListenTemporaryError{Error: fmt.Errorf("network down")})
+		drain(t, b)
+		if err := b.Connect(); err != nil {
+			t.Fatal(err)
+		}
+		h(&events.ListenRecovered{})
+	}
+
+	b, rec := newPairedBridge(t)
+	h := b.handlerFor(markLive(b))
+	h(&events.ListenRecovered{})
+	h(active)
+	if err := b.Connect(); err != nil { // the poll is up: nothing to restart
+		t.Fatal(err)
+	}
+	h(msg("m1"))
+	h(active)
+	if n := resyncs(t, b, rec); n != 0 {
+		t.Fatalf("no outage, no catch-up: %d", n)
+	}
+
+	outage(t, b, h)
+	h(active) // the new loop's postConnect went through
+	if n := resyncs(t, b, rec); n != 1 {
+		t.Fatalf("after the restart: want 1 resync, got %d", n)
+	}
+	h(active)
+	h(msg("m2"))
+	if n := resyncs(t, b, rec); n != 1 {
+		t.Fatalf("one catch-up per outage: %d", n)
+	}
+
+	outage(t, b, h)
+	h(msg("m3")) // data before the phone confirms the session
+	h(msg("m4"))
+	h(active)
+	if n := resyncs(t, b, rec); n != 2 {
+		t.Fatalf("data after the restart catches up once: %d", n)
+	}
+}
+
 // After PUSH_THROTTLE_ENDED the phone's held-back pushes may never come, so
 // Kotlin is asked to catch up once, after a pause that lets the late ones
 // arrive first, and only on the connection that heard it.
@@ -585,6 +726,7 @@ func TestPushThrottleEndedResyncsOnce(t *testing.T) {
 
 	b, rec := newPairedBridge(t)
 	gen := markLive(b)
+	oldSeq := b.connSeq
 	h := b.handlerFor(gen)
 	h(&events.ListenRecovered{})
 	h(alert(gmproto.AlertType_BROWSER_ACTIVE))
@@ -624,9 +766,10 @@ func TestPushThrottleEndedResyncsOnce(t *testing.T) {
 		t.Fatalf("a resync for a closed connection was sent: %d", n)
 	}
 
-	// A report still queued from the closed connection does nothing on the
-	// new one, and leaves the new connection's own report working.
-	b.processEvent(gen, 1, alert(gmproto.AlertType_PUSH_THROTTLE_ENDED))
+	// A report of the closed connection that reaches the helper (it was
+	// dispatched just before the new Connect) does nothing on the new one,
+	// and leaves the new connection's own report working.
+	b.scheduleThrottleResync(gen, oldSeq)
 	settle()
 	if n := resyncs(t, b, rec); n != 2 || b.throttleResync.Load() {
 		t.Fatalf("stale report: resyncs=%d pending=%v", n, b.throttleResync.Load())
@@ -661,10 +804,19 @@ func TestHelpersAreTiedToTheirConnection(t *testing.T) {
 		t.Fatal("a helper must run once per connection")
 	}
 
+	var epoch atomic.Uint64
+	if ctx, _ := b.supersedeForConnection(gen, oldSeq, &epoch); ctx != nil || epoch.Load() != 0 {
+		t.Fatal("an older connection superseded the current one's helper")
+	}
+	if ctx, e := b.supersedeForConnection(gen, seq, &epoch); ctx == nil || e != 1 || epoch.Load() != 1 {
+		t.Fatal("the live connection could not start its helper")
+	}
+
 	b.scheduleHackySetActive(gen, oldSeq)
 	b.scheduleSetActiveRetry(gen, oldSeq)
-	if b.hackyScheduled.Load() || b.setActiveRetrying.Load() {
-		t.Error("a stale event used up the current connection's retry")
+	b.scheduleThrottleResync(gen, oldSeq)
+	if b.hackyEpoch.Load() != 0 || b.setActiveEpoch.Load() != 0 || b.throttleResync.Load() {
+		t.Error("a stale event started a helper, or superseded or used up the current connection's")
 	}
 
 	b.Disconnect()
@@ -678,26 +830,54 @@ func TestHelpersAreTiedToTheirConnection(t *testing.T) {
 	}
 }
 
-// The hacky SetActiveSession retry runs on the connection that asked for it,
-// and not after that connection was replaced.
+// The hacky SetActiveSession retry follows libgm's warning unless the phone
+// confirms a session after it, and runs only on the connection that asked
+// for it.
 func TestHackySetActiveStaysOnItsConnection(t *testing.T) {
-	stub(t, &hackySetActiveDelay, 30*time.Millisecond)
+	const delay = 50 * time.Millisecond
+	stub(t, &hackySetActiveDelay, delay)
 	var calls atomic.Int32
 	stub(t, &setActiveSession, func(context.Context, *libgm.Client) error { calls.Add(1); return nil })
+	warn := &events.HackySetActiveMayFail{}
+	active := &gmproto.UserAlertEvent{AlertType: gmproto.AlertType_BROWSER_ACTIVE}
+	settled := func(t *testing.T, b *GMBridge, want int32, why string) {
+		t.Helper()
+		drain(t, b)
+		time.Sleep(3 * delay)
+		if n := calls.Load(); n != want {
+			t.Fatalf("%s: %d calls, want %d", why, n, want)
+		}
+	}
 
 	b, _ := newPairedBridge(t)
 	h := b.handlerFor(markLive(b))
-	h(&events.HackySetActiveMayFail{})
-	waitFor(t, "the hacky SetActiveSession", func() bool { return calls.Load() == 1 })
+	h(warn)
+	h(warn) // a later loop's warning replaces a pending one
+	waitFor(t, "the hacky SetActiveSession", func() bool { return calls.Load() >= 1 })
+	settled(t, b, 1, "two warnings within the delay")
 
-	h(&events.HackySetActiveMayFail{})
+	h(warn)
+	h(active)
+	settled(t, b, 1, "confirmed after the warning")
+
+	// A later long-poll loop warns again: the earlier confirmation was for
+	// the session ID that loop replaces.
+	h(warn)
+	waitFor(t, "the later loop's hacky SetActiveSession", func() bool { return calls.Load() == 2 })
+
+	// A newer connection without Disconnect: the old context is not
+	// cancelled, so only the check after the delay keeps it off.
+	h(warn)
+	drain(t, b)
+	markLive(b)
+	settled(t, b, 2, "the connection changed during the delay")
+
+	// Disconnect ends it as well.
+	h(warn)
 	drain(t, b)
 	b.Disconnect()
 	markLive(b)
-	time.Sleep(150 * time.Millisecond)
-	if n := calls.Load(); n != 1 {
-		t.Errorf("once per connection, and never on a newer one: %d", n)
-	}
+	settled(t, b, 2, "disconnected during the delay")
 }
 
 // libgm can reopen a long poll by itself after Disconnect (its ping

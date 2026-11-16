@@ -1,12 +1,17 @@
 package gmbridge
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,25 +21,32 @@ import (
 )
 
 // A send cut off after Google accepted the POST may still go out from the
-// server's queue, so it must not come back as connection_closed (which the
-// outbox resends) but as phone_not_responding (which it does not).
+// server's queue, so it must not come back as connection_closed or internal
+// (which the outbox resends) but as phone_not_responding (which it does
+// not). wrote: the request's headers had been written.
 func TestSendErrorAfterAcceptIsMaybeDelivered(t *testing.T) {
+	const secretURL = "https://example.invalid/send?key=SECRET"
 	cases := []struct {
-		name string
-		err  error
-		code string
+		name  string
+		err   error
+		wrote bool
+		code  string
 	}{
-		{"disconnected while waiting for the phone", fmt.Errorf("x: %w", libgm.ErrConnectionClosed), codePhoneNotResponding},
-		{"bare cancel from the response wait", context.Canceled, codePhoneNotResponding},
-		{"cancel while reading the POST response", fmt.Errorf("failed to read response body: %w", context.Canceled), codePhoneNotResponding},
-		{"POST cancelled in flight", &url.Error{Op: "Post", URL: "https://example.invalid/send?key=SECRET", Err: context.Canceled}, codeConnectionClosed},
-		{"POST failed in flight", &url.Error{Op: "Post", URL: "https://example.invalid/send?key=SECRET", Err: errors.New("connection reset")}, codeInternal},
-		{"phone timeout", fmt.Errorf("%w in 1m0s", libgm.ErrPhoneNotResponding), codePhoneNotResponding},
-		{"rpc deadline", context.DeadlineExceeded, codePhoneNotResponding},
-		{"rejected POST", events.HTTPError{Resp: &http.Response{StatusCode: 401}}, codeCookiesInvalid},
+		{"disconnected while waiting for the phone", fmt.Errorf("x: %w", libgm.ErrConnectionClosed), true, codePhoneNotResponding},
+		{"bare cancel from the response wait", context.Canceled, true, codePhoneNotResponding},
+		{"cancel while reading the POST response", fmt.Errorf("failed to read response body: %w", context.Canceled), true, codePhoneNotResponding},
+		{"POST cancelled after it went out", &url.Error{Op: "Post", URL: secretURL, Err: context.Canceled}, true, codePhoneNotResponding},
+		{"POST reset after it went out", &url.Error{Op: "Post", URL: secretURL, Err: errors.New("stream error: INTERNAL_ERROR")}, true, codePhoneNotResponding},
+		{"POST cancelled before it went out", &url.Error{Op: "Post", URL: secretURL, Err: context.Canceled}, false, codeConnectionClosed},
+		{"dial failed", &url.Error{Op: "Post", URL: secretURL, Err: &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}}, false, codeInternal},
+		{"client retired", &url.Error{Op: "Post", URL: secretURL, Err: errClientRetired}, false, codeNotPaired},
+		{"phone timeout", fmt.Errorf("%w in 1m0s", libgm.ErrPhoneNotResponding), true, codePhoneNotResponding},
+		{"rpc deadline", context.DeadlineExceeded, true, codePhoneNotResponding},
+		{"rejected POST", events.HTTPError{Resp: &http.Response{StatusCode: 401}}, true, codeCookiesInvalid},
+		{"server error after retries", events.HTTPError{Resp: &http.Response{StatusCode: 503}}, true, codeInternal},
 	}
 	for _, c := range cases {
-		err := sendError(c.err)
+		err := sendError(c.err, c.wrote)
 		if codeOf(err) != c.code {
 			t.Errorf("%s: got %v want %s", c.name, err, c.code)
 		}
@@ -45,6 +57,99 @@ func TestSendErrorAfterAcceptIsMaybeDelivered(t *testing.T) {
 	// Pairing keeps the plain mapping.
 	if be := toBridgeError(libgm.ErrConnectionClosed); be.code != codeConnectionClosed {
 		t.Errorf("classify must still map ErrConnectionClosed to connection_closed: %v", be)
+	}
+}
+
+// The same through send and a real HTTP/2 transport with the bridge's
+// settings: failures after the POST was written (an HTTP/2 response-header
+// timeout is not a context.DeadlineExceeded, a reset stream, a disconnect
+// while waiting for the answer) are maybe-delivered; a dial failure is not.
+func TestSendFailuresFromTheTransport(t *testing.T) {
+	bodyIn := make(chan struct{}, 1)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		switch r.URL.Path {
+		case "/slow", "/hold":
+			if r.URL.Path == "/hold" {
+				bodyIn <- struct{}{}
+			}
+			<-r.Context().Done() // until the client gives up
+		case "/abort":
+			panic(http.ErrAbortHandler)
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+
+	var retired atomic.Bool
+	cs := retirableSettings(&retired)
+	cs.ResponseHeaderTimeout = 300 * time.Millisecond
+	cs.TLSConfig = srv.Client().Transport.(*http.Transport).TLSClientConfig
+	client := cs.Compile()
+	post := func(ctx context.Context, target string) (*http.Response, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader([]byte("payload")))
+		if err != nil {
+			return nil, err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		_, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp, err
+	}
+	if resp, err := post(context.Background(), srv.URL+"/ok"); err != nil || resp.ProtoMajor != 2 {
+		t.Fatalf("the test server must speak HTTP/2: %v %+v", err, resp)
+	}
+
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	refused := "https://" + closed.Addr().String() + "/send"
+	closed.Close()
+
+	b, _ := newPairedBridge(t)
+	conv := &gmproto.Conversation{ConversationID: "c1"}
+	infos := []*gmproto.MessageInfo{textInfo("hi")}
+	var target string
+	stub(t, &sendMessage, func(ctx context.Context, _ *libgm.Client, _ *gmproto.SendMessageRequest) (*gmproto.SendMessageResponse, error) {
+		_, err := post(ctx, target)
+		if err == nil {
+			err = errors.New("the test server answered")
+		}
+		return nil, err
+	})
+	cases := []struct {
+		name, target, code string
+		cancelAfterBody    bool
+	}{
+		{"no response headers in time", srv.URL + "/slow", codePhoneNotResponding, false},
+		{"stream reset after the body arrived", srv.URL + "/abort", codePhoneNotResponding, false},
+		{"disconnected while waiting for the answer", srv.URL + "/hold", codePhoneNotResponding, true},
+		{"nothing listening", refused, codeInternal, false},
+	}
+	for _, c := range cases {
+		target = c.target
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if c.cancelAfterBody {
+			go func() {
+				select {
+				case <-bodyIn:
+					cancel()
+				case <-ctx.Done():
+				}
+			}()
+		}
+		_, err := b.send(ctx, nil, conv, "tmp", infos, "")
+		cancel()
+		if codeOf(err) != c.code {
+			t.Errorf("%s: got %v want %s", c.name, err, c.code)
+		}
 	}
 }
 
@@ -114,8 +219,110 @@ func TestForceRCSFollowsProtocolSwitchTombstones(t *testing.T) {
 	if !force(rcsAuto) {
 		t.Error("TEXT_TO_E2EE tombstone should set ForceRCS")
 	}
+	// An old tombstone redelivered live (IsOld) changes nothing either.
+	b.handlerFor(gen)(&libgm.WrappedMessage{IsOld: true, Message: tomb("m0", 500_000, gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_E2EE_TO_RCS)})
+	drain(t, b)
+	if !force(rcsAuto) {
+		t.Error("a redelivered old tombstone changed ForceRCS")
+	}
 	b.cache.reset()
 	if force(rcsAuto) {
 		t.Error("cache reset (unpair, new pairing) should forget ForceRCS")
 	}
+}
+
+// After a restart the cache is empty, and a chat's switch to end-to-end
+// encryption may lie far beyond the newest page. The archive's tombstones
+// (SeedProtocolSwitches) and older history pages fill it in; newer
+// tombstones still win, in whatever order they arrive.
+func TestForceRCSAfterRestart(t *testing.T) {
+	tomb := func(id string, ts int64, st gmproto.MessageStatusType) *gmproto.Message {
+		return &gmproto.Message{MessageID: id, ConversationID: "c1", Timestamp: ts, MessageStatus: &gmproto.MessageStatus{Status: st}}
+	}
+	rcsAuto := &gmproto.Conversation{ConversationID: "c1", Type: gmproto.ConversationType_RCS, SendMode: gmproto.ConversationSendMode_SEND_MODE_AUTO}
+	plain := &gmproto.Message{MessageID: "p1", ConversationID: "c1", Timestamp: 9_000_000,
+		MessageStatus: &gmproto.MessageStatus{Status: gmproto.MessageStatusType_INCOMING_COMPLETE}}
+	force := func(b *GMBridge) bool {
+		return b.buildSendRequest(rcsAuto, "tmp", []*gmproto.MessageInfo{textInfo("x")}, "").GetForceRCS()
+	}
+
+	t.Run("seeded from the archive", func(t *testing.T) {
+		b, _ := newPairedBridge(t)
+		seed := `[{"conversationId":"c1","status":"MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_RCS_TO_E2EE","timestampMs":4000},
+			{"conversationId":"c1","status":"MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_E2EE_TO_TEXT","timestampMs":2000},
+			{"conversationId":"c2","status":"INCOMING_COMPLETE","timestampMs":5000}]`
+		if err := b.SeedProtocolSwitches([]byte(seed)); err != nil {
+			t.Fatal(err)
+		}
+		if !force(b) {
+			t.Fatal("the archive's newest tombstone says end-to-end encrypted")
+		}
+		// The newest page without tombstones, and an older page with an
+		// older one, change nothing.
+		b.messagePage(&gmproto.ListMessagesResponse{Messages: []*gmproto.Message{plain}}, nil)
+		b.messagePage(&gmproto.ListMessagesResponse{Messages: []*gmproto.Message{
+			tomb("m1", 1_000_000, gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_E2EE_TO_RCS),
+		}}, &gmproto.Cursor{LastItemID: "m2", LastItemTimestamp: 2_000})
+		if !force(b) {
+			t.Fatal("older tombstones overrode the seed")
+		}
+		// A later live switch still turns it off.
+		gen := markLive(b)
+		b.handlerFor(gen)(&libgm.WrappedMessage{Message: tomb("m5", 5_000_000, gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_E2EE_TO_RCS)})
+		drain(t, b)
+		if force(b) {
+			t.Error("a newer live E2EE_TO_RCS tombstone should clear ForceRCS")
+		}
+		// Seeding again (e.g. after an import) cannot bring back an older state.
+		if err := b.SeedProtocolSwitches([]byte(seed)); err != nil || force(b) {
+			t.Errorf("an older seed overrode a newer tombstone: %v", err)
+		}
+	})
+
+	t.Run("status codes work too", func(t *testing.T) {
+		b, _ := newPairedBridge(t)
+		seed := fmt.Sprintf(`[{"conversationId":"c1","statusCode":%d,"timestampMs":1}]`,
+			gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_TEXT_TO_E2EE)
+		if err := b.SeedProtocolSwitches([]byte(seed)); err != nil || !force(b) {
+			t.Errorf("seed by status code: %v", err)
+		}
+	})
+
+	t.Run("bad input", func(t *testing.T) {
+		b, _ := newPairedBridge(t)
+		for _, raw := range []string{"", " ", "[]", "null"} {
+			if err := b.SeedProtocolSwitches([]byte(raw)); err != nil {
+				t.Errorf("%q: %v", raw, err)
+			}
+		}
+		if err := b.SeedProtocolSwitches([]byte(`{"conversationId":"c1"}`)); codeOf(err) != codeInvalidArgument {
+			t.Errorf("not an array: %v", err)
+		}
+		if force(b) {
+			t.Error("nothing was seeded")
+		}
+	})
+
+	t.Run("learned from an older page", func(t *testing.T) {
+		b, _ := newPairedBridge(t)
+		b.messagePage(&gmproto.ListMessagesResponse{Messages: []*gmproto.Message{plain}}, nil)
+		if force(b) {
+			t.Fatal("nothing known yet")
+		}
+		// History import walks back past the switch.
+		b.messagePage(&gmproto.ListMessagesResponse{Messages: []*gmproto.Message{
+			tomb("m3", 3_000_000, gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_RCS_TO_E2EE),
+			tomb("m1", 1_000_000, gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_E2EE_TO_TEXT),
+		}}, &gmproto.Cursor{LastItemID: "p1", LastItemTimestamp: 9_000})
+		if !force(b) {
+			t.Fatal("the newest tombstone of an older page counts while nothing newer is known")
+		}
+		// Still older pages do not undo it.
+		b.messagePage(&gmproto.ListMessagesResponse{Messages: []*gmproto.Message{
+			tomb("m0", 500_000, gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_E2EE_TO_RCS),
+		}}, &gmproto.Cursor{LastItemID: "m1", LastItemTimestamp: 1_000})
+		if !force(b) {
+			t.Error("an older page overrode a newer one")
+		}
+	})
 }

@@ -107,7 +107,7 @@ internal object Licenses {
     /** A heading (what a text is for) or a few paragraphs of the text. */
     data class Piece(val text: String, val heading: Boolean)
 
-    /** The licence text files, in name order (the build numbers them: the app, its native code, then Go). */
+    /** The licence text files, in name order (the build numbers them: the app, its native code, then Go, then the Android libraries). */
     fun files(assets: AssetManager): List<String> =
         assets.list(DIR).orEmpty().filter { it.endsWith(".txt") }.sorted()
 

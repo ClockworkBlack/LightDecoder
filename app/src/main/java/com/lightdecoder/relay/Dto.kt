@@ -385,6 +385,35 @@ data class MessagePage(
     }
 }
 
+/**
+ * A protocol-switch tombstone stored in the archive, as
+ * [RelayBridge.seedProtocolSwitches] takes it ([status] and [statusCode] as in
+ * [MessageDto]).
+ */
+data class ProtocolSwitchSeed(
+    val conversationId: String,
+    val status: String,
+    val statusCode: Int,
+    val timestampMs: Long,
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("conversationId", conversationId)
+        put("status", status)
+        put("statusCode", statusCode)
+        put("timestampMs", timestampMs)
+    }
+
+    companion object {
+        /** The statuses Go's SeedProtocolSwitches reads (the one-to-one switches, as in the connector). */
+        val STATUSES = listOf(
+            "MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_RCS_TO_E2EE",
+            "MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_TEXT_TO_E2EE",
+            "MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_E2EE_TO_RCS",
+            "MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_E2EE_TO_TEXT",
+        )
+    }
+}
+
 /** One entry of the phone's contact list. [id] is the contact's participant id. */
 data class ContactDto(
     val id: String,
