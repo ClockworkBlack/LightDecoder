@@ -42,6 +42,15 @@ object MediaCache {
     fun inlineKey(messageId: String, partId: String) = "$INLINE_KEY_PREFIX$messageId:$partId"
 
     /**
+     * Whether [path] is the file [fileFor] gives the inline bytes of message
+     * [messageId], part [partId]. Earlier versions stored a part's inline
+     * preview as its local file even when the real media could be
+     * downloaded; such a file is not the picture.
+     */
+    fun isInlineFile(path: String, messageId: String, partId: String): Boolean =
+        path.isNotEmpty() && File(path).nameWithoutExtension == hash(inlineKey(messageId, partId))
+
+    /**
      * Writes [bytes] to [file] whole or not at all: into a [PART_SUFFIX] file
      * first, renamed into place once complete. If anything fails the partial
      * file is removed before the exception is passed on.

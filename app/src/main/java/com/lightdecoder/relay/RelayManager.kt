@@ -2077,7 +2077,9 @@ class RelayManager private constructor(
 
     /** A message the catch-up stored: stickers in it go to the inbox like live ones (no notifications). */
     private fun onCaughtUp(dto: MessageDto, result: ArchiveRepository.UpsertResult) {
-        if (dto.isDeleted || dto.id.isEmpty() || result.newMediaParts.isEmpty() || !RelayPrefs.catchStickers(app)) return
+        if (dto.isDeleted || dto.id.isEmpty() || result.newMediaParts.isEmpty()) return
+        requestFullSizes(dto, result.newMediaParts)
+        if (!RelayPrefs.catchStickers(app)) return
         for (part in result.newMediaParts) {
             if (isStickerCandidate(part)) scope.launch(mediaDispatcher) { checkSticker(dto, part) }
         }
@@ -2141,6 +2143,7 @@ class RelayManager private constructor(
         val previousLatest = if (dto.isDeleted) 0L else repo.conversation(dto.conversationId)?.lastMessageTs ?: 0L
         val result = repo.upsertMessage(dto)
         if (dto.isDeleted || dto.id.isEmpty()) return
+        requestFullSizes(dto, result.newMediaParts)
         if (result.newMediaParts.isNotEmpty() && RelayPrefs.catchStickers(app)) {
             for (part in result.newMediaParts) {
                 if (isStickerCandidate(part)) scope.launch(mediaDispatcher) { checkSticker(dto, part) }
@@ -2250,13 +2253,15 @@ class RelayManager private constructor(
 
     private fun checkSticker(dto: MessageDto, part: MediaRow) {
         try {
+            // The real media first: inline bytes next to a media id or a thumbnail
+            // are only a small preview, and a sticker made of that is a blur.
             val bytes = when {
-                part.inlineData.isNotEmpty() -> part.inlineData
                 part.mediaId.isNotEmpty() -> download(dto.id, part.partId, part.mediaId, part.key, part.mime, thumbnail = false)
                 part.needsFullSize || part.thumbMediaId.isNotEmpty() -> {
                     requestFullSizeOnce(dto.id, part)
                     null
                 }
+                part.inlineData.isNotEmpty() -> part.inlineData
                 else -> null
             } ?: return
             val title = repo.conversation(dto.conversationId)?.name.orEmpty()
@@ -2291,28 +2296,62 @@ class RelayManager private constructor(
     private fun requestFullSizeOnce(messageId: String, part: MediaRow) {
         if (part.fullSizeRequested || part.partId.isEmpty() || part.partId.startsWith(INDEX_PART_PREFIX)) return
         if (!_state.value.isOnline) return
+        // The sticker check and the automatic request can both get here for one part.
+        val key = "$messageId\u0000${part.partId}"
+        if (!fullSizeAsking.add(key)) return
         try {
+            if (repo.mediaPart(messageId, part.partId)?.fullSizeRequested == true) return
             requireBridge().requestFullSizeImage(messageId, part.partId)
             repo.markFullSizeRequested(messageId, part.partId)
         } catch (e: RelayException) {
             RelayLog.add(app, "Full-size request failed: ${e.code}")
+        } finally {
+            fullSizeAsking.remove(key)
         }
     }
 
+    /** Parts whose full-size request is being sent right now. */
+    private val fullSizeAsking: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /**
+     * Pictures and videos that arrived with only a thumbnail on the phone:
+     * ask for the originals at once, as Messages for web does when they are
+     * shown, so the conversation shows them full size without a tap. Only for
+     * messages of the last [FULL_SIZE_AUTO_MS] (live ones and what a catch-up
+     * brings), not for old history.
+     */
+    private fun requestFullSizes(dto: MessageDto, parts: List<MediaRow>) {
+        if (System.currentTimeMillis() - dto.timestampMs > FULL_SIZE_AUTO_MS) return
+        for (part in parts) {
+            if (!part.needsFullSize || part.fullSizeRequested) continue
+            val mime = part.mime.substringBefore(';').trim().lowercase()
+            if (mime.isNotEmpty() && !mime.startsWith("image/") && !mime.startsWith("video/")) continue
+            scope.launch(mediaDispatcher) { requestFullSizeOnce(dto.id, part) }
+        }
+    }
+
+    /**
+     * A part's file: the original ([thumbnail] false) or the phone's thumbnail.
+     * The original comes from the media id; inline bytes only when they are
+     * the media itself (nothing to download), never the small preview the
+     * phone sends next to a picture. A local file earlier versions made of
+     * that preview does not count.
+     */
     private fun loadMedia(messageId: String, partId: String, thumbnail: Boolean): File? {
         val since = gate.epoch()
         val part = repo.mediaPart(messageId, partId) ?: return null
-        val stored = (if (thumbnail) listOf(part.thumbPath, part.localPath) else listOf(part.localPath))
+        val local = part.localPath.takeUnless { part.inlineIsPreview && MediaCache.isInlineFile(it, messageId, partId) }.orEmpty()
+        val stored = (if (thumbnail) listOf(part.thumbPath, local) else listOf(local))
             .filter { it.isNotEmpty() }.map(::File).firstOrNull { it.isFile && it.length() > 0 }
         if (stored != null) return stored
         return try {
             when {
                 thumbnail && part.thumbMediaId.isNotEmpty() ->
                     downloadToFile(since, messageId, partId, part.thumbMediaId, part.thumbKey, part.mime, thumbnail = true)
-                part.inlineData.isNotEmpty() ->
-                    writeMedia(since, messageId, partId, MediaCache.inlineKey(messageId, partId), part.inlineData, part.mime, thumbnail = false)
                 part.mediaId.isNotEmpty() ->
                     downloadToFile(since, messageId, partId, part.mediaId, part.key, part.mime, thumbnail = false)
+                part.inlineIsMedia ->
+                    writeMedia(since, messageId, partId, MediaCache.inlineKey(messageId, partId), part.inlineData, part.mime, thumbnail = false)
                 else -> null
             }
         } catch (e: RelayException) {
@@ -2452,6 +2491,9 @@ class RelayManager private constructor(
         private const val CONVERSATION_COUNT = 100
         private const val EVENT_DRAIN_TIMEOUT_S = 10L
         private const val STALE_MESSAGE_MS = 24 * 60 * 60 * 1000L
+
+        /** Originals of pictures this recent are asked of the phone without a tap ([requestFullSizes]). */
+        private const val FULL_SIZE_AUTO_MS = 7 * 24 * 60 * 60 * 1000L
 
         /** The detail of the INTERNAL error ensureBridge throws when the stored session is unreadable for now. */
         private const val SESSION_UNREADABLE = "session unreadable"

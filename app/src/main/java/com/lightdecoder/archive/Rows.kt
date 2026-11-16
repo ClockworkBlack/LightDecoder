@@ -115,7 +115,19 @@ data class MediaRow(
     val thumbPath: String,
     val fullSizeRequested: Boolean,
     val stickerChecked: Boolean,
-)
+) {
+    /**
+     * The phone sent a small preview inline (mediaData) next to the real
+     * media, which is a media id or a thumbnail to download. The preview is
+     * only a placeholder, never the picture: shown as the picture it is a
+     * blurry postage stamp. The connector uses inline bytes only when there
+     * is nothing else.
+     */
+    val inlineIsPreview: Boolean get() = inlineData.isNotEmpty() && (mediaId.isNotEmpty() || thumbMediaId.isNotEmpty())
+
+    /** The inline bytes are the media itself: there is nothing else to download. */
+    val inlineIsMedia: Boolean get() = inlineData.isNotEmpty() && mediaId.isEmpty() && thumbMediaId.isEmpty()
+}
 
 /**
  * A message waiting to be sent. [idempotencyKey] is the tmpId the message was

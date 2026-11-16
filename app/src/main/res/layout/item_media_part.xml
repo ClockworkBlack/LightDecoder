@@ -14,15 +14,11 @@
         android:clickable="true"
         android:focusable="true">
 
-        <ImageView
+        <!-- Sized from the picture's real dimensions (see MediaImageView). -->
+        <com.lightdecoder.ui.chat.MediaImageView
             android:id="@+id/mediaImage"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:adjustViewBounds="true"
-            android:maxWidth="480dp"
-            android:maxHeight="480dp"
-            android:minWidth="96dp"
-            android:minHeight="72dp"
             android:scaleType="fitCenter" />
 
         <ImageView

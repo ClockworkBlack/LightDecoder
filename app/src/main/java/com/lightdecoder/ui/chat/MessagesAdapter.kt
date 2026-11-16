@@ -80,6 +80,14 @@ class MessagesAdapter(
 
         /** The "Open link" accessibility actions added at the last bind ([BubbleLinks]). */
         var linkActionIds: List<Int> = emptyList()
+
+        /** The bubble as the layout made it, put back after a picture-only message used the holder. */
+        val bubbleBackground: android.graphics.drawable.Drawable? = binding.bubble.background
+        val bubblePadding = intArrayOf(
+            binding.bubble.paddingStart, binding.bubble.paddingTop, binding.bubble.paddingEnd, binding.bubble.paddingBottom,
+        )
+        val bubbleMinWidth = binding.bubble.minimumWidth
+        val metaMarginTop = (binding.meta.layoutParams as android.widget.LinearLayout.LayoutParams).topMargin
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
@@ -124,7 +132,11 @@ class MessagesAdapter(
         b.column.gravity = if (outgoing) Gravity.END else Gravity.START
         val bubbleColor = if (outgoing) holder.outgoingBubble else holder.incomingBubble
         val textColor = if (outgoing) holder.onOutgoing else holder.onIncoming
-        val metaColor = if (outgoing) holder.onOutgoing else holder.incomingMeta
+        // A picture or sticker on its own has no bubble: it sits on the conversation itself
+        // (as on an iPhone), with its time under it in the conversation's own colours.
+        val bare = isBare(item)
+        val metaColor = if (outgoing && !bare) holder.onOutgoing else holder.incomingMeta
+        bindBubbleShape(holder, bare, outgoing)
         b.bubble.backgroundTintList = ColorStateList.valueOf(bubbleColor)
         b.body.setTextColor(textColor)
         b.body.setLinkTextColor(textColor)
@@ -219,6 +231,41 @@ class MessagesAdapter(
         }
         // The text view is hidden from TalkBack (the bubble reads it): its links are bubble actions.
         holder.linkActionIds = BubbleLinks.bind(b.bubble, b.body, holder.linkActionIds)
+    }
+
+    /**
+     * A message that is only pictures (or stickers, or video stills): no
+     * text, subject or reply quote. It is drawn without a bubble.
+     */
+    private fun isBare(item: ThreadItem.Message): Boolean {
+        val row = item.row
+        return row.media.isNotEmpty() && row.media.all(::isVisual) && row.text.isEmpty() &&
+            row.subject.isBlank() && item.quote == null && row.replyToId.isEmpty()
+    }
+
+    /** The bubble's background, padding and the time's place: a bubble, or none for a [bare] picture. */
+    private fun bindBubbleShape(holder: MessageHolder, bare: Boolean, outgoing: Boolean) {
+        val b = holder.binding
+        val meta = b.meta.layoutParams as android.widget.LinearLayout.LayoutParams
+        if (bare) {
+            b.bubble.background = null
+            b.bubble.setPaddingRelative(0, 0, 0, 0)
+            b.bubble.minimumWidth = 0
+            meta.gravity = if (outgoing) Gravity.END else Gravity.START
+            meta.topMargin = 0
+            meta.marginStart = META_INSET
+            meta.marginEnd = META_INSET
+        } else {
+            b.bubble.background = holder.bubbleBackground
+            val p = holder.bubblePadding
+            b.bubble.setPaddingRelative(p[0], p[1], p[2], p[3])
+            b.bubble.minimumWidth = holder.bubbleMinWidth
+            meta.gravity = Gravity.END
+            meta.topMargin = holder.metaMarginTop
+            meta.marginStart = 0
+            meta.marginEnd = 0
+        }
+        b.meta.layoutParams = meta
     }
 
     /** [unconfirmed]: a failed send that may have gone out ([MessageStatus.outcomeUnknown]). */
@@ -369,6 +416,9 @@ class MessagesAdapter(
 
         /** Longest side of a picture in a bubble (decoded at this size or the bubble's width, shown up to it). */
         const val MEDIA_MAX_SIDE_DP = 480
+
+        /** How far the time under a bubble-less picture sits in from its edge. */
+        val META_INSET = (4 * android.content.res.Resources.getSystem().displayMetrics.density).toInt()
 
         val DIFF = object : DiffUtil.ItemCallback<ThreadItem>() {
             override fun areItemsTheSame(a: ThreadItem, b: ThreadItem) = a.key == b.key

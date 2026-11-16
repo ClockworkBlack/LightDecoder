@@ -207,6 +207,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             actionSheet?.dismiss()
             stickerSheet?.dismiss()
             fullSizeAsked.clear()
+            fullSizeWanted.clear()
             confirmDialog?.dismiss()
             closeOptionsMenu()
             windowSize = PAGE
@@ -599,6 +600,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             banner.render(state, paired)
             renderComposerState()
             if (online && !wasOnline) {
+                // Originals of pictures shown while offline: ask for them now.
+                for ((key, wanted) in fullSizeWanted.entries.toList()) requestOriginal(key, wanted.first, wanted.second)
                 // Pictures that failed to download while offline: try again now.
                 if (media.hadFailures) {
                     media.clearFailures()
@@ -998,17 +1001,35 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     /** Originals already asked of the phone from this screen (asked once each, without a tap). */
     private val fullSizeAsked = HashSet<String>()
 
+    /** Originals to ask for once the link is connected: shown while it was not. */
+    private val fullSizeWanted = LinkedHashMap<String, Pair<String, String>>()
+
     /**
      * A picture the phone only has a thumbnail of so far came on screen: ask
-     * for the original, quietly. It arrives as an update of the message.
+     * for the original, quietly (or as soon as the link is connected). It
+     * arrives as an update of the message, which then shows it full size.
      */
     override fun onLoadFullSize(row: MessageRow, part: MediaRow) {
-        if (!online) return
         val key = row.id + "|" + part.partId
+        if (key in fullSizeAsked) return
+        if (!online) {
+            fullSizeWanted[key] = row.id to part.partId
+            return
+        }
+        requestOriginal(key, row.id, part.partId)
+    }
+
+    private fun requestOriginal(key: String, messageId: String, partId: String) {
+        fullSizeWanted.remove(key)
         if (!fullSizeAsked.add(key)) return
+        val forConversation = conversationId
         lifecycleScope.launch {
-            relayAttempt { manager.requestFullSize(row.id, part.partId) }
-                .onFailure { fullSizeAsked.remove(key) }
+            relayAttempt { manager.requestFullSize(messageId, partId) }
+                .onFailure {
+                    fullSizeAsked.remove(key)
+                    // Not connected after all: ask again when it is (unless the thread changed).
+                    if (conversationId == forConversation) fullSizeWanted[key] = messageId to partId
+                }
         }
     }
 
