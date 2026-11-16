@@ -134,19 +134,19 @@ class WaFoundationTest {
     fun whatsAppHasItsOwnChoices() {
         assertFalse("off until the user turns it on", WaPrefs.liveEnabled(context))
         assertTrue(WaPrefs.autoStart(context))
-        assertFalse("WhatsApp on the phone already notifies", WaPrefs.notifyMessages(context))
+        assertTrue("message notifications are on unless turned off", WaPrefs.notifyMessages(context))
 
         WaPrefs.setLiveEnabled(context, true)
         WaPrefs.setAutoStart(context, false)
-        WaPrefs.setNotifyMessages(context, true)
+        WaPrefs.setNotifyMessages(context, false)
         assertTrue(WaPrefs.liveEnabled(context))
         assertFalse(WaPrefs.autoStart(context))
-        assertTrue(WaPrefs.notifyMessages(context))
+        assertFalse(WaPrefs.notifyMessages(context))
 
         // Nothing of it reaches the Google Messages link's choices, or the other way round.
         assertFalse(RelayPrefs.liveEnabled(context))
         assertTrue(RelayPrefs.autoStart(context))
-        assertFalse(RelayPrefs.notifyMessages(context))
+        assertTrue("untouched by WhatsApp's switch", RelayPrefs.notifyMessages(context))
         RelayPrefs.setLiveEnabled(context, true)
         WaPrefs.setLiveEnabled(context, false)
         assertTrue(RelayPrefs.liveEnabled(context))
@@ -186,7 +186,7 @@ class WaFoundationTest {
         assertNotEquals(first, WaIds.opaque(context, jid))
     }
 
-    // --- the manager's API, while it is a placeholder -----------------------------------------
+    // --- the manager's API without a link (linking itself: WaRuntimeTest) -----------------------------------------
 
     @Test
     fun theManagerIsTheWhatsAppBackendAndStartsUnlinked() {
@@ -236,14 +236,11 @@ class WaFoundationTest {
                 assertFalse("no id in the exception's text", e.message.orEmpty().contains("15550111"))
             }
         }
-        assertNotLinked("pairing code") { manager.requestPairingCode("+1 555 0100") }
-        assertNotLinked("QR") { manager.startQr() }
         assertNotLinked("send") { manager.sendText(jid, "hello") }
         assertNotLinked("react") { manager.react("M1", "👍", remove = false) }
         assertNotLinked("refresh") { manager.refreshConversations() }
         assertNotLinked("load older") { manager.loadOlder(jid) }
         assertNotLinked("delete for everyone") { manager.deleteMessage("M1", forEveryone = true) }
-        assertNotLinked("delete for me") { manager.deleteMessage("M1") }
         assertNotLinked("start a chat") { manager.startConversation(listOf("+15550111"), null) }
         assertNotLinked("contacts from the phone") { manager.contacts(refresh = true) }
         assertTrue(repo.messages(jid).isEmpty())

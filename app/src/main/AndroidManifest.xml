@@ -173,6 +173,10 @@
             android:exported="false"
             android:parentActivityName=".ui.chat.ConversationsActivity"
             android:windowSoftInputMode="adjustResize" />
+        <!-- A conversation's pictures, full screen: swipe between them, pinch or double-tap to zoom. -->
+        <activity
+            android:name=".ui.chat.PictureGalleryActivity"
+            android:exported="false" />
         <activity
             android:name=".ui.sticker.StickerMakerActivity"
             android:exported="false" />

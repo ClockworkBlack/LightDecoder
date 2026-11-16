@@ -326,6 +326,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             participants = emptyList()
             renderConversation()
             if (started) manager.watchPresence(id)
+            // Android pauses a thread before handing it a new intent (onResume then sets the mark);
+            // one that is still resumed marks the new conversation as on screen right away.
+            if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) {
+                MessageNotifier.setVisibleConversationId(manager.service, conversationId)
+            }
         }
         targetMessageId = intent.getStringExtra(RelayIntents.EXTRA_MESSAGE_ID)
         reload()
@@ -400,22 +405,73 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         ItemTouchHelper(SwipeToReply()).attachToRecyclerView(binding.messages)
     }
 
-    /** Swipe a message sideways to reply to it, as in most chat apps. */
+    /**
+     * Swipe a message sideways to reply to it, as in Google Messages: the
+     * bubble follows the finger a short way and springs back into its place
+     * in the thread when let go; past [REPLY_TRIGGER_DP] it opens the reply
+     * bar. The swipe never "completes" (a completed ItemTouchHelper swipe
+     * leaves the bubble off screen, and the message would vanish from the
+     * thread).
+     */
     private inner class SwipeToReply : ItemTouchHelper.SimpleCallback(0, ItemTouchHelper.START or ItemTouchHelper.END) {
+        private val density = resources.displayMetrics.density
+        private val maxShift = REPLY_MAX_SHIFT_DP * density
+        private val trigger = REPLY_TRIGGER_DP * density
+
+        /** The message the current drag has pulled far enough to reply to. */
+        private var armed: RecyclerView.ViewHolder? = null
+
         override fun getSwipeDirs(recyclerView: RecyclerView, holder: RecyclerView.ViewHolder): Int {
             val item = adapter.currentList.getOrNull(holder.bindingAdapterPosition) as? ThreadItem.Message
             return if (item != null && canReplyTo(item.row)) super.getSwipeDirs(recyclerView, holder) else 0
         }
 
-        override fun getSwipeThreshold(holder: RecyclerView.ViewHolder) = 0.3f
+        // Never reached: the bubble always comes back.
+        override fun getSwipeThreshold(holder: RecyclerView.ViewHolder) = Float.MAX_VALUE
+
+        override fun getSwipeEscapeVelocity(defaultValue: Float) = Float.MAX_VALUE
+
+        override fun getSwipeVelocityThreshold(defaultValue: Float) = 0f
 
         override fun onMove(rv: RecyclerView, a: RecyclerView.ViewHolder, b: RecyclerView.ViewHolder) = false
 
         override fun onSwiped(holder: RecyclerView.ViewHolder, direction: Int) {
-            val position = holder.bindingAdapterPosition
-            (adapter.currentList.getOrNull(position) as? ThreadItem.Message)?.let { onReply(it.row) }
-            // Put the bubble back where it was.
-            adapter.notifyItemChanged(position)
+            // Cannot happen (see the thresholds); if it does, the bubble goes back and the reply opens.
+            replyTo(holder)
+            adapter.notifyItemChanged(holder.bindingAdapterPosition)
+        }
+
+        override fun onChildDraw(
+            c: android.graphics.Canvas,
+            recyclerView: RecyclerView,
+            holder: RecyclerView.ViewHolder,
+            dX: Float,
+            dY: Float,
+            actionState: Int,
+            isCurrentlyActive: Boolean,
+        ) {
+            val shift = dX.coerceIn(-maxShift, maxShift)
+            if (isCurrentlyActive && kotlin.math.abs(shift) >= trigger && armed !== holder) {
+                armed = holder
+                holder.itemView.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+            } else if (isCurrentlyActive && kotlin.math.abs(shift) < trigger && armed === holder) {
+                armed = null
+            }
+            super.onChildDraw(c, recyclerView, holder, shift, dY, actionState, isCurrentlyActive)
+        }
+
+        /** Let go and back in place: reply if it was pulled far enough. */
+        override fun clearView(recyclerView: RecyclerView, holder: RecyclerView.ViewHolder) {
+            super.clearView(recyclerView, holder)
+            holder.itemView.translationX = 0f
+            if (armed === holder) {
+                armed = null
+                replyTo(holder)
+            }
+        }
+
+        private fun replyTo(holder: RecyclerView.ViewHolder) {
+            (adapter.currentList.getOrNull(holder.bindingAdapterPosition) as? ThreadItem.Message)?.let { onReply(it.row) }
         }
     }
 
@@ -1081,7 +1137,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
     }
 
-    private fun setAttachment(uri: Uri) {
+    @androidx.annotation.VisibleForTesting
+    internal fun setAttachment(uri: Uri) {
         attachment = uri
         binding.attachmentBar.visibility = View.VISIBLE
         binding.attachmentName.text = getString(R.string.chat_attachment_ready)
@@ -1169,6 +1226,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         binding.replySender.text = getString(R.string.chat_replying_to, who)
         binding.replyText.text = ThreadItems.preview(row, getString(R.string.chat_media_picture))
         binding.input.requestFocus()
+        // Ready to type the reply, with the message replied to still in its place above.
+        androidx.core.view.WindowCompat.getInsetsController(window, binding.input)
+            .show(androidx.core.view.WindowInsetsCompat.Type.ime())
     }
 
     override fun onMessageLongPress(row: MessageRow) {
@@ -1298,6 +1358,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     override fun onMediaTap(row: MessageRow, part: MediaRow) {
         val link = manager
+        if (PictureGalleryActivity.isPicture(part)) {
+            // Pictures open full screen, zoomable, with the conversation's other pictures a swipe away.
+            startActivity(PictureGalleryActivity.intent(this, link.service, conversationId, row.id, part.partId, title))
+            return
+        }
         lifecycleScope.launch {
             val local = listOf(part.localPath, if (part.needsFullSize) part.thumbPath else "")
                 .firstOrNull { it.isNotEmpty() && File(it).isFile }?.let(::File)
@@ -1619,6 +1684,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     companion object {
         private const val STATE_WINDOW = "window"
         private const val STATE_ATTACHMENT = "attachment"
+
+        /** How far a bubble follows a swipe to reply, and how far it must go to start the reply. */
+        private const val REPLY_MAX_SHIFT_DP = 96
+        private const val REPLY_TRIGGER_DP = 64
         private const val STICKER_COLUMNS = 4
         private const val STICKER_TILE_DP = 96
         private const val STATE_REPLY_TO = "replyTo"

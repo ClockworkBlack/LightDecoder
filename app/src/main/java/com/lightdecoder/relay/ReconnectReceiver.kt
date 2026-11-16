@@ -3,6 +3,7 @@ package com.lightdecoder.relay
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import com.lightdecoder.wa.WaManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -10,7 +11,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * The wake-up alarm behind a reconnect backoff. The backoff's own timer only
+ * The wake-up alarm behind a reconnect backoff (either link's). The backoff's own timer only
  * counts while the phone is awake, so with the screen off an errored link
  * could wait hours; this alarm (elapsed real time, allowed while idle) fires
  * on time and retries. Not exported: only the app's own alarm reaches it.
@@ -21,8 +22,12 @@ import kotlinx.coroutines.withTimeoutOrNull
 class ReconnectReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != ACTION_RECONNECT) return
-        val connecting = RelayManager.get(context).onReconnectDue() ?: return
+        val connecting = when (intent.action) {
+            ACTION_RECONNECT -> RelayManager.get(context).onReconnectDue()
+            // The WhatsApp link's backoff: its manager set this alarm, so it exists.
+            ACTION_WA_RECONNECT -> WaManager.get(context).onReconnectDue()
+            else -> null
+        } ?: return
         val pending = goAsync()
         background.launch {
             try {
@@ -35,6 +40,9 @@ class ReconnectReceiver : BroadcastReceiver() {
 
     internal companion object {
         const val ACTION_RECONNECT = "com.lightdecoder.relay.action.RECONNECT"
+
+        /** The same alarm for the WhatsApp link ([WaManager]). */
+        const val ACTION_WA_RECONNECT = "com.lightdecoder.wa.action.RECONNECT"
 
         /** Well below the time Android gives a background broadcast. */
         private const val HOLD_AWAKE_MS = 25_000L

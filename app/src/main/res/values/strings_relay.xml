@@ -7,7 +7,7 @@
     <string name="relay_channel_alerts">Link problems</string>
     <string name="relay_channel_alerts_description">Tells you when the Google Messages link needs you to pair again.</string>
     <string name="relay_channel_messages">Messages</string>
-    <string name="relay_channel_messages_description">New messages that arrive through the Google Messages link. Off unless you turn it on, since Google Messages on your phone already notifies.</string>
+    <string name="relay_channel_messages_description">New messages that arrive through the Google Messages link.</string>
 
     <!-- The ongoing notification of the link, by state -->
     <string name="relay_state_unpaired">Not paired with your phone</string>

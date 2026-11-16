@@ -140,7 +140,7 @@
     <string name="link_switch_live_help">Keeps a connection to your phone open in the background, with a notification you can disconnect from.</string>
     <string name="link_switch_auto_start">Reconnect after the phone restarts</string>
     <string name="link_switch_notify">Notify about new messages</string>
-    <string name="link_switch_notify_help">Off by default, because Google Messages on your phone already notifies.</string>
+    <string name="link_switch_notify_help">A notification for each new message, with Reply and Mark as read. Turn it off if Google Messages on your phone already notifies you.</string>
     <string name="link_switch_stickers">Decode stickers into the sticker inbox</string>
     <string name="link_battery_optimized">Android may pause the connection to save battery. Exempting LightDecoder from battery optimization keeps it connected.</string>
     <string name="link_battery_exempt">LightDecoder is exempt from battery optimization.</string>
@@ -426,4 +426,9 @@
     <!-- Spoken in place of the text of a message that is only a video or a file. -->
     <string name="chat_read_aloud_attachment">an attachment</string>
     <string name="chat_read_aloud_unavailable">Reading aloud needs a text-to-speech engine, and none is available on this phone.</string>
+    <!-- The picture viewer of a conversation -->
+    <string name="gallery_picture">Picture</string>
+    <string name="gallery_counter">%1$d of %2$d</string>
+    <string name="gallery_details">Save, details and effects</string>
+    <string name="gallery_loading_failed">This picture could not be loaded.</string>
 </resources>

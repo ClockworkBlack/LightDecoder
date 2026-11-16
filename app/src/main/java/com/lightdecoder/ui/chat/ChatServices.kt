@@ -211,6 +211,11 @@ internal object ChatErrors {
         RelayException.TOO_LARGE -> R.string.link_error_too_large
         RelayException.SEND_FAILED -> R.string.chat_wa_error_send_failed
         RelayException.LOGGED_OUT -> R.string.chat_wa_error_logged_out
+        // Linking (the setup screen).
+        WaErrors.PAIR_FAILED -> R.string.wa_error_pair_failed
+        WaErrors.ALREADY_PAIRED -> R.string.wa_error_already_paired
+        RelayException.PAIRING_TIMEOUT -> R.string.wa_error_pairing_timeout
+        RelayException.PAIRING_CANCELLED -> R.string.wa_error_pairing_cancelled
         WaErrors.TIMEOUT -> R.string.chat_wa_error_timeout
         WaErrors.RATE_LIMITED -> R.string.chat_wa_error_rate_limited
         WaErrors.NOT_ON_WHATSAPP -> R.string.chat_wa_error_not_on_whatsapp

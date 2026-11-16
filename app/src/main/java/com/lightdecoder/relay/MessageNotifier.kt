@@ -31,7 +31,8 @@ import java.util.concurrent.ConcurrentHashMap
  * the archive's ([ArchiveRepository.service]); elsewhere it is a parameter
  * that defaults to Google Messages, which was all there was.
  *
- * Off by default for both services: the phone's own app already notifies.
+ * On by default for both services (each has its switch in its link's
+ * settings, and its own channel in Android's settings).
  * Never for history, for the user's own messages, for a muted conversation,
  * or for the conversation on screen.
  *

@@ -282,10 +282,15 @@ class LinkFollowUpTest {
         val row = env.repo.messages("c1", limit = 10).single()
         ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(app, "c1").setFlags(0)).use { scenario ->
             settle()
-            ShadowToast.reset()
             scenario.onActivity { it.onMediaTap(row, row.media.single()) }
-            scenario.waitFor("the toast") {
-                ShadowToast.getTextOfLatestToast() == it.getString(R.string.chat_media_needs_connection)
+            // Pictures open in the zoomable gallery, which says why this one cannot show yet.
+            val opened = shadowOf(app as android.app.Application).nextStartedActivity
+            assertEquals(com.lightdecoder.ui.chat.PictureGalleryActivity::class.java.name, opened.component?.className)
+            ActivityScenario.launch<com.lightdecoder.ui.chat.PictureGalleryActivity>(opened).use { gallery ->
+                gallery.waitFor("the explanation") {
+                    val message = it.findViewById<TextView>(R.id.message)
+                    message != null && message.isShown && message.text.toString() == it.getString(R.string.chat_media_needs_connection)
+                }
             }
         }
     }

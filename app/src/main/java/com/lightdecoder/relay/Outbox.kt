@@ -2,6 +2,7 @@ package com.lightdecoder.relay
 
 import android.content.Context
 import android.net.Uri
+import com.lightdecoder.chat.AttachmentPrep
 import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
 import com.lightdecoder.archive.ArchiveRepository
@@ -102,10 +103,18 @@ internal class Outbox(
      */
     fun enqueueMedia(tmpId: String, conversationId: String, uri: Uri, caption: String?, replyToId: String?, nowMs: Long) {
         val file = MediaCache.outboxFile(context, tmpId)
-        val name = displayName(uri)
-        val mime = mimeOf(uri, name)
+        var name = displayName(uri)
+        var mime = mimeOf(uri, name)
         val error = copyCapped(uri, file)
-        if (error != null) file.delete()
+        if (error != null) {
+            file.delete()
+        } else {
+            // HEIC becomes JPEG (or PNG), a huge photo is scaled down: what every phone can show.
+            AttachmentPrep.prepare(file, mime, name)?.let {
+                mime = it.mime
+                name = it.name
+            }
+        }
         val text = caption?.trim().orEmpty()
         repo.insertLocalOutgoing(tmpId, conversationId, text, file.path, mime, name, replyToId, nowMs)
         repo.enqueueOutbox(

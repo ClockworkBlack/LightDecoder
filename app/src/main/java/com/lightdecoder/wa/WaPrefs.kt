@@ -56,10 +56,11 @@ object WaPrefs {
         prefs(context).edit { putBoolean(KEY_AUTO_START, enabled) }
 
     /**
-     * Post a notification for new WhatsApp messages. Off by default:
-     * WhatsApp on the phone already notifies.
+     * Post a notification for new WhatsApp messages. On by default, so
+     * LightDecoder tells the user about messages it receives; it can be
+     * turned off in the link's settings.
      */
-    fun notifyMessages(context: Context): Boolean = prefs(context).getBoolean(KEY_NOTIFY_MESSAGES, false)
+    fun notifyMessages(context: Context): Boolean = prefs(context).getBoolean(KEY_NOTIFY_MESSAGES, true)
 
     fun setNotifyMessages(context: Context, enabled: Boolean) =
         prefs(context).edit { putBoolean(KEY_NOTIFY_MESSAGES, enabled) }

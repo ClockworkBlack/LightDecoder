@@ -69,10 +69,11 @@ object RelayPrefs {
         prefs(context).edit().putString(KEY_BACKFILL_DEPTH, depth.name).apply()
 
     /**
-     * Post a notification for new messages. Off by default: Google Messages on
-     * the phone already notifies.
+     * Post a notification for new messages. On by default, so LightDecoder
+     * tells the user about messages it receives; it can be turned off in the
+     * link's settings.
      */
-    fun notifyMessages(context: Context) = prefs(context).getBoolean(KEY_NOTIFY_MESSAGES, false)
+    fun notifyMessages(context: Context) = prefs(context).getBoolean(KEY_NOTIFY_MESSAGES, true)
 
     fun setNotifyMessages(context: Context, enabled: Boolean) =
         prefs(context).edit().putBoolean(KEY_NOTIFY_MESSAGES, enabled).apply()

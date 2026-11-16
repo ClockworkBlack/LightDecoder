@@ -11,7 +11,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.recyclerview.widget.RecyclerView
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import androidx.test.platform.app.InstrumentationRegistry
 import com.google.android.material.tabs.TabLayout
 import com.lightdecoder.R
 import com.lightdecoder.chat.ChatService
@@ -35,6 +34,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.fakes.RoboMenuItem
 import org.robolectric.shadows.ShadowDialog
@@ -149,15 +149,18 @@ class ServiceTabsTest {
         two.env.pairedManager()
         two.seedConversation(messages, "c1", "Alice")
         two.seedConversation(whatsApp, "111@s.whatsapp.net", "Carol")
-        launch().use { scenario ->
-            scenario.waitFor("Messages") { titles(it) == listOf("Alice") }
+        // Delivered as Android does to a running list: paused, then the new intent, then resumed.
+        val controller = Robolectric.buildActivity(ConversationsActivity::class.java).setup()
+        try {
+            val activity = controller.get()
+            two.waitUntil("Messages") { titles(activity) == listOf("Alice") }
             // Up from a WhatsApp thread (opened from its notification) lands on this list.
-            scenario.onActivity { activity ->
-                val up = Intent(activity, ConversationsActivity::class.java).putExtra(RelayIntents.EXTRA_SERVICE, whatsApp.key)
-                InstrumentationRegistry.getInstrumentation().callActivityOnNewIntent(activity, up)
-                assertEquals(1, activity.findViewById<TabLayout>(R.id.services).selectedTabPosition)
-            }
-            scenario.waitFor("WhatsApp") { titles(it) == listOf("Carol") }
+            val up = Intent(activity, ConversationsActivity::class.java).putExtra(RelayIntents.EXTRA_SERVICE, whatsApp.key)
+            controller.newIntent(up)
+            assertEquals(1, activity.findViewById<TabLayout>(R.id.services).selectedTabPosition)
+            two.waitUntil("WhatsApp") { titles(activity) == listOf("Carol") }
+        } finally {
+            controller.pause().stop().destroy()
         }
     }
 
@@ -395,6 +398,12 @@ class ServiceTabsTest {
                 val item = activity.findViewById<Toolbar>(R.id.toolbar).menu.findItem(R.id.action_search)
                 assertTrue(item.expandActionView())
                 assertEquals("a search is over one service", View.GONE, activity.findViewById<View>(R.id.services).visibility)
+            }
+            two.settle()
+            // The menu was rebuilt for the search: type into the search field on screen now.
+            scenario.onActivity { activity ->
+                val item = activity.findViewById<Toolbar>(R.id.toolbar).menu.findItem(R.id.action_search)
+                if (!item.isActionViewExpanded) item.expandActionView()
                 (item.actionView as SearchView).setQuery("pineapple", true)
             }
             scenario.waitFor("WhatsApp's hit") { hits(it) == listOf("w1") }
@@ -407,8 +416,12 @@ class ServiceTabsTest {
                 activity.findViewById<Toolbar>(R.id.toolbar).menu.findItem(R.id.action_search).collapseActionView()
                 assertEquals(View.VISIBLE, activity.findViewById<View>(R.id.services).visibility)
                 selectService(activity, messages)
+                activity.findViewById<Toolbar>(R.id.toolbar).menu.findItem(R.id.action_search).expandActionView()
+            }
+            two.settle()
+            scenario.onActivity { activity ->
                 val item = activity.findViewById<Toolbar>(R.id.toolbar).menu.findItem(R.id.action_search)
-                item.expandActionView()
+                if (!item.isActionViewExpanded) item.expandActionView()
                 (item.actionView as SearchView).setQuery("pineapple", true)
             }
             scenario.waitFor("Messages' hit") { hits(it) == listOf("m1") }

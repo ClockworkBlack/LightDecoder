@@ -52,5 +52,5 @@ classes.dex with their exact versions and the Apache License 2.0). They also
 come with each module's source (go mod download) and with the pinned
 submodules under third_party/.
 
-Android libraries (AndroidX, Material Components, Kotlin and kotlinx.coroutines)
-are Apache-2.0; About > Licences lists them with the licence text.
+Android libraries (AndroidX, Material Components, Kotlin, kotlinx.coroutines and
+ZXing core, which draws the WhatsApp setup screen's QR code) are Apache-2.0; About > Licences lists them with the licence text.

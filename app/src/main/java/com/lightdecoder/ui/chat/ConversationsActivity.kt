@@ -88,6 +88,7 @@ class ConversationsActivity : AppCompatActivity() {
     private var searchQuery: String? = null
     private var restoredQuery: String? = null
     private var searchItem: MenuItem? = null
+    private var optionsMenu: Menu? = null
     private var searchJob: Job? = null
     private var reloadScheduled = false
     private var badgesScheduled = false
@@ -225,7 +226,7 @@ class ConversationsActivity : AppCompatActivity() {
             relayState = state
             binding.fab.isEnabled = paired
             renderLinkState()
-            if (paired != wasPaired) invalidateOptionsMenu()
+            if (paired != wasPaired) refreshMenu()
         }
     }
 
@@ -405,7 +406,7 @@ class ConversationsActivity : AppCompatActivity() {
     /** Pull to refresh and the menu's refresh ask the phone, which has nothing for the local Deleted folder. */
     private fun renderFolderControls() {
         binding.swipe.isEnabled = folder.listable
-        invalidateOptionsMenu()
+        refreshMenu()
     }
 
     // --- loading -------------------------------------------------------------
@@ -438,7 +439,7 @@ class ConversationsActivity : AppCompatActivity() {
             adapter.submitList(items)
             if (shown == Folder.DELETED && hasDeleted != items.isNotEmpty()) {
                 hasDeleted = items.isNotEmpty()
-                invalidateOptionsMenu()
+                refreshMenu()
             }
             binding.emptyText.setText(
                 when (shown) {
@@ -451,7 +452,7 @@ class ConversationsActivity : AppCompatActivity() {
             binding.emptyText.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
             if (archiveEmpty != nothingStored) {
                 archiveEmpty = nothingStored
-                invalidateOptionsMenu()
+                refreshMenu()
             }
             renderLinkState()
         }
@@ -487,6 +488,7 @@ class ConversationsActivity : AppCompatActivity() {
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
         menuInflater.inflate(R.menu.conversations_actions, menu)
+        optionsMenu = menu
         val item = menu.findItem(R.id.action_search)
         searchItem = item
         val searchView = item.actionView as SearchView
@@ -523,6 +525,21 @@ class ConversationsActivity : AppCompatActivity() {
         return true
     }
 
+    /**
+     * Brings the menu up to date. While a search is open the menu is not
+     * rebuilt (that would collapse the search field); closing the search
+     * rebuilds it.
+     */
+    private fun refreshMenu() {
+        if (searchQuery != null) updateSearchDependentItems() else invalidateOptionsMenu()
+    }
+
+    /** The menu items whose visibility depends on a search being open, updated in place. */
+    private fun updateSearchDependentItems() {
+        optionsMenu?.findItem(R.id.action_empty_deleted)?.isVisible =
+            folder == Folder.DELETED && hasDeleted && searchQuery == null
+    }
+
     override fun onPrepareOptionsMenu(menu: Menu): Boolean {
         // Without a pairing, what is listed is an archive an unpair kept: it can be deleted here.
         menu.findItem(R.id.action_delete_archive)?.isVisible = !paired && !archiveEmpty
@@ -546,7 +563,8 @@ class ConversationsActivity : AppCompatActivity() {
     /** The search is over the service whose tab was open; its tabs and folders wait behind it. */
     private fun enterSearch() {
         searchQuery = ""
-        invalidateOptionsMenu()
+        // Not invalidateOptionsMenu(): rebuilding the menu would collapse the search field just opened.
+        updateSearchDependentItems()
         binding.emptyText.visibility = View.GONE
         searchAdapter.submitList(emptyList())
         renderLinkState()
@@ -554,6 +572,7 @@ class ConversationsActivity : AppCompatActivity() {
 
     private fun exitSearch() {
         searchQuery = null
+        // The search field is closing anyway: the whole menu can be brought up to date.
         invalidateOptionsMenu()
         searchJob?.cancel()
         renderLinkState()

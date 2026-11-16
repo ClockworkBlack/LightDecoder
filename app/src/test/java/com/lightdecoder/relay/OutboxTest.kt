@@ -201,7 +201,10 @@ class OutboxTest {
         assertEquals(OutboxStatus.FAILED, entry.status)
         assertEquals(Outbox.UNCONFIRMED, entry.lastError)
         assertEquals(1, fake.sent.size)
-        assertTrue(RelayLog.read(env.context).any { it.endsWith("held while it was being sent went out; it waits as unconfirmed") })
+        // Logged just after the state above is written.
+        env.eventually(manager, what = "the log line") {
+            RelayLog.read(env.context).any { it.endsWith("held while it was being sent went out; it waits as unconfirmed") }
+        }
     }
 
     @Test

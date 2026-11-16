@@ -348,7 +348,8 @@ class RelayManagerTest {
         val stopped = shadowOf(env.context as Application).nextStoppedService
         assertEquals(RelayService::class.java.name, stopped?.component?.className)
         val notifications = env.context.getSystemService(NotificationManager::class.java)
-        val repair = shadowOf(notifications).allNotifications.single()
+        // Message notifications are on by default; the one asking to pair again is the alert.
+        val repair = shadowOf(notifications).allNotifications.single { it.channelId == RelayNotifications.CHANNEL_ALERTS }
         assertEquals(RelayNotifications.CHANNEL_ALERTS, repair.channelId)
     }
 

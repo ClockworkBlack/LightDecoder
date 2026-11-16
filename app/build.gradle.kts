@@ -38,8 +38,8 @@ android {
         applicationId = "com.lightdecoder"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 4
+        versionName = "0.4.0"
 
         // The decoder is plain software, so it runs on every ABI. These cover
         // phones (64- and 32-bit ARM) and the emulator.
@@ -311,7 +311,8 @@ val bundleLicenses by tasks.registering {
     val apacheLibrary = Regex(
         "(androidx\\.[^:]+|com\\.google\\.android\\.material|org\\.jetbrains\\.kotlinx?):[^:]+" +
             "|org\\.jetbrains:annotations|org\\.jspecify:jspecify" +
-            "|com\\.google\\.guava:listenablefuture|com\\.google\\.errorprone:error_prone_annotations",
+            "|com\\.google\\.guava:listenablefuture|com\\.google\\.errorprone:error_prone_annotations" +
+            "|com\\.google\\.zxing:core",
     )
     val androidLibraries = provider { configurations.getByName("releaseRuntimeClasspath") }.map { classpath ->
         classpath.incoming.resolutionResult.allComponents
@@ -523,7 +524,10 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.recyclerview:recyclerview:1.3.2")
     implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
+    implementation("androidx.viewpager2:viewpager2:1.1.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    // Draws the QR code of the WhatsApp setup screen (encoding only; Apache-2.0).
+    implementation("com.google.zxing:core:3.5.3")
 
     // The Google Messages bridge (Go, see gmbridge/), built by buildGoBridge above.
     implementation(files(goBridgeAar).builtBy(buildGoBridge))
