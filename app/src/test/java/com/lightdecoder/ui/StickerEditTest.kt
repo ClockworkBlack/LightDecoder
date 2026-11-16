@@ -137,4 +137,29 @@ class StickerEditTest {
             Thread.sleep(20)
         }
     }
+
+    @Test
+    fun anUndoneCutCanBeRedone() {
+        val original = picture()
+        val options = StickerMaker.Options(outline = false)
+        val trace = floatArrayOf(50f, 50f, 150f, 50f, 150f, 150f, 50f, 150f)
+        val file = StickerLibrary.save(context, StickerMaker.make(original, options))
+        StickerProject.save(context, file, original, StickerProject.Edits(options, trace, emptyList()))
+        ActivityScenario.launch<StickerMakerActivity>(StickerMakerActivity.editIntent(context, file)).use { scenario ->
+            waitFor(scenario, "the sticker") { it.findViewById<View>(R.id.save).isEnabled }
+            scenario.onActivity { a ->
+                assertTrue(a.findViewById<View>(R.id.traceUndo).isShown)
+                assertFalse(a.findViewById<View>(R.id.traceRedo).isShown)
+                a.findViewById<View>(R.id.traceUndo).performClick()
+                assertTrue(a.findViewById<View>(R.id.traceRedo).isShown)
+                a.findViewById<View>(R.id.traceRedo).performClick()
+                assertTrue("the cut is back", a.findViewById<View>(R.id.traceUndo).isShown)
+                assertFalse(a.findViewById<View>(R.id.traceRedo).isShown)
+            }
+            settle()
+            scenario.onActivity { it.findViewById<View>(R.id.save).performClick() }
+            waitFor(scenario, "the save") { it.isFinishing }
+        }
+        assertArrayEquals("the redone cut is what is kept", trace, StickerProject.load(context, file)!!.edits.trace, 0f)
+    }
 }

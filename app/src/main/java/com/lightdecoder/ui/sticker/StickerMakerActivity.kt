@@ -49,6 +49,9 @@ class StickerMakerActivity : AppCompatActivity() {
 
     /** The traced outline (x,y pairs in [original]'s pixels), kept so the sticker can be edited later. */
     private var trace: FloatArray? = null
+
+    /** The cut "Undo cut-out" took back, for "Redo cut-out"; a new cut forgets it. */
+    private var undoneTrace: FloatArray? = null
     private var sticker: Bitmap? = null
     private var renderJob: Job? = null
 
@@ -77,11 +80,9 @@ class StickerMakerActivity : AppCompatActivity() {
             binding.refine.brushSizePx = value * resources.displayMetrics.density
         }
         binding.brushUndo.setOnClickListener { binding.refine.undo() }
-        binding.brushReset.setOnClickListener {
-            binding.refine.clearStrokes()
-            updateBrushButtons()
-            render(refreshBrushedPicture = false)
-        }
+        binding.brushRedo.setOnClickListener { binding.refine.redo() }
+        // Undoable: Redo brings the cleared strokes back.
+        binding.brushReset.setOnClickListener { binding.refine.clearByUser() }
         binding.refine.onStrokesChanged = {
             updateBrushButtons()
             render(refreshBrushedPicture = false)
@@ -98,9 +99,21 @@ class StickerMakerActivity : AppCompatActivity() {
             startTracing()
         }
         binding.traceUndo.setOnClickListener {
+            undoneTrace = trace
             source = original
             trace = null
             binding.traceUndo.visibility = View.GONE
+            binding.traceRedo.visibility = if (undoneTrace != null) View.VISIBLE else View.GONE
+            render()
+        }
+        binding.traceRedo.setOnClickListener {
+            val again = undoneTrace ?: return@setOnClickListener
+            val picture = original ?: return@setOnClickListener
+            undoneTrace = null
+            trace = again
+            source = StickerMaker.cutToPath(picture, StickerProject.pathOf(again, close = true))
+            binding.traceRedo.visibility = View.GONE
+            binding.traceUndo.visibility = View.VISIBLE
             render()
         }
         binding.resetOriginal.setOnClickListener { resetToOriginal() }
@@ -111,6 +124,8 @@ class StickerMakerActivity : AppCompatActivity() {
             // Cut from the original, so the same cut can be made again when the sticker is edited later.
             original?.let { source = StickerMaker.cutToPath(it, outline) }
             trace = points
+            undoneTrace = null
+            binding.traceRedo.visibility = View.GONE
             binding.traceUndo.visibility = View.VISIBLE
             stopTracing()
             render()
@@ -169,6 +184,8 @@ class StickerMakerActivity : AppCompatActivity() {
     private fun applyEdits(edits: StickerProject.Edits) {
         val picture = original ?: return
         trace = edits.trace
+        undoneTrace = null
+        binding.traceRedo.visibility = View.GONE
         source = edits.trace?.let { StickerMaker.cutToPath(picture, StickerProject.pathOf(it, close = true)) } ?: picture
         binding.traceUndo.visibility = if (edits.trace != null) View.VISIBLE else View.GONE
         val o = edits.options
@@ -208,6 +225,8 @@ class StickerMakerActivity : AppCompatActivity() {
             source = bitmap
             original = bitmap
             trace = null
+            undoneTrace = null
+            binding.traceRedo.visibility = View.GONE
             binding.resetOriginal.visibility = View.VISIBLE
             // A new picture: the brushing was for the old one.
             binding.refine.clearStrokes()
@@ -266,6 +285,7 @@ class StickerMakerActivity : AppCompatActivity() {
     private fun updateBrushButtons() {
         val any = binding.refine.strokes.isNotEmpty()
         binding.brushUndo.isEnabled = any
+        binding.brushRedo.isEnabled = binding.refine.canRedo
         binding.brushReset.isEnabled = any
     }
 

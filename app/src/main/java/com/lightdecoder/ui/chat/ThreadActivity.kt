@@ -778,7 +778,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     /**
      * Under the title: how many people a group has; for one person, what the
      * service tells about them right now ("online", "typing…", "last seen
-     * …") where it does ([Capability.PRESENCE]), else their number.
+     * …") where it does ([Capability.PRESENCE]), else nothing (never their
+     * phone number).
      * Who is typing shows above the composer, unless the line under the
      * title already says it.
      */
@@ -790,7 +791,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         supportActionBar?.subtitle = when {
             conv?.isGroup == true -> resources.getQuantityString(R.plurals.chat_people, others.size + 1, others.size + 1)
             presence != null -> presence
-            others.size == 1 -> others[0].formattedNumber.ifBlank { others[0].number }.takeIf { it != title }
+            // No phone number under the name: the name alone, as Google Messages shows it.
             else -> null
         }
         renderTyping(if (presence != null) emptySet() else typing)

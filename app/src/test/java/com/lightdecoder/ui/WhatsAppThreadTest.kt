@@ -99,8 +99,8 @@ class WhatsAppThreadTest {
             assertEquals(setOf(carol), two.wa.watched.toSet())
             assertEquals(carol, MessageNotifier.visibleConversationId(whatsApp))
             assertNull("not a Google Messages conversation", MessageNotifier.visibleConversationId(messages))
-            // Nothing known about her yet: her number, as for any conversation.
-            assertEquals("+1 555-0100", subtitle(activity))
+            // Nothing known about her yet: nothing under her name (never her number).
+            assertNull(subtitle(activity))
 
             two.wa.presenceFlow.value = mapOf(carol to Presence(online = true, lastSeenMs = 0))
             two.waitUntil("online") { subtitle(activity) == activity.getString(R.string.chat_presence_online) }
@@ -117,13 +117,13 @@ class WhatsAppThreadTest {
 
             // Offline but WhatsApp did not say since when: nothing to claim.
             two.wa.presenceFlow.value = mapOf(carol to Presence(online = false, lastSeenMs = 0))
-            two.waitUntil("her number again") { subtitle(activity) == "+1 555-0100" }
+            two.waitUntil("nothing again") { subtitle(activity) == null }
 
             // What a link that is not connected last said may be stale: it is not shown ...
             two.wa.presenceFlow.value = mapOf(carol to Presence(online = true, lastSeenMs = 0))
             two.waitUntil("online again") { subtitle(activity) == activity.getString(R.string.chat_presence_online) }
             two.wa.stateFlow.value = RelayState(RelayState.Phase.DISCONNECTED)
-            two.waitUntil("not claimed while offline") { subtitle(activity) == "+1 555-0100" }
+            two.waitUntil("not claimed while offline") { subtitle(activity) == null }
             // ... and once connected again WhatsApp is asked again.
             val asked = two.wa.watched.size
             two.wa.stateFlow.value = RelayState(RelayState.Phase.CONNECTED)
@@ -251,7 +251,7 @@ class WhatsAppThreadTest {
             val activity = controller.get()
             two.waitUntil("the conversation") { shownIds(activity) == listOf("m1") }
             two.settle()
-            assertEquals("+1 555-0199", subtitle(activity))
+            assertNull("never a phone number under the name", subtitle(activity))
             assertTrue("WhatsApp was not told a thing: ${two.wa.visibility} ${two.wa.watched}", two.wa.visibility.isEmpty() && two.wa.watched.isEmpty())
             assertEquals("c1", MessageNotifier.visibleConversationId(messages))
         } finally {

@@ -27,4 +27,6 @@
     <string name="sticker_edit_mode_title">Tap a sticker to edit it</string>
     <string name="sticker_sheet_hint">Tap a sticker to send it. Touch and hold it to edit or delete it.</string>
     <string name="sticker_trace_too_small">Keep your finger down and draw all the way around the part to keep, then lift it.</string>
+    <string name="sticker_brush_redo">Redo stroke</string>
+    <string name="sticker_trace_redo">Redo cut-out</string>
 </resources>

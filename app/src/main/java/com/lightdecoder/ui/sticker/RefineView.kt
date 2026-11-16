@@ -111,24 +111,51 @@ class RefineView @JvmOverloads constructor(
         restoreShader = BitmapShader(original, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
         if (sizeChanged) {
             _strokes.clear()
+            redoStack.clear()
             zoom.reset()
         }
         rebuild()
         updateMatrix()
     }
 
+    /** Strokes taken back, the most recent last: [redo] puts them back in order. A new stroke empties it. */
+    private val redoStack = ArrayList<StickerMaker.Stroke>()
+
+    val canRedo: Boolean get() = redoStack.isNotEmpty()
+
     /** Takes back the last stroke. False when there is none. */
     fun undo(): Boolean {
         if (_strokes.isEmpty()) return false
-        _strokes.removeAt(_strokes.lastIndex)
+        redoStack += _strokes.removeAt(_strokes.lastIndex)
         rebuild()
         invalidate()
         onStrokesChanged?.invoke()
         return true
     }
 
+    /** Puts back the last stroke taken back (by [undo] or [clearByUser]). False when there is none. */
+    fun redo(): Boolean {
+        if (redoStack.isEmpty()) return false
+        _strokes += redoStack.removeAt(redoStack.lastIndex)
+        rebuild()
+        invalidate()
+        onStrokesChanged?.invoke()
+        return true
+    }
+
+    /** "Clear brushing": every stroke goes, and [redo] can bring them back one by one, in order. */
+    fun clearByUser() {
+        if (_strokes.isEmpty()) return
+        redoStack.addAll(_strokes.asReversed())
+        _strokes.clear()
+        rebuild()
+        invalidate()
+        onStrokesChanged?.invoke()
+    }
+
     /** Replaces the strokes (a sticker opened for editing brings its own). */
     fun setStrokes(strokes: List<StickerMaker.Stroke>) {
+        redoStack.clear()
         _strokes.clear()
         _strokes.addAll(strokes)
         rebuild()
@@ -136,6 +163,7 @@ class RefineView @JvmOverloads constructor(
     }
 
     fun clearStrokes() {
+        redoStack.clear()
         _strokes.clear()
         rebuild()
         invalidate()
@@ -313,6 +341,8 @@ class RefineView @JvmOverloads constructor(
         current = null
         path.lineTo(lastX + 0.1f, lastY)
         _strokes += StickerMaker.Stroke(path, currentWidth, keep, currentPoints.toFloatArray())
+        // A new stroke: what was taken back cannot be put back on top of it.
+        redoStack.clear()
         onStrokesChanged?.invoke()
     }
 

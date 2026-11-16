@@ -22,6 +22,13 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.6
+- Fine-tune: "Redo stroke"; "Clear brushing" is undoable (Redo brings the strokes back in order);
+  "Redo cut-out" after "Undo cut-out".
+- Thread top bar: no phone number under the name (only typing/online/last seen, or a group's size).
+- Known flaky under full-suite load: `LinkRound2Test.aLoadThatOutlivesAThreadSwitch...` (it steps
+  the main looper one task at a time); passes alone. Worth making deterministic.
+
 ## 0.5.5
 - Tracing takes on the first touch: the sticker maker's page (`DrawingScrollView`) is locked while
   tracing or brushing (a settling fling used to swallow the first touch), the picture is scrolled

@@ -112,6 +112,21 @@
                         android:text="@string/sticker_brush_undo" />
 
                     <com.google.android.material.button.MaterialButton
+                        android:id="@+id/brushRedo"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:enabled="false"
+                        android:text="@string/sticker_brush_redo" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center_horizontal"
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
                         android:id="@+id/brushReset"
                         style="@style/Widget.Material3.Button.TextButton"
                         android:layout_width="wrap_content"
@@ -177,6 +192,14 @@
                     android:layout_height="wrap_content"
                     android:layout_marginStart="8dp"
                     android:text="@string/sticker_trace_undo"
+                    android:visibility="gone" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/traceRedo"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/sticker_trace_redo"
                     android:visibility="gone" />
             </LinearLayout>
 

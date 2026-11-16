@@ -68,6 +68,8 @@ class ThreadCallTest {
             scenario.onActivity { activity ->
                 val toolbar = activity.findViewById<Toolbar>(R.id.toolbar)
                 assertNotNull("the avatar is next to the name", toolbar.logo)
+                assertEquals("Nina", activity.supportActionBar?.title?.toString())
+                org.junit.Assert.assertNull("no phone number under the name", activity.supportActionBar?.subtitle)
                 val call = toolbar.menu.findItem(R.id.action_call)
                 assertTrue(call.isVisible)
                 activity.onOptionsItemSelected(call)

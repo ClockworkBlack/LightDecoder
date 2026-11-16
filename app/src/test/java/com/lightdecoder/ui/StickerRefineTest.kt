@@ -98,4 +98,42 @@ class StickerRefineTest {
         v.onTouchEvent(MotionEvent.obtain(start, start + 70, MotionEvent.ACTION_UP, 100f, 200f, 0))
         assertTrue("no stroke from a pinch", v.strokes.isEmpty())
     }
+
+    private fun stroke(v: RefineView, y: Float, t0: Long) {
+        touch(v, MotionEvent.ACTION_DOWN, 20f, y, t0)
+        for (i in 1..10) touch(v, MotionEvent.ACTION_MOVE, 20f + 30f * i, y, t0 + 10L * i)
+        touch(v, MotionEvent.ACTION_UP, 320f, y, t0 + 200)
+    }
+
+    @Test
+    fun undoneStrokesCanBeRedoneUntilANewOneIsDrawn() {
+        val original = picture()
+        val v = view()
+        v.setPictures(original, original.copy(Bitmap.Config.ARGB_8888, true))
+        stroke(v, 100f, 0)
+        stroke(v, 200f, 1_000)
+        val second = v.strokes[1]
+        assertFalse(v.canRedo)
+
+        assertTrue(v.undo())
+        assertEquals(1, v.strokes.size)
+        assertTrue(v.canRedo)
+        assertTrue(v.redo())
+        assertEquals(2, v.strokes.size)
+        assertTrue("the same stroke is back", v.strokes[1] === second)
+        assertFalse(v.redo())
+
+        // "Clear brushing" can be taken back, stroke by stroke, in order.
+        val before = v.strokes.toList()
+        v.clearByUser()
+        assertTrue(v.strokes.isEmpty())
+        assertTrue(v.redo())
+        assertTrue(v.redo())
+        assertEquals(before, v.strokes)
+
+        // A new stroke after an undo: the undone one cannot come back on top of it.
+        v.undo()
+        stroke(v, 300f, 2_000)
+        assertFalse(v.canRedo)
+    }
 }
