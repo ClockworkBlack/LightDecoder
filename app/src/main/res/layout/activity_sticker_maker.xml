@@ -30,6 +30,13 @@
                 android:layout_gravity="center_horizontal"
                 android:contentDescription="@string/sticker_preview" />
 
+            <com.lightdecoder.ui.sticker.LassoView
+                android:id="@+id/lasso"
+                android:layout_width="match_parent"
+                android:layout_height="320dp"
+                android:contentDescription="@string/sticker_trace_area"
+                android:visibility="gone" />
+
             <TextView
                 android:id="@+id/hint"
                 android:layout_width="match_parent"
@@ -48,6 +55,30 @@
                 android:layout_gravity="center_horizontal"
                 android:layout_marginTop="8dp"
                 android:text="@string/sticker_pick" />
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal"
+                android:orientation="horizontal">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/trace"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:enabled="false"
+                    android:text="@string/sticker_trace" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/traceUndo"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:text="@string/sticker_trace_undo"
+                    android:visibility="gone" />
+            </LinearLayout>
 
             <com.google.android.material.materialswitch.MaterialSwitch
                 android:id="@+id/removeBackground"

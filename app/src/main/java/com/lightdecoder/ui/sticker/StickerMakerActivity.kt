@@ -37,6 +37,9 @@ class StickerMakerActivity : AppCompatActivity() {
     private lateinit var binding: ActivityStickerMakerBinding
     private var sourceUri: Uri? = null
     private var source: Bitmap? = null
+
+    /** The picture as chosen, before any traced cut-out. */
+    private var original: Bitmap? = null
     private var sticker: Bitmap? = null
     private var renderJob: Job? = null
 
@@ -61,6 +64,18 @@ class StickerMakerActivity : AppCompatActivity() {
         binding.shape.addOnButtonCheckedListener { _, _, isChecked -> if (isChecked) render() }
         binding.tolerance.addOnChangeListener { _, _, fromUser -> if (fromUser) render() }
         binding.save.setOnClickListener { save() }
+        binding.trace.setOnClickListener { startTracing() }
+        binding.traceUndo.setOnClickListener {
+            source = original
+            binding.traceUndo.visibility = View.GONE
+            render()
+        }
+        binding.lasso.onTraced = { outline ->
+            source?.let { source = StickerMaker.cutToPath(it, outline) }
+            binding.traceUndo.visibility = View.VISIBLE
+            stopTracing()
+            render()
+        }
         updateToleranceVisible()
 
         savedInstanceState?.getString(STATE_URI)?.let { load(Uri.parse(it)) }
@@ -88,9 +103,28 @@ class StickerMakerActivity : AppCompatActivity() {
             }
             sourceUri = uri
             source = bitmap
-            binding.hint.visibility = View.GONE
+            original = bitmap
+            binding.trace.isEnabled = true
+            binding.traceUndo.visibility = View.GONE
+            stopTracing()
             render()
         }
+    }
+
+    /** The picture replaces the preview; a line drawn around its subject cuts it out. */
+    private fun startTracing() {
+        val picture = source ?: return
+        binding.lasso.setBitmap(picture)
+        binding.lasso.visibility = View.VISIBLE
+        binding.preview.visibility = View.GONE
+        binding.hint.setText(R.string.sticker_trace_hint)
+        binding.hint.visibility = View.VISIBLE
+    }
+
+    private fun stopTracing() {
+        binding.lasso.visibility = View.GONE
+        binding.preview.visibility = View.VISIBLE
+        binding.hint.visibility = View.GONE
     }
 
     private fun readPicture(uri: Uri): Bitmap? = try {

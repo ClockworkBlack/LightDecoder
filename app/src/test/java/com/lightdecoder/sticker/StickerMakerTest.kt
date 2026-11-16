@@ -71,6 +71,19 @@ class StickerMakerTest {
     }
 
     @Test
+    fun tracingAroundASubjectCutsEverythingElseAway() {
+        val outline = android.graphics.Path().apply { addRect(50f, 50f, 150f, 150f, android.graphics.Path.Direction.CW) }
+        val cut = StickerMaker.cutToPath(redOnGreen(), outline)
+        assertEquals(0, Color.alpha(cut.getPixel(10, 10)))
+        assertEquals(Color.RED, cut.getPixel(100, 100))
+        assertEquals(Color.rgb(20, 200, 30), cut.getPixel(55, 100))
+        // As a sticker: the traced shape with its outline, nothing of the frame around it.
+        val made = StickerMaker.make(cut, StickerMaker.Options(outline = true))
+        assertEquals(0, Color.alpha(made.getPixel(0, 0)))
+        assertEquals(Color.RED, made.getPixel(StickerMaker.SIZE / 2, StickerMaker.SIZE / 2))
+    }
+
+    @Test
     fun theLibraryStoresPngFilesNewestFirstAndDeletesOnlyItsOwn() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         val made = StickerMaker.make(redOnGreen(), StickerMaker.Options(removeBackground = true))

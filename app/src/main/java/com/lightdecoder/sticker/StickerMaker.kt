@@ -180,6 +180,17 @@ object StickerMaker {
         return out
     }
 
+    /** Keeps only what lies inside [outline] (in [source]'s pixel coordinates); the rest becomes transparent. */
+    fun cutToPath(source: Bitmap, outline: Path): Bitmap {
+        val out = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        canvas.drawPath(outline, paint)
+        paint.xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC_IN)
+        canvas.drawBitmap(source, 0f, 0f, paint)
+        return out
+    }
+
     /** Cuts away fully transparent rows and columns around the picture. */
     internal fun trimmed(bitmap: Bitmap): Bitmap {
         val w = bitmap.width

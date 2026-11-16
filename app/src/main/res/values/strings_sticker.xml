@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="sticker_trace">Trace around it</string>
+    <string name="sticker_trace_hint">Draw around the part to keep with your finger. Lift it to cut.</string>
+    <string name="sticker_trace_undo">Undo cut-out</string>
+    <string name="sticker_trace_area">Picture to trace around</string>
+</resources>
