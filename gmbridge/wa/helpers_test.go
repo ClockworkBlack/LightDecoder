@@ -11,6 +11,7 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
+	"go.mau.fi/whatsmeow/proto/waAdv"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 )
@@ -334,6 +335,7 @@ func pair(t *testing.T, b *WABridge) {
 	ad.Device = 7
 	cli.Store.ID = &ad
 	cli.Store.PushName = "Me"
+	cli.Store.Account = &waAdv.ADVSignedDeviceIdentity{}
 	if err := cli.Store.Save(context.Background()); err != nil {
 		t.Fatalf("save device: %v", err)
 	}
