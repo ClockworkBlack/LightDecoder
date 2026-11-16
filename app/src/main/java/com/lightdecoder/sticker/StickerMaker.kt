@@ -1,6 +1,7 @@
 package com.lightdecoder.sticker
 
 import android.graphics.Bitmap
+import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -8,7 +9,9 @@ import android.graphics.Path
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffColorFilter
 import android.graphics.PorterDuffXfermode
+import android.graphics.Matrix
 import android.graphics.RectF
+import android.graphics.Shader
 import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
@@ -43,10 +46,69 @@ object StickerMaker {
         val solidBackground: Boolean = false,
     )
 
-    /** [source] is not changed or recycled. */
-    fun make(source: Bitmap, options: Options): Bitmap {
+    /**
+     * One brush stroke of the fine-tune editor, in the source picture's pixel
+     * coordinates: [keep] paints the original picture back in, otherwise it
+     * erases. [width] is the brush's diameter in source pixels.
+     */
+    class Stroke(val path: Path, val width: Float, val keep: Boolean)
+
+    /** The user's brush strokes, and the picture a Keep stroke paints back from (same size as the source). */
+    class Edits(val restoreFrom: Bitmap, val strokes: List<Stroke>)
+
+    /**
+     * The cut-out before shape, outline and fitting: [source] scaled to the
+     * working size, with the plain background removed if asked, and [edits]
+     * applied. A new bitmap; [source] is not changed.
+     */
+    fun cutOut(source: Bitmap, options: Options, edits: Edits? = null): Bitmap {
         var work = scaledDown(source, SIZE * 2)
         if (options.removeBackground) work = withoutBackground(work, options.tolerance)
+        if (edits != null && edits.strokes.isNotEmpty()) {
+            val scale = work.width.toFloat() / source.width
+            val restore = if (edits.restoreFrom.width == work.width && edits.restoreFrom.height == work.height) {
+                edits.restoreFrom
+            } else {
+                Bitmap.createScaledBitmap(edits.restoreFrom, work.width, work.height, true)
+            }
+            applyStrokes(work, restore, edits.strokes, scale)
+        }
+        return work
+    }
+
+    /**
+     * Draws [strokes] onto [target] (mutable, ARGB_8888): erasing strokes
+     * clear it, keep strokes paint [restoreFrom] (the same size as [target])
+     * back in. Stroke coordinates are multiplied by [scale] first.
+     */
+    fun applyStrokes(target: Bitmap, restoreFrom: Bitmap, strokes: List<Stroke>, scale: Float = 1f) {
+        val canvas = Canvas(target)
+        val matrix = Matrix().apply { setScale(scale, scale) }
+        val shader = BitmapShader(restoreFrom, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+        for (stroke in strokes) {
+            val path = if (scale == 1f) stroke.path else Path(stroke.path).apply { transform(matrix) }
+            canvas.drawPath(path, strokePaint(stroke.width * scale, stroke.keep, shader))
+        }
+    }
+
+    /** The paint of one brush stroke: round, soft-edged, clearing or restoring. */
+    fun strokePaint(width: Float, keep: Boolean, restore: BitmapShader): Paint =
+        Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = width.coerceAtLeast(1f)
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+            if (keep) {
+                shader = restore
+                xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC)
+            } else {
+                xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
+            }
+        }
+
+    /** [source] is not changed or recycled. */
+    fun make(source: Bitmap, options: Options, edits: Edits? = null): Bitmap {
+        var work = cutOut(source, options, edits)
         if (options.shape != Shape.ORIGINAL) work = clipped(work, options.shape)
         work = trimmed(work)
         val border = if (options.outline) OUTLINE else 0

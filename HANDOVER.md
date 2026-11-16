@@ -2,7 +2,32 @@
 
 Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request has been opened.
 
-## Done in this session
+## Priorities (user's direction, latest first)
+1. App features first; **WhatsApp work is paused** (it is built and tested, untouched since) and comes next after them.
+2. Requested next: Discord, Gmail and Instagram tabs (not started; see "Open decisions").
+
+## Releases and signing
+- Latest: **0.4.2** (versionCode 6), signed with the permanent release key (CN=LightDecoder,
+  SHA-256 63:b0:da:cf:...:36:9f:d1). The user holds the keystore and its password; it is NOT in the
+  repository. To sign a build, set LIGHTDECODER_KEYSTORE / _KEYSTORE_PASSWORD / _KEY_ALIAS
+  (alias `lightdecoder`), or ask the user to add the secrets to the GitHub "release" environment.
+  Never sign a build for the user with any other key: it would not install as an update.
+
+## 0.4.1 / 0.4.2
+- **Picture sends (hotfix):** in SMS/MMS conversations (anything not RCS) pictures are shrunk to at
+  most 1600 px and 800 KB before sending (`AttachmentPrep.MMS`); carriers refuse larger MMS and the
+  phone then keeps the picture, and every later message to that person, "sending". RCS keeps
+  `AttachmentPrep.LARGE` (4096 px / 8 MB). Not verified on a real phone.
+- **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
+  undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
+
+## Open decisions (ask the user)
+- Discord and Instagram have no official API for a person's own DMs; only unofficial clients
+  (against their terms, ban risk; Instagram's is the same risk the user declined for Messenger).
+- Gmail: official IMAP/SMTP with an app password (no Google review), or the Gmail API (needs a
+  Google Cloud OAuth client tied to the signing key).
+
+## Done in the previous session
 - **WhatsApp as a second service: finished.**
   - `WaService`: the foreground service (notification on the "WhatsApp link" channel with Disconnect; stops
     itself without a link, without "stay connected", or while its notification cannot be seen).

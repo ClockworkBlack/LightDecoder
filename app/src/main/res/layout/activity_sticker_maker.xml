@@ -37,6 +37,96 @@
                 android:contentDescription="@string/sticker_trace_area"
                 android:visibility="gone" />
 
+            <!-- Fine-tune: brush the background away, or the subject back in. -->
+            <com.lightdecoder.ui.sticker.RefineView
+                android:id="@+id/refine"
+                android:layout_width="match_parent"
+                android:layout_height="360dp"
+                android:contentDescription="@string/sticker_refine_area"
+                android:visibility="gone" />
+
+            <LinearLayout
+                android:id="@+id/refinePanel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <com.google.android.material.button.MaterialButtonToggleGroup
+                    android:id="@+id/brushMode"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center_horizontal"
+                    android:layout_marginTop="8dp"
+                    app:checkedButton="@+id/brushErase"
+                    app:selectionRequired="true"
+                    app:singleSelection="true">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/brushErase"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/sticker_brush_erase" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/brushKeep"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/sticker_brush_keep" />
+                </com.google.android.material.button.MaterialButtonToggleGroup>
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:labelFor="@+id/brushSize"
+                    android:text="@string/sticker_brush_size"
+                    android:textAppearance="?attr/textAppearanceBodySmall"
+                    android:textColor="?attr/colorOnSurfaceVariant" />
+
+                <com.google.android.material.slider.Slider
+                    android:id="@+id/brushSize"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:contentDescription="@string/sticker_brush_size"
+                    android:stepSize="1"
+                    android:value="24"
+                    android:valueFrom="4"
+                    android:valueTo="80" />
+
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center_horizontal"
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/brushUndo"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:enabled="false"
+                        android:text="@string/sticker_brush_undo" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/brushReset"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:enabled="false"
+                        android:text="@string/sticker_brush_reset" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/refineDone"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:text="@string/sticker_refine_done" />
+                </LinearLayout>
+            </LinearLayout>
+
             <TextView
                 android:id="@+id/hint"
                 android:layout_width="match_parent"
@@ -69,6 +159,15 @@
                     android:layout_height="wrap_content"
                     android:enabled="false"
                     android:text="@string/sticker_trace" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/refineStart"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:enabled="false"
+                    android:text="@string/sticker_refine" />
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/traceUndo"

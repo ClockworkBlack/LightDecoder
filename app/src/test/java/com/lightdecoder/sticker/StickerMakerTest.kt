@@ -99,4 +99,39 @@ class StickerMakerTest {
         assertTrue(StickerLibrary.delete(context, file))
         assertTrue(StickerLibrary.list(context).isEmpty())
     }
+
+    @Test
+    fun eraseStrokesRemoveAndKeepStrokesBringThePictureBack() {
+        val picture = redOnGreen()
+        // Background removal took the green away; a Keep stroke along the top brings a band of it back,
+        // and an Erase stroke across the middle cuts through the red square.
+        val keep = StickerMaker.Stroke(android.graphics.Path().apply { moveTo(20f, 20f); lineTo(180f, 20f) }, 10f, keep = true)
+        val erase = StickerMaker.Stroke(android.graphics.Path().apply { moveTo(20f, 100f); lineTo(180f, 100f) }, 10f, keep = false)
+        val cut = StickerMaker.cutOut(
+            picture, StickerMaker.Options(removeBackground = true), StickerMaker.Edits(picture, listOf(keep, erase)),
+        )
+        assertEquals("kept", Color.rgb(20, 200, 30), cut.getPixel(100, 20))
+        assertEquals("still removed elsewhere", 0, Color.alpha(cut.getPixel(100, 40)))
+        assertEquals("erased", 0, Color.alpha(cut.getPixel(100, 100)))
+        assertEquals("the rest of the subject stays", Color.RED, cut.getPixel(100, 80))
+
+        // Without background removal, erasing alone cuts the picture.
+        val erased = StickerMaker.cutOut(picture, StickerMaker.Options(), StickerMaker.Edits(picture, listOf(erase)))
+        assertEquals(0, Color.alpha(erased.getPixel(30, 100)))
+        assertEquals(Color.rgb(20, 200, 30), erased.getPixel(30, 30))
+    }
+
+    @Test
+    fun strokesFollowThePictureWhenItIsScaledDown() {
+        // A picture larger than the working size: strokes in its own coordinates still land in the same place.
+        val big = Bitmap.createBitmap(2048, 2048, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLUE) }
+        val erase = StickerMaker.Stroke(android.graphics.Path().apply { moveTo(0f, 1024f); lineTo(2048f, 1024f) }, 40f, keep = false)
+        val cut = StickerMaker.cutOut(big, StickerMaker.Options(), StickerMaker.Edits(big, listOf(erase)))
+        assertEquals(StickerMaker.SIZE * 2, cut.width)
+        assertEquals(0, Color.alpha(cut.getPixel(cut.width / 2, cut.height / 2)))
+        assertEquals(Color.BLUE, cut.getPixel(cut.width / 2, 100))
+        // And the sticker made from it is cut too (both halves remain, apart).
+        val sticker = StickerMaker.make(big, StickerMaker.Options(outline = false), StickerMaker.Edits(big, listOf(erase)))
+        assertEquals(0, Color.alpha(sticker.getPixel(StickerMaker.SIZE / 2, StickerMaker.SIZE / 2)))
+    }
 }

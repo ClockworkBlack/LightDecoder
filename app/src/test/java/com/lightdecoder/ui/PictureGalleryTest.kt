@@ -214,6 +214,53 @@ class PictureGalleryTest {
         dir.deleteRecursively()
     }
 
+    // --- pictures that fit what the conversation can carry ------------------------------------
+
+    /** A photo-like picture (noise compresses badly): several MB as JPEG. */
+    private fun bigPhoto(): File {
+        val w = 3000
+        val h = 2000
+        val random = java.util.Random(7)
+        val pixels = IntArray(w * h) { Color.rgb(random.nextInt(256), random.nextInt(256), random.nextInt(256)) }
+        val bitmap = Bitmap.createBitmap(pixels, w, h, Bitmap.Config.ARGB_8888)
+        return File(app.cacheDir, "camera.jpg").apply { outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 95, it) } }
+    }
+
+    @Test
+    fun aBigPhotoIsShrunkToFitMmsInAnSmsConversation() {
+        val (manager, fake) = env.pairedManager()
+        fake.goOnline()
+        seedConversation() // not RCS: an SMS/MMS conversation
+        val photo = bigPhoto()
+        assertTrue("the test photo is big: ${photo.length()}", photo.length() > AttachmentPrep.MMS.maxBytes)
+        manager.sendMedia("c1", Uri.fromFile(photo), "look", null)
+        env.eventually(manager, timeoutMs = 30_000, what = "the picture to go out") { fake.sent.isNotEmpty() }
+        val sent = fake.sent.single()
+        assertTrue("small enough for MMS: ${sent.media!!.size}", sent.media!!.size <= AttachmentPrep.MMS.maxBytes)
+        assertEquals("image/jpeg", sent.mime)
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(sent.media, 0, sent.media!!.size, bounds)
+        assertTrue(maxOf(bounds.outWidth, bounds.outHeight) <= AttachmentPrep.MMS.maxSide)
+        assertEquals("the caption goes with it", "look", sent.text)
+    }
+
+    @Test
+    fun anRcsChatKeepsThePhotoAsItIs() {
+        val (manager, fake) = env.pairedManager()
+        fake.goOnline()
+        env.repo.upsertConversation(
+            ConversationDto(
+                id = "c1", name = "Alice", type = "RCS", folder = "inbox", lastMessageTs = 1_000,
+                participants = listOf(ParticipantDto(id = "me", isMe = true), ParticipantDto(id = "p1", name = "Alice")),
+            )
+        )
+        val photo = bigPhoto()
+        val original = photo.readBytes()
+        manager.sendMedia("c1", Uri.fromFile(photo), null, null)
+        env.eventually(manager, timeoutMs = 30_000, what = "the picture to go out") { fake.sent.isNotEmpty() }
+        assertTrue("unchanged", original.contentEquals(fake.sent.single().media))
+    }
+
     // --- swipe to reply ----------------------------------------------------------------------
 
     @Test

@@ -59,12 +59,33 @@ class StickerMakerActivity : AppCompatActivity() {
             pick.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
         }
         binding.removeBackground.setOnCheckedChangeListener { _, _ -> render() }
+        binding.refineStart.setOnClickListener { startRefining() }
+        binding.refineDone.setOnClickListener { stopRefining() }
+        binding.brushMode.addOnButtonCheckedListener { _, id, isChecked ->
+            if (isChecked) binding.refine.keep = id == R.id.brushKeep
+        }
+        binding.brushSize.addOnChangeListener { _, value, _ ->
+            binding.refine.brushSizePx = value * resources.displayMetrics.density
+        }
+        binding.brushUndo.setOnClickListener { binding.refine.undo() }
+        binding.brushReset.setOnClickListener {
+            binding.refine.clearStrokes()
+            updateBrushButtons()
+            render(refreshBrushedPicture = false)
+        }
+        binding.refine.onStrokesChanged = {
+            updateBrushButtons()
+            render(refreshBrushedPicture = false)
+        }
         binding.outline.setOnCheckedChangeListener { _, _ -> render() }
         binding.solid.setOnCheckedChangeListener { _, _ -> render() }
         binding.shape.addOnButtonCheckedListener { _, _, isChecked -> if (isChecked) render() }
         binding.tolerance.addOnChangeListener { _, _, fromUser -> if (fromUser) render() }
         binding.save.setOnClickListener { save() }
-        binding.trace.setOnClickListener { startTracing() }
+        binding.trace.setOnClickListener {
+            stopRefining()
+            startTracing()
+        }
         binding.traceUndo.setOnClickListener {
             source = original
             binding.traceUndo.visibility = View.GONE
@@ -104,7 +125,12 @@ class StickerMakerActivity : AppCompatActivity() {
             sourceUri = uri
             source = bitmap
             original = bitmap
+            // A new picture: the brushing was for the old one.
+            binding.refine.clearStrokes()
+            updateBrushButtons()
+            stopRefining()
             binding.trace.isEnabled = true
+            binding.refineStart.isEnabled = true
             binding.traceUndo.visibility = View.GONE
             stopTracing()
             render()
@@ -119,6 +145,61 @@ class StickerMakerActivity : AppCompatActivity() {
         binding.preview.visibility = View.GONE
         binding.hint.setText(R.string.sticker_trace_hint)
         binding.hint.visibility = View.VISIBLE
+    }
+
+    /**
+     * Fine-tune: the picture replaces the preview, and the user brushes the
+     * background away (Erase) or the subject back in (Keep). The options
+     * below still apply; changing them updates what is brushed on.
+     */
+    private fun startRefining() {
+        if (source == null) return
+        stopTracing()
+        binding.refine.visibility = View.VISIBLE
+        binding.refinePanel.visibility = View.VISIBLE
+        binding.preview.visibility = View.GONE
+        binding.hint.setText(R.string.sticker_refine_hint)
+        binding.hint.visibility = View.VISIBLE
+        refreshRefineBase()
+    }
+
+    private fun stopRefining() {
+        if (binding.refine.visibility != View.VISIBLE) return
+        binding.refine.visibility = View.GONE
+        binding.refinePanel.visibility = View.GONE
+        binding.preview.visibility = View.VISIBLE
+        binding.hint.visibility = View.GONE
+    }
+
+    private val refining: Boolean get() = binding.refine.visibility == View.VISIBLE
+
+    private fun updateBrushButtons() {
+        val any = binding.refine.strokes.isNotEmpty()
+        binding.brushUndo.isEnabled = any
+        binding.brushReset.isEnabled = any
+    }
+
+    /** What the brushes paint on: the picture with background removal and tracing, without the strokes. */
+    private var refineJob: Job? = null
+
+    private fun refreshRefineBase() {
+        val picture = source ?: return
+        val from = original ?: return
+        val options = options()
+        refineJob?.cancel()
+        refineJob = lifecycleScope.launch {
+            val base = withContext(Dispatchers.Default) {
+                try {
+                    StickerMaker.cutOut(picture, options)
+                } catch (e: OutOfMemoryError) {
+                    null
+                }
+            } ?: return@launch
+            // The brushes work on the picture's own pixels: both at the same size.
+            val restore = if (from.width == base.width && from.height == base.height) from
+            else Bitmap.createScaledBitmap(from, base.width, base.height, true)
+            binding.refine.setPictures(restore, base)
+        }
     }
 
     private fun stopTracing() {
@@ -169,15 +250,19 @@ class StickerMakerActivity : AppCompatActivity() {
     }
 
     /** Re-makes the preview with the current options; only the latest request is shown. */
-    private fun render() {
+    private fun render(refreshBrushedPicture: Boolean = true) {
         updateToleranceVisible()
         val picture = source ?: return
         val options = options()
+        // The options changed what the brushes paint on (a stroke alone does not).
+        if (refining && refreshBrushedPicture) refreshRefineBase()
+        val strokes = binding.refine.strokes.toList()
+        val edits = original?.takeIf { strokes.isNotEmpty() }?.let { StickerMaker.Edits(it, strokes) }
         renderJob?.cancel()
         renderJob = lifecycleScope.launch {
             val made = withContext(Dispatchers.Default) {
                 try {
-                    StickerMaker.make(picture, options)
+                    StickerMaker.make(picture, options, edits)
                 } catch (e: OutOfMemoryError) {
                     null
                 }

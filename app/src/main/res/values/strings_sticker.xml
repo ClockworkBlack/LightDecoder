@@ -4,4 +4,13 @@
     <string name="sticker_trace_hint">Draw around the part to keep with your finger. Lift it to cut.</string>
     <string name="sticker_trace_undo">Undo cut-out</string>
     <string name="sticker_trace_area">Picture to trace around</string>
+    <string name="sticker_refine">Fine-tune</string>
+    <string name="sticker_refine_area">Picture to fine-tune: paint to erase background or keep the subject</string>
+    <string name="sticker_refine_hint">Paint with one finger: Erase removes background, Keep brings the picture back. Pinch with two fingers to zoom in for the edges.</string>
+    <string name="sticker_brush_erase">Erase</string>
+    <string name="sticker_brush_keep">Keep</string>
+    <string name="sticker_brush_size">Brush size</string>
+    <string name="sticker_brush_undo">Undo stroke</string>
+    <string name="sticker_brush_reset">Clear brushing</string>
+    <string name="sticker_refine_done">Done</string>
 </resources>

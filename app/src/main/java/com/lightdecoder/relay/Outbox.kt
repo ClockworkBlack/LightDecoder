@@ -110,7 +110,9 @@ internal class Outbox(
             file.delete()
         } else {
             // HEIC becomes JPEG (or PNG), a huge photo is scaled down: what every phone can show.
-            AttachmentPrep.prepare(file, mime, name)?.let {
+            // An SMS/MMS conversation (anything not known to be RCS) takes only small pictures.
+            val rcs = runCatching { repo.conversation(conversationId)?.isRcs }.getOrNull() == true
+            AttachmentPrep.prepare(file, mime, name, if (rcs) AttachmentPrep.LARGE else AttachmentPrep.MMS)?.let {
                 mime = it.mime
                 name = it.name
             }
