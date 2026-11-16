@@ -112,7 +112,9 @@ class ViewerActivity : AppCompatActivity() {
                 }
             else -> null
         }
-        if (uri != null) load(queryName(uri)) { readCapped(uri) } else showEmpty()
+        // A title comes only with intentForFile (a picture from a message).
+        val title = intent?.getStringExtra(EXTRA_TITLE)?.takeIf { it.isNotBlank() }
+        if (uri != null) load(queryName(uri), title) { readCapped(uri) } else showEmpty()
     }
 
     private fun loadInboxItem(id: String) {
@@ -377,6 +379,7 @@ class ViewerActivity : AppCompatActivity() {
 
     companion object {
         private const val EXTRA_INBOX_ID = "com.lightdecoder.extra.INBOX_ID"
+        private const val EXTRA_TITLE = "com.lightdecoder.extra.TITLE"
         private const val MAX_FILE_BYTES = 64 * 1024 * 1024
 
         /** Opens a sticker that the inbox has stored. */
@@ -386,5 +389,23 @@ class ViewerActivity : AppCompatActivity() {
                 // Distinct data per item, so pending intents for two stickers are not merged.
                 .setData(Uri.parse("lightdecoder://inbox/$id"))
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+
+        /**
+         * Opens a picture from the app's own storage (media of a Google
+         * Messages conversation). The file is handed over as a content:// uri
+         * of the app's FileProvider rather than a path: the viewer is exported,
+         * so it must not accept file paths from callers, and it already reads
+         * content uris. [title] is shown in the toolbar.
+         *
+         * @throws IllegalArgumentException if [file] is outside the folders in res/xml/file_paths.xml
+         */
+        fun intentForFile(context: Context, file: File, mime: String, title: String): Intent {
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+            return Intent(context, ViewerActivity::class.java)
+                .setAction(Intent.ACTION_VIEW)
+                .setDataAndType(uri, mime.ifBlank { "image/*" })
+                .putExtra(EXTRA_TITLE, title)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
     }
 }

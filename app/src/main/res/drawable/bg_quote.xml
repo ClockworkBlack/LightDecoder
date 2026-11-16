@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The quoted message above a reply: a faint darkening of whatever the bubble colour is. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="#1F000000" />
+    <corners android:radius="8dp" />
+</shape>

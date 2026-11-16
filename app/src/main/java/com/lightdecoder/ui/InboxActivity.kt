@@ -15,19 +15,36 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.recyclerview.widget.GridLayoutManager
 import com.lightdecoder.R
+import com.lightdecoder.archive.ArchiveChange
+import com.lightdecoder.archive.ArchiveEvents
+import com.lightdecoder.archive.ArchiveRepository
 import com.lightdecoder.databinding.ActivityInboxBinding
 import com.lightdecoder.inbox.InboxEvents
 import com.lightdecoder.inbox.InboxItem
 import com.lightdecoder.inbox.InboxLog
 import com.lightdecoder.inbox.InboxPrefs
 import com.lightdecoder.inbox.InboxStore
+import com.lightdecoder.relay.RelayManager
+import com.lightdecoder.relay.RelayState
+import com.lightdecoder.ui.chat.ConversationsActivity
+import com.lightdecoder.ui.relay.RelayErrors
+import com.lightdecoder.ui.relay.RelaySetupActivity
+import com.lightdecoder.ui.relay.RelayStatusActivity
+import com.lightdecoder.ui.relay.RelayUi
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * The home screen: stickers caught from message notifications, and the switch
  * that turns catching on. Nothing is read until the user turns on notification
- * access for LightDecoder in Android's settings.
+ * access for LightDecoder in Android's settings. A second card leads to the
+ * Google Messages link (set it up, open the messages, or fix it).
  */
 class InboxActivity : AppCompatActivity() {
 
@@ -35,6 +52,12 @@ class InboxActivity : AppCompatActivity() {
     private lateinit var store: InboxStore
     private lateinit var adapter: InboxAdapter
     private val refresh = Runnable { refreshItems() }
+    private val relay by lazy { RelayManager.get(this) }
+    private var relayState: RelayState? = null
+    private var relayPaired = false
+    private val onArchiveChange: (ArchiveChange) -> Unit = { change ->
+        if (change.kind == ArchiveChange.Kind.CONVERSATIONS) renderRelayCard()
+    }
 
     private val openDocument = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
@@ -70,6 +93,27 @@ class InboxActivity : AppCompatActivity() {
 
         binding.statusAction.setOnClickListener { onStatusAction() }
         binding.statusHelp.setOnClickListener { showGreyedOutHelp() }
+
+        binding.relayAction.setOnClickListener { onRelayAction() }
+        binding.relaySettings.setOnClickListener { startActivity(Intent(this, RelayStatusActivity::class.java)) }
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                relay.state.collect {
+                    relayState = it
+                    renderRelayCard()
+                }
+            }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        ArchiveEvents.register(onArchiveChange)
+    }
+
+    override fun onStop() {
+        ArchiveEvents.unregister(onArchiveChange)
+        super.onStop()
     }
 
     override fun onResume() {
@@ -175,6 +219,53 @@ class InboxActivity : AppCompatActivity() {
             .show()
     }
 
+    // --- Google Messages link card ---------------------------------------------
+
+    private fun renderRelayCard() {
+        val state = relayState ?: return
+        lifecycleScope.launch {
+            val (paired, unread) = withContext(Dispatchers.IO) {
+                relay.isPaired() to ArchiveRepository.get(this@InboxActivity).unreadCount()
+            }
+            relayPaired = paired
+            val problem = RelayUi.isProblem(state.phase)
+            when {
+                !paired && !problem -> {
+                    binding.relayBody.setText(R.string.link_card_not_set_up)
+                    binding.relayAction.setText(R.string.link_card_set_up)
+                }
+                problem -> {
+                    val reason = if (state.code.isNotEmpty()) RelayErrors.message(this@InboxActivity, state.code)
+                    else getString(RelayUi.body(state.phase))
+                    binding.relayBody.text = getString(RelayUi.title(state.phase)) + "\n" + reason
+                    binding.relayAction.setText(R.string.link_card_fix)
+                }
+                state.isOnline -> {
+                    binding.relayBody.text = if (unread > 0) getString(R.string.link_card_connected_unread, unread)
+                    else getString(R.string.link_card_connected)
+                    binding.relayAction.setText(R.string.link_card_open)
+                }
+                else -> {
+                    binding.relayBody.setText(RelayUi.title(state.phase))
+                    binding.relayAction.setText(R.string.link_card_open)
+                }
+            }
+            binding.relaySettings.visibility = if (paired || problem) View.VISIBLE else View.GONE
+        }
+    }
+
+    private fun onRelayAction() {
+        val state = relayState
+        val target = when {
+            state != null && RelayUi.isProblem(state.phase) ->
+                if (RelayUi.fix(state, relayPaired) == RelayUi.Fix.SET_UP) RelaySetupActivity::class.java
+                else RelayStatusActivity::class.java
+            !relayPaired -> RelaySetupActivity::class.java
+            else -> ConversationsActivity::class.java
+        }
+        startActivity(Intent(this, target))
+    }
+
     // --- list ----------------------------------------------------------------
 
     private fun refreshItems() {
@@ -210,6 +301,7 @@ class InboxActivity : AppCompatActivity() {
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         when (item.itemId) {
+            R.id.action_messages -> startActivity(Intent(this, ConversationsActivity::class.java))
             R.id.action_open -> openDocument.launch(arrayOf("image/*", "*/*"))
             R.id.action_all_images -> {
                 InboxPrefs.setCatchAllImages(this, !InboxPrefs.catchAllImages(this))

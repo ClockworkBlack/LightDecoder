@@ -1,0 +1,33 @@
+package com.lightdecoder
+
+import android.app.Activity
+import android.app.Application
+import android.os.Bundle
+import com.lightdecoder.relay.RelayManager
+import com.lightdecoder.relay.RelayNotifications
+
+/**
+ * The app process. Sets up the Google Messages link's notification channels
+ * and its manager. Neither touches the network or loads the Go bridge unless
+ * the user has paired; for everyone else LightDecoder stays the sticker
+ * decoder it was.
+ */
+class LightDecoderApp : Application() {
+
+    override fun onCreate() {
+        super.onCreate()
+        RelayNotifications.ensureChannels(this)
+        RelayManager.get(this)
+        // If the user wants the link connected but Android refused to start
+        // its service from the background, start it once a screen is shown.
+        registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
+            override fun onActivityStarted(activity: Activity) = RelayManager.get(activity).onAppVisible()
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
+            override fun onActivityResumed(activity: Activity) = Unit
+            override fun onActivityPaused(activity: Activity) = Unit
+            override fun onActivityStopped(activity: Activity) = Unit
+            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+            override fun onActivityDestroyed(activity: Activity) = Unit
+        })
+    }
+}

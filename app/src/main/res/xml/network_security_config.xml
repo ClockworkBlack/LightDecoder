@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Encrypted connections only, trusting only the system's certificate
+    authorities (not ones the user added). This covers the app's Java side and
+    the Google sign-in WebView; the Go bridge makes its own TLS connections.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

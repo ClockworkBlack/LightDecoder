@@ -74,6 +74,17 @@
     <string name="log_empty">Nothing yet. Lines appear here when a message notification with an attachment arrives.</string>
     <string name="log_clear">Clear log</string>
 
+    <!-- Inbox: the Google Messages link card -->
+    <string name="action_messages">Messages</string>
+    <string name="link_card_title">Google Messages link</string>
+    <string name="link_card_not_set_up">Not set up. Link LightDecoder to Google Messages on your phone to read and send your texts here, and to catch stickers without notification access.</string>
+    <string name="link_card_connected">Connected.</string>
+    <string name="link_card_connected_unread">Connected · %1$d unread</string>
+    <string name="link_card_set_up">Set up</string>
+    <string name="link_card_open">Open messages</string>
+    <string name="link_card_fix">Fix</string>
+    <string name="link_card_settings">Settings</string>
+
     <!-- Notifications LightDecoder posts -->
     <string name="alert_channel">Decoded stickers</string>
     <string name="alert_channel_description">Shows a sticker that LightDecoder decoded from an incoming message.</string>

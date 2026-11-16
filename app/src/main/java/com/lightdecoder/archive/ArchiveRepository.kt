@@ -750,6 +750,15 @@ class ArchiveRepository private constructor(private val helper: ArchiveDb) {
         fun forTesting(db: ArchiveDb): ArchiveRepository = ArchiveRepository(db)
 
         /**
+         * Makes [get] return [repo] (tests only), so screens, which always
+         * use [get], read the archive the test seeded and the manager writes.
+         */
+        internal fun installForTesting(repo: ArchiveRepository) = synchronized(this) { instance = repo }
+
+        /** Forgets the process instance (tests only); the next [get] opens one for the current app. */
+        internal fun resetForTesting() = synchronized(this) { instance = null }
+
+        /**
          * Turns what the user typed into an FTS4 query that cannot be misread
          * as search syntax: each word becomes a quoted phrase (quotes and
          * stars removed), and the last word also matches as a prefix.

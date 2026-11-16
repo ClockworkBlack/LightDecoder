@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Strings of the Google Messages link runtime: notifications and the service. -->
+<resources>
+    <!-- Notification channels -->
+    <string name="relay_channel_status">Google Messages link</string>
+    <string name="relay_channel_status_description">Shown while LightDecoder is connected to Google Messages, with a button to disconnect.</string>
+    <string name="relay_channel_alerts">Link problems</string>
+    <string name="relay_channel_alerts_description">Tells you when the Google Messages link needs you to pair again.</string>
+    <string name="relay_channel_messages">Messages</string>
+    <string name="relay_channel_messages_description">New messages that arrive through the Google Messages link. Off unless you turn it on, since Google Messages on your phone already notifies.</string>
+
+    <!-- The ongoing notification of the link, by state -->
+    <string name="relay_state_unpaired">Not paired with your phone</string>
+    <string name="relay_state_pairing">Pairing with your phone…</string>
+    <string name="relay_state_disconnected">Disconnected from Google Messages</string>
+    <string name="relay_state_connecting">Connecting to Google Messages…</string>
+    <string name="relay_state_connected">Connected to Google Messages</string>
+    <string name="relay_state_active_elsewhere">Google Messages is open on another device</string>
+    <string name="relay_state_reconnecting">Reconnecting to Google Messages…</string>
+    <string name="relay_state_phone_offline">Your phone is not responding</string>
+    <string name="relay_state_logged_out">Pairing ended: pair again</string>
+    <string name="relay_state_cookies_invalid">Google sign-in expired: pair again</string>
+    <string name="relay_state_error">Connection problem, trying again soon</string>
+    <string name="relay_service_text">Messages stay on this phone. Tap to open them.</string>
+    <string name="relay_service_text_elsewhere">Open LightDecoder and tap \"Use here\" to switch back.</string>
+    <string name="relay_service_text_phone_offline">Check that your phone is on and has a connection.</string>
+    <string name="relay_action_disconnect">Disconnect</string>
+
+    <!-- Asking the user to pair again -->
+    <string name="relay_repair_title">Google Messages link stopped</string>
+    <string name="relay_repair_text_logged_out">The pairing was removed from your phone or Google account. Tap to pair again. Your saved messages are kept.</string>
+    <string name="relay_repair_text_cookies">Google no longer accepts the sign-in. Tap to sign in and pair again. Your saved messages are kept.</string>
+
+    <!-- New message notifications -->
+    <string name="relay_notify_you">You</string>
+    <string name="relay_notify_reply">Reply</string>
+    <string name="relay_notify_mark_read">Mark as read</string>
+    <string name="relay_notify_photo">Photo</string>
+    <string name="relay_notify_attachment">Attachment</string>
+    <string name="relay_notify_someone">Someone</string>
+</resources>
