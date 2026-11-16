@@ -44,9 +44,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * The home screen: stickers caught from message notifications, and the switch
- * that turns catching on. Nothing is read until the user turns on notification
- * access for LightDecoder in Android's settings. A second card leads to the
+ * The home screen: the sticker inbox (stickers opened, shared or decoded from
+ * the links). Catching stickers from other apps' notifications is switched
+ * off: the notification listener is not declared, so Android never offers
+ * notification access for LightDecoder. A card leads to the
  * two links, Google Messages and WhatsApp: for each, set it up, open its
  * messages, or fix it.
  */
@@ -73,9 +74,6 @@ class InboxActivity : AppCompatActivity() {
     }
 
     /** Asked once, just before sending the user to the notification-access screen. */
-    private val askToPostNotifications =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { openNotificationAccessSettings() }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         // Sign-in cookies a killed setup screen left behind (once per process; see SignInWebData).
         SignInWebData.wipeIfDirty(this)
@@ -95,8 +93,6 @@ class InboxActivity : AppCompatActivity() {
         binding.grid.layoutManager = GridLayoutManager(this, columns)
         binding.grid.adapter = adapter
 
-        binding.statusAction.setOnClickListener { onStatusAction() }
-        binding.statusHelp.setOnClickListener { showGreyedOutHelp() }
 
         links = listOf(
             LinkBlock(ChatService.MESSAGES, binding.relayBody, binding.relayAction, binding.relaySettings),
@@ -129,7 +125,6 @@ class InboxActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         InboxEvents.register(refresh)
-        refreshStatus()
         refreshItems()
     }
 
@@ -141,92 +136,6 @@ class InboxActivity : AppCompatActivity() {
     override fun onDestroy() {
         adapter.shutdown()
         super.onDestroy()
-    }
-
-    // --- status card ---------------------------------------------------------
-
-    private fun refreshStatus() {
-        val granted = InboxPrefs.hasNotificationAccess(this)
-        val paused = InboxPrefs.isPaused(this)
-        when {
-            !granted -> {
-                binding.statusTitle.setText(R.string.status_off_title)
-                binding.statusBody.setText(R.string.status_off_body)
-                binding.statusAction.setText(R.string.status_turn_on)
-                binding.statusHelp.visibility = View.VISIBLE
-            }
-            paused -> {
-                binding.statusTitle.setText(R.string.status_paused_title)
-                binding.statusBody.setText(R.string.status_paused_body)
-                binding.statusAction.setText(R.string.status_resume)
-                binding.statusHelp.visibility = View.GONE
-            }
-            else -> {
-                binding.statusTitle.setText(R.string.status_on_title)
-                binding.statusBody.setText(
-                    if (InboxPrefs.catchAllImages(this)) R.string.status_on_body_all else R.string.status_on_body
-                )
-                binding.statusAction.setText(R.string.status_pause)
-                binding.statusHelp.visibility = View.GONE
-            }
-        }
-    }
-
-    private fun onStatusAction() {
-        when {
-            !InboxPrefs.hasNotificationAccess(this) -> {
-                val needsAsk = Build.VERSION.SDK_INT >= 33 &&
-                    ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
-                    PackageManager.PERMISSION_GRANTED
-                if (needsAsk) {
-                    askToPostNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
-                } else {
-                    openNotificationAccessSettings()
-                }
-            }
-            else -> {
-                InboxPrefs.setPaused(this, !InboxPrefs.isPaused(this))
-                refreshStatus()
-            }
-        }
-    }
-
-    private fun openNotificationAccessSettings() {
-        val detail = if (Build.VERSION.SDK_INT >= 30) {
-            Intent(Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS).putExtra(
-                Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME,
-                InboxPrefs.listenerComponent(this).flattenToString(),
-            )
-        } else {
-            null
-        }
-        try {
-            startActivity(detail ?: Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
-        } catch (e: ActivityNotFoundException) {
-            try {
-                startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
-            } catch (e2: ActivityNotFoundException) {
-                showMessage(getString(R.string.settings_unavailable))
-            }
-        }
-    }
-
-    /** Android blocks this switch for apps installed from a file until the user allows it. */
-    private fun showGreyedOutHelp() {
-        AlertDialog.Builder(this)
-            .setTitle(R.string.greyed_title)
-            .setMessage(R.string.greyed_body)
-            .setPositiveButton(R.string.greyed_open_app_info) { _, _ ->
-                try {
-                    startActivity(
-                        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
-                    )
-                } catch (e: ActivityNotFoundException) {
-                    showMessage(getString(R.string.settings_unavailable))
-                }
-            }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
     }
 
     // --- the links' card -------------------------------------------------------
@@ -344,8 +253,6 @@ class InboxActivity : AppCompatActivity() {
     }
 
     override fun onPrepareOptionsMenu(menu: Menu): Boolean {
-        menu.findItem(R.id.action_all_images).isChecked = InboxPrefs.catchAllImages(this)
-        menu.findItem(R.id.action_alerts).isChecked = InboxPrefs.alertsEnabled(this)
         return super.onPrepareOptionsMenu(menu)
     }
 
@@ -354,11 +261,6 @@ class InboxActivity : AppCompatActivity() {
             // Wherever the list was last: it remembers its tab.
             R.id.action_messages -> startActivity(Intent(this, ConversationsActivity::class.java))
             R.id.action_open -> openDocument.launch(arrayOf("image/*", "*/*"))
-            R.id.action_all_images -> {
-                InboxPrefs.setCatchAllImages(this, !InboxPrefs.catchAllImages(this))
-                refreshStatus()
-            }
-            R.id.action_alerts -> InboxPrefs.setAlertsEnabled(this, !InboxPrefs.alertsEnabled(this))
             R.id.action_log -> showLog()
             R.id.action_clear -> confirmClear()
             R.id.action_about -> showAbout()

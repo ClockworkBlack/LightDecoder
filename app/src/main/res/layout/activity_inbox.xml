@@ -11,12 +11,15 @@
         android:layout_height="?attr/actionBarSize"
         app:title="@string/app_name" />
 
+    <!-- Catching stickers from notifications is switched off (the listener is not declared): the card stays hidden. -->
     <com.google.android.material.card.MaterialCardView
+        android:id="@+id/catchCard"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginHorizontal="12dp"
         android:layout_marginTop="4dp"
-        android:layout_marginBottom="8dp">
+        android:layout_marginBottom="8dp"
+        android:visibility="gone">
 
         <LinearLayout
             android:layout_width="match_parent"

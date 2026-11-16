@@ -127,24 +127,11 @@
         </activity>
 
         <!--
-            Catches picture attachments from message notifications. Android
-            starts this only after the user turns on notification access for
-            LightDecoder in system settings, and only the system can bind to it.
-            Ongoing notifications (music players, navigation and the like) are
-            declared as not wanted.
+            Catching stickers from other apps' notifications is switched off:
+            the notification listener (inbox.StickerNotificationListener) is
+            not declared, so Android does not offer, or keep, notification
+            access for LightDecoder.
         -->
-        <service
-            android:name=".inbox.StickerNotificationListener"
-            android:exported="true"
-            android:label="@string/listener_label"
-            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
-            <intent-filter>
-                <action android:name="android.service.notification.NotificationListenerService" />
-            </intent-filter>
-            <meta-data
-                android:name="android.service.notification.disabled_filter_types"
-                android:value="ongoing" />
-        </service>
 
         <!--
             Google Messages link: setup, status and the conversations. The

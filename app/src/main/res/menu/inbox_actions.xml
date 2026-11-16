@@ -11,16 +11,6 @@
         android:title="@string/open_file"
         app:showAsAction="never" />
     <item
-        android:id="@+id/action_all_images"
-        android:checkable="true"
-        android:title="@string/action_all_images"
-        app:showAsAction="never" />
-    <item
-        android:id="@+id/action_alerts"
-        android:checkable="true"
-        android:title="@string/action_alerts"
-        app:showAsAction="never" />
-    <item
         android:id="@+id/action_log"
         android:title="@string/action_log"
         app:showAsAction="never" />
