@@ -58,6 +58,10 @@ import com.lightdecoder.ui.relay.RelayStatusActivity
 import com.lightdecoder.ui.relay.SignInWebData
 import com.lightdecoder.ui.relay.relayAttempt
 import com.lightdecoder.ui.relay.runInBackground
+import com.lightdecoder.ui.voice.Dictation
+import com.lightdecoder.ui.voice.MessageReader
+import com.lightdecoder.ui.voice.ReadAloudText
+import com.lightdecoder.ui.voice.VoicePrefs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -141,6 +145,37 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         if (uri != null) setAttachment(uri)
     }
 
+    /** The conversation dictation was started in; a result for another one is dropped. */
+    private var dictationFor: String? = null
+
+    private val dictate = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val forConversation = dictationFor
+        dictationFor = null
+        if (result.resultCode != RESULT_OK || forConversation != conversationId) return@registerForActivityResult
+        Dictation.resultText(result.data)?.let(::insertDictated)
+    }
+
+    // --- reading aloud ---
+    // The reader is made on first use; its text-to-speech engine only on the first thing said.
+
+    private var readerInstance: MessageReader? = null
+    private val reader: MessageReader
+        get() = readerInstance ?: MessageReader.create(this, readerListener).also { readerInstance = it }
+
+    private val readerListener = object : MessageReader.Listener {
+        override fun onSpeakingChanged(speaking: Boolean) = invalidateOptionsMenu()
+        override fun onUnavailable() = noteReaderUnavailable()
+    }
+
+    /**
+     * Incoming messages at or after this time that are not in [readAloudSeen]
+     * arrived while the thread was open. Null until the first read of the
+     * thread's rows after it opened, came back to the front or was switched:
+     * that read sets it, and what it finds is never read out.
+     */
+    private var readAloudSince: Long? = null
+    private val readAloudSeen = HashSet<String>()
+
     private val onArchiveChange: (ArchiveChange) -> Unit = { change ->
         val mine = change.conversationId == null || change.conversationId == conversationId
         if (mine && change.kind != ArchiveChange.Kind.HEALTH) scheduleReload()
@@ -174,6 +209,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
         setUpList()
         setUpComposer()
+        if (VoicePrefs.readNewAloud(this) && !reader.isAvailable) noteReaderUnavailable()
         savedInstanceState?.getString(STATE_REPLY_TO)?.let(::restoreReply)
         // Opened from a message notification on a cold start, the thread is the
         // whole task: Back and Up lead to the conversation list, not out of the app.
@@ -210,6 +246,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             fullSizeWanted.clear()
             confirmDialog?.dismiss()
             closeOptionsMenu()
+            // Leaving the thread: stop reading its messages; the next one's are new from its first read.
+            readerInstance?.stop()
+            readAloudSince = null
+            dictationFor = null
             windowSize = PAGE
             growWindow = false
             growPending = false
@@ -243,13 +283,23 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         super.onStart()
         started = true
         ArchiveEvents.register(onArchiveChange)
+        // Back in front: what arrived meanwhile is not read out, only what comes from now on.
+        readAloudSince = null
+        updateVoiceInput()
         reload()
     }
 
     override fun onStop() {
         started = false
         ArchiveEvents.unregister(onArchiveChange)
+        readerInstance?.stop()
         super.onStop()
+    }
+
+    override fun onDestroy() {
+        readerInstance?.shutdown()
+        readerInstance = null
+        super.onDestroy()
     }
 
     /**
@@ -384,6 +434,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         participants = snapshot.participants
         historyComplete = snapshot.historyComplete
         renderConversation()
+        readNewAloud(snapshot.rows)
 
         val scrollTo = target?.takeIf { t -> snapshot.rows.any { it.id == t } }
         if (target != null) targetMessageId = null
@@ -663,6 +714,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             pickMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
         }
         binding.stickers.setOnClickListener { showStickers() }
+        binding.voiceInput.setOnClickListener { startDictation() }
         binding.attachmentRemove.setOnClickListener { clearAttachment() }
         binding.replyClose.setOnClickListener { clearReply() }
         binding.input.addTextChangedListener(object : TextWatcher {
@@ -690,6 +742,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         binding.input.isEnabled = paired
         binding.attach.isEnabled = paired
         binding.stickers.isEnabled = paired
+        binding.voiceInput.isEnabled = paired
         binding.input.hint = getString(if (paired) R.string.chat_compose_hint else R.string.chat_compose_unpaired)
         updateSendEnabled()
     }
@@ -699,6 +752,91 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         binding.send.isEnabled = paired && hasContent
         // The tint has no disabled state: dim it the way Material dims disabled controls.
         binding.send.alpha = if (binding.send.isEnabled) 1f else DISABLED_ALPHA
+    }
+
+    // --- voice ------------------------------------------------------------------
+
+    /** The dictation button, only when some app can recognise speech. */
+    private fun updateVoiceInput() {
+        binding.voiceInput.visibility = if (Dictation.isAvailable(packageManager)) View.VISIBLE else View.GONE
+    }
+
+    private fun startDictation() {
+        if (!binding.input.isEnabled) return
+        dictationFor = conversationId
+        try {
+            dictate.launch(Dictation.intent(this))
+        } catch (e: ActivityNotFoundException) {
+            dictationFor = null
+            binding.voiceInput.visibility = View.GONE
+            toast(getString(R.string.chat_voice_unavailable))
+        }
+    }
+
+    /** Recognised speech goes in at the cursor (over a selection), for the user to check and send. */
+    private fun insertDictated(spoken: String) {
+        if (!binding.input.isEnabled || binding.composer.visibility != View.VISIBLE) return
+        val editable = binding.input.text ?: return
+        // No cursor yet (never focused): at the end.
+        val rawStart = binding.input.selectionStart
+        val rawEnd = binding.input.selectionEnd
+        val a = if (rawStart < 0) editable.length else rawStart.coerceIn(0, editable.length)
+        val b = if (rawEnd < 0) a else rawEnd.coerceIn(0, editable.length)
+        val start = minOf(a, b)
+        val end = maxOf(a, b)
+        val piece = Dictation.piece(editable, start, end, spoken)
+        editable.replace(start, end, piece)
+        binding.input.setSelection((start + piece.length).coerceAtMost(binding.input.length()))
+        binding.input.requestFocus()
+    }
+
+    private fun readAloud(row: MessageRow) {
+        if (!isShown(row)) return
+        val sentence = ReadAloudText.sentence(this, row) ?: return
+        if (!reader.isAvailable) {
+            noteReaderUnavailable()
+            return
+        }
+        reader.speak(sentence, interrupt = true)
+    }
+
+    /**
+     * With "Read new messages aloud" on, says the incoming messages that
+     * arrived since the thread opened (or came back to the front). Messages
+     * loaded from further back (scrolling up, a jump to an old one) are older
+     * than that, so they are never read out.
+     */
+    private fun readNewAloud(rows: List<MessageRow>) {
+        val incoming = rows.filter(ReadAloudText::isIncoming)
+        val since = readAloudSince
+        if (since == null) {
+            // The phone's clock and this one may differ a little: a message sent just
+            // before the thread opened (and not here yet) still counts as new.
+            val newest = incoming.maxOfOrNull { it.timestampMs } ?: Long.MIN_VALUE
+            val start = maxOf(newest, System.currentTimeMillis() - READ_ALOUD_CLOCK_SLACK_MS)
+            readAloudSince = start
+            readAloudSeen.clear()
+            incoming.filter { it.timestampMs >= start }.mapTo(readAloudSeen) { it.id }
+            return
+        }
+        val fresh = incoming.filter { it.timestampMs >= since && it.id !in readAloudSeen }
+        if (fresh.isEmpty()) return
+        fresh.mapTo(readAloudSeen) { it.id }
+        if (!started || !VoicePrefs.readNewAloud(this) || !reader.isAvailable) return
+        // A burst (the link catching up) is not read out in full.
+        for (row in fresh.sortedBy { it.timestampMs }.takeLast(MAX_READ_AT_ONCE)) {
+            ReadAloudText.sentence(this, row)?.let { reader.speak(it, interrupt = false) }
+        }
+    }
+
+    /** No text-to-speech: said once per app run, and the options go. */
+    private fun noteReaderUnavailable() {
+        if (!readerUnavailableShown) {
+            readerUnavailableShown = true
+            toast(getString(R.string.chat_read_aloud_unavailable))
+        }
+        actionSheet?.findViewById<View>(R.id.actionReadAloud)?.visibility = View.GONE
+        invalidateOptionsMenu()
     }
 
     /** At most one ping every few seconds; the manager throttles too. */
@@ -955,6 +1093,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             sheet.dismiss()
             copy(row.text)
         }
+        val sayable = reader.isAvailable && ReadAloudText.sentence(this, row) != null
+        b.actionReadAloud.visibility = if (sayable) View.VISIBLE else View.GONE
+        b.actionReadAloud.setOnClickListener {
+            sheet.dismiss()
+            readAloud(row)
+        }
         b.actionRetry.visibility = if (MessageStatus.canRetryLocally(row)) View.VISIBLE else View.GONE
         b.actionRetry.setOnClickListener {
             sheet.dismiss()
@@ -1193,6 +1337,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             setTitle(if (conv?.muted == true) R.string.chat_action_unmute else R.string.chat_action_mute)
         }
         menu.findItem(R.id.action_delete_conversation)?.isVisible = conv != null && !deleted
+        menu.findItem(R.id.action_read_new_aloud)?.apply {
+            isVisible = reader.isAvailable
+            isChecked = VoicePrefs.readNewAloud(this@ThreadActivity)
+        }
+        menu.findItem(R.id.action_stop_reading)?.isVisible = readerInstance?.isSpeaking == true
         return super.onPrepareOptionsMenu(menu)
     }
 
@@ -1223,6 +1372,17 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             R.id.action_delete_forever -> confirmDeleteForever()
             R.id.action_delete_conversation -> confirmDeleteConversation()
             R.id.action_link_status -> startActivity(Intent(this, RelayStatusActivity::class.java))
+            R.id.action_read_new_aloud -> {
+                val on = !VoicePrefs.readNewAloud(this)
+                VoicePrefs.setReadNewAloud(this, on)
+                item.isChecked = on
+                if (!on) readerInstance?.stop()
+                invalidateOptionsMenu()
+            }
+            R.id.action_stop_reading -> {
+                readerInstance?.stop()
+                invalidateOptionsMenu()
+            }
             else -> return super.onOptionsItemSelected(item)
         }
         return true
@@ -1319,6 +1479,16 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         private const val MAX_PREVIEW_READ = 32 * 1024 * 1024
         private const val ATTACHMENT_THUMB_DP = 96
         private const val DISABLED_ALPHA = 0.38f
+
+        /** How far behind this phone's clock a message may be stamped and still count as arriving now. */
+        private const val READ_ALOUD_CLOCK_SLACK_MS = 2 * 60_000L
+
+        /** The most new messages read out from one batch of arrivals (the newest ones). */
+        private const val MAX_READ_AT_ONCE = 5
+
+        /** The "no text-to-speech" toast was shown in this app run. */
+        @VisibleForTesting
+        internal var readerUnavailableShown = false
 
         /** The quick reactions offered on long press, in Google Messages' order. */
         val QUICK_REACTIONS = listOf("👍", "❤️", "😂", "😮", "😢", "🙏")

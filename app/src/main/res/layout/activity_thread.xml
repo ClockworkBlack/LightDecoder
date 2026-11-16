@@ -196,6 +196,16 @@
                 android:maxLines="6" />
         </com.google.android.material.textfield.TextInputLayout>
 
+        <!-- Dictation through the system's speech recogniser; hidden when there is none. -->
+        <ImageButton
+            android:id="@+id/voiceInput"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/chat_voice_input"
+            android:src="@drawable/ic_mic"
+            android:visibility="gone" />
+
         <ImageButton
             android:id="@+id/send"
             android:layout_width="48dp"

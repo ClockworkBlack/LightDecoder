@@ -347,4 +347,19 @@
     <string name="sticker_tile">Sticker. Tap to send, touch and hold to delete.</string>
     <string name="sticker_delete_title">Delete this sticker?</string>
     <string name="sticker_delete_confirm">Delete</string>
+
+    <!-- Voice: dictation in the composer, reading messages aloud -->
+    <string name="chat_voice_input">Dictate a message</string>
+    <string name="chat_voice_prompt">Say your message</string>
+    <string name="chat_voice_unavailable">Speech recognition is not available.</string>
+    <string name="chat_action_read_aloud">Read aloud</string>
+    <string name="chat_read_new_aloud">Read new messages aloud</string>
+    <string name="chat_stop_reading">Stop reading</string>
+    <!-- Spoken: "Alice said: See you at eight". -->
+    <string name="chat_read_aloud_said">%1$s said: %2$s</string>
+    <!-- Spoken in place of the text of a message that is only a picture. -->
+    <string name="chat_read_aloud_picture">a picture</string>
+    <!-- Spoken in place of the text of a message that is only a video or a file. -->
+    <string name="chat_read_aloud_attachment">an attachment</string>
+    <string name="chat_read_aloud_unavailable">Reading aloud needs a text-to-speech engine, and none is available on this phone.</string>
 </resources>

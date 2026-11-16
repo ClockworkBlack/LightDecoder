@@ -60,6 +60,22 @@
         android:text="@string/chat_action_copy" />
 
     <TextView
+        android:id="@+id/actionReadAloud"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?attr/selectableItemBackground"
+        android:clickable="true"
+        android:drawablePadding="20dp"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:minHeight="52dp"
+        android:paddingHorizontal="24dp"
+        android:textAppearance="?attr/textAppearanceBodyLarge"
+        android:drawableStart="@drawable/ic_read_aloud"
+        android:text="@string/chat_action_read_aloud"
+        android:visibility="gone" />
+
+    <TextView
         android:id="@+id/actionRetry"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"

@@ -30,6 +30,22 @@
         tools:ignore="BatteryLife" />
 
     <!--
+        Voice: the system's speech recogniser (the composer's dictation
+        button is shown only when there is one) and text-to-speech engines
+        (for reading messages aloud). Android 11+ hides both from apps that
+        do not declare them here. Recognition runs in the recogniser's own
+        app, so no microphone permission is needed here.
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
+
+    <!--
         Backup is off because the inbox holds pictures from private
         conversations and the archive holds messages, neither of which should
         be copied to a cloud backup or another device. dataExtractionRules
