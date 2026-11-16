@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.speech.RecognizerIntent
+import androidx.core.content.edit
 import com.lightdecoder.R
 import com.lightdecoder.archive.MessageRow
 
@@ -75,6 +76,6 @@ object VoicePrefs {
         context.getSharedPreferences(FILE, Context.MODE_PRIVATE).getBoolean(KEY_READ_NEW, false)
 
     fun setReadNewAloud(context: Context, on: Boolean) {
-        context.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putBoolean(KEY_READ_NEW, on).apply()
+        context.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit { putBoolean(KEY_READ_NEW, on) }
     }
 }
