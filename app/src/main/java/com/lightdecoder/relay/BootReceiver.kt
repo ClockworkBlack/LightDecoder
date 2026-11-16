@@ -14,7 +14,14 @@ class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action !in ACTIONS) return
         if (!RelayPrefs.autoStart(context) || !RelayPrefs.liveEnabled(context)) return
-        if (!RelayManager.get(context).isPaired()) return
+        val manager = RelayManager.get(context)
+        if (!manager.isPaired()) return
+        if (!RelayNotifications.statusVisible(context)) {
+            // The link never runs without its notification; it starts once a
+            // screen is shown with notifications back on.
+            manager.onNotificationsHidden()
+            return
+        }
         // start() catches ForegroundServiceStartNotAllowedException: Android
         // allows this start after boot and updates, but some builds do not.
         if (RelayService.start(context)) RelayLog.add(context, "Reconnecting after restart")

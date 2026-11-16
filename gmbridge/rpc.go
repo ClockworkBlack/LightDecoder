@@ -3,6 +3,8 @@ package gmbridge
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/url"
 	"slices"
 	"strings"
 
@@ -43,7 +45,10 @@ func (b *GMBridge) ListConversations(folder string, count int64) (out []byte, er
 		return nil, err
 	}
 	defer cancel()
-	resp, err := cli.ListConversations(ctx, &gmproto.ListConversationsRequest{Count: count, Folder: f})
+	var resp *gmproto.ListConversationsResponse
+	b.whileSyncingConversations(func() {
+		resp, err = cli.ListConversations(ctx, &gmproto.ListConversationsRequest{Count: count, Folder: f})
+	})
 	if err != nil {
 		return nil, exported(err)
 	}
@@ -55,6 +60,17 @@ func (b *GMBridge) ListConversations(folder string, count int64) (out []byte, er
 		dtos = append(dtos, toConversationDTO(conv, b.cache))
 	}
 	return toJSON(dtos), nil
+}
+
+// whileSyncingConversations runs fn (a ListConversations call) with
+// syncingConversations raised, so MESSAGE_DELETED updates the phone sends
+// meanwhile are dropped (see handlerFor). The connector does the same around
+// its ListConversations sync. The deferred decrement keeps the count right
+// even if fn panics.
+func (b *GMBridge) whileSyncingConversations(fn func()) {
+	b.syncingConversations.Add(1)
+	defer b.syncingConversations.Add(-1)
+	fn()
 }
 
 // GetConversation fetches one conversation as a ConversationDTO.
@@ -134,6 +150,13 @@ func (b *GMBridge) messagePage(resp *gmproto.ListMessagesResponse, cursor *gmpro
 	slices.Reverse(raw)
 	page := messagePageDTO{Messages: make([]messageDTO, 0, len(raw)), Total: resp.GetTotalMessages()}
 	var oldest *gmproto.Message
+	if cursor == nil {
+		// The newest page, oldest first: the last protocol-switch tombstone
+		// wins. Older pages must not overwrite what newer messages said.
+		for _, msg := range raw {
+			b.cache.noteProtocolSwitch(msg)
+		}
+	}
 	for _, msg := range raw {
 		if cursor != nil {
 			ms := microsToMillis(msg.GetTimestamp())
@@ -266,9 +289,53 @@ func textInfo(text string) *gmproto.MessageInfo {
 	}}
 }
 
-// send builds the SendMessageRequest exactly as the connector's
-// ConvertMatrixMessage does and reports the phone's verdict.
+// send sends one message and reports the phone's verdict.
 func (b *GMBridge) send(ctx context.Context, cli *libgm.Client, conv *gmproto.Conversation, tmpID string, infos []*gmproto.MessageInfo, replyToID string) ([]byte, error) {
+	req := b.buildSendRequest(conv, tmpID, infos, replyToID)
+	// Nothing has gone to Google yet, so whatever happens here is safe to
+	// send again.
+	if cerr := ctx.Err(); cerr != nil {
+		if errors.Is(cerr, context.DeadlineExceeded) {
+			return nil, newError(codeSendFailed, "timed out before sending")
+		}
+		return nil, newError(codeConnectionClosed, "disconnected before sending")
+	}
+	resp, err := cli.SendMessage(ctx, req)
+	if err != nil {
+		return nil, sendError(err)
+	}
+	result := sendResultDTO{TmpID: tmpID, Status: resp.GetStatus().String()}
+	if resp.GetStatus() == gmproto.SendMessageResponse_SUCCESS {
+		result.OK = true
+	} else {
+		result.Code = codeSendFailed
+	}
+	return toJSON(result), nil
+}
+
+// sendError maps a SendMessage failure. libgm returns ErrConnectionClosed
+// only from its wait for the phone's reply, and a bare context.Canceled from
+// that wait or from reading the POST's response body: in both cases Google
+// has already accepted the POST, and the phone may still send the message
+// from the server's queue. (The one other bare context.Canceled, libgm's
+// pause before retrying a 5xx, is ambiguous too and treated the same.) That
+// is reported like phone_not_responding, which the outbox does not retry by
+// itself (a retry could send it twice); if the phone does send it, the tmpId
+// echo clears the failure. A POST that was cancelled or failed in flight
+// comes back as *url.Error and stays connection_closed, which the outbox
+// sends again on the next connection. classify is left alone: pairing also
+// gets ErrConnectionClosed, and there it does mean connection_closed.
+func sendError(err error) error {
+	var ue *url.Error
+	if errors.Is(err, libgm.ErrConnectionClosed) || (errors.Is(err, context.Canceled) && !errors.As(err, &ue)) {
+		return &bridgeError{code: codePhoneNotResponding, detail: "disconnected after Google accepted the message", cause: err}
+	}
+	return exported(err)
+}
+
+// buildSendRequest builds the SendMessageRequest as the connector's
+// ConvertMatrixMessage does (minus its Matrix-only parts).
+func (b *GMBridge) buildSendRequest(conv *gmproto.Conversation, tmpID string, infos []*gmproto.MessageInfo, replyToID string) *gmproto.SendMessageRequest {
 	convID := conv.GetConversationID()
 	req := &gmproto.SendMessageRequest{
 		ConversationID: convID,
@@ -281,21 +348,16 @@ func (b *GMBridge) send(ctx context.Context, cli *libgm.Client, conv *gmproto.Co
 		},
 		SIMPayload: b.cache.simPayloadFor(conv),
 		TmpID:      tmpID,
+		// Keep an end-to-end encrypted RCS chat on RCS instead of leaving it
+		// to the phone's automatic choice, which may fall back to SMS/MMS.
+		ForceRCS: conv.GetType() == gmproto.ConversationType_RCS &&
+			conv.GetSendMode() == gmproto.ConversationSendMode_SEND_MODE_AUTO &&
+			b.cache.shouldForceRCS(convID),
 	}
 	if replyToID != "" && b.replySupported(replyToID, conv) {
 		req.Reply = &gmproto.ReplyPayload{MessageID: replyToID}
 	}
-	resp, err := cli.SendMessage(ctx, req)
-	if err != nil {
-		return nil, exported(err)
-	}
-	result := sendResultDTO{TmpID: tmpID, Status: resp.GetStatus().String()}
-	if resp.GetStatus() == gmproto.SendMessageResponse_SUCCESS {
-		result.OK = true
-	} else {
-		result.Code = codeSendFailed
-	}
-	return toJSON(result), nil
+	return req
 }
 
 // replySupported follows the connector: SMS/MMS messages cannot carry reply

@@ -19,7 +19,8 @@ const maxUploadBytes = 100 << 20
 
 // DownloadMedia downloads and decrypts one attachment (mediaID + its 32-byte
 // key from a PartDTO). It needs a pairing but not a live connection: libgm
-// fetches the blob directly with the session token.
+// fetches the blob directly with the session token. While disconnected with
+// an expired token it fails with not_connected (see mediaClient).
 func (b *GMBridge) DownloadMedia(mediaID string, key []byte) (out []byte, err error) {
 	defer recoverInto(&err)
 	if mediaID == "" {
@@ -28,7 +29,7 @@ func (b *GMBridge) DownloadMedia(mediaID string, key []byte) (out []byte, err er
 	if len(key) != 32 {
 		return nil, newError(codeInvalidArgument, "media key must be 32 bytes")
 	}
-	cli, err := b.pairedClient()
+	cli, err := b.mediaClient()
 	if err != nil {
 		return nil, err
 	}
@@ -102,26 +103,40 @@ func (b *GMBridge) SendMedia(conversationID, tmpID string, data []byte, fileName
 	if fileName = strings.TrimSpace(fileName); fileName == "" {
 		fileName = "attachment"
 	}
+	// 1. Resolve the conversation under its own budget, so a bad ID fails
+	// before a large upload.
 	cli, ctx, cancel, err := b.rpc()
 	if err != nil {
 		return nil, err
 	}
-	defer cancel()
 	conv, err := b.conversationForWrite(ctx, cli, conversationID)
+	cancel()
 	if err != nil {
 		return nil, exported(err)
 	}
-	// UploadMedia encrypts a copy before returning, so the Java-owned data
-	// slice is not used after this call.
+	// 2. Upload, outside any RPC deadline: a large file on a slow uplink can
+	// take minutes. libgm takes no context here; each of its HTTP calls is
+	// bounded by the client's 5 minute timeout. UploadMedia encrypts a copy
+	// before returning, so the Java-owned data slice is not used after it.
 	media, err := cli.UploadMedia(data, fileName, mime)
 	if err != nil {
 		return nil, uploadError(err)
+	}
+	// 3. A fresh budget for SendMessage, which may wait 60 s for the phone.
+	// This also checks the connection is still up and on the same client.
+	sendCli, ctx, cancel, err := b.rpc()
+	if err != nil {
+		return nil, err // not_connected: nothing was sent, the outbox requeues
+	}
+	defer cancel()
+	if sendCli != cli {
+		return nil, newError(codeNotConnected, "connection changed during upload")
 	}
 	infos := []*gmproto.MessageInfo{{Data: &gmproto.MessageInfo_MediaContent{MediaContent: media}}}
 	if strings.TrimSpace(caption) != "" {
 		infos = append(infos, textInfo(caption))
 	}
-	return b.send(ctx, cli, conv, tmpID, infos, replyToID)
+	return b.send(ctx, sendCli, conv, tmpID, infos, replyToID)
 }
 
 // uploadError keeps auth failures recognisable and reports the rest as a

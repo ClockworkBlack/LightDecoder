@@ -1,6 +1,7 @@
 package com.lightdecoder.relay
 
 import android.app.Application
+import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.os.Looper
@@ -139,11 +140,127 @@ class RelayServiceTest {
     }
 
     @Test
+    fun bootDoesNotStartTheLinkWithItsNotificationOff() {
+        env.pairedManager()
+        RelayPrefs.setLiveEnabled(env.context, true)
+        notifications().setNotificationsEnabled(false)
+        BootReceiver().onReceive(env.context, Intent(Intent.ACTION_BOOT_COMPLETED))
+        assertNull(shadowOf(env.context as Application).nextStartedService)
+    }
+
+    @Test
     fun bootDoesNothingWhenNotPaired() {
         env.manager()
         RelayPrefs.setLiveEnabled(env.context, true)
         BootReceiver().onReceive(env.context, Intent(Intent.ACTION_BOOT_COMPLETED))
         assertNull(shadowOf(env.context as Application).nextStartedService)
+    }
+
+    @Test
+    fun theLinkDoesNotRunWhenItsNotificationCannotBeSeen() {
+        // Android 13+: the user said "Don't allow" to notifications; or turned them off.
+        val (manager, fake) = env.pairedManager()
+        RelayPrefs.setLiveEnabled(env.context, true)
+        notifications().setNotificationsEnabled(false)
+
+        val service = Robolectric.buildService(RelayService::class.java).create().get()
+        assertEquals(Service.START_NOT_STICKY, service.onStartCommand(null, 0, 1))
+        assertTrue(shadowOf(service).isStoppedBySelf)
+        manager.awaitIdleForTesting()
+        Thread.sleep(100)
+        assertFalse("never connects without its notification", fake.calls.contains("connect"))
+        assertEquals(RelayState(RelayState.Phase.DISCONNECTED, RelayState.NOTIFICATIONS_OFF), manager.state.value)
+        assertTrue("stay connected is kept for when notifications are back", RelayPrefs.liveEnabled(env.context))
+    }
+
+    @Test
+    fun stayConnectedWithNotificationsOffWaitsForThemAndResumes() {
+        val (manager, _) = env.pairedManager()
+        val app = shadowOf(env.context as Application)
+        RelayPrefs.setAutoStart(env.context, false)
+        notifications().setNotificationsEnabled(false)
+        manager.startLive()
+        assertNull("not started", app.nextStartedService)
+        assertEquals(RelayState.NOTIFICATIONS_OFF, manager.state.value.code)
+        manager.onAppVisible()
+        assertNull("still off", app.nextStartedService)
+
+        // The user turns notifications back on and comes back to the app.
+        notifications().setNotificationsEnabled(true)
+        manager.onAppVisible()
+        assertEquals(RelayService::class.java.name, app.nextStartedService?.component?.className)
+    }
+
+    @Test
+    fun turningNotificationsOffWhileConnectedTakesTheLinkDown() {
+        val (manager, fake) = env.pairedManager()
+        RelayPrefs.setLiveEnabled(env.context, true)
+        val service = Robolectric.buildService(RelayService::class.java).create().get()
+        service.onStartCommand(null, 0, 1)
+        env.eventually(manager, what = "connect") { fake.calls.contains("connect") }
+        fake.goOnline()
+        manager.awaitIdleForTesting()
+
+        notifications().setNotificationsEnabled(false)
+        NotificationBlockReceiver().onReceive(env.context, Intent("android.app.action.APP_BLOCK_STATE_CHANGED"))
+        env.eventually(manager, what = "the disconnect") { fake.calls.contains("disconnect") }
+        assertEquals(RelayService::class.java.name, shadowOf(env.context as Application).nextStoppedService?.component?.className)
+        manager.awaitIdleForTesting()
+        assertEquals(RelayState(RelayState.Phase.DISCONNECTED, RelayState.NOTIFICATIONS_OFF), manager.state.value)
+        assertTrue(RelayPrefs.liveEnabled(env.context))
+    }
+
+    @Test
+    fun aSwipedAwayNotificationComesBackWhileConnected() {
+        val (manager, fake) = env.pairedManager()
+        RelayPrefs.setLiveEnabled(env.context, true)
+        val service = Robolectric.buildService(RelayService::class.java).create().get()
+        service.onStartCommand(null, 0, 1)
+        env.eventually(manager, what = "connect") { fake.calls.contains("connect") }
+        val posted = shadowOf(service).lastForegroundNotification!!
+        assertNotNull("the notification asks to be put back when swiped away", posted.deleteIntent)
+
+        // Android 14+: the user swipes it away.
+        env.context.getSystemService(NotificationManager::class.java).cancel(RelayNotifications.ID_SERVICE)
+        assertNull(notifications().getNotification(RelayNotifications.ID_SERVICE))
+        assertEquals(Service.START_STICKY, service.onStartCommand(RelayService.repostIntent(env.context), 0, 2))
+        assertNotNull(notifications().getNotification(RelayNotifications.ID_SERVICE))
+        assertFalse(shadowOf(service).isStoppedBySelf)
+
+        // A repost reaching a service that is not running in the foreground leaves nothing behind.
+        val stray = Robolectric.buildService(RelayService::class.java).create().get()
+        assertEquals(Service.START_NOT_STICKY, stray.onStartCommand(RelayService.repostIntent(env.context), 0, 1))
+        assertTrue(shadowOf(stray).isStoppedBySelf)
+    }
+
+    @Test
+    fun theServiceGoingAwayTakesTheConnectionWithIt() {
+        val (manager, fake) = env.pairedManager()
+        RelayPrefs.setLiveEnabled(env.context, true)
+        val controller = Robolectric.buildService(RelayService::class.java).create()
+        controller.get().onStartCommand(null, 0, 1)
+        env.eventually(manager, what = "connect") { fake.calls.contains("connect") }
+        fake.goOnline()
+        manager.awaitIdleForTesting()
+
+        controller.destroy() // e.g. stopped by Android
+        env.eventually(manager, what = "the disconnect") { fake.calls.contains("disconnect") }
+    }
+
+    @Test
+    fun anotherAppOpeningAScreenDoesNotStartTheLinkWhenAutoStartIsOff() {
+        val (manager, _) = env.pairedManager()
+        val app = shadowOf(env.context as Application)
+        RelayPrefs.setLiveEnabled(env.context, true)
+        RelayPrefs.setAutoStart(env.context, false)
+        manager.onAppVisible()
+        assertNull(app.nextStartedService)
+
+        // But a start the user wanted that Android refused is repaired.
+        manager.resumeOnVisible = true
+        manager.onAppVisible()
+        assertEquals(RelayService::class.java.name, app.nextStartedService?.component?.className)
+        assertFalse(manager.resumeOnVisible)
     }
 
     @Test
@@ -157,4 +274,6 @@ class RelayServiceTest {
         manager.onAppVisible()
         assertNull(shadowOf(env.context as Application).nextStartedService)
     }
+
+    private fun notifications() = shadowOf(env.context.getSystemService(NotificationManager::class.java))
 }

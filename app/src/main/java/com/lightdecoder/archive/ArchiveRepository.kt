@@ -13,6 +13,7 @@ import com.lightdecoder.relay.ReactionDto
 import org.json.JSONArray
 import org.json.JSONException
 import java.io.File
+import java.util.concurrent.atomic.AtomicLong
 import android.database.Cursor as DbCursor
 
 /**
@@ -31,6 +32,9 @@ import android.database.Cursor as DbCursor
 class ArchiveRepository private constructor(private val helper: ArchiveDb) {
 
     private val filesDir: File get() = helper.appContext.filesDir
+
+    /** When this instance last looked for partial files left by writes that never finished. */
+    private val lastPartSweep = AtomicLong(0)
 
     /** What one upsert did. [newMediaParts] are the media parts worth downloading now. */
     data class UpsertResult(val inserted: Boolean, val replacedTmpId: String?, val newMediaParts: List<MediaRow>)
@@ -262,9 +266,33 @@ class ArchiveRepository private constructor(private val helper: ArchiveDb) {
             it.toMedia()
         }.firstOrNull()
 
-    /** Records where a part's file (or, with [thumbnail], its thumbnail) was saved. */
-    fun setMediaLocalPath(messageId: String, partId: String, path: String, thumbnail: Boolean) =
-        updateMedia(messageId, partId, ContentValues().apply { put(if (thumbnail) "thumb_path" else "local_path", path) })
+    /**
+     * Records where a part's file (or, with [thumbnail], its thumbnail) was
+     * saved, the file having been fetched for [cacheKey]: the media id (or
+     * thumbnail id) it was downloaded under, or a [MediaCache.inlineKey] for
+     * data that came inside the message.
+     *
+     * Only if the part still has that media. If the message was deleted, or
+     * the part now points to other media, while the file was being fetched,
+     * nothing is recorded and the file is deleted (unless another part uses
+     * it), so a late download never leaves a picture on disk that nothing
+     * shows or cleans up. Returns whether the path was recorded.
+     */
+    fun setMediaLocalPath(messageId: String, partId: String, cacheKey: String, path: String, thumbnail: Boolean): Boolean =
+        when {
+            cacheKey.startsWith(MediaCache.INLINE_KEY_PREFIX) ->
+                recordMediaPath(messageId, partId, path, thumbnail, " AND inline_data IS NOT NULL", emptyArray())
+            thumbnail -> recordMediaPath(messageId, partId, path, thumbnail = true, " AND thumb_media_id = ?", arrayOf(cacheKey))
+            else -> recordMediaPath(messageId, partId, path, thumbnail = false, " AND media_id = ?", arrayOf(cacheKey))
+        }
+
+    /**
+     * As the overload with a cache key, except that the part's media is not
+     * compared: a part that changed media meanwhile gets this file anyway.
+     * The file is still deleted if the message or part is gone.
+     */
+    fun setMediaLocalPath(messageId: String, partId: String, path: String, thumbnail: Boolean): Boolean =
+        recordMediaPath(messageId, partId, path, thumbnail, "", emptyArray())
 
     fun markFullSizeRequested(messageId: String, partId: String) =
         updateMedia(messageId, partId, ContentValues().apply { put("full_size_requested", 1) })
@@ -424,6 +452,7 @@ class ArchiveRepository private constructor(private val helper: ArchiveDb) {
     }
 
     private fun <T> write(block: (Batch) -> T): T {
+        sweepStaleParts()
         val db = helper.writableDatabase
         val batch = Batch(db)
         val result: T
@@ -665,6 +694,44 @@ class ArchiveRepository private constructor(private val helper: ArchiveDb) {
             "INSERT INTO messages_fts (docid, text_body, message_id, conversation_id) VALUES (?, ?, ?, ?)",
             arrayOf<Any>(rowId, body, messageId, conversationId),
         )
+    }
+
+    /** At most once per [MediaCache.STALE_PART_MS]: partial files of downloads the app died in the middle of. */
+    private fun sweepStaleParts() {
+        val now = System.currentTimeMillis()
+        val last = lastPartSweep.get()
+        if (now - last < MediaCache.STALE_PART_MS || !lastPartSweep.compareAndSet(last, now)) return
+        MediaCache.deleteStaleParts(MediaCache.mediaDir(filesDir), now)
+    }
+
+    /**
+     * Sets a part's local_path (or thumb_path) to [path] where the part also
+     * meets [condition]. If no part does, [path] goes to orphan cleanup; a
+     * different file the part pointed to before does too.
+     */
+    private fun recordMediaPath(
+        messageId: String,
+        partId: String,
+        path: String,
+        thumbnail: Boolean,
+        condition: String,
+        conditionArgs: Array<String>,
+    ): Boolean = write { b ->
+        val column = if (thumbnail) "thumb_path" else "local_path"
+        val where = "message_id = ? AND part_id = ?$condition"
+        val args = arrayOf(messageId, partId, *conditionArgs)
+        val previous = query(b.db, "SELECT $column FROM media WHERE $where", args) { it.getString(0) ?: "" }.firstOrNull()
+        if (previous == null) {
+            // Nothing shows this file: deleted after commit unless another part uses it.
+            b.maybeOrphaned.add(path)
+            return@write false
+        }
+        if (previous != path) b.maybeOrphaned.add(previous)
+        b.db.update("media", ContentValues().apply { put(column, path) }, where, args)
+        query(b.db, "SELECT conversation_id FROM messages WHERE message_id = ?", arrayOf(messageId)) {
+            it.getString(0)
+        }.firstOrNull()?.let { b.changed(Kind.MESSAGES, it) }
+        true
     }
 
     private fun updateMedia(messageId: String, partId: String, values: ContentValues) = write { b ->

@@ -175,22 +175,78 @@ class OutboxTest {
     }
 
     @Test
-    fun anInterruptedSendWhoseEchoAlreadyArrivedIsNotSentAgain() {
+    fun anInterruptedSendIsLookedUpOnThePhoneAndNeverSentAgainBlindly() {
         // As left by a process that died mid-send: the entry is SENDING and
         // the phone's echo already replaced the local copy.
         insertSending("tmp-done", "already there")
         env.repo.upsertMessage(outgoing("real-done", "already there", "tmp-done"))
         assertEquals(OutboxStatus.SENDING, env.repo.outbox("tmp-done")!!.status)
         assertNull(env.repo.message(MessageRow.tmpMessageId("tmp-done")))
-        // And one whose echo never came: it is sent again.
+        // One the phone has, but whose echo was never handled: the lookup finds it.
+        insertSending("tmp-echoed", "went out")
+        // And one the phone does not show: it may still have gone out, so it
+        // waits for the user instead of going out a second time.
         insertSending("tmp-lost", "lost in flight")
 
         val (manager, fake) = env.pairedManager()
+        fake.pages[CONV] = java.util.concurrent.ConcurrentLinkedQueue(
+            listOf(MessagePage(listOf(outgoing("real-echoed", "went out", "tmp-echoed")), null))
+        )
         fake.goOnline()
         env.eventually(manager, what = "the queue to settle") {
-            env.repo.outbox("tmp-done") == null && env.repo.outbox("tmp-lost")?.status == OutboxStatus.SENT
+            env.repo.outbox("tmp-done") == null && env.repo.outbox("tmp-echoed") == null &&
+                env.repo.outbox("tmp-lost")?.status == OutboxStatus.FAILED
         }
-        assertEquals(listOf("tmp-lost"), fake.sent.map { it.tmpId })
+        assertTrue("nothing sent again", fake.sent.isEmpty())
+        assertEquals("one lookup for the conversation", listOf(CONV), fake.fetches.map { it.first })
+        assertEquals("went out", env.repo.message("real-echoed")!!.text)
+        val lost = env.repo.message(MessageRow.tmpMessageId("tmp-lost"))!!
+        assertEquals(LocalState.FAILED, lost.localState)
+        assertEquals(Outbox.INTERRUPTED, lost.errorText)
+
+        // The user decides: retry sends it.
+        manager.retry("tmp-lost")
+        env.eventually(manager, what = "the resend") { fake.sent.size == 1 }
+        assertEquals("tmp-lost", fake.sent.single().tmpId)
+    }
+
+    @Test
+    fun aSentMessageWhoseEchoWasLostIsSettledByLookingItUp() {
+        val (manager, fake) = env.pairedManager(RelayTestEnv.FAST.copy(unconfirmedSendCheckMs = 50))
+        fake.goOnline()
+        val tmpId = manager.sendText(CONV, "echo lost")
+        env.eventually(manager, what = "the send") { env.repo.outbox(tmpId)?.status == OutboxStatus.SENT }
+        // The echo never came as an event, but the phone has the message.
+        fake.pages[CONV] = java.util.concurrent.ConcurrentLinkedQueue(
+            listOf(MessagePage(listOf(outgoing("real-1", "echo lost", tmpId)), null))
+        )
+        env.eventually(manager, what = "the lookup") { env.repo.outbox(tmpId) == null }
+        assertNull(env.repo.message(MessageRow.tmpMessageId(tmpId)))
+        assertEquals("echo lost", env.repo.message("real-1")!!.text)
+        assertEquals(1, fake.sent.size)
+        assertTrue(RelayPrefs.unconfirmedSends(env.context).isEmpty())
+    }
+
+    @Test
+    fun aSentMessageThatIsNeverConfirmedStopsShowingSending() {
+        val (manager, fake) = env.pairedManager(
+            RelayTestEnv.FAST.copy(unconfirmedSendCheckMs = 50, unconfirmedSendGiveUpMs = 300)
+        )
+        fake.goOnline()
+        val tmpId = manager.sendText(CONV, "into the void")
+        env.eventually(manager, what = "the send") { env.repo.outbox(tmpId)?.status == OutboxStatus.SENT }
+        env.eventually(manager, what = "giving up") { env.repo.outbox(tmpId)?.status == OutboxStatus.FAILED }
+        val local = env.repo.message(MessageRow.tmpMessageId(tmpId))!!
+        assertEquals(LocalState.FAILED, local.localState)
+        assertEquals(Outbox.UNCONFIRMED, local.errorText)
+        assertTrue("looked up before giving up", fake.fetches.isNotEmpty())
+        assertEquals("not sent again by itself", 1, fake.sent.size)
+
+        // A late echo still settles it.
+        fake.emitMessage(outgoing("real-late", "into the void", tmpId))
+        manager.awaitIdleForTesting()
+        assertNull(env.repo.outbox(tmpId))
+        assertNull(env.repo.message(MessageRow.tmpMessageId(tmpId)))
     }
 
     @Test

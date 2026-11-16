@@ -84,12 +84,17 @@ object SessionVault {
         }
     }
 
+    /** The stored session exists but could not be read right now (Keystore busy, read error). Try again later. */
+    class UnreadableException(cause: Throwable) : Exception("session unreadable", cause)
+
     /**
      * The stored session, or null if there is none or it cannot be decrypted.
      * A damaged file, or one sealed with a key that no longer exists, is
      * deleted. Any other failure (the Keystore not answering, a read error)
-     * keeps the file, so a passing problem never costs the pairing.
+     * keeps the file and throws [UnreadableException], so a passing problem
+     * never costs the pairing and is never mistaken for "not paired".
      */
+    @Throws(UnreadableException::class)
     fun load(context: Context): ByteArray? = synchronized(lock) {
         val file = file(context)
         if (!file.exists()) return@synchronized null
@@ -109,7 +114,8 @@ object SessionVault {
             file.delete()
             null
         } catch (e: Exception) {
-            null
+            // The file is kept; the caller retries later.
+            throw UnreadableException(e)
         }
     }
 

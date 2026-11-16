@@ -25,6 +25,12 @@ object RelayIntents {
      * One conversation, optionally scrolled to [messageId]. SINGLE_TOP so a
      * thread already on screen takes the new conversation in onNewIntent
      * instead of being torn down and rebuilt.
+     *
+     * No back stack is synthesized (a TaskStackBuilder would clear whatever
+     * the user had open in the app on every tap). From a cold start the
+     * thread is the task's root, and [ThreadActivity] itself puts the
+     * conversation list behind it: Up always leads there, and so does Back
+     * when nothing of the app is below.
      */
     fun thread(context: Context, conversationId: String, messageId: String? = null): Intent =
         activity(context, ThreadActivity::class.java)

@@ -1,7 +1,11 @@
 package com.lightdecoder.relay
 
+import android.app.AlarmManager
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
+import android.os.SystemClock
 import com.lightdecoder.R
 import com.lightdecoder.archive.ArchiveRepository
 import com.lightdecoder.archive.ContactRow
@@ -24,8 +28,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -38,7 +45,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import java.io.File
-import java.io.FileOutputStream
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
@@ -64,6 +70,15 @@ data class RelayState(val phase: Phase, val code: String = "", val detail: Strin
 
     /** True while messages can be sent and fetched. */
     val isOnline: Boolean get() = phase == Phase.CONNECTED || phase == Phase.ACTIVE
+
+    companion object {
+        /**
+         * [code] of a DISCONNECTED state: the user wants the link, but its
+         * notification cannot be seen (the app's notifications or the link's
+         * channel are off), and it never runs without it.
+         */
+        const val NOTIFICATIONS_OFF = "notifications_off"
+    }
 }
 
 /** How far a history import has got. [error] is a bridge error code if it stopped early. */
@@ -119,6 +134,10 @@ class RelayManager private constructor(
         val reconnectDelaysMs: List<Long> = listOf(15_000, 30_000, 60_000, 120_000, 300_000, 900_000),
         /** last_event_ts is written at most this often. */
         val healthEventIntervalMs: Long = 10_000,
+        /** A send without an echo this long is looked up on the phone. */
+        val unconfirmedSendCheckMs: Long = 15_000,
+        /** A send without an echo this long stops showing "sending" (as the connector's pending-send age). */
+        val unconfirmedSendGiveUpMs: Long = 3_600_000,
     )
 
     private val app: Context = context.applicationContext
@@ -178,10 +197,29 @@ class RelayManager private constructor(
     private val jobsLock = Any()
     private val connectLock = Mutex()
     private var connectJob: Job? = null
+
+    /** A connect was asked for while one was still running: try again when it ends. */
+    private var connectAgain = false
     private var reconnectJob: Job? = null
     private var reconnectAttempts = 0
     private var backfillJob: Job? = null
     private var gateTimer: Job? = null
+
+    /** Parent of the forward catch-ups of the current connection; cancelled with it. */
+    private val catchUps = SupervisorJob(scope.coroutineContext[Job])
+
+    /** Catch-ups and history imports page through the phone one at a time, never both at once. */
+    private val pager = Mutex()
+
+    /** Serializes unpairs (a second tap, or a recreated screen asking again). */
+    private val unpairLock = Mutex()
+    private val _unpairing = MutableStateFlow(false)
+
+    /** True while an unpair is running; the UI keeps Unpair and Disconnect disabled meanwhile. */
+    val unpairing: StateFlow<Boolean> = _unpairing.asStateFlow()
+
+    /** Drops what the phone sends back after the archive was deleted. */
+    private val gate = ArchiveGate()
 
     /** Bumped by every "connecting": one number per connection. */
     private val connection = AtomicLong(0)
@@ -204,11 +242,16 @@ class RelayManager private constructor(
 
     // --- outbox, history, media, typing ---------------------------------------------
 
-    private val outbox = Outbox(app, repo, ::requireBridge, timing.outboxRetryDelaysMs, ::canSend) {
+    private val outbox = Outbox(
+        app, repo, ::requireBridge, timing.outboxRetryDelaysMs, ::canSend, gate,
+        unconfirmedCheckMs = timing.unconfirmedSendCheckMs,
+        unconfirmedGiveUpMs = timing.unconfirmedSendGiveUpMs,
+        drainLater = ::kickOutboxLater,
+    ) {
         outboxPausedFor = connection.get()
     }
     private val backfiller = Backfill(
-        repo, ::requireBridge, timing.backfillPagePauseMs, timing.backfillConversationPauseMs, _backfill,
+        repo, ::requireBridge, gate, timing.backfillPagePauseMs, timing.backfillConversationPauseMs, _backfill,
     )
     private val outboxKicks = Channel<Unit>(Channel.CONFLATED)
     private val outboxWorker: Job by lazy {
@@ -297,21 +340,49 @@ class RelayManager private constructor(
 
     // --- lifecycle ------------------------------------------------------------------
 
-    /** Turns on "stay connected" and starts the foreground service, which connects. */
+    /**
+     * Turns on "stay connected" and starts the foreground service, which
+     * connects. Without a pairing it does nothing (and leaves "stay
+     * connected" off). With the link's notification turned off it keeps the
+     * wish but does not start: the state says why ([RelayState.NOTIFICATIONS_OFF]).
+     *
+     * Cheap and safe on the main thread, like [stopLive]: call both directly,
+     * so that quick on/off taps take effect in the order they were made.
+     */
     fun startLive() {
+        if (!paired) {
+            RelayPrefs.setLiveEnabled(app, false)
+            return
+        }
         RelayPrefs.setLiveEnabled(app, true)
         synchronized(jobsLock) { reconnectAttempts = 0 }
-        if (!paired) return
+        if (!RelayNotifications.statusVisible(app)) {
+            onNotificationsHidden()
+            return
+        }
         RelayService.start(app)
     }
 
     /** Disconnects and stops the service, keeping the pairing. */
     fun stopLive() {
         RelayPrefs.setLiveEnabled(app, false)
+        resumeOnVisible = false
         stopConnectionWork()
         RelayService.stop(app)
+        disconnectUnlessWanted()
+        if (_state.value.code == RelayState.NOTIFICATIONS_OFF) setState(RelayState(RelayState.Phase.DISCONNECTED))
+        RelayLog.add(app, "Disconnected by the user")
+    }
+
+    /**
+     * Disconnects the bridge once no connect is in progress, unless by then
+     * the link is wanted again and may run (a later [startLive]): whichever of
+     * the two the user did last wins.
+     */
+    private fun disconnectUnlessWanted() {
         scope.launch {
             connectLock.withLock {
+                if (linkAllowed()) return@withLock
                 try {
                     bridge?.disconnect()
                 } catch (e: RelayException) {
@@ -319,7 +390,6 @@ class RelayManager private constructor(
                 }
             }
         }
-        RelayLog.add(app, "Disconnected by the user")
     }
 
     /** Makes this device the phone's active web session again, after another one took over. */
@@ -332,9 +402,28 @@ class RelayManager private constructor(
      * disconnects, and deletes the stored session. With [deleteArchive] the
      * local message archive and its media go too. The sticker inbox is never
      * touched. Does not throw.
+     *
+     * It runs in the manager's own scope: if the screen that asked goes away
+     * (Back, rotation) while it waits for a connect to finish, only the wait
+     * is cancelled and the unpair still completes. [unpairing] is true
+     * meanwhile; a second unpair waits for the first.
      */
-    suspend fun unpair(deleteArchive: Boolean): Unit = withContext(Dispatchers.IO) {
+    suspend fun unpair(deleteArchive: Boolean) {
+        scope.async {
+            unpairLock.withLock {
+                _unpairing.value = true
+                try {
+                    unpairNow(deleteArchive)
+                } finally {
+                    _unpairing.value = false
+                }
+            }
+        }.await()
+    }
+
+    private suspend fun unpairNow(deleteArchive: Boolean) {
         RelayPrefs.setLiveEnabled(app, false)
+        resumeOnVisible = false
         stopConnectionWork()
         RelayService.stop(app)
         val b = try {
@@ -356,7 +445,7 @@ class RelayManager private constructor(
         RelayPrefs.setBackfillDoneAt(app, 0)
         try {
             if (deleteArchive) {
-                repo.clearAll()
+                wipeArchive()
             } else {
                 repo.updateHealth(status = "unpaired", account = "", phoneId = "", lastError = "")
                 // Queued sends must not go out by themselves under the next
@@ -379,12 +468,18 @@ class RelayManager private constructor(
 
     /** Re-lists one folder from the phone into the archive; returns how many conversations came back. */
     suspend fun refreshConversations(folder: Folder = Folder.INBOX): Int = withContext(Dispatchers.IO) {
-        val list = requireBridge().listConversations(folder, CONVERSATION_COUNT)
-        repo.upsertConversations(list)
-        list.size
+        listAndStore(folder).size
     }
 
-    /** Fetches the page before the oldest stored message; returns how many arrived, 0 at the start. */
+    /** Lists one folder and stores it (unless the archive was deleted meanwhile); returns the list. */
+    private fun listAndStore(folder: Folder): List<ConversationDto> {
+        val since = gate.epoch()
+        val list = requireBridge().listConversations(folder, CONVERSATION_COUNT)
+        gate.ifCurrent(since) { repo.upsertConversations(list) }
+        return list
+    }
+
+    /** Fetches the page before where the history import got to; returns how many arrived, 0 at the start. */
     suspend fun loadOlder(conversationId: String, count: Int = 50): Int = withContext(Dispatchers.IO) {
         backfiller.loadOlder(conversationId, count)
     }
@@ -555,7 +650,9 @@ class RelayManager private constructor(
     suspend fun listContacts(refresh: Boolean): List<ContactRow> = withContext(Dispatchers.IO) {
         if (refresh) {
             try {
-                repo.upsertContacts(requireBridge().listContacts())
+                val since = gate.epoch()
+                val contacts = requireBridge().listContacts()
+                gate.ifCurrent(since) { repo.upsertContacts(contacts) }
             } catch (e: RelayException) {
                 if (repo.contacts().isEmpty()) throw e
             }
@@ -565,8 +662,9 @@ class RelayManager private constructor(
 
     /** Opens (or creates) the conversation with these numbers and returns its id. */
     suspend fun startConversation(numbers: List<String>, groupName: String?): String = withContext(Dispatchers.IO) {
+        val since = gate.epoch()
         val conversation = requireBridge().getOrCreateConversation(numbers, groupName?.trim()?.ifEmpty { null })
-        repo.upsertConversation(conversation)
+        gate.ifCurrent(since) { repo.upsertConversation(conversation) }
         conversation.id
     }
 
@@ -586,24 +684,74 @@ class RelayManager private constructor(
      */
     internal val serviceStartsPending = AtomicInteger(0)
 
+    /**
+     * A start the user wanted that could not happen: Android refused to start
+     * the service from the background, or its notification was turned off.
+     * The next screen the user opens repairs it ([onAppVisible]).
+     */
+    @Volatile
+    internal var resumeOnVisible = false
+
     /** The foreground service is running: connect if the user wants the link live. */
     internal fun onServiceStarted() = connectIfWanted()
 
     /**
-     * One of the app's screens came to the front. Android 12+ refuses to start
-     * a foreground service from the background, which is where the app is
-     * when pairing finishes (the user is in Google Messages tapping the
-     * emoji) or when a boot-time start was refused. Starting it again now,
-     * while the user is looking, repairs that.
+     * One of the app's screens came to the front (on the main thread).
+     *
+     * Android 12+ refuses to start a foreground service from the background,
+     * which is where the app is when pairing finishes (the user is in Google
+     * Messages tapping the emoji) or when a boot-time start was refused.
+     * Starting it again now, while the user is looking, repairs that. Some
+     * screens can be opened by other apps, so a link that is simply not
+     * running (after a restart, say) only starts here when the user lets it
+     * start by itself ("start automatically").
+     *
+     * With the service running: a link whose notification was turned off
+     * goes down, and an errored one retries now instead of waiting out its
+     * backoff.
      */
     internal fun onAppVisible() {
-        if (!serviceRunning && wantConnected()) RelayService.start(app)
+        if (serviceRunning) {
+            if (!RelayNotifications.statusVisible(app)) {
+                onNotificationsHidden()
+            } else if (_state.value.phase == RelayState.Phase.ERROR) {
+                retryNow()
+            }
+            return
+        }
+        if (!wantConnected() || serviceStartsPending.get() > 0) return
+        if (!resumeOnVisible && !RelayPrefs.autoStart(app)) return
+        if (!RelayNotifications.statusVisible(app)) {
+            onNotificationsHidden()
+            return
+        }
+        resumeOnVisible = false
+        RelayService.start(app)
     }
 
     /** A network came up: an errored link retries now instead of waiting out its backoff. */
     internal fun onNetworkAvailable() {
         if (_state.value.phase != RelayState.Phase.ERROR) return
-        synchronized(jobsLock) { reconnectJob?.cancel() }
+        retryNow()
+    }
+
+    /** The backoff's wake-up alarm fired. Returns the connect it started, if any. */
+    internal fun onReconnectDue(): Job? {
+        synchronized(jobsLock) {
+            if (reconnectJob?.isActive != true) return null
+            reconnectJob?.cancel()
+            reconnectJob = null
+        }
+        connectIfWanted()
+        return synchronized(jobsLock) { connectJob }
+    }
+
+    private fun retryNow() {
+        synchronized(jobsLock) {
+            reconnectJob?.cancel()
+            reconnectJob = null
+        }
+        cancelReconnectAlarm()
         connectIfWanted()
     }
 
@@ -611,6 +759,46 @@ class RelayManager private constructor(
     internal fun onServiceTimeout() {
         RelayLog.add(app, "Android's time limit for the service was reached")
         stopLive()
+    }
+
+    /**
+     * The service is gone. Whatever stopped it (Disconnect, the user turning
+     * notifications off, Android), the link does not stay connected without
+     * its notification, unless a new start is already on its way.
+     */
+    internal fun onServiceDestroyed() {
+        if (bridge == null) return
+        if (_state.value.phase in LIVE_PHASES || bridge?.isConnected == true) disconnectUnlessWanted()
+    }
+
+    /**
+     * The link's notification cannot be seen: the app's notifications or its
+     * channel are off (on Android 13+ also: the permission was refused). The
+     * link never runs without it, since its Disconnect button must always be
+     * there. Stops the service and disconnects, but keeps "stay connected",
+     * so the link comes back when notifications are on and a screen is shown.
+     */
+    internal fun onNotificationsHidden() {
+        resumeOnVisible = true
+        stopConnectionWork()
+        RelayService.stop(app)
+        if (bridge != null && (_state.value.phase in LIVE_PHASES || bridge?.isConnected == true)) disconnectUnlessWanted()
+        val current = _state.value
+        if (current.phase in NEEDS_USER_PHASES || current.code == RelayState.NOTIFICATIONS_OFF) return
+        RelayLog.add(app, "Link not started: its notification is turned off")
+        setState(RelayState(RelayState.Phase.DISCONNECTED, RelayState.NOTIFICATIONS_OFF))
+    }
+
+    /** The user turned the app's notifications, or one of its channels, off or on (Android 9+). */
+    internal fun onNotificationSettingsChanged() {
+        if (!wantConnected()) return
+        if (!RelayNotifications.statusVisible(app)) {
+            onNotificationsHidden()
+        } else if (!serviceRunning && serviceStartsPending.get() == 0 && resumeOnVisible) {
+            // Back on: try now; if Android refuses from the background, the next screen does it.
+            resumeOnVisible = false
+            RelayService.start(app)
+        }
     }
 
     // ============================== bridge access ==============================
@@ -621,7 +809,15 @@ class RelayManager private constructor(
         synchronized(bridgeLock) {
             bridge?.let { return it }
             val factory = RelayBridges.factory ?: { session, sink -> GoRelayBridge(session, sink) }
-            val session = SessionVault.load(app)
+            val session = try {
+                SessionVault.load(app)
+            } catch (e: SessionVault.UnreadableException) {
+                // Passing (Keystore busy at boot, a read error): not the same as
+                // "no session". Nothing is cached, `paired` and the state stay
+                // as they are, and the next call tries again.
+                RelayLog.add(app, "Stored session could not be read right now")
+                throw RelayException(RelayException.INTERNAL, SESSION_UNREADABLE)
+            }
             val created = try {
                 factory(session, sink)
             } catch (e: RelayException) {
@@ -640,6 +836,8 @@ class RelayManager private constructor(
             if (!paired && _state.value.phase == RelayState.Phase.DISCONNECTED) {
                 setState(RelayState(if (repo.health().status == "logged_out") RelayState.Phase.LOGGED_OUT else RelayState.Phase.UNPAIRED))
             }
+            // A service started on the stored file alone (at boot, say) has nothing to connect.
+            if (!paired && serviceRunning) giveUpLive()
             return created
         }
     }
@@ -666,19 +864,72 @@ class RelayManager private constructor(
             cont.invokeOnCancellation { scope.launch { runCatching(onCancel) } }
         }
 
+    /**
+     * A pairing was just made. Conversation ids are only meaningful on the
+     * phone they came from (another phone can have someone else behind the
+     * same id), so before the link goes live:
+     *  - paired with a different phone or account than the archive came
+     *    from: the old archive (with its queued sends and media) is deleted;
+     *  - the same phone again (after "logged out" or expired cookies): queued
+     *    sends go out as planned;
+     *  - not known which: queued sends wait as failed for the user to retry
+     *    or discard, as after an unpair.
+     */
     private fun onPaired(b: RelayBridge) {
+        val previousPhone = runCatching { RelayPrefs.archivePhone(app).ifEmpty { repo.health().phoneId } }.getOrDefault("")
+        val previousAccount = runCatching { RelayPrefs.archiveAccount(app).ifEmpty { repo.health().account } }.getOrDefault("")
         paired = true
         RelayNotifications.cancelRepairNeeded(app)
         RelayPrefs.setBackfillDoneAt(app, 0)
         onEventThread("session") { b.exportSession()?.let { SessionVault.save(app, it) } }
         val status = runCatching { b.status() }.getOrNull()
-        repo.updateHealth(
-            status = "disconnected", lastError = "",
-            account = status?.account.orEmpty(), phoneId = status?.phoneId.orEmpty(),
-        )
+        val phone = status?.phoneId.orEmpty()
+        val account = status?.account.orEmpty()
+        val otherPhone = previousPhone.isNotEmpty() && phone.isNotEmpty() && previousPhone != phone
+        val otherAccount = previousAccount.isNotEmpty() && account.isNotEmpty() && !previousAccount.equals(account, ignoreCase = true)
+        when {
+            otherPhone || otherAccount -> archiveBelongsToAnotherPhone()
+            previousPhone.isEmpty() || phone.isEmpty() -> holdQueuedSends()
+            else -> Unit
+        }
+        if (phone.isNotEmpty()) RelayPrefs.setArchiveOwner(app, phone, account)
+        repo.updateHealth(status = "disconnected", lastError = "", account = account, phoneId = phone)
         setState(RelayState(RelayState.Phase.DISCONNECTED))
         RelayLog.add(app, "Paired with the phone")
         startLive()
+    }
+
+    /** The archive came from another phone or account: it goes, before anything of the new one arrives. */
+    private fun archiveBelongsToAnotherPhone() {
+        try {
+            // On the intake thread: after sends already handed in, before later ones.
+            intake.submit { wipeArchive() }.get(WIPE_TIMEOUT_S, TimeUnit.SECONDS)
+            RelayLog.add(app, "Paired with a different phone; the previous phone's archive was deleted")
+        } catch (e: Exception) {
+            RelayLog.add(app, "Previous archive could not be deleted: ${e.javaClass.simpleName}")
+            holdQueuedSends()
+        }
+        _settings.value = null
+        clearTyping()
+        MessageNotifier.cancelAll(app)
+    }
+
+    /** Nothing queued under another (or an unknown) pairing goes out by itself. */
+    private fun holdQueuedSends() {
+        try {
+            // On the intake thread: ordered after sends already handed in, and before startLive() opens the gate.
+            intake.submit { outbox.holdAll(UNPAIRED_ERROR) }.get(EVENT_DRAIN_TIMEOUT_S, TimeUnit.SECONDS)
+        } catch (e: Exception) {
+            RelayLog.add(app, "Could not hold queued sends: ${e.javaClass.simpleName}")
+        }
+    }
+
+    /** Deletes the archive (messages, media, queued sends) between two writes of what the phone sent. */
+    private fun wipeArchive() {
+        gate.wipe { repo.clearAll() }
+        RelayPrefs.setArchiveOwner(app, "", "")
+        RelayPrefs.setUnconfirmedSends(app, emptyMap())
+        fetchedConversations.clear()
     }
 
     private fun pairingEnded(e: Throwable) {
@@ -693,27 +944,79 @@ class RelayManager private constructor(
 
     private fun wantConnected() = paired && RelayPrefs.liveEnabled(app)
 
+    /**
+     * Whether the link may be connected right now: the user wants it, its
+     * service is running (or a start is on its way) and the service's
+     * notification can be seen.
+     */
+    private fun linkAllowed(): Boolean =
+        wantConnected() && (serviceRunning || serviceStartsPending.get() > 0) && RelayNotifications.statusVisible(app)
+
     private fun connectIfWanted() {
         // Only with the service there: its notification (with Disconnect) must
         // show while connected. A reconnect timer or network callback that
         // fires after the service went away must not connect without it.
+        if (!paired && serviceRunning) {
+            // The service started on a stale "paired" (the bridge has since
+            // found no pairing): nothing will connect, so it must not stay up.
+            giveUpLive()
+            return
+        }
         if (!wantConnected() || !serviceRunning) return
+        if (!RelayNotifications.statusVisible(app)) {
+            onNotificationsHidden()
+            return
+        }
         synchronized(jobsLock) {
-            if (connectJob?.isActive == true) return
-            connectJob = scope.launch { connectNow() }
+            if (connectJob?.isActive == true) {
+                // It may already be past its last look at what the user wants.
+                connectAgain = true
+                return
+            }
+            connectAgain = false
+            val job = scope.launch { connectNow() }
+            connectJob = job
+            job.invokeOnCompletion {
+                val again = synchronized(jobsLock) {
+                    (connectAgain && connectJob === job).also { if (it) connectAgain = false }
+                }
+                if (again) connectIfWanted()
+            }
         }
     }
 
     private suspend fun connectNow() = connectLock.withLock {
-        if (!wantConnected()) return@withLock
+        if (!wantConnected()) {
+            if (!paired && serviceRunning) giveUpLive()
+            return@withLock
+        }
         val b = try {
             ensureBridge()
         } catch (e: RelayException) {
             RelayLog.add(app, "Could not load the link: ${e.code}")
+            if (e.message == SESSION_UNREADABLE) {
+                // Passing: the service stays and retries with backoff.
+                scheduleReconnect()
+            } else {
+                // The Go library cannot be loaded: no retry fixes that.
+                paired = false
+                giveUpLive()
+            }
             return@withLock
         }
         if (!b.isPaired) {
+            // A stored session without a pairing (kept after "logged out"):
+            // nothing will ever connect, so the service must not stay up.
             paired = false
+            giveUpLive()
+            val phase = _state.value.phase
+            if (phase == RelayState.Phase.LOGGED_OUT || phase == RelayState.Phase.COOKIES_INVALID) {
+                RelayNotifications.showRepairNeeded(app, phase)
+            }
+            return@withLock
+        }
+        if (!RelayNotifications.statusVisible(app)) {
+            onNotificationsHidden()
             return@withLock
         }
         try {
@@ -725,10 +1028,25 @@ class RelayManager private constructor(
             if (e.code !in NEEDS_USER) scheduleReconnect()
             return@withLock
         }
-        // stopLive() may have run while connect() was blocking.
-        if (!wantConnected()) b.disconnect()
+        // stopLive(), the service stopping, or notifications being turned off
+        // may have happened while connect() was blocking.
+        if (!linkAllowed()) b.disconnect()
     }
 
+    /** The link cannot run (no pairing, no library): "stay connected" off, service stopped. */
+    private fun giveUpLive() {
+        RelayPrefs.setLiveEnabled(app, false)
+        resumeOnVisible = false
+        stopConnectionWork()
+        RelayService.stop(app)
+    }
+
+    /**
+     * Retries after a pause that grows per attempt. The coroutine timer only
+     * counts while the phone is awake; a wake-up alarm on elapsed real time
+     * (allowed while idle) backs it up, so a phone asleep with its screen off
+     * still retries on time ([onReconnectDue]).
+     */
     private fun scheduleReconnect() {
         synchronized(jobsLock) {
             if (!wantConnected() || reconnectJob?.isActive == true) return
@@ -738,12 +1056,41 @@ class RelayManager private constructor(
             RelayLog.add(app, "Reconnecting in ${wait / 1000} s")
             reconnectJob = scope.launch {
                 delay(wait)
+                cancelReconnectAlarm()
                 connectIfWanted()
             }
+            setReconnectAlarm(wait)
         }
     }
 
-    /** Stops what belongs to a live connection: reconnect timer, send gate timer, history import. */
+    private fun reconnectAlarmIntent(): PendingIntent = PendingIntent.getBroadcast(
+        app, 0,
+        Intent(app, ReconnectReceiver::class.java).setAction(ReconnectReceiver.ACTION_RECONNECT),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+
+    private fun setReconnectAlarm(waitMs: Long) {
+        try {
+            app.getSystemService(AlarmManager::class.java)?.setAndAllowWhileIdle(
+                AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + waitMs, reconnectAlarmIntent(),
+            )
+        } catch (e: RuntimeException) {
+            // The coroutine timer still runs (while awake).
+        }
+    }
+
+    private fun cancelReconnectAlarm() {
+        try {
+            app.getSystemService(AlarmManager::class.java)?.cancel(reconnectAlarmIntent())
+        } catch (e: RuntimeException) {
+            // Nothing to cancel.
+        }
+    }
+
+    /**
+     * Stops what belongs to a live connection: reconnect timer and alarm,
+     * send gate timer, forward catch-up, history import.
+     */
     private fun stopConnectionWork() {
         synchronized(jobsLock) {
             reconnectJob?.cancel()
@@ -751,6 +1098,8 @@ class RelayManager private constructor(
             gateTimer?.cancel()
             gateTimer = null
         }
+        cancelReconnectAlarm()
+        catchUps.cancelChildren()
         cancelBackfill()
     }
 
@@ -762,6 +1111,14 @@ class RelayManager private constructor(
     private fun kickOutbox() {
         outboxWorker // started on first use
         outboxKicks.trySend(Unit)
+    }
+
+    /** Another look at the outbox later (sends still waiting for their echo). */
+    private fun kickOutboxLater(delayMs: Long) {
+        scope.launch {
+            delay(delayMs)
+            kickOutbox()
+        }
     }
 
     // ============================== events ==============================
@@ -783,7 +1140,8 @@ class RelayManager private constructor(
             "conversation" -> repo.upsertConversation(ConversationDto.fromJson(JSONObject(payload)))
             "typing" -> onTyping(TypingDto.fromJson(JSONObject(payload)))
             "settings" -> onSettings(SettingsDto.fromJson(JSONObject(payload)))
-            "resync" -> scope.launch { refreshQuietly() }
+            // The phone's data changed in ways live events do not replay.
+            "resync" -> scope.launch { refreshQuietly()?.let(::startCatchUp) }
             "account" -> RelayLog.add(app, "The phone reported an account change")
         }
     }
@@ -791,7 +1149,15 @@ class RelayManager private constructor(
     private fun onState(event: RelayStateEvent, now: Long) {
         val phase = PHASES[event.state] ?: return
         val previous = _state.value
-        setState(RelayState(phase, event.code, event.detail))
+        // Down because its notification is off: the UI says so, not just "disconnected".
+        val code = if (phase == RelayState.Phase.DISCONNECTED && event.code.isEmpty() && wantConnected() &&
+            !RelayNotifications.statusVisible(app)
+        ) {
+            RelayState.NOTIFICATIONS_OFF
+        } else {
+            event.code
+        }
+        setState(RelayState(phase, code, event.detail))
         lastHealthEventWrite = now
         repo.updateHealth(
             status = event.state,
@@ -824,6 +1190,7 @@ class RelayManager private constructor(
      */
     private fun onOnline() {
         synchronized(jobsLock) { reconnectAttempts = 0 }
+        cancelReconnectAlarm()
         val current = connection.get()
         // The bridge says it is (again) connected: sends that found it down may go now.
         outboxPausedFor = -1L
@@ -853,24 +1220,89 @@ class RelayManager private constructor(
         kickOutbox()
     }
 
+    /**
+     * Once per connection: re-list the inbox, fill what arrived while the
+     * link was down (forward catch-up), and start the history import if it
+     * never finished.
+     */
     private suspend fun initialSync() {
-        refreshQuietly()
+        val list = refreshQuietly()
         try {
+            val since = gate.epoch()
             val status = requireBridge().status()
-            repo.updateHealth(account = status.account, phoneId = status.phoneId)
+            gate.ifCurrent(since) {
+                repo.updateHealth(account = status.account, phoneId = status.phoneId)
+                if (status.phoneId.isNotEmpty()) RelayPrefs.setArchiveOwner(app, status.phoneId, status.account)
+            }
         } catch (e: RelayException) {
             // Only for display.
         }
+        if (list != null) startCatchUp(list)
         val depth = RelayPrefs.backfillDepth(app)
         val running = synchronized(jobsLock) { backfillJob?.isActive == true }
         if (depth != BackfillDepth.OFF && RelayPrefs.backfillDoneAt(app) == 0L && !running) startBackfill(depth)
     }
 
-    private suspend fun refreshQuietly() {
-        try {
-            refreshConversations(Folder.INBOX)
-        } catch (e: RelayException) {
-            RelayLog.add(app, "Conversation list refresh failed: ${e.code}")
+    /** The inbox list as the phone has it now (also stored), or null if it could not be had. */
+    private fun refreshQuietly(): List<ConversationDto>? = try {
+        listAndStore(Folder.INBOX)
+    } catch (e: RelayException) {
+        RelayLog.add(app, "Conversation list refresh failed: ${e.code}")
+        null
+    }
+
+    /**
+     * Fetches, for each listed conversation whose latest message the archive
+     * does not have, what arrived while the link was down. The phone does
+     * not replay those messages as live events, and the history import only
+     * pages backwards, so without this the gap would stay for good. Runs with
+     * the connection (cancelled with it), one page at a time, never alongside
+     * a history import.
+     */
+    private fun startCatchUp(conversations: List<ConversationDto>) {
+        scope.launch(catchUps) {
+            pager.withLock {
+                try {
+                    catchUp(conversations)
+                } catch (e: RuntimeException) {
+                    RelayLog.add(app, "Catch-up stopped: ${e.javaClass.simpleName}")
+                }
+            }
+        }
+    }
+
+    private suspend fun catchUp(conversations: List<ConversationDto>) {
+        val behind = conversations.filter { it.latestMessageId.isNotEmpty() && repo.message(it.latestMessageId) == null }
+        if (behind.isEmpty()) return
+        var messages = 0
+        var conversationsFilled = 0
+        var failedInARow = 0
+        for (conversation in behind) {
+            currentCoroutineContext().ensureActive()
+            val fetched = try {
+                backfiller.catchUp(conversation, ::onCaughtUp).also { failedInARow = 0 }
+            } catch (e: RelayException) {
+                if (e.code in Backfill.ABORT_CODES || ++failedInARow >= 2) {
+                    RelayLog.add(app, "Catch-up stopped: ${e.code}")
+                    return
+                }
+                0
+            }
+            if (fetched > 0) {
+                messages += fetched
+                conversationsFilled++
+                // Only after asking the phone: conversations with nothing stored cost nothing.
+                delay(timing.backfillConversationPauseMs)
+            }
+        }
+        if (conversationsFilled > 0) RelayLog.add(app, "Caught up $conversationsFilled conversations, $messages messages")
+    }
+
+    /** A message the catch-up stored: stickers in it go to the inbox like live ones (no notifications). */
+    private fun onCaughtUp(dto: MessageDto, result: ArchiveRepository.UpsertResult) {
+        if (dto.isDeleted || dto.id.isEmpty() || result.newMediaParts.isEmpty() || !RelayPrefs.catchStickers(app)) return
+        for (part in result.newMediaParts) {
+            if (isStickerCandidate(part)) scope.launch(mediaDispatcher) { checkSticker(dto, part) }
         }
     }
 
@@ -881,19 +1313,29 @@ class RelayManager private constructor(
                 withTimeoutOrNull(timing.backfillWaitOnlineMs) { state.first { it.isOnline } }
                     ?: throw RelayException(RelayException.NOT_CONNECTED, "not online")
             }
-            RelayLog.add(app, "History import started (${depth.name.lowercase()})")
-            val messages = backfiller.run(depth)
-            val done = _backfill.value
-            _backfill.value = done.copy(running = false, messages = messages)
-            RelayPrefs.setBackfillDoneAt(app, System.currentTimeMillis())
-            RelayLog.add(app, "History import finished: ${done.conversationsDone} conversations, $messages messages")
+            pager.withLock {
+                RelayLog.add(app, "History import started (${depth.name.lowercase()})")
+                val outcome = backfiller.run(depth)
+                val done = _backfill.value
+                _backfill.value = done.copy(running = false, messages = outcome.messages)
+                RelayPrefs.setBackfillDoneAt(app, System.currentTimeMillis())
+                RelayLog.add(
+                    app,
+                    "History import finished: ${done.conversationsDone} conversations, ${outcome.messages} messages" +
+                        if (outcome.skipped > 0) ", ${outcome.skipped} skipped" else "",
+                )
+            }
         } catch (e: CancellationException) {
-            _backfill.value = _backfill.value.copy(running = false)
+            // Whoever cancelled it (Cancel, a new import, disconnecting) set the
+            // progress already; a run replaced by a newer one must not touch it.
             throw e
         } catch (e: RelayException) {
+            // Cancelled while a page was on its way: the page's failure is not this run's to report.
+            currentCoroutineContext().ensureActive()
             _backfill.value = _backfill.value.copy(running = false, error = e.code)
             RelayLog.add(app, "History import stopped: ${e.code}")
         } catch (e: RuntimeException) {
+            currentCoroutineContext().ensureActive()
             // A database or parsing failure: without this the progress would
             // say "running" forever and the UI would never offer a new import.
             _backfill.value = _backfill.value.copy(running = false, error = RelayException.INTERNAL)
@@ -905,12 +1347,15 @@ class RelayManager private constructor(
     private fun needsRepair(phase: RelayState.Phase, pairingLost: Boolean) {
         if (pairingLost) paired = false
         RelayPrefs.setLiveEnabled(app, false)
+        resumeOnVisible = false
         stopConnectionWork()
         RelayService.stop(app)
         RelayNotifications.showRepairNeeded(app, phase)
     }
 
     private fun onMessage(dto: MessageDto) {
+        // Read before the upsert moves it: the conversation's newest message so far.
+        val previousLatest = if (dto.isDeleted) 0L else repo.conversation(dto.conversationId)?.lastMessageTs ?: 0L
         val result = repo.upsertMessage(dto)
         if (dto.isDeleted || dto.id.isEmpty()) return
         if (result.newMediaParts.isNotEmpty() && RelayPrefs.catchStickers(app)) {
@@ -920,7 +1365,11 @@ class RelayManager private constructor(
         }
         if (result.inserted) {
             maybeFetchConversation(dto.conversationId)
-            if (!dto.isOld && !dto.fromMe && dto.direction == "in") MessageNotifier.onIncoming(app, repo, dto)
+            // An old message seen for the first time (someone reacted to it, say)
+            // is not news, as in the connector: over a day old and older than
+            // what the conversation already had.
+            val stale = System.currentTimeMillis() - dto.timestampMs > STALE_MESSAGE_MS && dto.timestampMs < previousLatest
+            if (!dto.isOld && !stale && !dto.fromMe && dto.direction == "in") MessageNotifier.onIncoming(app, repo, dto)
         }
     }
 
@@ -931,7 +1380,9 @@ class RelayManager private constructor(
         if (!_state.value.isOnline || !fetchedConversations.add(conversationId)) return
         scope.launch {
             try {
-                repo.upsertConversation(requireBridge().getConversation(conversationId))
+                val since = gate.epoch()
+                val conversation = requireBridge().getConversation(conversationId)
+                gate.ifCurrent(since) { repo.upsertConversation(conversation) }
             } catch (e: RelayException) {
                 fetchedConversations.remove(conversationId)
             }
@@ -1056,6 +1507,7 @@ class RelayManager private constructor(
     }
 
     private fun loadMedia(messageId: String, partId: String, thumbnail: Boolean): File? {
+        val since = gate.epoch()
         val part = repo.mediaPart(messageId, partId) ?: return null
         val stored = (if (thumbnail) listOf(part.thumbPath, part.localPath) else listOf(part.localPath))
             .filter { it.isNotEmpty() }.map(::File).firstOrNull { it.isFile && it.length() > 0 }
@@ -1063,11 +1515,11 @@ class RelayManager private constructor(
         return try {
             when {
                 thumbnail && part.thumbMediaId.isNotEmpty() ->
-                    downloadToFile(messageId, partId, part.thumbMediaId, part.thumbKey, part.mime, thumbnail = true)
+                    downloadToFile(since, messageId, partId, part.thumbMediaId, part.thumbKey, part.mime, thumbnail = true)
                 part.inlineData.isNotEmpty() ->
-                    writeMedia(messageId, partId, "inline:$messageId:$partId", part.inlineData, part.mime, thumbnail = false)
+                    writeMedia(since, messageId, partId, MediaCache.inlineKey(messageId, partId), part.inlineData, part.mime, thumbnail = false)
                 part.mediaId.isNotEmpty() ->
-                    downloadToFile(messageId, partId, part.mediaId, part.key, part.mime, thumbnail = false)
+                    downloadToFile(since, messageId, partId, part.mediaId, part.key, part.mime, thumbnail = false)
                 else -> null
             }
         } catch (e: RelayException) {
@@ -1079,33 +1531,40 @@ class RelayManager private constructor(
         }
     }
 
-    private fun downloadToFile(messageId: String, partId: String, mediaId: String, key: ByteArray, mime: String, thumbnail: Boolean): File {
+    private fun downloadToFile(
+        since: Long, messageId: String, partId: String, mediaId: String, key: ByteArray, mime: String, thumbnail: Boolean,
+    ): File? {
         val bytes = requireBridge().downloadMedia(mediaId, key)
-        return writeMedia(messageId, partId, mediaId, bytes, mime, thumbnail)
+        return writeMedia(since, messageId, partId, mediaId, bytes, mime, thumbnail)
     }
 
     /** Downloads a part (also keeping it in the media cache for the conversation screen). */
     private fun download(messageId: String, partId: String, mediaId: String, key: ByteArray, mime: String, thumbnail: Boolean): ByteArray {
+        val since = gate.epoch()
         val bytes = requireBridge().downloadMedia(mediaId, key)
         try {
-            writeMedia(messageId, partId, mediaId, bytes, mime, thumbnail)
+            writeMedia(since, messageId, partId, mediaId, bytes, mime, thumbnail)
         } catch (e: java.io.IOException) {
             // The bytes are still good for the sticker inbox.
         }
         return bytes
     }
 
-    /** Stores bytes in the media cache (temp file, then rename) and records the path. */
-    private fun writeMedia(messageId: String, partId: String, cacheKey: String, bytes: ByteArray, mime: String, thumbnail: Boolean): File {
+    /**
+     * Stores bytes in the media cache (whole or not at all) and records the
+     * path. Null, with nothing left on disk, if the archive was deleted since
+     * [since], or the message went away (or its part got other media) while
+     * the download ran: a decrypted file no row points at would never be
+     * cleaned up.
+     */
+    private fun writeMedia(
+        since: Long, messageId: String, partId: String, cacheKey: String, bytes: ByteArray, mime: String, thumbnail: Boolean,
+    ): File? = gate.ifCurrent(since) {
+        if (repo.mediaPart(messageId, partId) == null) return@ifCurrent null
         val file = MediaCache.fileFor(app, cacheKey, ImageSniffer.extensionFor(bytes, mime))
-        val tmp = File(file.parentFile, file.name + ".part")
-        FileOutputStream(tmp).use { it.write(bytes) }
-        if (!tmp.renameTo(file)) {
-            tmp.delete()
-            throw java.io.IOException("rename failed")
-        }
-        repo.setMediaLocalPath(messageId, partId, file.path, thumbnail)
-        return file
+        MediaCache.writeAtomically(file, bytes)
+        // When not recorded, the repository has already deleted the file (unless another part uses it).
+        if (repo.setMediaLocalPath(messageId, partId, cacheKey, file.path, thumbnail)) file else null
     }
 
     // ============================== threads ==============================
@@ -1187,6 +1646,11 @@ class RelayManager private constructor(
         private const val PAIRING_TIMEOUT_MS = 180_000L
         private const val CONVERSATION_COUNT = 100
         private const val EVENT_DRAIN_TIMEOUT_S = 10L
+        private const val WIPE_TIMEOUT_S = 60L
+        private const val STALE_MESSAGE_MS = 24 * 60 * 60 * 1000L
+
+        /** The detail of the INTERNAL error ensureBridge throws when the stored session is unreadable for now. */
+        private const val SESSION_UNREADABLE = "session unreadable"
         private const val GOOGLE_MESSAGES_PACKAGE = "com.google.android.apps.messaging"
 
         /** The error a send queued before an unpair is held with (content-free). */
@@ -1196,6 +1660,17 @@ class RelayManager private constructor(
         private const val INDEX_PART_PREFIX = "idx:"
 
         private val HEIF_MIMES = setOf("image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence")
+
+        /** Phases in which Go keeps a connection (or keeps reconnecting one). */
+        private val LIVE_PHASES = setOf(
+            RelayState.Phase.CONNECTING, RelayState.Phase.CONNECTED, RelayState.Phase.ACTIVE,
+            RelayState.Phase.ACTIVE_ELSEWHERE, RelayState.Phase.RECONNECTING, RelayState.Phase.PHONE_OFFLINE,
+        )
+
+        /** States that say something more pressing than "notifications are off". */
+        private val NEEDS_USER_PHASES = setOf(
+            RelayState.Phase.UNPAIRED, RelayState.Phase.PAIRING, RelayState.Phase.LOGGED_OUT, RelayState.Phase.COOKIES_INVALID,
+        )
 
         /** Connect failures that only the user can fix; they are not retried. */
         private val NEEDS_USER = setOf(RelayException.COOKIES_INVALID, RelayException.LOGGED_OUT, RelayException.NOT_PAIRED)

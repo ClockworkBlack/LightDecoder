@@ -156,6 +156,25 @@
             </intent-filter>
         </receiver>
 
+        <!-- The wake-up alarm behind a reconnect backoff. Only the app's own alarm reaches it. -->
+        <receiver
+            android:name=".relay.ReconnectReceiver"
+            android:exported="false" />
+
+        <!--
+            The link never runs without its notification: when the user turns
+            the app's notifications (or the link's channel) off, it goes down.
+            Both actions are protected broadcasts only the system can send.
+        -->
+        <receiver
+            android:name=".relay.NotificationBlockReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.app.action.APP_BLOCK_STATE_CHANGED" />
+                <action android:name="android.app.action.NOTIFICATION_CHANNEL_BLOCK_STATE_CHANGED" />
+            </intent-filter>
+        </receiver>
+
         <!-- Reply and Mark as read on message notifications. Only this app's notifications reach it. -->
         <receiver
             android:name=".relay.ReplyReceiver"

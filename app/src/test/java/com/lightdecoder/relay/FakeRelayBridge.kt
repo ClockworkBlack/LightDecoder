@@ -45,6 +45,25 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
     val pages = ConcurrentHashMap<String, ConcurrentLinkedQueue<MessagePage>>()
     val fetches = CopyOnWriteArrayList<Triple<String, Int, Cursor?>>()
 
+    /** Conversations whose every fetch fails with this. */
+    val failFetches = ConcurrentHashMap<String, RelayException>()
+
+    /** Runs at the start of every fetch (e.g. to hold it, as a slow phone would). */
+    @Volatile
+    var beforeFetch: ((String) -> Unit)? = null
+
+    /** Runs inside connect() before it returns (e.g. to hold it, as Go's connect can for ~30 s). */
+    @Volatile
+    var duringConnect: (() -> Unit)? = null
+
+    /** Runs inside listConversations() once the list is ready, before it is returned. */
+    @Volatile
+    var beforeListReturns: (() -> Unit)? = null
+
+    /** Runs inside downloadMedia() once the bytes are ready, before they are returned. */
+    @Volatile
+    var beforeDownloadReturns: (() -> Unit)? = null
+
     // --- media
     val media = ConcurrentHashMap<String, ByteArray>()
     val downloads = CopyOnWriteArrayList<String>()
@@ -62,7 +81,11 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
     override val isPaired: Boolean get() = paired
     override val isConnected: Boolean get() = connected
 
-    override fun status() = RelayStatus(paired, connected, "someone@example.com", "phone-1", "session-1")
+    /** What status() reports as the paired phone (another phone after a re-pair, or "" if unknown). */
+    @Volatile
+    var phoneId = "phone-1"
+
+    override fun status() = RelayStatus(paired, connected, "someone@example.com", phoneId, "session-1")
 
     override fun startPairing(cookies: Map<String, String>): PairingChallenge {
         calls += "startPairing"
@@ -87,6 +110,7 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
         if (!paired) throw RelayException(RelayException.NOT_PAIRED, "pair first")
         connected = true
         emitState("connecting")
+        duringConnect?.invoke()
     }
 
     override fun disconnect() {
@@ -113,7 +137,9 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
     override fun listConversations(folder: Folder, count: Int): List<ConversationDto> {
         calls += "listConversations"
         requireConnected()
-        return conversations.filter { it.folder == folder.wire }.take(count)
+        val list = conversations.filter { it.folder == folder.wire }.take(count)
+        beforeListReturns?.invoke()
+        return list
     }
 
     override fun getConversation(id: String): ConversationDto {
@@ -122,7 +148,9 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
     }
 
     override fun fetchMessages(conversationId: String, count: Int, cursor: Cursor?): MessagePage {
+        beforeFetch?.invoke(conversationId)
         requireConnected()
+        failFetches[conversationId]?.let { throw it }
         fetches += Triple(conversationId, count, cursor)
         return pages[conversationId]?.poll() ?: MessagePage(emptyList(), null)
     }
@@ -137,7 +165,9 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
     override fun downloadMedia(mediaId: String, key: ByteArray): ByteArray {
         downloads += mediaId
         if (!paired) throw RelayException(RelayException.NOT_PAIRED, "")
-        return media[mediaId] ?: throw RelayException(RelayException.NOT_FOUND, "media is not available")
+        val bytes = media[mediaId] ?: throw RelayException(RelayException.NOT_FOUND, "media is not available")
+        beforeDownloadReturns?.invoke()
+        return bytes
     }
 
     override fun requestFullSizeImage(messageId: String, partId: String) {

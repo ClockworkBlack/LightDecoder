@@ -14,13 +14,16 @@ import com.lightdecoder.ui.relay.RelaySetupActivity
 import com.lightdecoder.ui.relay.RelayStatusActivity
 import com.lightdecoder.ui.relay.RelayUi
 import com.lightdecoder.ui.relay.relayAttempt
-import com.lightdecoder.ui.relay.runInBackground
 import kotlinx.coroutines.launch
 
 /**
  * The strip at the top of the messaging screens that says when the link is
  * not live (offline, connecting, in use elsewhere, needs fixing) and offers
  * the one action that helps. Hidden while connected.
+ *
+ * The owner re-renders it whenever it comes back to the front (its state
+ * collection restarts), so returning from the notification settings updates
+ * the "notifications are off" case.
  */
 class ConnectionBanner(
     private val activity: AppCompatActivity,
@@ -42,11 +45,11 @@ class ConnectionBanner(
         binding.root.visibility = View.VISIBLE
         // Without a pairing say "not linked", unless the link knows why (logged out, say).
         val phase = if (!paired && !RelayUi.isProblem(state.phase)) RelayState.Phase.UNPAIRED else state.phase
-        binding.bannerText.setText(RelayUi.title(phase))
+        fix = RelayUi.fix(state, paired, RelayUi.notificationsOn(activity))
+        binding.bannerText.setText(RelayUi.title(phase, fix))
         // The specific reason, when the link gave one we can explain.
         val reason = if (state.code.isNotEmpty() && RelayUi.isProblem(phase)) RelayErrors.message(activity, state.code) else null
-        binding.bannerDetail.text = reason ?: activity.getString(RelayUi.body(phase))
-        fix = RelayUi.fix(state, paired)
+        binding.bannerDetail.text = reason ?: activity.getString(RelayUi.body(phase, fix))
         if (fix == RelayUi.Fix.NONE) {
             binding.bannerAction.visibility = View.GONE
         } else {
@@ -63,7 +66,11 @@ class ConnectionBanner(
         when (fix) {
             RelayUi.Fix.SET_UP -> activity.startActivity(Intent(activity, RelaySetupActivity::class.java))
             RelayUi.Fix.STATUS -> activity.startActivity(Intent(activity, RelayStatusActivity::class.java))
-            RelayUi.Fix.CONNECT -> notifications.ensureThen { runInBackground { manager.startLive() } }
+            // Cheap and main-thread safe; called directly so it orders with a Disconnect tap.
+            RelayUi.Fix.CONNECT -> notifications.ensureThen { manager.startLive() }
+            // A link the user wants starts by itself once they are on and a screen is in
+            // front again (RelayManager.onAppVisible); otherwise the banner then offers Connect.
+            RelayUi.Fix.NOTIFICATIONS -> notifications.openSettings()
             RelayUi.Fix.USE_HERE -> activity.lifecycleScope.launch {
                 relayAttempt { manager.useHere() }.onFailure {
                     Toast.makeText(activity, RelayErrors.message(activity, it), Toast.LENGTH_LONG).show()

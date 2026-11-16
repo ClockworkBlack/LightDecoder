@@ -56,6 +56,8 @@ class RelayStatusActivity : AppCompatActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Sign-in cookies a killed setup screen left behind (once per process; see SignInWebData).
+        SignInWebData.wipeIfDirty(this)
         super.onCreate(savedInstanceState)
         binding = ActivityRelayStatusBinding.inflate(layoutInflater)
         setContentView(binding.root)
@@ -71,6 +73,10 @@ class RelayStatusActivity : AppCompatActivity() {
         binding.setUp.setOnClickListener { startActivity(Intent(this, RelaySetupActivity::class.java)) }
         binding.disconnect.setOnClickListener { disconnect() }
         binding.unpair.setOnClickListener { confirmUnpair() }
+        binding.turnOnNotifications.setOnClickListener { notifications.openSettings() }
+        binding.deleteArchive.setOnClickListener {
+            LocalArchive.confirmDelete(this) { binding.archiveCard.visibility = View.GONE }
+        }
         binding.batterySettings.setOnClickListener { openBatterySettings() }
         binding.showLog.setOnClickListener { showLog() }
 
@@ -78,6 +84,7 @@ class RelayStatusActivity : AppCompatActivity() {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 launch { manager.state.collect { renderState(it) } }
                 launch { manager.backfill.collect { renderBackfill(it) } }
+                launch { manager.unpairing.collect { renderUnpairing(it) } }
             }
         }
     }
@@ -107,25 +114,48 @@ class RelayStatusActivity : AppCompatActivity() {
 
     private fun renderState(state: RelayState) {
         lifecycleScope.launch {
-            paired = withContext(Dispatchers.IO) { manager.isPaired() }
+            val (isPaired, hasArchive) = withContext(Dispatchers.IO) {
+                manager.isPaired() to runCatching { LocalArchive.hasAny(repo) }.getOrDefault(false)
+            }
+            paired = isPaired
             val phase = if (paired || RelayUi.isProblem(state.phase)) state.phase else RelayState.Phase.UNPAIRED
-            binding.stateTitle.setText(RelayUi.title(phase))
-            binding.stateBody.setText(RelayUi.body(phase))
-            val reason = state.code.takeIf { it.isNotEmpty() && phase != RelayState.Phase.CONNECTED && phase != RelayState.Phase.ACTIVE }
+            // Re-read on every render: this runs again whenever the screen comes back
+            // to the front, for example from the notification settings.
+            val fix = RelayUi.fix(state, paired, RelayUi.notificationsOn(this@RelayStatusActivity))
+            binding.stateTitle.setText(RelayUi.title(phase, fix))
+            binding.stateBody.setText(RelayUi.body(phase, fix))
+            val reason = state.code.takeIf {
+                it.isNotEmpty() && it != RelayState.NOTIFICATIONS_OFF &&
+                    phase != RelayState.Phase.CONNECTED && phase != RelayState.Phase.ACTIVE
+            }
             binding.stateReason.visibility = if (reason != null) View.VISIBLE else View.GONE
             if (reason != null) binding.stateReason.text = RelayErrors.message(this@RelayStatusActivity, reason)
 
             binding.useHere.visibility = if (phase == RelayState.Phase.ACTIVE_ELSEWHERE) View.VISIBLE else View.GONE
-            binding.setUp.visibility = if (RelayUi.fix(state, paired) == RelayUi.Fix.SET_UP) View.VISIBLE else View.GONE
+            binding.setUp.visibility = if (fix == RelayUi.Fix.SET_UP) View.VISIBLE else View.GONE
+            binding.turnOnNotifications.visibility = if (fix == RelayUi.Fix.NOTIFICATIONS) View.VISIBLE else View.GONE
             // A lost pairing or rejected sign-in still leaves the stored
             // session (and the archive) behind: Unpair stays offered so the
             // user can wipe them without pairing again first.
             val sessionLeft = paired || phase == RelayState.Phase.LOGGED_OUT || phase == RelayState.Phase.COOKIES_INVALID
-            binding.disconnect.isEnabled = paired && phase != RelayState.Phase.DISCONNECTED
-            binding.unpair.isEnabled = sessionLeft
+            val unpairing = manager.unpairing.value
+            binding.disconnect.isEnabled = paired && phase != RelayState.Phase.DISCONNECTED && !unpairing
+            binding.unpair.isEnabled = sessionLeft && !unpairing
             binding.controls.visibility = if (sessionLeft) View.VISIBLE else View.GONE
             binding.importCard.visibility = if (paired) View.VISIBLE else View.GONE
+            // An archive kept after unpairing can be deleted without pairing again.
+            binding.archiveCard.visibility = if (!sessionLeft && hasArchive && !unpairing) View.VISIBLE else View.GONE
             syncSwitches()
+        }
+    }
+
+    private fun renderUnpairing(unpairing: Boolean) {
+        binding.unpairProgress.visibility = if (unpairing) View.VISIBLE else View.GONE
+        if (unpairing) {
+            binding.unpair.isEnabled = false
+            binding.disconnect.isEnabled = false
+        } else {
+            renderState(manager.state.value)
         }
     }
 
@@ -147,7 +177,7 @@ class RelayStatusActivity : AppCompatActivity() {
             when {
                 error.isEmpty() -> dash()
                 // Stored errors start with a bridge code ("code: detail"); explain the known ones.
-                error.substringBefore(":").trim() in RelayException.CODES ->
+                error.substringBefore(":").trim().let { it in RelayException.CODES || it == RelayState.NOTIFICATIONS_OFF } ->
                     RelayErrors.message(this, error.substringBefore(":").trim())
                 else -> error
             },
@@ -164,19 +194,24 @@ class RelayStatusActivity : AppCompatActivity() {
 
     private fun bindSwitches() {
         binding.switchLive.setOnClickListener {
-            val on = binding.switchLive.isChecked
-            RelayPrefs.setLiveEnabled(this, on)
-            if (on) {
-                notifications.ensureThen { runInBackground { manager.startLive() } }
+            // startLive and stopLive are cheap and main-thread safe; calling them
+            // directly keeps quick on/off taps in order.
+            if (binding.switchLive.isChecked) {
+                // Never without its notification: if it cannot be shown, the switch goes back off.
+                notifications.ensureThen(onRefused = { syncSwitches() }) {
+                    manager.startLive()
+                    syncSwitches()
+                }
             } else {
-                runInBackground { manager.stopLive() }
+                manager.stopLive()
             }
         }
         binding.switchAutoStart.setOnClickListener { RelayPrefs.setAutoStart(this, binding.switchAutoStart.isChecked) }
         binding.switchNotify.setOnClickListener {
             val on = binding.switchNotify.isChecked
             RelayPrefs.setNotifyMessages(this, on)
-            if (on) notifications.ensureThen { }
+            // Only asks; message notifications are optional, so a refusal changes nothing here.
+            if (on) notifications.requestIfNeeded()
         }
         binding.switchStickers.setOnClickListener { RelayPrefs.setCatchStickers(this, binding.switchStickers.isChecked) }
     }
@@ -248,9 +283,8 @@ class RelayStatusActivity : AppCompatActivity() {
     }
 
     private fun disconnect() {
-        RelayPrefs.setLiveEnabled(this, false)
         binding.switchLive.isChecked = false
-        runInBackground { manager.stopLive() }
+        manager.stopLive()
     }
 
     private fun confirmUnpair() {
@@ -263,6 +297,11 @@ class RelayStatusActivity : AppCompatActivity() {
             .show()
     }
 
+    /**
+     * The unpair itself runs in the manager's scope: leaving or rotating this
+     * screen only stops waiting for it, and [RelayManager.unpairing] shows it
+     * still running on the screen that comes back.
+     */
     private fun unpair(deleteArchive: Boolean) {
         binding.unpair.isEnabled = false
         binding.disconnect.isEnabled = false
@@ -277,7 +316,7 @@ class RelayStatusActivity : AppCompatActivity() {
                     finish()
                 }
                 .onFailure {
-                    binding.unpair.isEnabled = true
+                    renderState(manager.state.value)
                     toast(RelayErrors.message(this@RelayStatusActivity, it))
                 }
         }

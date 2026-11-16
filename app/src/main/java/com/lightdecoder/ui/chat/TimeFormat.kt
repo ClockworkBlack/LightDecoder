@@ -4,6 +4,8 @@ import android.content.Context
 import android.text.format.DateFormat
 import com.lightdecoder.R
 import java.text.SimpleDateFormat
+import java.time.Instant
+import java.time.temporal.ChronoUnit
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
@@ -68,37 +70,23 @@ object TimeFormat {
     }
 
     /** Midnight at the start of the day [timestampMs] falls in, for grouping. */
-    fun startOfDay(timestampMs: Long, zone: TimeZone = TimeZone.getDefault()): Long =
-        Calendar.getInstance(zone).apply {
-            timeInMillis = timestampMs
-            set(Calendar.HOUR_OF_DAY, 0)
-            set(Calendar.MINUTE, 0)
-            set(Calendar.SECOND, 0)
-            set(Calendar.MILLISECOND, 0)
-        }.timeInMillis
+    fun startOfDay(timestampMs: Long, zone: TimeZone = TimeZone.getDefault()): Long {
+        val z = zone.toZoneId()
+        return Instant.ofEpochMilli(timestampMs).atZone(z).toLocalDate().atStartOfDay(z).toInstant().toEpochMilli()
+    }
 
     /**
      * Whole calendar days from [earlierMs] to [laterMs] (0 = same day), by
      * calendar dates rather than 24-hour spans, so 23:59 and 00:01 are a day
-     * apart. Negative if [earlierMs] is in the future.
+     * apart and a day with a daylight-saving change still counts as one.
+     * Negative if [earlierMs] is in the future. Constant time: a thread with
+     * hundreds of day headers labels each one with this.
      */
     fun daysBetween(earlierMs: Long, laterMs: Long, zone: TimeZone = TimeZone.getDefault()): Int {
-        val a = Calendar.getInstance(zone).apply { timeInMillis = startOfDay(earlierMs, zone) }
-        val b = Calendar.getInstance(zone).apply { timeInMillis = startOfDay(laterMs, zone) }
-        // Count by date fields: a day with a daylight-saving change is not 24 h long.
-        var days = 0
-        if (a.before(b)) {
-            while (a.before(b) && days < MAX_DAYS) {
-                a.add(Calendar.DAY_OF_MONTH, 1)
-                days++
-            }
-        } else {
-            while (b.before(a) && days > -MAX_DAYS) {
-                b.add(Calendar.DAY_OF_MONTH, 1)
-                days--
-            }
-        }
-        return days
+        val z = zone.toZoneId()
+        val a = Instant.ofEpochMilli(earlierMs).atZone(z).toLocalDate()
+        val b = Instant.ofEpochMilli(laterMs).atZone(z).toLocalDate()
+        return ChronoUnit.DAYS.between(a, b).coerceIn(-MAX_DAYS.toLong(), MAX_DAYS.toLong()).toInt()
     }
 
     private fun sameYear(a: Long, b: Long, zone: TimeZone): Boolean {
@@ -113,6 +101,6 @@ object TimeFormat {
     private fun pattern(pattern: String, timestampMs: Long, zone: TimeZone, locale: Locale): String =
         SimpleDateFormat(pattern, locale).apply { timeZone = zone }.format(Date(timestampMs))
 
-    /** Beyond this the exact count does not change any label; it bounds the loop. */
+    /** Beyond this the exact count does not change any label. */
     private const val MAX_DAYS = 400
 }

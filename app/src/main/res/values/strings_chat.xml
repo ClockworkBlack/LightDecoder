@@ -32,6 +32,8 @@
     <string name="link_paste_use">Use these</string>
     <string name="link_paste_unreadable">No Google cookies found in that text.</string>
     <string name="link_paste_missing">These cookies are missing: %1$s</string>
+    <string name="link_paste_clipboard_cleared">The cookies were removed from the clipboard. If your keyboard keeps a clipboard history, delete them there too: LightDecoder cannot reach it.</string>
+    <string name="link_sign_in_no_webview">This phone\'s web component (Android System WebView) is not available right now, so Google\'s sign-in page cannot open. Try again later, or use \"Paste cookies\".</string>
 
     <!-- Setup, step 3: the emoji -->
     <string name="link_confirm_title">Confirm on your phone</string>
@@ -64,6 +66,7 @@
     <string name="link_phase_logged_out">Link removed</string>
     <string name="link_phase_cookies_invalid">Google sign-in expired</string>
     <string name="link_phase_error">Connection problem</string>
+    <string name="link_phase_notifications_off">Notifications are off</string>
 
     <string name="link_body_unpaired">Set up the link to read and send messages here.</string>
     <string name="link_body_pairing">Waiting for you to confirm on your phone.</string>
@@ -76,11 +79,18 @@
     <string name="link_body_logged_out">The link was removed on your phone, or the Google account signed out. Set it up again to reconnect. Imported messages are kept.</string>
     <string name="link_body_cookies_invalid">Google no longer accepts this sign-in. Set the link up again with a fresh sign-in. Imported messages are kept.</string>
     <string name="link_body_error">The connection stopped because of an error. The activity log in the link\'s settings has details.</string>
+    <string name="link_body_notifications_off">The link only connects while its notification, with its Disconnect button, can be shown. Turn on LightDecoder\'s notifications to connect.</string>
 
     <string name="link_fix_set_up">Set up</string>
     <string name="link_fix_connect">Connect</string>
     <string name="link_fix_use_here">Use here</string>
     <string name="link_fix_status">Details</string>
+    <string name="link_fix_notifications">Turn on</string>
+
+    <!-- The link never runs without its notification -->
+    <string name="link_notifications_needed_title">Notifications needed</string>
+    <string name="link_notifications_needed_body">While the link is connected, LightDecoder always shows a notification with a Disconnect button, so you can see it is running and stop it at any time. It cannot connect without it. Turn on LightDecoder\'s notifications (at least \"Google Messages link\") in system settings.</string>
+    <string name="link_notifications_open_settings">Open settings</string>
 
     <!-- Error codes from the link, in plain words -->
     <string name="link_error_not_paired">This phone is not linked to Google Messages yet. Set up the link first.</string>
@@ -101,6 +111,7 @@
     <string name="link_error_too_large">That file is too large to send or download.</string>
     <string name="link_error_send_failed">Your phone could not send this message.</string>
     <string name="link_error_logged_out">The link was removed on your phone, or the Google account signed out. Set it up again to reconnect.</string>
+    <string name="link_error_notifications_off">LightDecoder\'s notifications are turned off, so the link cannot connect: it always shows a notification with a Disconnect button while connected.</string>
     <string name="link_error_internal">Something went wrong in the link. Try again; if it keeps happening, the activity log in the link\'s settings may help.</string>
 
     <!-- Link settings -->
@@ -129,10 +140,18 @@
     <string name="link_disconnect">Disconnect</string>
     <string name="link_unpair">Unpair</string>
     <string name="link_unpair_title">Unpair from Google Messages?</string>
-    <string name="link_unpair_body">LightDecoder is removed from the paired devices on your phone, and the sign-in session on this device is deleted. To use it again, you set it up from the start.</string>
+    <string name="link_unpair_body">LightDecoder is removed from the paired devices on your phone, and the sign-in session on this device is deleted. To use it again, you set it up from the start. A kept archive is deleted if you later link a different phone or Google account.</string>
     <string name="link_unpair_delete_archive">Also delete the local message archive</string>
     <string name="link_unpair_confirm">Unpair</string>
     <string name="link_unpaired">Unpaired.</string>
+    <string name="link_unpairing">Unpairing…</string>
+    <string name="link_delete_archive">Delete local message archive</string>
+    <string name="link_delete_archive_help">Messages and pictures kept on this device from the earlier link. The sticker inbox is not affected.</string>
+    <string name="link_delete_archive_title">Delete the local message archive?</string>
+    <string name="link_delete_archive_body">All conversations, messages and media stored on this device are deleted. Your phone is not linked, so nothing changes there. The sticker inbox is kept.</string>
+    <string name="link_delete_archive_confirm">Delete</string>
+    <string name="link_archive_deleted">Local message archive deleted.</string>
+    <string name="link_archive_delete_failed">The archive could not be deleted.</string>
 
     <string name="link_import_title">Message history</string>
     <string name="link_import_body">How much past history to copy to this device after linking. Older messages also load when you scroll up in a conversation.</string>
@@ -185,6 +204,7 @@
     <string name="chat_deleted">Conversation deleted</string>
     <string name="chat_delete_conversation_title">Delete this conversation?</string>
     <string name="chat_delete_conversation_body">It is deleted on your phone too, with all its messages.</string>
+    <string name="chat_delete_conversation_body_local">It is removed from this device only, with all its messages. Your phone is not linked, so nothing changes there.</string>
 
     <!-- Thread -->
     <string name="chat_day_today">Today</string>
@@ -223,6 +243,7 @@
     <string name="chat_action_retry">Try sending again</string>
     <string name="chat_action_discard">Discard</string>
     <string name="chat_delete_message_question">Delete this message? It is deleted on your phone too.</string>
+    <string name="chat_delete_message_question_local">Delete this message? It is removed from this device only: your phone is not linked.</string>
     <string name="chat_clip_label">Message</string>
     <string name="chat_copied">Copied</string>
     <string name="chat_typing_someone">Typing…</string>

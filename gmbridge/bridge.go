@@ -17,6 +17,7 @@ package gmbridge
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,6 +26,8 @@ import (
 	"go.mau.fi/util/exhttp"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
+	"go.mau.fi/mautrix-gmessages/pkg/libgm/events"
+	"go.mau.fi/mautrix-gmessages/pkg/libgm/util"
 )
 
 // Version is the bridge API version; Kotlin can check it at startup.
@@ -38,12 +41,28 @@ const (
 	persistInterval = 30 * time.Minute
 	// closeDrainWait bounds how long Close waits for queued callbacks.
 	closeDrainWait = 2 * time.Second
+	// unpairTimeout bounds the UnpairGaia request.
+	unpairTimeout = 15 * time.Second
+	// mediaTokenMargin: below this much token lifetime left, a download while
+	// disconnected is refused rather than sent with a token Google rejects.
+	mediaTokenMargin = time.Minute
 )
+
+// pairedDeviceName is what Google Messages on the phone lists under Device
+// pairing. The app's texts (strings_chat.xml link_intro_stop and
+// link_unpair_body, README) tell the user to look for this name, so keep
+// them in sync. Devices paired before it was set keep libgm's "libgm" until
+// they are paired again.
+const pairedDeviceName = "LightDecoder"
 
 func init() {
 	// Belt and braces on top of zerolog.Nop(): libgm sometimes logs through
 	// zerolog.Ctx(ctx), which falls back to the global level.
 	zerolog.SetGlobalLevel(zerolog.Disabled)
+	// Sent with every pairing request (libgm's default is "libgm"). Only init
+	// writes this global, before any client exists. DeviceType stays TABLET
+	// and BrowserType stays OTHER (contract §0.5).
+	util.BrowserDetailsMessage.OS = pairedDeviceName
 }
 
 // Callback is implemented in Kotlin. It is called from a single Go dispatcher
@@ -87,9 +106,27 @@ type GMBridge struct {
 	closed     bool
 
 	// Per-connection flags, written from the dispatcher and helper goroutines.
-	browserActive   atomic.Bool
-	syncingMobileDB atomic.Bool
-	hackyScheduled  atomic.Bool
+	// Connect resets them (resetConnectionFlags).
+	browserActive     atomic.Bool
+	syncingMobileDB   atomic.Bool
+	hackyScheduled    atomic.Bool
+	setActiveRetrying atomic.Bool  // postConnect's SetActiveSession failed; retry running
+	needResync        atomic.Bool  // a retried SetActiveSession went through; resync on BROWSER_ACTIVE
+	inactiveElsewhere atomic.Bool  // another browser is the phone's active session
+	inactiveDetail    atomic.Value // string: the last BROWSER_INACTIVE* alert name
+	wasInactive       atomic.Bool  // was inactive since the last BROWSER_ACTIVE: catch up when active again
+	noDataRecently    atomic.Bool  // libgm reported a data gap: catch up once data flows again
+	pollDown          atomic.Bool  // the long poll reported a temporary error and has not recovered
+
+	// Per client: libgm's phone liveness state survives Disconnect/Connect
+	// and it reports PhoneNotResponding only once per outage, so this is
+	// reset only when a new client is built.
+	phoneNotResponding atomic.Bool
+
+	// syncingConversations counts ListConversations calls in flight. The
+	// phone sends spurious MESSAGE_DELETED updates while it serves them; like
+	// the connector, those are dropped.
+	syncingConversations atomic.Int32
 }
 
 // NewGMBridge restores a session from a previous OnSession (or starts unpaired
@@ -118,6 +155,7 @@ func NewGMBridge(session []byte, cb Callback) (b *GMBridge, err error) {
 // handler installed. Callers hold b.mu (or own b exclusively).
 func (b *GMBridge) newClientLocked() *libgm.Client {
 	b.gen++
+	b.phoneNotResponding.Store(false) // a new client starts with fresh liveness
 	cli := libgm.NewClient(b.auth, nil, zerolog.Nop(), exhttp.SensibleClientSettings)
 	cli.SetEventHandler(b.handlerFor(b.gen))
 	return cli
@@ -181,7 +219,10 @@ func (b *GMBridge) StatusJSON() (out string) {
 
 // Connect starts the long-lived connection. It returns once the token refresh
 // has succeeded and the long poll is starting; "connected" follows as a state
-// event. It does nothing if already connected.
+// event. If already connected it does nothing, except that a long poll that
+// is down (state "reconnecting") is restarted at once: libgm waits longer
+// after every failed attempt ((n+1)*5 s, without limit), so after a long
+// outage the next attempt can be minutes away once the network is back.
 func (b *GMBridge) Connect() (err error) {
 	defer recoverInto(&err)
 	b.lifecycle.Lock()
@@ -196,16 +237,22 @@ func (b *GMBridge) Connect() (err error) {
 		b.mu.Unlock()
 		return newError(codeNotPaired, "pair with your phone first")
 	case b.live:
+		cli := b.client
 		b.mu.Unlock()
+		if b.pollDown.Load() && !longPollOpen(cli) {
+			// Reconnect ends the sleeping loop (it exits when it wakes) and
+			// starts a fresh one whose first attempt is immediate.
+			if rerr := restartLongPoll(cli); rerr != nil {
+				return toBridgeError(rerr)
+			}
+		}
 		return nil
 	}
 	cli, gen := b.client, b.gen
 	ctx, cancel := context.WithCancel(context.Background())
 	b.live, b.connCtx, b.connCancel = true, ctx, cancel
 	b.connSeq++
-	b.browserActive.Store(false)
-	b.syncingMobileDB.Store(false)
-	b.hackyScheduled.Store(false)
+	b.resetConnectionFlags()
 	b.mu.Unlock()
 
 	b.emitState(stateConnecting, "", "")
@@ -227,6 +274,21 @@ func (b *GMBridge) Connect() (err error) {
 	}
 	go b.persistLoop(ctx, gen)
 	return nil
+}
+
+// resetConnectionFlags clears what the previous connection learned. Not
+// phoneNotResponding: that follows the client (see its declaration).
+func (b *GMBridge) resetConnectionFlags() {
+	b.browserActive.Store(false)
+	b.syncingMobileDB.Store(false)
+	b.hackyScheduled.Store(false)
+	b.setActiveRetrying.Store(false)
+	b.needResync.Store(false)
+	b.inactiveElsewhere.Store(false)
+	b.inactiveDetail.Store("")
+	b.wasInactive.Store(false)
+	b.noDataRecently.Store(false)
+	b.pollDown.Store(false)
 }
 
 // startClient is the connector's Connect: fetch the web config first (an
@@ -353,29 +415,89 @@ func (b *GMBridge) SetActiveSession() (err error) {
 
 // Unpair revokes the pairing on the phone (best effort), disconnects and
 // deletes the session. It succeeds even when nothing was paired, so Kotlin
-// can use it as "wipe".
+// can use it as "wipe": the local wipe always happens. If the revoke did not
+// reach Google, the "unpaired" state carries code unpair_remote_failed so the
+// app can tell the user to remove the device on the phone.
+//
+// While disconnected the tachyon token may have expired (it lasts about a
+// day and only Connect and the long poll refresh it), and Google would reject
+// the revoke. libgm's only exported way to refresh it synchronously is
+// Connect, so a short temporary connection is made first in that case.
 func (b *GMBridge) Unpair() (err error) {
 	defer recoverInto(&err)
 	b.lifecycle.Lock()
 	defer b.lifecycle.Unlock()
 
 	b.mu.Lock()
-	cli, gen := b.client, b.gen
-	b.mu.Unlock()
+	cli, live, auth := b.client, b.live, b.auth
 	if cli != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		_ = cli.UnpairGaia(ctx) // best effort: the phone may be offline
-		cancel()
-		b.teardownLocked(gen)
+		// Drop everything the client reports from here on: a temporary
+		// connection must not deliver data or re-persist the session that
+		// is about to be deleted.
+		b.gen++
+	}
+	gen := b.gen
+	b.mu.Unlock()
+	var remoteErr error
+	if cli != nil {
+		if !live && tokenExpiresWithin(auth, libgm.RefreshTachyonBuffer) {
+			remoteErr = func() (e error) {
+				defer recoverInto(&e)
+				return refreshForUnpair(cli)
+			}()
+		}
+		if remoteErr == nil {
+			remoteErr = func() (e error) {
+				defer recoverInto(&e)
+				ctx, cancel := context.WithTimeout(context.Background(), unpairTimeout)
+				defer cancel()
+				return unpairGaia(ctx, cli)
+			}()
+		}
+		// Google saying the pairing does not exist means it is gone already.
+		if errors.Is(remoteErr, events.ErrRequestedEntityNotFound) {
+			remoteErr = nil
+		}
+		b.teardownLocked(gen) // also ends the temporary connection
 	}
 	b.mu.Lock()
 	b.auth, b.client, b.phoneID, b.account = nil, nil, "", ""
 	b.gen++
 	b.mu.Unlock()
+	b.phoneNotResponding.Store(false)
 	b.cache.reset()
 	b.emitSessionDeleted()
-	b.emitState(stateUnpaired, "", "")
+	if remoteErr != nil {
+		b.emitState(stateUnpaired, codeUnpairRemoteFailed, "the phone may still list this device")
+	} else {
+		b.emitState(stateUnpaired, "", "")
+	}
 	return nil
+}
+
+// libgm calls that touch the network or the long poll; tests replace them.
+var (
+	longPollOpen = (*libgm.Client).IsConnected
+	// restartLongPoll uses its own context for the same reason as
+	// startClient: libgm's long poll ignores cancellation.
+	restartLongPoll = func(cli *libgm.Client) error { return cli.Reconnect(context.Background()) }
+	// refreshForUnpair refreshes the tachyon token. Connect is the only
+	// exported libgm call that does so synchronously; the long poll it also
+	// starts is stopped by Unpair's teardown, and its events are dropped.
+	refreshForUnpair = func(cli *libgm.Client) error { return cli.Connect(context.Background()) }
+	unpairGaia       = func(ctx context.Context, cli *libgm.Client) error { return cli.UnpairGaia(ctx) }
+)
+
+// tokenExpiresWithin reports whether auth's tachyon token is missing or ends
+// within d.
+func tokenExpiresWithin(auth *libgm.AuthData, d time.Duration) bool {
+	if auth == nil {
+		return true
+	}
+	auth.CookiesLock.RLock()
+	exp := auth.TachyonExpiry
+	auth.CookiesLock.RUnlock()
+	return exp.IsZero() || time.Until(exp) <= d
 }
 
 // ExportSession returns the current session JSON (null in Java if there is
@@ -476,9 +598,12 @@ func (b *GMBridge) rpc() (*libgm.Client, context.Context, context.CancelFunc, er
 	return cli, ctx, cancel, nil
 }
 
-// pairedClient returns the client when paired, connected or not. Media
-// downloads only need the token, not the long poll.
-func (b *GMBridge) pairedClient() (*libgm.Client, error) {
+// mediaClient returns the client for a media download, connected or not:
+// downloads only need the token, not the long poll. While not connected it
+// refuses once the token is (nearly) expired, because only Connect and the
+// long poll refresh it, and libgm would send the stale token anyway: Google's
+// error page then reads as a bad stream, i.e. "media not found".
+func (b *GMBridge) mediaClient() (*libgm.Client, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	switch {
@@ -486,6 +611,8 @@ func (b *GMBridge) pairedClient() (*libgm.Client, error) {
 		return nil, newError(codeInternal, "bridge is closed")
 	case b.client == nil:
 		return nil, newError(codeNotPaired, "pair with your phone first")
+	case !b.live && tokenExpiresWithin(b.auth, mediaTokenMargin):
+		return nil, newError(codeNotConnected, "connect to load this media")
 	}
 	return b.client, nil
 }

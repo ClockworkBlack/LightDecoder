@@ -1,9 +1,12 @@
 package com.lightdecoder.ui.relay
 
 import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.view.MenuItem
 import android.view.View
@@ -13,7 +16,6 @@ import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
-import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
@@ -51,7 +53,8 @@ import kotlinx.coroutines.withContext
  *     this phone; the user confirms on their phone; how to disconnect.
  *  2. Sign in to Google in a WebView (or paste cookies), only to obtain the
  *     cookies Messages for web needs. The WebView's cookies and storage are
- *     wiped before and after.
+ *     wiped before and after, and at the next start if the process died
+ *     in between ([SignInWebData]).
  *  3. Show the emoji. The user taps the same emoji in Google Messages on their
  *     phone; that confirmation is theirs alone, nothing here answers it.
  *  4. Done.
@@ -67,6 +70,8 @@ class RelaySetupActivity : AppCompatActivity() {
     private var pollJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Before any WebView of this process exists: sign-in data an earlier one left behind goes.
+        SignInWebData.wipeIfDirty(this)
         super.onCreate(savedInstanceState)
         binding = ActivityRelaySetupBinding.inflate(layoutInflater)
         setContentView(binding.root)
@@ -111,9 +116,12 @@ class RelaySetupActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         // A rotation recreates the screen mid-sign-in: keep what the user typed
-        // into Google so far. Leaving for good wipes it.
+        // into Google so far. Leaving for good wipes it, but only if there is
+        // something to wipe: wiping loads Chromium, which a user who never got
+        // to the sign-in should not pay for.
+        val hadWebView = webView != null
         destroyWebView()
-        if (isFinishing) clearWebData()
+        if (isFinishing && (hadWebView || SignInWebData.isDirty(this))) clearWebData()
         super.onDestroy()
     }
 
@@ -208,7 +216,20 @@ class RelaySetupActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     private fun ensureWebView() {
         if (webView != null) return
-        val web = WebView(this)
+        // Marked before the WebView exists, so no cookie can be set without the
+        // marker that has the next process start wipe it if this one dies.
+        SignInWebData.webViewCreating(this)
+        val web = try {
+            WebView(this)
+        } catch (e: RuntimeException) {
+            // No usable WebView (missing, disabled, or being updated): the sign-in
+            // page cannot open, but "Paste cookies" still works. Nothing is logged.
+            binding.signInError.setText(R.string.link_sign_in_no_webview)
+            binding.signInError.visibility = View.VISIBLE
+            return
+        }
+        SignInWebData.webViewCreated()
+        binding.signInError.setText(R.string.link_sign_in_load_failed)
         web.settings.apply {
             // Google's sign-in page does not work without JavaScript. The
             // client below only ever lets Google's own sign-in hosts load,
@@ -289,17 +310,11 @@ class RelaySetupActivity : AppCompatActivity() {
         web.clearCache(true)
         binding.webContainer.removeView(web)
         web.destroy()
+        SignInWebData.webViewDestroyed()
     }
 
     /** Wipes every cookie and all web storage of this app's WebViews, then runs [then]. */
-    private fun clearWebData(then: (() -> Unit)? = null) {
-        WebStorage.getInstance().deleteAllData()
-        val cookies = CookieManager.getInstance()
-        cookies.removeAllCookies {
-            cookies.flush()
-            then?.invoke()
-        }
-    }
+    private fun clearWebData(then: (() -> Unit)? = null) = SignInWebData.wipe(this, then)
 
     private inner class SignInClient : WebViewClient() {
         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
@@ -334,7 +349,8 @@ class RelaySetupActivity : AppCompatActivity() {
         dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         dialog.setOnShowListener {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                val cookies = CookieParser.parse(dialogBinding.pasteInput.text?.toString().orEmpty())
+                val pasted = dialogBinding.pasteInput.text?.toString().orEmpty()
+                val cookies = CookieParser.parse(pasted)
                 val missing = CookieParser.missingRequired(cookies)
                 when {
                     cookies.isEmpty() -> dialogBinding.pasteLayout.error = getString(R.string.link_paste_unreadable)
@@ -342,6 +358,7 @@ class RelaySetupActivity : AppCompatActivity() {
                         // Cookie names are not secret; their values never appear anywhere.
                         dialogBinding.pasteLayout.error = getString(R.string.link_paste_missing, missing.joinToString(", "))
                     else -> {
+                        clearClipboardIfHolds(pasted, cookies)
                         dialog.dismiss()
                         destroyWebView()
                         clearWebData()
@@ -352,6 +369,33 @@ class RelaySetupActivity : AppCompatActivity() {
         }
         dialog.setOnDismissListener { dialogBinding.pasteInput.text?.clear() }
         dialog.show()
+    }
+
+    /**
+     * The cookies the user pasted are as good as their password: once used,
+     * they come off the clipboard too, if that is still where they came from
+     * (the same text, or text that reads as the same cookies). The keyboard's
+     * own clipboard history is out of reach, so the user is told about it.
+     * The clip is only compared, never logged or kept.
+     */
+    private fun clearClipboardIfHolds(pasted: String, cookies: Map<String, String>) {
+        val clipboard = getSystemService(ClipboardManager::class.java) ?: return
+        val clip = runCatching { clipboard.primaryClip }.getOrNull() ?: return
+        val text = runCatching {
+            (0 until clip.itemCount).joinToString("") { clip.getItemAt(it).coerceToText(this) }
+        }.getOrNull()
+        if (text.isNullOrBlank()) return
+        val same = text.trim() == pasted.trim() || CookieParser.parse(text) == cookies
+        if (!same) return
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                clipboard.clearPrimaryClip()
+            } else {
+                clipboard.setPrimaryClip(ClipData.newPlainText("", ""))
+            }
+        }.onSuccess {
+            Toast.makeText(this, R.string.link_paste_clipboard_cleared, Toast.LENGTH_LONG).show()
+        }
     }
 
     companion object {

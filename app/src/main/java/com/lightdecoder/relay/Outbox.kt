@@ -26,6 +26,11 @@ import java.io.FileOutputStream
  * Intake ([enqueueText], [enqueueMedia], [retry], [discard]) runs on one
  * thread so sends keep the order they were made in; [drain] runs on one
  * coroutine and sends one message at a time, in queue order.
+ *
+ * Sends whose outcome is unknown are looked up on the phone before anything
+ * else goes out ([reconcile]): an entry a previous run left SENDING (the app
+ * died mid-send) is never sent again blindly, and a send Google accepted
+ * whose echo never came stops showing "sending" after [unconfirmedGiveUpMs].
  */
 internal class Outbox(
     private val context: Context,
@@ -33,6 +38,13 @@ internal class Outbox(
     private val bridge: () -> RelayBridge,
     private val retryDelaysMs: List<Long>,
     private val canSend: () -> Boolean,
+    private val gate: ArchiveGate = ArchiveGate(),
+    /** How long after a send without an echo the phone is asked about it. */
+    private val unconfirmedCheckMs: Long = 15_000,
+    /** How long a send may go without an echo before it is shown as unconfirmed (failed). */
+    private val unconfirmedGiveUpMs: Long = 3_600_000,
+    /** Asks for another [drain] after this many ms (to look at unconfirmed sends again). */
+    private val drainLater: (Long) -> Unit = {},
     /** The bridge said the link is down: stop trying until the next connection. */
     private val onOffline: () -> Unit,
 ) {
@@ -52,6 +64,12 @@ internal class Outbox(
 
     /** Taken while an entry is claimed for sending, and by [retry] and [discard], so they never race. */
     private val claimLock = Any()
+
+    /** Guards the stored list of unconfirmed sends (read, changed, written back). */
+    private val unconfirmedLock = Any()
+
+    /** Unconfirmed sends already looked up on the phone by this process (looked up again only to give up). */
+    private val lookedUp = java.util.Collections.synchronizedSet(HashSet<String>())
 
     // --- intake (one thread) -----------------------------------------------------
 
@@ -140,18 +158,98 @@ internal class Outbox(
 
     /** Sends queued messages in order for as long as the link can send. */
     suspend fun drain() {
+        if (!canSend()) return
+        // Found SENDING before this drain sent anything: a previous run was interrupted mid-send.
+        val interrupted = repo.pendingOutbox()
+            .filter { it.status == OutboxStatus.SENDING }
+            .mapTo(HashSet()) { it.idempotencyKey }
+        if (!reconcile(interrupted)) return
         val tried = HashSet<String>()
         while (canSend()) {
             val row = repo.pendingOutbox().firstOrNull { it.idempotencyKey !in tried } ?: return
             tried.add(row.idempotencyKey)
-            if (!sendOne(row)) return
+            if (!sendOne(row, row.idempotencyKey in interrupted)) return
         }
     }
 
+    /**
+     * Asks the phone about sends whose outcome is unknown: [interrupted]
+     * entries, and accepted sends without an echo for [unconfirmedCheckMs].
+     * The newest page of their conversations carries the echo (with its
+     * tmpId) if the phone has the message; storing it replaces the local copy,
+     * which retires the entry. Sends still unconfirmed after
+     * [unconfirmedGiveUpMs] are marked failed ("unconfirmed") for the user to
+     * retry or discard; a late echo still clears them. Returns false if the
+     * link went down.
+     */
+    private fun reconcile(interrupted: Set<String>): Boolean {
+        val now = System.currentTimeMillis()
+        val unconfirmed = pruneUnconfirmed()
+        val giveUp = unconfirmed.filterValues { now - it >= unconfirmedGiveUpMs }.keys
+        val ask = unconfirmed.filter { (key, sentAt) ->
+            key in giveUp || (now - sentAt >= unconfirmedCheckMs && key !in lookedUp)
+        }.keys + interrupted
+        val conversations = ask.mapNotNullTo(LinkedHashSet()) { repo.outbox(it)?.conversationId }
+        for (conversationId in conversations) {
+            if (!canSend()) return false
+            val since = gate.epoch()
+            try {
+                val page = bridge().fetchMessages(conversationId, RECONCILE_PAGE, null)
+                gate.ifCurrent(since) { repo.upsertMessages(page.messages) }
+            } catch (e: RelayException) {
+                if (verdictFor(e.code) is Verdict.Offline) {
+                    onOffline()
+                    return false
+                }
+                // Unanswered: interrupted entries wait for the user below, unconfirmed ones stay as they are.
+                RelayLog.add(context, "Could not check sends with the phone: ${e.code}")
+            }
+        }
+        lookedUp.addAll(ask)
+        var gaveUp = 0
+        for (key in giveUp) {
+            val held = synchronized(claimLock) {
+                if (repo.outbox(key)?.status != OutboxStatus.SENT || repo.message(MessageRow.tmpMessageId(key)) == null) {
+                    false
+                } else {
+                    repo.setLocalState(key, LocalState.FAILED, UNCONFIRMED)
+                    repo.updateOutbox(key, OutboxStatus.FAILED, error = UNCONFIRMED)
+                    true
+                }
+            }
+            if (held) gaveUp++
+        }
+        if (gaveUp > 0) RelayLog.add(context, "$gaveUp sent message(s) never confirmed by the phone")
+        pruneUnconfirmed()
+        return true
+    }
+
+    /** The unconfirmed sends still waiting for their echo; forgets the ones that are settled. */
+    private fun pruneUnconfirmed(): Map<String, Long> = synchronized(unconfirmedLock) {
+        val all = RelayPrefs.unconfirmedSends(context)
+        val waiting = all.filterKeys { repo.outbox(it)?.status == OutboxStatus.SENT }
+        if (waiting.size != all.size) {
+            RelayPrefs.setUnconfirmedSends(context, waiting)
+            lookedUp.retainAll(waiting.keys)
+        }
+        waiting
+    }
+
+    /** Google accepted this send but the phone's echo has not arrived yet. */
+    private fun awaitEcho(key: String) {
+        val now = System.currentTimeMillis()
+        synchronized(unconfirmedLock) {
+            if (repo.outbox(key)?.status != OutboxStatus.SENT) return
+            RelayPrefs.setUnconfirmedSends(context, RelayPrefs.unconfirmedSends(context) + (key to now))
+        }
+        drainLater(unconfirmedCheckMs + RECHECK_SLACK_MS)
+        drainLater(unconfirmedGiveUpMs + RECHECK_SLACK_MS)
+    }
+
     /** Returns false when the link went down and draining should stop. */
-    private suspend fun sendOne(queued: OutboxRow): Boolean {
+    private suspend fun sendOne(queued: OutboxRow, interrupted: Boolean): Boolean {
         val key = queued.idempotencyKey
-        val row = claim(key) ?: return true
+        val row = claim(key, interrupted) ?: return true
         val payload = try {
             payloadOf(row)
         } catch (e: OutOfMemoryError) {
@@ -175,6 +273,7 @@ internal class Outbox(
                     // otherwise the echo removes it. The local copy stays
                     // "sending" until then.
                     repo.updateOutbox(key, OutboxStatus.SENT)
+                    awaitEcho(key)
                     return true
                 }
                 is Verdict.Retry -> {
@@ -217,14 +316,26 @@ internal class Outbox(
      * local copy "tmp:<key>" is gone, the phone's echo already replaced it:
      * the message went out, so it is not sent again. The same holds for a
      * PENDING entry whose local copy is gone (the echo of an earlier attempt).
+     *
+     * An [interrupted] entry whose copy is still there after [reconcile]
+     * looked on the phone may still have gone out (Google accepted it just
+     * before the app died, and the echo is late or lost). Sending it again
+     * could deliver it twice, so it waits as failed ("interrupted") for the
+     * user, like a send the phone did not answer; a late echo still clears it.
      */
-    private fun claim(key: String): OutboxRow? = synchronized(claimLock) {
+    private fun claim(key: String, interrupted: Boolean): OutboxRow? = synchronized(claimLock) {
         val row = repo.outbox(key) ?: return null
         if (row.status != OutboxStatus.PENDING && row.status != OutboxStatus.SENDING) return null
         if (repo.message(MessageRow.tmpMessageId(key)) == null) {
             repo.deleteOutbox(key)
             deleteCopy(key)
             if (row.status == OutboxStatus.SENDING) RelayLog.add(context, "Interrupted send had already arrived")
+            return null
+        }
+        if (interrupted && row.status == OutboxStatus.SENDING) {
+            repo.setLocalState(key, LocalState.FAILED, INTERRUPTED)
+            repo.updateOutbox(key, OutboxStatus.FAILED, error = INTERRUPTED)
+            RelayLog.add(context, "Interrupted send of a ${kindOf(row)} waits for the user")
             return null
         }
         repo.updateOutbox(key, OutboxStatus.SENDING)
@@ -374,6 +485,14 @@ internal class Outbox(
     companion object {
         /** Attachments larger than this are refused (the Go side refuses them too). */
         const val MAX_ATTACHMENT_BYTES = 100L * 1024 * 1024
+
+        /** Content-free reasons a send waits for the user. */
+        const val INTERRUPTED = "interrupted"
+        const val UNCONFIRMED = "unconfirmed"
+
+        /** Messages fetched per conversation to look for echoes. */
+        private const val RECONCILE_PAGE = 20
+        private const val RECHECK_SLACK_MS = 1_000L
 
         private val TRANSIENT_STATUSES = setOf("FAILURE_2", "FAILURE_3")
         private val EMPTY = ByteArray(0)

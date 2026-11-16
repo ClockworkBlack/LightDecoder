@@ -17,9 +17,12 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
+import java.io.IOException
 
 /** The archive's upsert rules, search, and bookkeeping tables, against real SQLite. */
 @RunWith(AndroidJUnit4::class)
@@ -290,6 +293,133 @@ class ArchiveRepositoryTest {
         repo.applyDeletion("m1")
         assertFalse(file.exists())
         assertTrue(repo.media("m1").isEmpty())
+    }
+
+    @Test
+    fun aDownloadThatFinishesAfterItsMessageWasDeletedLeavesNoFile() {
+        repo.upsertMessage(message("m1", parts = listOf(mediaPart("p1", mediaId = "late-M1", thumbId = "late-T1"))))
+        // The user deletes the message while the picture and its thumbnail are being fetched.
+        repo.applyDeletion("m1")
+        val full = MediaCache.fileFor(context, "late-M1", "heic").apply { writeText("decrypted") }
+        val thumb = MediaCache.fileFor(context, "late-T1", "jpg").apply { writeText("decrypted") }
+
+        assertFalse(repo.setMediaLocalPath("m1", "p1", "late-M1", full.path, thumbnail = false))
+        assertFalse(repo.setMediaLocalPath("m1", "p1", "late-T1", thumb.path, thumbnail = true))
+        assertFalse(full.exists())
+        assertFalse(thumb.exists())
+
+        // The same without a cache key.
+        val again = MediaCache.fileFor(context, "late-M1", "heic").apply { writeText("decrypted") }
+        assertFalse(repo.setMediaLocalPath("m1", "p1", again.path, thumbnail = false))
+        assertFalse(again.exists())
+    }
+
+    @Test
+    fun aDownloadOfMediaThePartNoLongerHasIsNotRecorded() {
+        repo.upsertMessage(message("m1", parts = listOf(mediaPart("p1", mediaId = "old-M", thumbId = "T"))))
+        // The full size arrives under a new id while the old one is still downloading.
+        repo.upsertMessage(message("m1", parts = listOf(mediaPart("p1", mediaId = "new-M", thumbId = "T"))))
+        val stale = MediaCache.fileFor(context, "old-M", "heic").apply { writeText("old") }
+        assertFalse(repo.setMediaLocalPath("m1", "p1", "old-M", stale.path, thumbnail = false))
+        assertEquals("", repo.mediaPart("m1", "p1")!!.localPath)
+        assertFalse(stale.exists())
+
+        val current = MediaCache.fileFor(context, "new-M", "heic").apply { writeText("new") }
+        assertTrue(repo.setMediaLocalPath("m1", "p1", "new-M", current.path, thumbnail = false))
+        val thumb = MediaCache.fileFor(context, "T", "jpg").apply { writeText("thumb") }
+        assertTrue(repo.setMediaLocalPath("m1", "p1", "T", thumb.path, thumbnail = true))
+        repo.mediaPart("m1", "p1")!!.let {
+            assertEquals(current.path, it.localPath)
+            assertEquals(thumb.path, it.thumbPath)
+        }
+        // A thumbnail id is not a full-size id.
+        assertFalse(repo.setMediaLocalPath("m1", "p1", "T", thumb.path, thumbnail = false))
+        assertEquals(current.path, repo.mediaPart("m1", "p1")!!.localPath)
+        assertTrue("still the part's thumbnail", thumb.exists())
+    }
+
+    @Test
+    fun aLateFileAnotherPartStillUsesIsKept() {
+        repo.upsertMessage(message("m1", parts = listOf(mediaPart("p1", mediaId = "shared-M"))))
+        repo.upsertMessage(message("m2", parts = listOf(mediaPart("p1", mediaId = "shared-M"))))
+        val file = MediaCache.fileFor(context, "shared-M", "png").apply { writeText("x") }
+        assertTrue(repo.setMediaLocalPath("m1", "p1", "shared-M", file.path, thumbnail = false))
+        repo.applyDeletion("m2")
+        assertFalse(repo.setMediaLocalPath("m2", "p1", "shared-M", file.path, thumbnail = false))
+        assertTrue(file.exists())
+        assertEquals(file.path, repo.mediaPart("m1", "p1")!!.localPath)
+    }
+
+    @Test
+    fun inlineMediaIsRecordedOnlyWhileThePartStillHasIt() {
+        val inline = PartDto("p1", kind = "media", mime = "image/heic", inlineData = byteArrayOf(1, 2, 3))
+        repo.upsertMessage(message("m1", parts = listOf(inline)))
+        val key = MediaCache.inlineKey("m1", "p1")
+        val file = MediaCache.fileFor(context, key, "heic").apply { writeText("inline") }
+        assertTrue(repo.setMediaLocalPath("m1", "p1", key, file.path, thumbnail = false))
+        assertEquals(file.path, repo.mediaPart("m1", "p1")!!.localPath)
+
+        // The part now points to a downloadable file instead: the inline copy is not recorded again.
+        repo.upsertMessage(message("m1", parts = listOf(mediaPart("p1", mediaId = "M-from-inline"))))
+        assertFalse(file.exists())
+        val late = MediaCache.fileFor(context, key, "heic").apply { writeText("inline") }
+        assertFalse(repo.setMediaLocalPath("m1", "p1", key, late.path, thumbnail = false))
+        assertFalse(late.exists())
+    }
+
+    @Test
+    fun aNewFileForAPartDeletesTheOneItReplaces() {
+        repo.upsertMessage(message("m1", parts = listOf(mediaPart("p1", mediaId = "M-ext"))))
+        val first = MediaCache.fileFor(context, "M-ext", "bin").apply { writeText("x") }
+        assertTrue(repo.setMediaLocalPath("m1", "p1", "M-ext", first.path, thumbnail = false))
+        val second = MediaCache.fileFor(context, "M-ext", "heic").apply { writeText("x") }
+        assertTrue(repo.setMediaLocalPath("m1", "p1", "M-ext", second.path, thumbnail = false))
+        assertFalse(first.exists())
+        assertTrue(second.exists())
+        // Recording the same file again keeps it.
+        assertTrue(repo.setMediaLocalPath("m1", "p1", "M-ext", second.path, thumbnail = false))
+        assertTrue(second.exists())
+    }
+
+    @Test
+    fun writeAtomicallyLeavesNoPartialFile() {
+        val file = MediaCache.fileFor(context, "atomic-M", "heic")
+        MediaCache.writeAtomically(file, byteArrayOf(1, 2, 3))
+        assertArrayEquals(byteArrayOf(1, 2, 3), file.readBytes())
+        assertFalse(File(file.parentFile, file.name + ".part").exists())
+
+        // The rename fails (a non-empty directory is in the way): the partial file goes too.
+        val blocked = MediaCache.fileFor(context, "atomic-blocked", "heic").apply { mkdirs() }
+        File(blocked, "inside").writeText("x")
+        try {
+            MediaCache.writeAtomically(blocked, byteArrayOf(1))
+            fail("expected an IOException")
+        } catch (e: IOException) {
+            // expected
+        }
+        assertFalse(File(blocked.parentFile, blocked.name + ".part").exists())
+        blocked.deleteRecursively()
+    }
+
+    @Test
+    fun stalePartialFilesAreDeletedOnTheFirstWrite() {
+        val dir = MediaCache.mediaDir(context).apply { mkdirs() }
+        val stale = File(dir, "abc.heic.part").apply {
+            writeText("x")
+            setLastModified(System.currentTimeMillis() - MediaCache.STALE_PART_MS - 60_000)
+        }
+        val inProgress = File(dir, "def.heic.part").apply { writeText("x") }
+        val oldMedia = File(dir, "abc.heic").apply {
+            writeText("x")
+            setLastModified(System.currentTimeMillis() - MediaCache.STALE_PART_MS - 60_000)
+        }
+
+        repo.updateHealth(status = "connected")
+
+        assertFalse(stale.exists())
+        assertTrue("a write in progress is left alone", inProgress.exists())
+        assertTrue("only partial files", oldMedia.exists())
+        listOf(inProgress, oldMedia).forEach { it.delete() }
     }
 
     // --- search -----------------------------------------------------------------

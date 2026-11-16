@@ -23,12 +23,16 @@ import kotlinx.coroutines.launch
  * Foreground type remoteMessaging on Android 14+ (it relays messages from
  * the phone), dataSync before that. It is only started by a user action
  * ([RelayManager.startLive]) or by [BootReceiver] when the user chose to stay
- * connected; the connection itself is [RelayManager]'s.
+ * connected; the connection itself is [RelayManager]'s. It never runs while
+ * its notification cannot be seen (notifications or its channel turned off).
  */
 class RelayService : Service() {
 
     private val scope = MainScope()
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+    /** startForeground succeeded for this instance. */
+    private var inForeground = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -52,6 +56,17 @@ class RelayService : Service() {
             stopSelf(startId)
             return START_NOT_STICKY
         }
+        if (intent?.action == ACTION_REPOST) {
+            // The user swiped the notification away (Android 14+ allows it).
+            // While the link runs it must stay visible, so it goes straight back.
+            if (inForeground && manager.isPaired() && RelayPrefs.liveEnabled(this) && RelayNotifications.statusVisible(this)) {
+                RelayNotifications.updateService(this, manager.state.value)
+                return START_STICKY
+            }
+            // Not (or no longer) a live foreground service: leave no stray notification.
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
         // Every start (also a restart after the process was killed) has to
         // reach startForeground promptly, even one that stops right away.
         val foreground = goForeground(manager)
@@ -60,6 +75,14 @@ class RelayService : Service() {
             manager.serviceStartsPending.updateAndGet { (it - 1).coerceAtLeast(0) }
         }
         if (!foreground || !manager.isPaired() || !RelayPrefs.liveEnabled(this)) {
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        if (!RelayNotifications.statusVisible(this)) {
+            // Its notification (with Disconnect) cannot be seen: the link does
+            // not run. "Stay connected" stays on, so it comes back once
+            // notifications are on again.
+            manager.onNotificationsHidden()
             stopSelf(startId)
             return START_NOT_STICKY
         }
@@ -80,7 +103,12 @@ class RelayService : Service() {
     }
 
     override fun onDestroy() {
-        RelayManager.get(this).serviceRunning = false
+        val manager = RelayManager.get(this)
+        manager.serviceRunning = false
+        inForeground = false
+        // No service, no connection: whatever stopped it, the link goes down
+        // with its notification (unless a new start is already on its way).
+        manager.onServiceDestroyed()
         scope.cancel()
         networkCallback?.let { callback ->
             runCatching { getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(callback) }
@@ -101,10 +129,13 @@ class RelayService : Service() {
             this, RelayNotifications.ID_SERVICE,
             RelayNotifications.serviceNotification(this, manager.state.value), type,
         )
+        inForeground = true
         true
     } catch (e: RuntimeException) {
         // ForegroundServiceStartNotAllowedException and friends (Android 12+
-        // background limits, or a type the system refuses).
+        // background limits, or a type the system refuses). Tried again when
+        // one of the app's screens is shown.
+        manager.resumeOnVisible = true
         RelayLog.add(this, "Could not start the link in the foreground: ${e.javaClass.simpleName}")
         false
     }
@@ -128,6 +159,9 @@ class RelayService : Service() {
     companion object {
         const val ACTION_DISCONNECT = "com.lightdecoder.relay.action.DISCONNECT"
 
+        /** Sent when the user swipes the notification away: show it again. */
+        const val ACTION_REPOST = "com.lightdecoder.relay.action.REPOST_NOTIFICATION"
+
         /** Marks a start made with startForegroundService, which onStartCommand must answer with startForeground. */
         private const val EXTRA_FOREGROUND_START = "com.lightdecoder.relay.extra.FOREGROUND_START"
 
@@ -144,10 +178,13 @@ class RelayService : Service() {
             } catch (e: IllegalStateException) {
                 pending.decrementAndGet()
                 // Includes ForegroundServiceStartNotAllowedException (Android 12+).
+                // The next screen the user opens starts it again.
+                RelayManager.get(context).resumeOnVisible = true
                 RelayLog.add(context, "Android did not allow starting the link now: ${e.javaClass.simpleName}")
                 false
             } catch (e: SecurityException) {
                 pending.decrementAndGet()
+                RelayManager.get(context).resumeOnVisible = true
                 RelayLog.add(context, "Android did not allow starting the link: ${e.javaClass.simpleName}")
                 false
             }
@@ -166,5 +203,9 @@ class RelayService : Service() {
         /** The notification's Disconnect button. */
         fun disconnectIntent(context: Context): Intent =
             Intent(context, RelayService::class.java).setAction(ACTION_DISCONNECT)
+
+        /** The notification's delete intent (swiped away on Android 14+). */
+        fun repostIntent(context: Context): Intent =
+            Intent(context, RelayService::class.java).setAction(ACTION_REPOST)
     }
 }

@@ -28,10 +28,12 @@ import com.lightdecoder.relay.RelayIntents
 import com.lightdecoder.relay.RelayManager
 import com.lightdecoder.relay.RelayState
 import com.lightdecoder.ui.applySystemBarPadding
+import com.lightdecoder.ui.relay.LocalArchive
 import com.lightdecoder.ui.relay.NotificationPermission
 import com.lightdecoder.ui.relay.RelayErrors
 import com.lightdecoder.ui.relay.RelaySetupActivity
 import com.lightdecoder.ui.relay.RelayStatusActivity
+import com.lightdecoder.ui.relay.SignInWebData
 import com.lightdecoder.ui.relay.relayAttempt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -74,6 +76,8 @@ class ConversationsActivity : AppCompatActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Sign-in cookies a killed setup screen left behind (once per process; see SignInWebData).
+        SignInWebData.wipeIfDirty(this)
         super.onCreate(savedInstanceState)
         binding = ActivityConversationsBinding.inflate(layoutInflater)
         setContentView(binding.root)
@@ -145,10 +149,12 @@ class ConversationsActivity : AppCompatActivity() {
 
     private fun onState(state: RelayState) {
         lifecycleScope.launch {
+            val wasPaired = paired
             paired = withContext(Dispatchers.IO) { manager.isPaired() }
             relayState = state
             banner.render(state, paired)
             binding.fab.isEnabled = paired
+            if (paired != wasPaired) invalidateOptionsMenu()
         }
     }
 
@@ -285,11 +291,19 @@ class ConversationsActivity : AppCompatActivity() {
         return true
     }
 
+    override fun onPrepareOptionsMenu(menu: Menu): Boolean {
+        // Without a pairing, what is listed is an archive an unpair kept: it can be deleted here.
+        menu.findItem(R.id.action_delete_archive)?.isVisible = !paired
+        menu.findItem(R.id.action_refresh)?.isVisible = paired
+        return super.onPrepareOptionsMenu(menu)
+    }
+
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         when (item.itemId) {
             android.R.id.home -> finish()
             R.id.action_refresh -> refreshFromPhone()
             R.id.action_link_status -> startActivity(Intent(this, RelayStatusActivity::class.java))
+            R.id.action_delete_archive -> LocalArchive.confirmDelete(this) { reload() }
             else -> return super.onOptionsItemSelected(item)
         }
         return true
@@ -363,12 +377,21 @@ class ConversationsActivity : AppCompatActivity() {
         if (muted) R.string.chat_muted_done else R.string.chat_unmuted_done,
     ) { manager.setMuted(row.id, muted) }
 
+    /** With a pairing it goes on the phone too; without one (an archive an unpair kept) only here. */
     private fun confirmDelete(item: ConversationItem) {
+        val linked = manager.isPaired()
+        val id = item.row.id
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.chat_delete_conversation_title)
-            .setMessage(R.string.chat_delete_conversation_body)
+            .setMessage(if (linked) R.string.chat_delete_conversation_body else R.string.chat_delete_conversation_body_local)
             .setPositiveButton(R.string.chat_action_delete) { _, _ ->
-                runAction(R.string.chat_deleted) { manager.deleteConversation(item.row.id) }
+                runAction(R.string.chat_deleted) {
+                    if (linked) {
+                        manager.deleteConversation(id)
+                    } else {
+                        withContext(Dispatchers.IO) { repo.deleteConversationLocal(id) }
+                    }
+                }
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()

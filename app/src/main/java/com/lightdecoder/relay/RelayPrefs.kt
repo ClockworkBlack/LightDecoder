@@ -1,5 +1,6 @@
 package com.lightdecoder.relay
 
+import android.annotation.SuppressLint
 import android.content.Context
 
 /**
@@ -21,6 +22,9 @@ object RelayPrefs {
     private const val KEY_NOTIFY_MESSAGES = "notify_messages"
     private const val KEY_CATCH_STICKERS = "catch_stickers"
     private const val KEY_BACKFILL_DONE_AT = "backfill_done_at"
+    private const val KEY_ARCHIVE_PHONE = "archive_phone"
+    private const val KEY_ARCHIVE_ACCOUNT = "archive_account"
+    private const val KEY_UNCONFIRMED_SENDS = "unconfirmed_sends"
 
     private fun prefs(context: Context) =
         context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -65,4 +69,47 @@ object RelayPrefs {
 
     fun setBackfillDoneAt(context: Context, timestampMs: Long) =
         prefs(context).edit().putLong(KEY_BACKFILL_DONE_AT, timestampMs).apply()
+
+    /**
+     * The phone (and Google account) the local archive came from; empty if
+     * unknown. Kept when unpairing keeps the archive, so pairing again can tell
+     * whether the archive belongs to the new phone: conversation ids only mean
+     * something on the phone they came from.
+     */
+    fun archivePhone(context: Context): String = prefs(context).getString(KEY_ARCHIVE_PHONE, null).orEmpty()
+
+    fun archiveAccount(context: Context): String = prefs(context).getString(KEY_ARCHIVE_ACCOUNT, null).orEmpty()
+
+    /**
+     * Records (or, with empty values, forgets) who the archive belongs to.
+     * Unlike the other settings it is on disk before this returns: if the app
+     * died just after the archive was cleared for a new phone and the write
+     * were lost, the owner would still name the old phone, and pairing that
+     * phone again later would mix its messages into the new phone's. Call it
+     * off the main thread.
+     */
+    @SuppressLint("ApplySharedPref")
+    fun setArchiveOwner(context: Context, phoneId: String, account: String) {
+        if (archivePhone(context) == phoneId && archiveAccount(context) == account) return
+        prefs(context).edit().putString(KEY_ARCHIVE_PHONE, phoneId).putString(KEY_ARCHIVE_ACCOUNT, account).commit()
+    }
+
+    /**
+     * Sends Google accepted whose echo from the phone has not arrived yet:
+     * outbox key (a random tmpId, never content) to when it was sent.
+     */
+    fun unconfirmedSends(context: Context): Map<String, Long> =
+        prefs(context).getString(KEY_UNCONFIRMED_SENDS, null).orEmpty()
+            .split(';')
+            .mapNotNull { entry ->
+                val key = entry.substringBefore('=', "")
+                val at = entry.substringAfter('=', "").toLongOrNull()
+                if (key.isEmpty() || at == null) null else key to at
+            }
+            .toMap()
+
+    fun setUnconfirmedSends(context: Context, sends: Map<String, Long>) =
+        prefs(context).edit()
+            .putString(KEY_UNCONFIRMED_SENDS, sends.entries.joinToString(";") { "${it.key}=${it.value}" })
+            .apply()
 }

@@ -87,6 +87,8 @@ internal class RelayTestEnv {
             typingThrottleMs = 5_000,
             reconnectDelaysMs = listOf(60_000),
             healthEventIntervalMs = 0,
+            unconfirmedSendCheckMs = 60_000,
+            unconfirmedSendGiveUpMs = 3_600_000,
         )
     }
 }

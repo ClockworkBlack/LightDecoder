@@ -1,8 +1,8 @@
 package com.lightdecoder.relay
 
 import com.lightdecoder.archive.ArchiveRepository
-import com.lightdecoder.archive.MessageRow
 import com.lightdecoder.archive.SyncStateRow
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -18,54 +18,128 @@ import kotlinx.coroutines.flow.MutableStateFlow
  * app killed, cancelled) carries on from there next time instead of starting
  * over.
  *
+ * Every page is stored through [gate] with the epoch taken before asking, so
+ * a page that comes back after the archive was deleted is dropped; and a run
+ * that was cancelled while it waited for a page writes nothing more.
+ *
  * Only plain bridge reads and archive writes happen here; the caller decides
  * when to run, and catches [RelayException].
  */
 internal class Backfill(
     private val repo: ArchiveRepository,
     private val bridge: () -> RelayBridge,
+    private val gate: ArchiveGate,
     private val pagePauseMs: Long,
     private val conversationPauseMs: Long,
     private val progress: MutableStateFlow<BackfillProgress>,
 ) {
+    /** What a run did: messages fetched, and conversations skipped because the phone kept failing on them. */
+    data class Outcome(val messages: Int, val skipped: Int)
 
     /**
      * Imports the newest [BackfillDepth.conversations] inbox conversations,
      * up to [BackfillDepth.messagesPerConversation] messages each (counting
-     * what the archive already has). Returns the number of messages fetched.
+     * what the archive already has).
+     *
+     * A conversation the phone cannot serve (not found, a reply that does
+     * not parse) is skipped, so one bad conversation does not stop the rest;
+     * the thread's "load older" can still reach it. The run stops when the
+     * link itself is down, or after two failures in a row (the phone is not
+     * answering at all).
      */
-    suspend fun run(depth: BackfillDepth): Int {
-        if (depth == BackfillDepth.OFF) return 0
+    suspend fun run(depth: BackfillDepth): Outcome {
+        if (depth == BackfillDepth.OFF) return Outcome(0, 0)
+        val since = gate.epoch()
         val conversations = bridge().listConversations(Folder.INBOX, depth.conversations).take(depth.conversations)
-        repo.upsertConversations(conversations)
-        var messages = 0
         currentCoroutineContext().ensureActive()
+        gate.ifCurrent(since) { repo.upsertConversations(conversations) } ?: throw ArchiveWiped()
+        var messages = 0
+        var skipped = 0
+        var failedInARow = 0
         progress.value = BackfillProgress(true, 0, conversations.size, 0)
         for ((index, conversation) in conversations.withIndex()) {
             currentCoroutineContext().ensureActive()
-            messages += importConversation(conversation.id, depth.messagesPerConversation)
+            try {
+                messages += importConversation(conversation.id, depth.messagesPerConversation)
+                failedInARow = 0
+            } catch (e: RelayException) {
+                if (e.code in ABORT_CODES || ++failedInARow >= 2) throw e
+                skipped++
+            }
             // A cancelled run may only notice once a page it was waiting for
             // arrives; it must not overwrite the progress of the next run.
             currentCoroutineContext().ensureActive()
             progress.value = BackfillProgress(true, index + 1, conversations.size, messages)
             if (index < conversations.lastIndex) delay(conversationPauseMs)
         }
-        return messages
+        return Outcome(messages, skipped)
     }
 
     /**
-     * Fetches the page before the oldest message known for a conversation.
-     * Returns how many messages came back; 0 means the start of the
-     * conversation has been reached.
+     * Fetches the page before where the import got to (the newest page if
+     * nothing was imported yet). Returns how many messages came back; 0 means
+     * the start of the conversation has been reached.
+     *
+     * It never pages from the oldest message stored: a live update can store
+     * one old message on its own (a reaction to something from last year),
+     * and paging below it would skip everything between it and the import.
+     * Messages already stored come back again harmlessly (stored by id).
      */
     fun loadOlder(conversationId: String, count: Int): Int {
         val sync = repo.syncState(conversationId)
         if (sync?.historyComplete == true) return 0
-        val cursor = olderOf(sync?.cursor, oldestStoredCursor(conversationId))
-        val page = bridge().fetchMessages(conversationId, count.coerceIn(1, PAGE_SIZE), cursor)
-        repo.upsertMessages(page.messages)
-        repo.setSyncState(nextSyncState(conversationId, sync, cursor, page))
-        return page.messages.size
+        val cursor = sync?.cursor
+        val since = gate.epoch()
+        val page = bridge().fetchMessages(conversationId, requestSize(count, cursor), cursor)
+        return gate.ifCurrent(since) {
+            repo.upsertMessages(page.messages)
+            repo.setSyncState(nextSyncState(conversationId, sync, cursor, page))
+            page.messages.size
+        } ?: 0
+    }
+
+    /**
+     * Fills the gap between the newest message the archive has for a
+     * conversation and the phone's newest: what arrived while the link was
+     * down. Live events after a gap are not replayed, so without this those
+     * messages would never be in the thread or in search.
+     *
+     * Pages back from the newest until a page reaches what is stored (at
+     * most [maxPages]). A conversation with nothing stored has no gap to
+     * fill (its history is the import's, or "load older"'s, to fetch), and
+     * the import's cursor is never touched. [onStored] is told about each
+     * message stored (for the sticker inbox); no notifications. Returns the
+     * number of messages fetched.
+     */
+    suspend fun catchUp(
+        conversation: ConversationDto,
+        onStored: (MessageDto, ArchiveRepository.UpsertResult) -> Unit = { _, _ -> },
+        maxPages: Int = CATCH_UP_PAGES,
+    ): Int {
+        if (conversation.latestMessageId.isEmpty()) return 0
+        if (repo.message(conversation.latestMessageId) != null) return 0
+        val newestStored = repo.messages(conversation.id, limit = PAGE_SIZE).lastOrNull { !it.isLocal }?.timestampMs
+            ?: return 0
+        var cursor: Cursor? = null
+        var fetched = 0
+        repeat(maxPages) {
+            currentCoroutineContext().ensureActive()
+            val since = gate.epoch()
+            val page = bridge().fetchMessages(conversation.id, PAGE_SIZE, cursor)
+            currentCoroutineContext().ensureActive()
+            if (page.messages.isEmpty()) return fetched
+            val reached = gate.ifCurrent(since) {
+                val reached = page.messages.any { it.timestampMs <= newestStored || repo.message(it.id) != null }
+                for (message in page.messages) onStored(message, repo.upsertMessage(message))
+                reached
+            } ?: throw ArchiveWiped()
+            fetched += page.messages.size
+            if (reached || page.cursor == null) return fetched
+            cursor = page.cursor
+            delay(pagePauseMs)
+        }
+        // Hit the cap: what lies between is left to "load older" and the import.
+        return fetched
     }
 
     /** Pages back through one conversation until it has [target] messages or its start is reached. */
@@ -74,23 +148,30 @@ internal class Backfill(
         if (sync?.historyComplete == true) return 0
         var have = storedCount(conversationId, target)
         var fetched = 0
-        // With nothing imported yet the newest page comes first: it also
-        // fills in anything that arrived while the link was down.
+        // With nothing imported yet the newest page comes first.
         var cursor = sync?.cursor
+        var since = gate.epoch()
         while (have < target) {
             currentCoroutineContext().ensureActive()
-            val page = bridge().fetchMessages(conversationId, (target - have).coerceIn(1, PAGE_SIZE), cursor)
-            repo.upsertMessages(page.messages)
+            since = gate.epoch()
+            val page = bridge().fetchMessages(conversationId, requestSize(target - have, cursor), cursor)
+            // A run cancelled while it waited must not store a stale cursor over a newer run's.
+            currentCoroutineContext().ensureActive()
+            val next = nextSyncState(conversationId, sync, cursor, page, System.currentTimeMillis())
+            gate.ifCurrent(since) {
+                repo.upsertMessages(page.messages)
+                repo.setSyncState(next)
+            } ?: throw ArchiveWiped()
+            sync = next
             fetched += page.messages.size
-            sync = nextSyncState(conversationId, sync, cursor, page, System.currentTimeMillis())
-            repo.setSyncState(sync)
-            if (sync.historyComplete || page.messages.isEmpty()) break
-            cursor = sync.cursor
+            if (next.historyComplete || page.messages.isEmpty()) break
+            cursor = next.cursor
             have = storedCount(conversationId, target)
             if (have < target) delay(pagePauseMs)
         }
-        if (sync != null && sync.lastBackfillAt == 0L) {
-            repo.setSyncState(sync.copy(lastBackfillAt = System.currentTimeMillis()))
+        val finished = sync
+        if (finished != null && finished.lastBackfillAt == 0L) {
+            gate.ifCurrent(since) { repo.setSyncState(finished.copy(lastBackfillAt = System.currentTimeMillis())) }
         }
         return fetched
     }
@@ -121,33 +202,30 @@ internal class Backfill(
     private fun storedCount(conversationId: String, limit: Int): Int =
         repo.messages(conversationId, limit = limit).count { !it.isLocal }
 
-    /**
-     * A cursor at the oldest message the archive holds for this conversation
-     * (live messages arrive without any history cursor). Like the mautrix
-     * bridge's anchor cursor, it lets "load older" start below what is shown.
-     */
-    private fun oldestStoredCursor(conversationId: String): Cursor? {
-        var before = Long.MAX_VALUE
-        var oldest: MessageRow? = null
-        while (true) {
-            val batch = repo.messages(conversationId, beforeTs = before, limit = SCAN_BATCH)
-            batch.firstOrNull { !it.isLocal }?.let { oldest = it }
-            if (batch.size < SCAN_BATCH) break
-            before = batch.first().timestampMs
-        }
-        return oldest?.let { Cursor(it.id, it.timestampMs) }
-    }
-
-    private fun olderOf(a: Cursor?, b: Cursor?): Cursor? = when {
-        a == null -> b
-        b == null -> a
-        b.lastItemTimestampMs < a.lastItemTimestampMs -> b
-        else -> a
-    }
+    /** The archive was deleted while a page was on its way: this run is over. */
+    class ArchiveWiped : CancellationException("archive deleted")
 
     companion object {
         /** Messages per request; the phone answers larger requests slowly. */
         const val PAGE_SIZE = 50
-        private const val SCAN_BATCH = 500
+
+        /** At most this many pages (newest first) to fill one conversation's gap. */
+        const val CATCH_UP_PAGES = 10
+
+        /**
+         * Messages to ask for. Below a cursor always a full page: the phone's
+         * reply can start with the cursor's own message (or ones from the same
+         * millisecond), which the bridge drops; a request for one or two
+         * would then come back empty and without a cursor, and that would be
+         * stored as "history complete" with years of history left.
+         */
+        fun requestSize(wanted: Int, cursor: Cursor?): Int =
+            if (cursor == null) wanted.coerceIn(1, PAGE_SIZE) else PAGE_SIZE
+
+        /** Failures that mean the link, not the conversation, is the problem: stop the whole run. */
+        val ABORT_CODES = setOf(
+            RelayException.NOT_CONNECTED, RelayException.CONNECTION_CLOSED, RelayException.NOT_PAIRED,
+            RelayException.LOGGED_OUT, RelayException.COOKIES_INVALID,
+        )
     }
 }

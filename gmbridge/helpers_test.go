@@ -154,7 +154,39 @@ func markLive(b *GMBridge) uint64 {
 	b.live = true
 	b.connSeq++
 	b.connCtx, b.connCancel = context.WithCancel(context.Background())
+	b.resetConnectionFlags()
 	return b.gen
+}
+
+// stub replaces a package-level hook for the duration of the test.
+func stub[T any](t *testing.T, target *T, value T) {
+	t.Helper()
+	old := *target
+	*target = value
+	t.Cleanup(func() { *target = old })
+}
+
+// stateEvents returns the decoded "state" events seen so far, in order.
+func (r *recorder) stateEvents() []stateDTO {
+	var out []stateDTO
+	for _, p := range r.eventsOf(kindState) {
+		var st stateDTO
+		_ = json.Unmarshal(p, &st)
+		out = append(out, st)
+	}
+	return out
+}
+
+// drain waits until the dispatcher has run everything queued so far.
+func drain(t *testing.T, b *GMBridge) {
+	t.Helper()
+	done := make(chan struct{})
+	b.disp.push(func() { close(done) })
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("dispatcher did not drain")
+	}
 }
 
 func codeOf(err error) string {

@@ -20,6 +20,7 @@ import com.lightdecoder.databinding.DialogGroupNameBinding
 import com.lightdecoder.relay.RelayIntents
 import com.lightdecoder.relay.RelayManager
 import com.lightdecoder.ui.relay.RelayErrors
+import com.lightdecoder.ui.relay.SignInWebData
 import com.lightdecoder.ui.relay.relayAttempt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -46,6 +47,8 @@ class NewConversationActivity : AppCompatActivity() {
     private var starting = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Sign-in cookies a killed setup screen left behind (once per process; see SignInWebData).
+        SignInWebData.wipeIfDirty(this)
         super.onCreate(savedInstanceState)
         binding = ActivityNewConversationBinding.inflate(layoutInflater)
         setContentView(binding.root)

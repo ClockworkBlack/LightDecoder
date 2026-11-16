@@ -37,6 +37,11 @@ const (
 	codeInternal           = "internal"
 )
 
+// codeUnpairRemoteFailed is not an error a call returns: it is the code on
+// the "unpaired" state when the local wipe happened but the revoke did not
+// reach Google, so the phone may still list the device.
+const codeUnpairRemoteFailed = "unpair_remote_failed"
+
 // maxDetailLen keeps exception messages short; a detail is a hint for the
 // activity log, never a payload.
 const maxDetailLen = 200

@@ -36,6 +36,7 @@ import com.lightdecoder.ui.relay.RelayErrors
 import com.lightdecoder.ui.relay.RelaySetupActivity
 import com.lightdecoder.ui.relay.RelayStatusActivity
 import com.lightdecoder.ui.relay.RelayUi
+import com.lightdecoder.ui.relay.SignInWebData
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -75,6 +76,8 @@ class InboxActivity : AppCompatActivity() {
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { openNotificationAccessSettings() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Sign-in cookies a killed setup screen left behind (once per process; see SignInWebData).
+        SignInWebData.wipeIfDirty(this)
         super.onCreate(savedInstanceState)
         binding = ActivityInboxBinding.inflate(layoutInflater)
         setContentView(binding.root)
@@ -246,7 +249,11 @@ class InboxActivity : AppCompatActivity() {
                     binding.relayAction.setText(R.string.link_card_open)
                 }
                 else -> {
-                    binding.relayBody.setText(RelayUi.title(state.phase))
+                    // "Notifications are off" rather than just "Disconnected": the link
+                    // never runs without its notification (the conversations' banner
+                    // then offers the settings).
+                    val fix = RelayUi.fix(state, paired, RelayUi.notificationsOn(this@InboxActivity))
+                    binding.relayBody.setText(RelayUi.title(state.phase, fix))
                     binding.relayAction.setText(R.string.link_card_open)
                 }
             }

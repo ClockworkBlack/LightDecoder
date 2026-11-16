@@ -5,6 +5,7 @@ import android.app.Application
 import android.os.Bundle
 import com.lightdecoder.relay.RelayManager
 import com.lightdecoder.relay.RelayNotifications
+import com.lightdecoder.ui.relay.SignInWebData
 
 /**
  * The app process. Sets up the Google Messages link's notification channels
@@ -16,6 +17,9 @@ class LightDecoderApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // Also for processes that start with no screen (boot, the link's service):
+        // sign-in cookies a killed sign-in left behind go before anything else runs.
+        SignInWebData.wipeIfDirty(this)
         RelayNotifications.ensureChannels(this)
         RelayManager.get(this)
         // If the user wants the link connected but Android refused to start

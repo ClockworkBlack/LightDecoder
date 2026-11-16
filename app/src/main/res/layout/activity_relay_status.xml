@@ -78,6 +78,14 @@
                             android:layout_height="wrap_content"
                             android:text="@string/link_fix_set_up"
                             android:visibility="gone" />
+
+                        <!-- The link never runs without its notification: the way to turn it back on. -->
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/turnOnNotifications"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/link_notifications_open_settings"
+                            android:visibility="gone" />
                     </LinearLayout>
 
                     <TextView
@@ -204,6 +212,46 @@
                             android:layout_marginStart="8dp"
                             android:text="@string/link_unpair" />
                     </LinearLayout>
+
+                    <!-- While an unpair runs (it finishes even if this screen closes). -->
+                    <com.google.android.material.progressindicator.LinearProgressIndicator
+                        android:id="@+id/unpairProgress"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:contentDescription="@string/link_unpairing"
+                        android:indeterminate="true"
+                        android:visibility="gone" />
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <!-- An archive kept after unpairing: the way to delete it without pairing again. -->
+            <com.google.android.material.card.MaterialCardView
+                android:id="@+id/archiveCard"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="16dp">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/link_delete_archive_help"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/deleteArchive"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:text="@string/link_delete_archive" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 

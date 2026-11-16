@@ -7,6 +7,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.TextView
 import androidx.core.view.ViewCompat
 import androidx.core.view.accessibility.AccessibilityNodeInfoCompat.AccessibilityActionCompat
@@ -227,6 +228,9 @@ class MessagesAdapter(
 
     private fun bindMedia(holder: MessageHolder, row: MessageRow) {
         val container = holder.binding.mediaContainer
+        // The old part views go: stop their loads first, or every rebind (a status
+        // or reaction change) would leave a download running for a detached view.
+        cancelMedia(container)
         container.removeAllViews()
         if (row.media.isEmpty()) {
             container.visibility = View.GONE
@@ -262,6 +266,17 @@ class MessagesAdapter(
         }
     }
 
+    /** A row scrolled out of view: its pictures stop loading. */
+    override fun onViewRecycled(holder: RecyclerView.ViewHolder) {
+        if (holder is MessageHolder) cancelMedia(holder.binding.mediaContainer)
+    }
+
+    private fun cancelMedia(container: ViewGroup) {
+        for (i in 0 until container.childCount) {
+            container.getChildAt(i).findViewById<ImageView>(R.id.mediaImage)?.let(media::cancel)
+        }
+    }
+
     private fun bindReactions(holder: MessageHolder, row: MessageRow) {
         val box = holder.binding.reactions
         box.removeAllViews()
@@ -276,11 +291,13 @@ class MessagesAdapter(
             val chip = inflater.inflate(R.layout.item_reaction, box, false) as TextView
             val count = reaction.participantIds.size.coerceAtLeast(1)
             chip.text = if (count > 1) "${reaction.emoji} $count" else reaction.emoji
-            chip.setBackgroundResource(if (reaction.fromMe) R.drawable.bg_reaction_mine else R.drawable.bg_reaction)
+            // A 48dp touch target around a smaller pill (the inset drawables keep the pill's size).
+            chip.setBackgroundResource(if (reaction.fromMe) R.drawable.bg_reaction_mine_target else R.drawable.bg_reaction_target)
             chip.contentDescription = box.context.resources.getQuantityString(
                 if (reaction.fromMe) R.plurals.chat_reaction_mine else R.plurals.chat_reaction, count, reaction.emoji, count,
             )
             chip.isEnabled = !row.isLocal
+            chip.alpha = if (chip.isEnabled) 1f else DISABLED_ALPHA
             chip.setOnClickListener { callbacks.onReactionTap(row, reaction) }
             box.addView(chip)
         }
@@ -313,6 +330,9 @@ class MessagesAdapter(
         const val TYPE_DAY = 1
         const val TYPE_MESSAGE = 2
         const val TYPE_SYSTEM = 3
+
+        /** How Material dims a control that cannot be used. */
+        const val DISABLED_ALPHA = 0.38f
 
         /** Longest side of a picture preview in a bubble (decoded at this size, shown up to it). */
         const val MEDIA_MAX_SIDE_DP = 240

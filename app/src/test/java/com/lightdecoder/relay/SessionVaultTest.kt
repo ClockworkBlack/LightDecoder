@@ -9,6 +9,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -114,8 +115,14 @@ class SessionVaultTest {
         SessionVault.save(context, session)
         val working = SessionVault.cipherProvider
         SessionVault.cipherProvider = SessionVault.CipherProvider { throw java.security.ProviderException("keystore busy") }
-        assertNull(SessionVault.load(context))
+        try {
+            SessionVault.load(context)
+            fail("a passing failure must not look like 'no session'")
+        } catch (e: SessionVault.UnreadableException) {
+            // Expected: the caller retries later.
+        }
         assertTrue("a passing failure must not cost the pairing", file().exists())
+        assertTrue(SessionVault.exists(context))
 
         SessionVault.cipherProvider = working
         assertArrayEquals(session, SessionVault.load(context))

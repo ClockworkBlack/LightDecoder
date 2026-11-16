@@ -1,6 +1,7 @@
 package gmbridge
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -88,7 +89,9 @@ func TestStateEventsFromSyntheticLibgmEvents(t *testing.T) {
 	h(&events.ListenTemporaryError{Error: fmt.Errorf("%w in 1m0s", libgm.ErrPhoneNotResponding)})
 	h(&gmproto.UserAlertEvent{AlertType: gmproto.AlertType_MOBILE_BATTERY_LOW}) // ignored
 
-	want := []string{stateConnected, stateActive, stateActiveElsewhere, statePhoneOffline, stateConnected, stateReconnecting}
+	// PhoneRespondingAgain goes back to what still holds: another browser
+	// is still the active session.
+	want := []string{stateConnected, stateActive, stateActiveElsewhere, statePhoneOffline, stateActiveElsewhere, stateReconnecting}
 	waitFor(t, "six states", func() bool { return len(rec.states()) == len(want) })
 	for i, s := range rec.states() {
 		if s != want[i] {
@@ -294,5 +297,271 @@ func TestStaleFatalDoesNotKillNewerConnection(t *testing.T) {
 	b.invalidate(gen, oldSeq, stateLoggedOut, newError(codeLoggedOut, "gone"))
 	if b.IsPaired() {
 		t.Error("logged_out must clear the pairing")
+	}
+}
+
+// The phone sends spurious MESSAGE_DELETED updates while it serves the
+// conversation list (connector: syncingConversations). They must never reach
+// Kotlin, which would delete archived messages for good.
+func TestDeletesDroppedDuringConversationSync(t *testing.T) {
+	b, rec := newPairedBridge(t)
+	gen := markLive(b)
+	h := b.handlerFor(gen)
+	deleted := func(id string) *libgm.WrappedMessage {
+		return &libgm.WrappedMessage{Message: &gmproto.Message{MessageID: id, ConversationID: "c1",
+			MessageStatus: &gmproto.MessageStatus{Status: gmproto.MessageStatusType_MESSAGE_DELETED}}}
+	}
+	b.whileSyncingConversations(func() {
+		h(deleted("during"))
+		h(&libgm.WrappedMessage{Message: sampleMessage()}) // other updates still flow
+	})
+	h(deleted("after"))
+	waitFor(t, "two messages", func() bool { return len(rec.eventsOf(kindMessage)) == 2 })
+	drain(t, b)
+	var ids []string
+	for _, p := range rec.eventsOf(kindMessage) {
+		var msg messageDTO
+		_ = json.Unmarshal(p, &msg)
+		ids = append(ids, msg.ID)
+	}
+	if len(ids) != 2 || ids[0] != "m1" || ids[1] != "after" {
+		t.Errorf("only the non-deletion and the deletion after the sync should pass: %v", ids)
+	}
+
+	// The count stays balanced even if the call panics.
+	func() {
+		defer func() { _ = recover() }()
+		b.whileSyncingConversations(func() { panic("libgm blew up") })
+	}()
+	if n := b.syncingConversations.Load(); n != 0 {
+		t.Errorf("syncingConversations = %d after a panic", n)
+	}
+}
+
+// A long-poll blip must not hide conditions that still hold: libgm reports
+// PhoneNotResponding and BROWSER_INACTIVE only once.
+func TestRecoveryKeepsConditionsInForce(t *testing.T) {
+	last := func(rec *recorder) stateDTO {
+		st := rec.stateEvents()
+		return st[len(st)-1]
+	}
+	blip := func(h libgm.EventHandler) {
+		h(&events.ListenTemporaryError{Error: fmt.Errorf("network down")})
+		h(&events.ListenRecovered{})
+	}
+
+	t.Run("phone offline", func(t *testing.T) {
+		b, rec := newPairedBridge(t)
+		h := b.handlerFor(markLive(b))
+		h(&events.ListenRecovered{})
+		h(&events.PhoneNotResponding{})
+		blip(h)
+		waitFor(t, "four states", func() bool { return len(rec.states()) == 4 })
+		if st := last(rec); st.State != statePhoneOffline || st.Code != codePhoneNotResponding {
+			t.Errorf("after the blip: %+v (states %v)", st, rec.states())
+		}
+		h(&events.PhoneRespondingAgain{})
+		waitFor(t, "five states", func() bool { return len(rec.states()) == 5 })
+		if st := last(rec); st.State != stateConnected {
+			t.Errorf("phone back: %+v", st)
+		}
+	})
+
+	t.Run("active elsewhere", func(t *testing.T) {
+		b, rec := newPairedBridge(t)
+		h := b.handlerFor(markLive(b))
+		h(&events.ListenRecovered{})
+		h(&gmproto.UserAlertEvent{AlertType: gmproto.AlertType_BROWSER_ACTIVE})
+		h(&gmproto.UserAlertEvent{AlertType: gmproto.AlertType_BROWSER_INACTIVE})
+		blip(h)
+		waitFor(t, "five states", func() bool { return len(rec.states()) == 5 })
+		if st := last(rec); st.State != stateActiveElsewhere || st.Detail != gmproto.AlertType_BROWSER_INACTIVE.String() {
+			t.Errorf("after the blip: %+v (states %v)", st, rec.states())
+		}
+		h(&gmproto.UserAlertEvent{AlertType: gmproto.AlertType_BROWSER_ACTIVE})
+		waitFor(t, "six states", func() bool { return len(rec.states()) == 6 })
+		if st := last(rec); st.State != stateActive {
+			t.Errorf("used here again: %+v", st)
+		}
+		blip(h)
+		waitFor(t, "eight states", func() bool { return len(rec.states()) == 8 })
+		if st := last(rec); st.State != stateActive {
+			t.Errorf("a blip while active should come back as active: %+v", st)
+		}
+	})
+
+	t.Run("phone offline across reconnect", func(t *testing.T) {
+		b, rec := newPairedBridge(t)
+		h := b.handlerFor(markLive(b))
+		h(&events.ListenRecovered{})
+		h(&events.PhoneNotResponding{})
+		drain(t, b)
+		b.Disconnect()
+		markLive(b) // Connect again on the same client
+		h(&events.ListenRecovered{})
+		waitFor(t, "four states", func() bool { return len(rec.states()) == 4 })
+		if s := rec.states(); s[2] != stateDisconnected || last(rec).State != statePhoneOffline {
+			t.Errorf("libgm will not report PhoneNotResponding again for this client: %v", s)
+		}
+	})
+
+	t.Run("new client starts fresh", func(t *testing.T) {
+		b, _ := newPairedBridge(t)
+		b.phoneNotResponding.Store(true)
+		b.mu.Lock()
+		b.client = b.newClientLocked()
+		b.mu.Unlock()
+		if b.currentState().State != stateConnected {
+			t.Errorf("a new client has fresh liveness: %+v", b.currentState())
+		}
+	})
+}
+
+// Events from the gaps (another browser active, libgm's NoDataReceived) are
+// not redelivered, so Kotlin is asked to catch up, once per gap.
+func TestResyncAfterGaps(t *testing.T) {
+	msg := func(id string) *libgm.WrappedMessage {
+		return &libgm.WrappedMessage{Message: &gmproto.Message{MessageID: id, ConversationID: "c1",
+			MessageStatus: &gmproto.MessageStatus{Status: gmproto.MessageStatusType_INCOMING_COMPLETE}}}
+	}
+	active := &gmproto.UserAlertEvent{AlertType: gmproto.AlertType_BROWSER_ACTIVE}
+	resyncs := func(t *testing.T, b *GMBridge, rec *recorder) int {
+		drain(t, b)
+		return len(rec.eventsOf(kindResync))
+	}
+
+	b, rec := newPairedBridge(t)
+	h := b.handlerFor(markLive(b))
+	h(&events.ListenRecovered{})
+	h(active)
+	if n := resyncs(t, b, rec); n != 0 {
+		t.Fatalf("the first BROWSER_ACTIVE of a connection needs no resync (Kotlin syncs on connect): %d", n)
+	}
+	h(&gmproto.UserAlertEvent{AlertType: gmproto.AlertType_BROWSER_INACTIVE_FROM_INACTIVITY})
+	h(msg("elsewhere"))
+	h(active) // "use here"
+	if n := resyncs(t, b, rec); n != 1 {
+		t.Fatalf("active again after another browser: want 1 resync, got %d", n)
+	}
+	h(active)
+	if n := resyncs(t, b, rec); n != 1 {
+		t.Fatalf("a repeated BROWSER_ACTIVE must not resync again: %d", n)
+	}
+
+	h(&events.NoDataReceived{})
+	h(&gmproto.Conversation{ConversationID: "c2"})
+	h(msg("m2"))
+	if n := resyncs(t, b, rec); n != 2 {
+		t.Fatalf("data after a gap: want one more resync, got %d", n)
+	}
+
+	h(&events.NoDataReceived{})
+	h(active)
+	h(msg("m3"))
+	if n := resyncs(t, b, rec); n != 3 {
+		t.Fatalf("BROWSER_ACTIVE after a gap resyncs once and clears the gap: %d", n)
+	}
+
+	// A gap reported by a connection that has been closed does not count.
+	h(&events.NoDataReceived{})
+	drain(t, b)
+	b.Disconnect()
+	h(msg("m4"))
+	if n := resyncs(t, b, rec); n != 3 {
+		t.Fatalf("no resync while disconnected: %d", n)
+	}
+}
+
+// libgm's postConnect sends SetActiveSession once and only reports a failure
+// as PingFailed{ErrorCount: 0}; the bridge retries it.
+func TestSetActiveSessionRetriedAfterPostConnectFailure(t *testing.T) {
+	stub(t, &setActiveRetryDelays, []time.Duration{10 * time.Millisecond, 10 * time.Millisecond, 10 * time.Millisecond})
+	var mu sync.Mutex
+	calls := 0
+	stub(t, &setActiveSession, func(context.Context, *libgm.Client) error {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		if calls == 1 {
+			return fmt.Errorf("network blip")
+		}
+		return nil
+	})
+	callCount := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return calls
+	}
+
+	b, rec := newPairedBridge(t)
+	h := b.handlerFor(markLive(b))
+	h(&events.ListenRecovered{})
+	h(&events.PingFailed{Error: fmt.Errorf("ditto ping"), ErrorCount: 2}) // a ping failure: not retried
+	drain(t, b)
+	time.Sleep(50 * time.Millisecond)
+	if callCount() != 0 {
+		t.Fatal("ping failures must not trigger SetActiveSession retries")
+	}
+
+	h(&events.PingFailed{Error: fmt.Errorf("failed to set active session: boom")})
+	waitFor(t, "a successful retry", func() bool { return callCount() == 2 })
+	time.Sleep(50 * time.Millisecond)
+	if callCount() != 2 {
+		t.Errorf("retries must stop after one goes through: %d", callCount())
+	}
+	h(&events.PingFailed{Error: fmt.Errorf("failed to set active session: again")})
+	drain(t, b)
+	time.Sleep(50 * time.Millisecond)
+	if callCount() != 2 {
+		t.Errorf("once per connection: %d", callCount())
+	}
+	h(&gmproto.UserAlertEvent{AlertType: gmproto.AlertType_BROWSER_ACTIVE})
+	waitFor(t, "resync after the retried activation", func() bool { return len(rec.eventsOf(kindResync)) == 1 })
+
+	// Already active: nothing to retry.
+	b2, _ := newPairedBridge(t)
+	h2 := b2.handlerFor(markLive(b2))
+	h2(&gmproto.UserAlertEvent{AlertType: gmproto.AlertType_BROWSER_ACTIVE})
+	h2(&events.PingFailed{Error: fmt.Errorf("failed to set active session: boom")})
+	drain(t, b2)
+	time.Sleep(50 * time.Millisecond)
+	if callCount() != 2 {
+		t.Errorf("no retry when the session is already active: %d", callCount())
+	}
+}
+
+// Connect while connected restarts a long poll that is stuck in libgm's
+// growing backoff, and only then.
+func TestConnectWhileLiveRestartsADownLongPoll(t *testing.T) {
+	open := false
+	restarts := 0
+	stub(t, &longPollOpen, func(*libgm.Client) bool { return open })
+	stub(t, &restartLongPoll, func(*libgm.Client) error { restarts++; return nil })
+
+	b, rec := newPairedBridge(t)
+	h := b.handlerFor(markLive(b))
+	if err := b.Connect(); err != nil || restarts != 0 {
+		t.Fatalf("before the first error: err=%v restarts=%d", err, restarts)
+	}
+	h(&events.ListenTemporaryError{Error: fmt.Errorf("network down")})
+	drain(t, b)
+	if err := b.Connect(); err != nil || restarts != 1 {
+		t.Fatalf("long poll down: err=%v restarts=%d", err, restarts)
+	}
+	h(&events.ListenRecovered{})
+	drain(t, b)
+	if err := b.Connect(); err != nil || restarts != 1 {
+		t.Fatalf("recovered: err=%v restarts=%d", err, restarts)
+	}
+	// A late error from the replaced loop while the new stream is open
+	// must not flip the state back to reconnecting.
+	open = true
+	h(&events.ListenTemporaryError{Error: fmt.Errorf("from the old loop")})
+	drain(t, b)
+	if s := rec.states(); len(s) != 2 || s[1] != stateConnected {
+		t.Errorf("states: %v", s)
+	}
+	if err := b.Connect(); err != nil || restarts != 1 {
+		t.Fatalf("open: err=%v restarts=%d", err, restarts)
 	}
 }

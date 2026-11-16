@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.annotation.StringRes
 import com.lightdecoder.R
 import com.lightdecoder.relay.RelayException
+import com.lightdecoder.relay.RelayState
 import kotlinx.coroutines.CancellationException
 
 /**
@@ -34,6 +35,8 @@ object RelayErrors {
         RelayException.TOO_LARGE -> R.string.link_error_too_large
         RelayException.SEND_FAILED -> R.string.link_error_send_failed
         RelayException.LOGGED_OUT -> R.string.link_error_logged_out
+        // Not a bridge code: the runtime's reason for not starting the link.
+        RelayState.NOTIFICATIONS_OFF -> R.string.link_error_notifications_off
         else -> R.string.link_error_internal
     }
 

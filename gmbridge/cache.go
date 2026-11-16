@@ -25,6 +25,9 @@ type stateCache struct {
 	// isDefaultSMSApp is optional in the settings proto and missing from some
 	// events, so the last value seen is kept (connector mergeSettings).
 	isDefaultSMSApp bool
+	// forceRCS: conversations whose latest protocol-switch tombstone says
+	// they became end-to-end encrypted (connector PortalMetadata.ForceRCS).
+	forceRCS map[string]bool
 }
 
 type indexedMessage struct {
@@ -47,6 +50,7 @@ func (c *stateCache) reset() {
 	c.msgIndex = make(map[string]indexedMessage)
 	c.msgOrder = nil
 	c.isDefaultSMSApp = false
+	c.forceRCS = make(map[string]bool)
 }
 
 func (c *stateCache) putConversation(conv *gmproto.Conversation) {
@@ -142,4 +146,42 @@ func (c *stateCache) message(id string) (indexedMessage, bool) {
 	defer c.mu.RUnlock()
 	m, ok := c.msgIndex[id]
 	return m, ok
+}
+
+// noteProtocolSwitch follows the connector's ConvertMessage: a tombstone
+// saying the chat switched to end-to-end encryption (235/237) turns ForceRCS
+// on for it, one saying it switched away (236/238) turns it off. Like the
+// connector it looks only at these one-to-one tombstones, not the group
+// variants. Other messages change nothing.
+func (c *stateCache) noteProtocolSwitch(msg *gmproto.Message) {
+	var force bool
+	switch msg.GetMessageStatus().GetStatus() {
+	case gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_RCS_TO_E2EE,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_TEXT_TO_E2EE:
+		force = true
+	case gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_E2EE_TO_RCS,
+		gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_E2EE_TO_TEXT:
+		force = false
+	default:
+		return
+	}
+	id := msg.GetConversationID()
+	if id == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if force {
+		c.forceRCS[id] = true
+	} else {
+		delete(c.forceRCS, id)
+	}
+}
+
+// shouldForceRCS reports what noteProtocolSwitch last recorded for the
+// conversation (false if nothing was seen, as for a new connector portal).
+func (c *stateCache) shouldForceRCS(conversationID string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.forceRCS[conversationID]
 }

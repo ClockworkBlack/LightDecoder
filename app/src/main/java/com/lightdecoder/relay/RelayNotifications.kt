@@ -53,9 +53,25 @@ object RelayNotifications {
     }
 
     /**
+     * Whether the link's ongoing notification can actually be seen: the
+     * app's notifications are on (on Android 13+ that includes the
+     * POST_NOTIFICATIONS permission) and its channel is not turned off. The
+     * link must not run without it, since its Disconnect button is the
+     * user's way to stop it at any time.
+     */
+    fun statusVisible(context: Context): Boolean {
+        if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) return false
+        ensureChannels(context)
+        val system = context.getSystemService(NotificationManager::class.java) ?: return true
+        val channel = system.getNotificationChannel(CHANNEL_STATUS) ?: return true
+        return channel.importance != NotificationManager.IMPORTANCE_NONE
+    }
+
+    /**
      * The foreground service's notification: what the link is doing, a tap
      * that opens the conversations, and the one-tap Disconnect the product
-     * rules require.
+     * rules require. Android 14+ lets the user swipe it away even so; its
+     * delete intent puts it straight back while the service runs.
      */
     fun serviceNotification(context: Context, state: RelayState): Notification {
         ensureChannels(context)
@@ -65,6 +81,10 @@ object RelayNotifications {
         )
         val disconnect = PendingIntent.getService(
             context, 1, RelayService.disconnectIntent(context),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val repost = PendingIntent.getService(
+            context, 3, RelayService.repostIntent(context),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val text = when (state.phase) {
@@ -79,6 +99,7 @@ object RelayNotifications {
             .setContentIntent(open)
             .addAction(R.drawable.ic_relay_disconnect, context.getString(R.string.relay_action_disconnect), disconnect)
             .setOngoing(true)
+            .setDeleteIntent(repost)
             .setOnlyAlertOnce(true)
             .setShowWhen(false)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)

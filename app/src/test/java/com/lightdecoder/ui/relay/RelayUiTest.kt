@@ -1,11 +1,14 @@
 package com.lightdecoder.ui.relay
 
+import android.app.NotificationManager
 import android.content.Context
 import android.net.Uri
+import android.provider.Settings
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.lightdecoder.R
 import com.lightdecoder.relay.RelayException
+import com.lightdecoder.relay.RelayNotifications
 import com.lightdecoder.relay.RelayState
 import com.lightdecoder.relay.RelayState.Phase
 import org.junit.Assert.assertEquals
@@ -14,8 +17,14 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Shadows.shadowOf
+import java.io.File
 
-/** Error wording, the state-to-action rules, and which pages the sign-in WebView may open. */
+/**
+ * Error wording, the state-to-action rules (including "notifications are
+ * off"), which pages the sign-in WebView may open, and the wipe of sign-in
+ * data a killed setup left behind.
+ */
 @RunWith(AndroidJUnit4::class)
 class RelayUiTest {
 
@@ -56,6 +65,80 @@ class RelayUiTest {
         for (phase in Phase.entries) {
             assertTrue(context.getString(RelayUi.title(phase)).isNotBlank())
             assertTrue(context.getString(RelayUi.body(phase)).isNotBlank())
+        }
+    }
+
+    @Test
+    fun withItsNotificationOffTheLinkOffersNotificationSettingsNotConnect() {
+        val off = false
+        // The runtime held the link back for that reason, or it is simply not running.
+        assertEquals(
+            RelayUi.Fix.NOTIFICATIONS,
+            RelayUi.fix(RelayState(Phase.DISCONNECTED, RelayState.NOTIFICATIONS_OFF), paired = true, notificationsOn = off),
+        )
+        assertEquals(RelayUi.Fix.NOTIFICATIONS, RelayUi.fix(RelayState(Phase.DISCONNECTED), paired = true, notificationsOn = off))
+        // Turned back on: an ordinary disconnected link again.
+        assertEquals(
+            RelayUi.Fix.CONNECT,
+            RelayUi.fix(RelayState(Phase.DISCONNECTED, RelayState.NOTIFICATIONS_OFF), paired = true, notificationsOn = true),
+        )
+        // Pairing problems come first; a live link is left alone.
+        assertEquals(RelayUi.Fix.SET_UP, RelayUi.fix(RelayState(Phase.UNPAIRED), paired = false, notificationsOn = off))
+        assertEquals(RelayUi.Fix.SET_UP, RelayUi.fix(RelayState(Phase.LOGGED_OUT), paired = true, notificationsOn = off))
+        assertEquals(RelayUi.Fix.NONE, RelayUi.fix(RelayState(Phase.CONNECTING), paired = true, notificationsOn = off))
+
+        val fix = RelayUi.Fix.NOTIFICATIONS
+        assertEquals(R.string.link_phase_notifications_off, RelayUi.title(Phase.DISCONNECTED, fix))
+        assertEquals(R.string.link_body_notifications_off, RelayUi.body(Phase.DISCONNECTED, fix))
+        assertEquals(R.string.link_fix_notifications, RelayUi.fixLabel(fix))
+        assertNotEquals(R.string.link_error_internal, RelayErrors.messageRes(RelayState.NOTIFICATIONS_OFF))
+    }
+
+    @Test
+    fun notificationSettingsOpenWhereTheLinksNotificationIsTurnedOff() {
+        val system = context.getSystemService(NotificationManager::class.java)
+        shadowOf(system).setNotificationsEnabled(false)
+        val app = RelayUi.notificationSettingsIntent(context)
+        assertEquals(Settings.ACTION_APP_NOTIFICATION_SETTINGS, app.action)
+        assertEquals(context.packageName, app.getStringExtra(Settings.EXTRA_APP_PACKAGE))
+        assertFalse(RelayUi.notificationsOn(context))
+
+        // The app's notifications are on, so only the link's channel can be the problem.
+        shadowOf(system).setNotificationsEnabled(true)
+        val channel = RelayUi.notificationSettingsIntent(context)
+        assertEquals(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS, channel.action)
+        assertEquals(RelayNotifications.CHANNEL_STATUS, channel.getStringExtra(Settings.EXTRA_CHANNEL_ID))
+    }
+
+    @Test
+    fun signInDataAKilledSetupLeftIsWipedAtTheNextStart() {
+        SignInWebData.resetForTesting()
+        try {
+            // What a process that died mid-sign-in leaves: the marker and Chromium's cookie store.
+            SignInWebData.webViewCreating(context)
+            val cookies = File(context.dataDir, "app_webview/Default/Cookies").apply {
+                parentFile!!.mkdirs()
+                writeText("SID=secret")
+            }
+            assertTrue(SignInWebData.isDirty(context))
+
+            SignInWebData.wipeIfDirty(context)
+            assertFalse("cookie store left behind", cookies.exists())
+            assertFalse(File(context.dataDir, "app_webview").exists())
+            assertFalse(SignInWebData.isDirty(context))
+
+            // Once per process: a later screen does not touch a sign-in that is under way.
+            SignInWebData.webViewCreating(context)
+            SignInWebData.webViewCreated()
+            cookies.parentFile!!.mkdirs()
+            cookies.writeText("SID=in-progress")
+            SignInWebData.wipeIfDirty(context)
+            assertTrue(cookies.exists())
+            assertTrue(SignInWebData.isDirty(context))
+        } finally {
+            SignInWebData.resetForTesting()
+            File(context.dataDir, "app_webview").deleteRecursively()
+            File(context.noBackupFilesDir, "signin-webview-dirty").delete()
         }
     }
 

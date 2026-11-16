@@ -25,11 +25,21 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
+      # The Go that builds libgojni.so is the toolchain line of gmbridge/go.mod
+      # (a patched go1.26), read here and installed as is. setup-go exports
+      # GOTOOLCHAIN=local, so no step quietly switches to another Go; the
+      # Gradle tasks pin GOTOOLCHAIN to the same version.
+      - name: Read the pinned Go toolchain
+        id: go-pin
+        run: |
+          v=$(sed -n 's/^toolchain go//p' gmbridge/go.mod)
+          test -n "$v" || { echo "gmbridge/go.mod has no toolchain line" >&2; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
-          # Uses the toolchain line of gmbridge/go.mod (a patched go1.26).
-          go-version-file: gmbridge/go.mod
+          go-version: ${{ steps.go-pin.outputs.version }}
           cache-dependency-path: gmbridge/go.sum
 
       # The platform is needed by gomobile's javac step (android.jar >= 26).
@@ -37,32 +47,104 @@ jobs:
         run: |
           sdkmanager "ndk;28.2.13676358" "cmake;3.31.6" "platforms;android-36"
 
-      - name: Go bridge checks (vet, tests, Android cross-build)
+      - name: Go bridge checks (version, vet, tests, Android cross-build)
         working-directory: gmbridge
         run: |
+          go version
+          want=go${{ steps.go-pin.outputs.version }}
+          have=$(go env GOVERSION)
+          test "$have" = "$want" || { echo "Go is $have, gmbridge/go.mod pins $want" >&2; exit 1; }
           go vet ./...
           go test ./...
           CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build ./...
 
       # gomobile silently drops methods whose types it cannot bind and only
-      # leaves a "skipped" comment in the generated Java; fail the build if so.
+      # leaves a "// skipped ..." comment in the generated Java; fail if so.
+      # The jar is checked on its own first: in an `if` pipeline a failed
+      # unzip would only look like "no match".
       - name: Build Go bridge (gomobile) and check nothing was skipped
         run: |
           ./gradlew :app:buildGoBridge --no-daemon --stacktrace
-          if unzip -p app/libs/gmbridge-sources.jar '*.java' | grep -n skipped; then
+          jar=app/libs/gmbridge-sources.jar
+          test -s "$jar" || { echo "gomobile produced no $jar" >&2; exit 1; }
+          srcs=$(unzip -p "$jar" '*.java')   # under bash -e a failed unzip fails the step here
+          test -n "$srcs" || { echo "no Java sources in $jar" >&2; exit 1; }
+          if printf '%s\n' "$srcs" | grep -nE '^[[:space:]]*// skipped (constructor|field|method|variable|const|function) '; then
             echo "gomobile skipped part of the gmbridge API" >&2
             exit 1
           fi
 
+      # The pinned Go and 16 KB pages, checked on the binary itself.
+      - name: Check libgojni.so (Go version, 16 KB alignment)
+        run: |
+          want=$(sed -n 's/^toolchain //p' gmbridge/go.mod)
+          readelf="$ANDROID_HOME/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          dir="$RUNNER_TEMP/gojni"
+          rm -rf "$dir" && mkdir -p "$dir"
+          unzip -q app/libs/gmbridge.aar 'jni/*/libgojni.so' -d "$dir"
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            so="$dir/jni/$abi/libgojni.so"
+            go version "$so" | grep -q ": $want\$" || { echo "$abi libgojni.so not built with $want" >&2; go version "$so" >&2; exit 1; }
+          done
+          for abi in arm64-v8a x86_64; do
+            aligns=$("$readelf" -lW "$dir/jni/$abi/libgojni.so" | awk '$1 == "LOAD" { print $NF }')
+            test -n "$aligns" || { echo "$abi libgojni.so: no LOAD segments" >&2; exit 1; }
+            for a in $aligns; do
+              (( 16#${a#0x} >= 16384 )) || { echo "$abi libgojni.so: LOAD segment aligned to $a, not 16 KB" >&2; exit 1; }
+            done
+          done
+
       - name: Unit tests (decode real HEIC through the Bitmap path)
         run: ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace
 
-      - name: Build debug APK
-        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
+      # The release key comes from repository secrets when they are set:
+      # LIGHTDECODER_KEYSTORE_BASE64 (base64 of the keystore file),
+      # LIGHTDECODER_KEYSTORE_PASSWORD, LIGHTDECODER_KEY_ALIAS and optionally
+      # LIGHTDECODER_KEY_PASSWORD. Without them (forks, pull requests) the
+      # release APK is signed with this runner's throwaway debug key.
+      - name: Decode release keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.LIGHTDECODER_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            echo "LIGHTDECODER_KEYSTORE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+          else
+            echo "::warning::No release keystore secret: the APK is signed with a throwaway debug key and will not update an installed copy."
+          fi
+
+      # The release build is not debuggable: adb cannot read its archive or
+      # session or attach a debugger. Debug builds are for development only
+      # and are not published.
+      - name: Build release APK
+        env:
+          LIGHTDECODER_KEYSTORE_PASSWORD: ${{ secrets.LIGHTDECODER_KEYSTORE_PASSWORD }}
+          LIGHTDECODER_KEY_ALIAS: ${{ secrets.LIGHTDECODER_KEY_ALIAS }}
+          LIGHTDECODER_KEY_PASSWORD: ${{ secrets.LIGHTDECODER_KEY_PASSWORD }}
+        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Check the release APK (not debuggable, signed, 16 KB pages, licences)
+        run: |
+          apk=app/build/outputs/apk/release/app-release.apk
+          bt="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n 1)"
+          badging=$("$bt/aapt2" dump badging "$apk")
+          printf '%s\n' "$badging" | grep -E "^package: name='com\.lightdecoder' " || { echo "unexpected package name" >&2; exit 1; }
+          if printf '%s\n' "$badging" | grep -q '^application-debuggable'; then
+            echo "release APK is debuggable" >&2
+            exit 1
+          fi
+          "$bt/apksigner" verify --print-certs "$apk" | grep -E '^Signer #1 certificate (DN|SHA-256)'
+          "$bt/zipalign" -c -P 16 -v 4 "$apk" > /dev/null || { echo "APK is not 16 KB zip-aligned" >&2; exit 1; }
+          files=$(unzip -Z1 "$apk")
+          for f in assets/NOTICE assets/licenses/00-lightdecoder.txt assets/licenses/10-libheif.txt \
+                   assets/licenses/11-libde265.txt assets/licenses/20-go-go.mau.fi_mautrix-gmessages.txt \
+                   assets/licenses/30-go.txt lib/arm64-v8a/libgojni.so lib/arm64-v8a/liblightdecoder.so; do
+            printf '%s\n' "$files" | grep -qxF "$f" || { echo "release APK lacks $f" >&2; exit 1; }
+          done
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: lightdecoder-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: lightdecoder
+          path: app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error

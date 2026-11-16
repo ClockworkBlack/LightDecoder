@@ -3,6 +3,7 @@ package gmbridge
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"time"
 
@@ -40,6 +41,15 @@ const (
 // hackySetActiveDelay is how long the connector waits for BROWSER_ACTIVE after
 // libgm warns that its own SetActiveSession may have been swallowed.
 const hackySetActiveDelay = 7 * time.Second
+
+// setActiveRetryDelays are the waits before each retry of a SetActiveSession
+// that failed right after the long poll opened. Tests shorten them.
+var setActiveRetryDelays = []time.Duration{5 * time.Second, 15 * time.Second, 45 * time.Second}
+
+// setActiveSession is cli.SetActiveSession; tests replace it.
+var setActiveSession = func(ctx context.Context, cli *libgm.Client) error {
+	return cli.SetActiveSession(ctx)
+}
 
 // dispatcher is the single goroutine that calls into Kotlin.
 //
@@ -182,12 +192,37 @@ func (b *GMBridge) emitSessionDeleted() {
 // backs up, an event from a connection that has since been replaced by
 // Disconnect + Connect must not act on the new one. b.mu is never held while
 // calling into libgm, so taking it here cannot deadlock.
+//
+// Two kinds of event are judged here rather than on the dispatcher, because
+// what they depend on is only true at the moment libgm raises them:
+//   - MESSAGE_DELETED while a ListConversations call is in flight is dropped,
+//     as the connector does: the phone sends spurious deletions while it
+//     serves the conversation list. RPC goroutines are not ordered with the
+//     dispatcher queue, so the counter must be read now.
+//   - ListenTemporaryError while the long poll is open comes from a loop that
+//     has been replaced (Reconnect): libgm's current loop only reports errors
+//     while its stream is closed. It must not turn "connected" back into
+//     "reconnecting".
 func (b *GMBridge) handlerFor(gen uint64) libgm.EventHandler {
 	return func(evt any) {
 		defer func() { _ = recover() }()
+		switch e := evt.(type) {
+		case *libgm.WrappedMessage:
+			if e.Message != nil && e.GetMessageStatus().GetStatus() == gmproto.MessageStatusType_MESSAGE_DELETED &&
+				b.syncingConversations.Load() > 0 {
+				return
+			}
+		}
 		b.mu.Lock()
 		seq := b.connSeq
+		var cli *libgm.Client
+		if b.gen == gen {
+			cli = b.client
+		}
 		b.mu.Unlock()
+		if _, ok := evt.(*events.ListenTemporaryError); ok && cli != nil && longPollOpen(cli) {
+			return
+		}
 		b.disp.push(func() { b.processEvent(gen, seq, evt) })
 	}
 }
@@ -201,10 +236,11 @@ func (b *GMBridge) processEvent(gen, seq uint64, raw any) {
 	}
 	switch evt := raw.(type) {
 	case *libgm.WrappedMessage:
-		b.handleMessage(evt)
+		b.handleMessage(gen, seq, evt)
 	case *gmproto.Conversation:
 		b.cache.putConversation(evt)
 		b.deliverEvent(kindConversation, toConversationDTO(evt, b.cache))
+		b.resyncIfDataResumed(gen, seq)
 	case *gmproto.TypingData:
 		b.deliverEvent(kindTyping, toTypingDTO(evt, b.cache.conversation(evt.GetConversationID())))
 	case *gmproto.Settings:
@@ -226,6 +262,14 @@ func (b *GMBridge) processEvent(gen, seq uint64, raw any) {
 		go b.invalidate(gen, 0, stateLoggedOut, newError(codeLoggedOut, "Google account pairing was removed"))
 	case *gmproto.RevokePairData:
 		go b.invalidate(gen, 0, stateLoggedOut, newError(codeLoggedOut, "pairing was revoked on the phone"))
+	case *events.PhoneNotResponding:
+		// Phone liveness belongs to the client, not to one connection, so it
+		// is recorded whichever connection reported it.
+		b.phoneNotResponding.Store(true)
+		b.processConnectionEvent(gen, seq, raw)
+	case *events.PhoneRespondingAgain:
+		b.phoneNotResponding.Store(false)
+		b.processConnectionEvent(gen, seq, raw)
 	default:
 		b.processConnectionEvent(gen, seq, raw)
 	}
@@ -244,12 +288,12 @@ func (b *GMBridge) processConnectionEvent(gen, seq uint64, raw any) {
 	case *gmproto.UserAlertEvent:
 		b.handleUserAlert(evt)
 	case *events.ListenRecovered:
-		b.deliverEvent(kindState, stateDTO{State: stateConnected})
-	case *events.PhoneRespondingAgain:
-		b.deliverEvent(kindState, stateDTO{State: stateConnected})
-	case *events.PhoneNotResponding:
-		b.deliverEvent(kindState, stateDTO{State: statePhoneOffline, Code: codePhoneNotResponding})
+		b.pollDown.Store(false)
+		b.deliverEvent(kindState, b.currentState())
+	case *events.PhoneRespondingAgain, *events.PhoneNotResponding:
+		b.deliverEvent(kindState, b.currentState())
 	case *events.ListenTemporaryError:
+		b.pollDown.Store(true)
 		be := toBridgeError(evt.Error)
 		if be == nil {
 			be = newError(codeInternal, "")
@@ -260,36 +304,95 @@ func (b *GMBridge) processConnectionEvent(gen, seq uint64, raw any) {
 	case *events.PingFailed:
 		if errors.Is(evt.Error, events.ErrRequestedEntityNotFound) {
 			go b.invalidate(gen, seq, stateLoggedOut, newError(codeLoggedOut, "pairing no longer exists"))
+		} else if evt.ErrorCount == 0 && !b.browserActive.Load() {
+			// ErrorCount 0 only comes from libgm's postConnect, whose
+			// SetActiveSession failed (ditto ping failures count from 1).
+			// Without it the phone does not push to this session.
+			b.scheduleSetActiveRetry(gen, seq)
 		}
 	case *events.HackySetActiveMayFail:
 		b.scheduleHackySetActive(gen)
+	case *events.NoDataReceived:
+		// libgm noticed a gap (long poll down for a while, phone silent, or
+		// the phone answering again) and asked for updates; events from the
+		// gap may not be redelivered. Catch up once data flows again.
+		b.noDataRecently.Store(true)
 	}
 }
 
-func (b *GMBridge) handleMessage(evt *libgm.WrappedMessage) {
+// currentState is the state that holds now, given everything still in
+// force: an unresponsive phone or another active browser outlast a long-poll
+// blip, and libgm reports each of them only once.
+func (b *GMBridge) currentState() stateDTO {
+	switch {
+	case b.phoneNotResponding.Load():
+		return stateDTO{State: statePhoneOffline, Code: codePhoneNotResponding}
+	case b.inactiveElsewhere.Load():
+		detail, _ := b.inactiveDetail.Load().(string)
+		return stateDTO{State: stateActiveElsewhere, Detail: detail}
+	case b.browserActive.Load():
+		return stateDTO{State: stateActive}
+	default:
+		return stateDTO{State: stateConnected}
+	}
+}
+
+// resyncIfDataResumed mirrors the connector's resyncAfterDataResume: the
+// first data after a gap libgm reported asks Kotlin to catch up, once.
+func (b *GMBridge) resyncIfDataResumed(gen, seq uint64) {
+	if !b.noDataRecently.Load() {
+		return
+	}
+	if cur, live := b.liveSeq(gen); !live || cur != seq {
+		return
+	}
+	if b.noDataRecently.Swap(false) {
+		b.deliverEvent(kindResync, struct{}{})
+	}
+}
+
+func (b *GMBridge) handleMessage(gen, seq uint64, evt *libgm.WrappedMessage) {
 	if evt.Message == nil {
 		return
 	}
 	// The phone sends spurious deletions while it rebuilds its database; the
-	// connector ignores them, and so do we.
+	// connector ignores them, and so do we. (Deletions during a
+	// ListConversations call are dropped in handlerFor.)
 	if evt.GetMessageStatus().GetStatus() == gmproto.MessageStatusType_MESSAGE_DELETED && b.syncingMobileDB.Load() {
 		return
 	}
 	b.cache.indexMessage(evt.Message)
+	b.cache.noteProtocolSwitch(evt.Message)
 	conv := b.cache.conversation(evt.GetConversationID())
 	b.deliverEvent(kindMessage, toMessageDTO(evt.Message, evt.IsOld, conv, b.cache))
+	b.resyncIfDataResumed(gen, seq)
 }
 
 func (b *GMBridge) handleUserAlert(evt *gmproto.UserAlertEvent) {
 	switch evt.GetAlertType() {
 	case gmproto.AlertType_BROWSER_ACTIVE:
 		b.browserActive.Store(true)
-		b.deliverEvent(kindState, stateDTO{State: stateActive})
+		b.inactiveElsewhere.Store(false)
+		b.deliverEvent(kindState, b.currentState())
+		// Like the connector: catch up when this session becomes active
+		// after another one was (useHere also resets the session ID), after
+		// a data gap, or after a retried SetActiveSession. Kotlin syncs
+		// once per Connect by itself, so only these later cases need it.
+		// All three flags are cleared.
+		wasInactive := b.wasInactive.Swap(false)
+		noData := b.noDataRecently.Swap(false)
+		retried := b.needResync.Swap(false)
+		if wasInactive || noData || retried {
+			b.deliverEvent(kindResync, struct{}{})
+		}
 	case gmproto.AlertType_BROWSER_INACTIVE,
 		gmproto.AlertType_BROWSER_INACTIVE_FROM_TIMEOUT,
 		gmproto.AlertType_BROWSER_INACTIVE_FROM_INACTIVITY:
 		b.browserActive.Store(false)
-		b.deliverEvent(kindState, stateDTO{State: stateActiveElsewhere, Detail: evt.GetAlertType().String()})
+		b.inactiveElsewhere.Store(true)
+		b.inactiveDetail.Store(evt.GetAlertType().String())
+		b.wasInactive.Store(true)
+		b.deliverEvent(kindState, b.currentState())
 	case gmproto.AlertType_MOBILE_DATABASE_SYNC_STARTED:
 		b.syncingMobileDB.Store(true)
 	case gmproto.AlertType_MOBILE_DATABASE_SYNC_COMPLETE:
@@ -346,5 +449,58 @@ func (b *GMBridge) scheduleHackySetActive(gen uint64) {
 		callCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
 		defer cancel()
 		_ = cli.SetActiveSession(callCtx)
+	}()
+}
+
+// scheduleSetActiveRetry retries the SetActiveSession that libgm's
+// postConnect sends once and gives up on (it only reports PingFailed). Until
+// one goes through the phone does not push to this session, and libgm itself
+// would only notice about 10 minutes later. Retries stop once the phone
+// confirms the session (BROWSER_ACTIVE) or the connection changes. A retry
+// that goes through makes the next BROWSER_ACTIVE ask Kotlin to resync, for
+// whatever arrived meanwhile. Once per connection; separate from the hacky
+// retry so the two cannot race over one flag.
+func (b *GMBridge) scheduleSetActiveRetry(gen, seq uint64) {
+	if !b.setActiveRetrying.CompareAndSwap(false, true) {
+		return
+	}
+	b.mu.Lock()
+	ctx := b.connCtx
+	b.mu.Unlock()
+	if ctx == nil {
+		return
+	}
+	delays := slices.Clone(setActiveRetryDelays)
+	call := setActiveSession
+	go func() {
+		defer func() { _ = recover() }()
+		for _, delay := range delays {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(delay):
+			}
+			if b.browserActive.Load() {
+				return
+			}
+			if cur, live := b.liveSeq(gen); !live || cur != seq {
+				return
+			}
+			cli, err := b.liveClient()
+			if err != nil {
+				return
+			}
+			err = func() error {
+				callCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
+				defer cancel()
+				return call(callCtx, cli)
+			}()
+			if err == nil {
+				if cur, live := b.liveSeq(gen); live && cur == seq {
+					b.needResync.Store(true)
+				}
+				return
+			}
+		}
 	}()
 }

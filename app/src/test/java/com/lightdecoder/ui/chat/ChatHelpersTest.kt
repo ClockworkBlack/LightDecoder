@@ -49,6 +49,20 @@ class ChatHelpersTest {
     }
 
     @Test
+    fun dayArithmeticIsConstantTimeAndStillCalendarBased() {
+        val ny = TimeZone.getTimeZone("America/New_York")
+        // Midnight on the day daylight saving starts, and on the day after (a 23-hour day apart).
+        assertEquals(at(ny, 2026, 3, 8, 0), TimeFormat.startOfDay(at(ny, 2026, 3, 8, 15, 30), ny))
+        assertEquals(at(ny, 2026, 3, 9, 0), TimeFormat.startOfDay(at(ny, 2026, 3, 9, 0, 1), ny))
+        assertEquals(1, TimeFormat.daysBetween(at(ny, 2026, 11, 1, 0, 30), at(ny, 2026, 11, 2, 23, 30), ny))
+        // Far apart: clamped like before (no label changes beyond a year), and answered at once.
+        val start = System.nanoTime()
+        repeat(10_000) { assertEquals(400, TimeFormat.daysBetween(at(utc, 2001, 1, 1, 0), at(utc, 2026, 1, 1, 0), utc)) }
+        assertEquals(-400, TimeFormat.daysBetween(at(utc, 2026, 1, 1, 0), at(utc, 2001, 1, 1, 0), utc))
+        assertTrue("10k far-apart day counts took too long", System.nanoTime() - start < 5_000_000_000L)
+    }
+
+    @Test
     fun listTimeNarrowsWithAge() {
         val now = at(utc, 2026, 11, 16, 15)
         val today = TimeFormat.listTime(context, at(utc, 2026, 11, 16, 9, 5), now, utc, Locale.US)

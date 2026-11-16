@@ -17,6 +17,7 @@ import android.view.MenuItem
 import android.view.View
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -52,6 +53,7 @@ import com.lightdecoder.ui.ViewerActivity
 import com.lightdecoder.ui.relay.NotificationPermission
 import com.lightdecoder.ui.relay.RelayErrors
 import com.lightdecoder.ui.relay.RelayStatusActivity
+import com.lightdecoder.ui.relay.SignInWebData
 import com.lightdecoder.ui.relay.relayAttempt
 import com.lightdecoder.ui.relay.runInBackground
 import kotlinx.coroutines.Dispatchers
@@ -126,6 +128,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Sign-in cookies a killed setup screen left behind (once per process; see SignInWebData).
+        SignInWebData.wipeIfDirty(this)
         super.onCreate(savedInstanceState)
         binding = ActivityThreadBinding.inflate(layoutInflater)
         setContentView(binding.root)
@@ -151,6 +155,14 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
         setUpList()
         setUpComposer()
+        // Opened from a message notification on a cold start, the thread is the
+        // whole task: Back and Up lead to the conversation list, not out of the app.
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (isTaskRoot) openConversations()
+                finish()
+            }
+        })
 
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -166,14 +178,25 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val id = intent.getStringExtra(RelayIntents.EXTRA_CONVERSATION_ID).orEmpty()
         if (id.isEmpty()) return
         if (id != conversationId) {
+            // Everything that belonged to the other conversation goes, above all
+            // a half-typed reply: one tap on Send would deliver it to the wrong person.
+            // A paging call still running for it is dropped when it returns (loadOlderFromPhone).
             conversationId = id
             windowSize = PAGE
+            growWindow = false
+            growPending = false
             messages = emptyList()
             historyComplete = false
             remoteExhausted = false
+            remoteFailedAtMs = 0L
             lastMarkedId = null
+            highlightId = null
+            binding.input.setText("")
             clearReply()
             clearAttachment()
+            renderTyping(manager.typing.value[id].orEmpty())
+            submitSeq++
+            pendingScrollTo = null
             adapter.submitList(emptyList())
         }
         targetMessageId = intent.getStringExtra(RelayIntents.EXTRA_MESSAGE_ID)
@@ -283,7 +306,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val target = targetMessageId
         val grow = growWindow
         growWindow = false
-        val oldestShown = messages.firstOrNull()?.timestampMs
+        // Back at the newest messages after reading far up (or after jumping to
+        // an old search hit): shrink the window again, so later reloads (one per
+        // incoming message or status change) do not re-read thousands of rows.
+        val reset = target == null && !grow && windowSize > RESET_WINDOW && canShrinkWindow()
+        if (reset) windowSize = PAGE
+        val oldestShown = if (reset) null else messages.firstOrNull()?.timestampMs
         val wanted = windowSize
         val snapshot = withContext(Dispatchers.IO) {
             var rows: List<MessageRow>
@@ -341,26 +369,48 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         return quotes
     }
 
-    private fun submit(quotes: Map<String, Quote>, scrollTo: String?) {
-        val atBottom = isAtBottom() || scrollToBottomNext
-        scrollToBottomNext = false
-        val anchor = if (atBottom || scrollTo != null) null else firstVisibleAnchor()
+    /** Bumped by every render; a render whose list was built after a newer one began is dropped. */
+    private var submitSeq = 0
+
+    /** A jump a dropped render was asked for; the render that replaces it makes it. */
+    private var pendingScrollTo: String? = null
+
+    /**
+     * Builds the list off the main thread (a long window has thousands of
+     * rows and day headers) and hands it to the adapter. Where the list is
+     * scrolled is read just before the hand-over, so it is current.
+     */
+    private suspend fun submit(quotes: Map<String, Quote>, scrollToMessage: String?) {
+        val seq = ++submitSeq
+        if (scrollToMessage != null) pendingScrollTo = scrollToMessage
         val header = when {
             loadingOlder -> ThreadItem.Header(loading = true, complete = false)
             historyComplete || remoteExhausted -> ThreadItem.Header(loading = false, complete = true)
             else -> null
         }
-        val items = ThreadItems.build(
-            messages = messages,
-            isGroup = conversation?.isGroup == true,
-            quotes = quotes,
-            header = header,
-            highlightId = highlightId,
-            dayStart = { TimeFormat.startOfDay(it) },
-            dayLabel = { TimeFormat.dayLabel(this, it) },
-        )
+        val shown = messages
+        val isGroup = conversation?.isGroup == true
+        val highlighted = highlightId
         lastQuotes = quotes
-        binding.emptyText.visibility = if (messages.isEmpty()) View.VISIBLE else View.GONE
+        val context = applicationContext
+        val items = withContext(Dispatchers.Default) {
+            ThreadItems.build(
+                messages = shown,
+                isGroup = isGroup,
+                quotes = quotes,
+                header = header,
+                highlightId = highlighted,
+                dayStart = { TimeFormat.startOfDay(it) },
+                dayLabel = { TimeFormat.dayLabel(context, it) },
+            )
+        }
+        if (seq != submitSeq) return
+        val scrollTo = pendingScrollTo
+        pendingScrollTo = null
+        val atBottom = isAtBottom() || scrollToBottomNext
+        scrollToBottomNext = false
+        val anchor = if (atBottom || scrollTo != null) null else firstVisibleAnchor()
+        binding.emptyText.visibility = if (shown.isEmpty()) View.VISIBLE else View.GONE
         adapter.submitList(items) {
             when {
                 scrollTo != null -> scrollToMessage(scrollTo)
@@ -373,7 +423,22 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private var lastQuotes: Map<String, Quote> = emptyMap()
 
     /** Re-renders without reading the archive (header or highlight changed). */
-    private fun resubmit() = submit(lastQuotes, null)
+    private fun resubmit(scrollTo: String? = null) {
+        lifecycleScope.launch { submit(lastQuotes, scrollTo) }
+    }
+
+    /**
+     * Whether the window can go back to the newest [PAGE] messages without
+     * anything on screen changing: the list is at the bottom and everything
+     * visible is among the newest [PAGE] rows.
+     */
+    private fun canShrinkWindow(): Boolean {
+        if (!isAtBottom()) return false
+        val first = layoutManager.findFirstVisibleItemPosition()
+        if (first == RecyclerView.NO_POSITION) return false
+        // Items include day headers, so this many items hold at most as many messages.
+        return adapter.itemCount - first <= PAGE
+    }
 
     private fun isAtBottom(): Boolean {
         val count = adapter.itemCount
@@ -436,23 +501,29 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         if (auto && (!online || System.currentTimeMillis() - remoteFailedAtMs < REMOTE_RETRY_MS)) return
         loadingOlder = true
         resubmit()
+        val id = conversationId
         lifecycleScope.launch {
-            val result = relayAttempt { manager.loadOlder(conversationId, PAGE) }
+            val result = relayAttempt { manager.loadOlder(id, PAGE) }
             loadingOlder = false
-            result
-                .onSuccess { added ->
-                    if (added == 0) {
-                        remoteExhausted = true
-                    } else {
-                        windowSize += added
-                        growWindow = true
+            // The screen may have switched to another conversation meanwhile
+            // (a notification tap): this result is not about the one shown now.
+            if (id == conversationId) {
+                result
+                    .onSuccess { added ->
+                        if (added == 0) {
+                            remoteExhausted = true
+                        } else {
+                            windowSize += added
+                            growWindow = true
+                        }
                     }
-                }
-                .onFailure {
-                    remoteFailedAtMs = System.currentTimeMillis()
-                    val code = RelayErrors.codeOf(it)
-                    if (!auto && code != RelayException.NOT_CONNECTED) toast(RelayErrors.message(this@ThreadActivity, code))
-                }
+                    .onFailure {
+                        remoteFailedAtMs = System.currentTimeMillis()
+                        val code = RelayErrors.codeOf(it)
+                        if (!auto && code != RelayException.NOT_CONNECTED) toast(RelayErrors.message(this@ThreadActivity, code))
+                    }
+            }
+            // For a switched conversation this runs its own automatic load, now that loadingOlder is free.
             loadNow()
         }
     }
@@ -566,6 +637,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private fun updateSendEnabled() {
         val hasContent = !binding.input.text.isNullOrBlank() || attachment != null
         binding.send.isEnabled = paired && hasContent
+        // The tint has no disabled state: dim it the way Material dims disabled controls.
+        binding.send.alpha = if (binding.send.isEnabled) 1f else DISABLED_ALPHA
     }
 
     /** At most one ping every few seconds; the manager throttles too. */
@@ -740,8 +813,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     override fun onQuoteTap(messageId: String) {
         if (messages.any { it.id == messageId }) {
             highlight(messageId)
-            resubmit()
-            scrollToMessage(messageId)
+            resubmit(scrollTo = messageId)
         } else {
             targetMessageId = messageId
             reload()
@@ -822,13 +894,17 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         if (Build.VERSION.SDK_INT < 33) toast(getString(R.string.chat_copied))
     }
 
+    /** With a pairing it goes on the phone too; without one (an archive an unpair kept) only here. */
     private fun confirmDeleteMessage(row: MessageRow) {
+        val linked = manager.isPaired()
+        val id = row.id
         MaterialAlertDialogBuilder(this)
-            .setMessage(R.string.chat_delete_message_question)
+            .setMessage(if (linked) R.string.chat_delete_message_question else R.string.chat_delete_message_question_local)
             .setPositiveButton(R.string.chat_action_delete) { _, _ ->
                 lifecycleScope.launch {
-                    relayAttempt { manager.deleteMessage(row.id) }
-                        .onFailure { toast(RelayErrors.message(this@ThreadActivity, it)) }
+                    relayAttempt {
+                        if (linked) manager.deleteMessage(id) else withContext(Dispatchers.IO) { repo.applyDeletion(id) }
+                    }.onFailure { toast(RelayErrors.message(this@ThreadActivity, it)) }
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -860,7 +936,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         val conv = conversation
         when (item.itemId) {
-            android.R.id.home -> finish()
+            android.R.id.home -> {
+                openConversations()
+                finish()
+            }
             R.id.action_archive -> if (conv != null) {
                 val archive = conv.folderEnum != Folder.ARCHIVE
                 runAction(if (archive) R.string.chat_archived else R.string.chat_unarchived) {
@@ -879,14 +958,29 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         return true
     }
 
+    /**
+     * Up: always the conversation list. CLEAR_TOP|SINGLE_TOP returns to the
+     * one below this thread when there is one, else starts it (on top of the
+     * sticker inbox, or as the task's root after a cold start).
+     */
+    private fun openConversations() {
+        startActivity(
+            Intent(this, ConversationsActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        )
+    }
+
     private fun confirmDeleteConversation() {
         val id = conversation?.id ?: return
+        val linked = manager.isPaired()
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.chat_delete_conversation_title)
-            .setMessage(R.string.chat_delete_conversation_body)
+            .setMessage(if (linked) R.string.chat_delete_conversation_body else R.string.chat_delete_conversation_body_local)
             .setPositiveButton(R.string.chat_action_delete) { _, _ ->
                 lifecycleScope.launch {
-                    relayAttempt { manager.deleteConversation(id) }
+                    relayAttempt {
+                        if (linked) manager.deleteConversation(id) else withContext(Dispatchers.IO) { repo.deleteConversationLocal(id) }
+                    }
                         .onSuccess { finish() }
                         .onFailure { toast(RelayErrors.message(this@ThreadActivity, it)) }
                 }
@@ -914,6 +1008,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         private const val PAGE = 50
         private const val RELOAD_SLACK = 50
         private const val MAX_WINDOW = 20_000
+
+        /** A window larger than this shrinks back to [PAGE] once the user is at the newest messages. */
+        private const val RESET_WINDOW = 4 * PAGE
         private const val MAX_QUOTE_LOOKUPS = 100
         private const val LOAD_OLDER_THRESHOLD = 3
         private const val RELOAD_DEBOUNCE_MS = 120L
@@ -923,6 +1020,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         private const val REMOTE_RETRY_MS = 30_000L
         private const val MAX_PREVIEW_READ = 32 * 1024 * 1024
         private const val ATTACHMENT_THUMB_DP = 96
+        private const val DISABLED_ALPHA = 0.38f
 
         /** The quick reactions offered on long press, in Google Messages' order. */
         val QUICK_REACTIONS = listOf("👍", "❤️", "😂", "😮", "😢", "🙏")

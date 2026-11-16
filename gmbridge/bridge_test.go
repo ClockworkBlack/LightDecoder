@@ -2,11 +2,18 @@ package gmbridge
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
+	"go.mau.fi/mautrix-gmessages/pkg/libgm/events"
+	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
+	"go.mau.fi/mautrix-gmessages/pkg/libgm/util"
 )
 
 func TestSessionRoundTrip(t *testing.T) {
@@ -330,5 +337,126 @@ func TestCloseStopsEverything(t *testing.T) {
 func TestVersion(t *testing.T) {
 	if Version != "1" {
 		t.Errorf("Version = %q", Version)
+	}
+}
+
+// newBridgeWithToken returns a paired, disconnected bridge whose tachyon
+// token expires at exp.
+func newBridgeWithToken(t *testing.T, exp time.Time) (*GMBridge, *recorder) {
+	t.Helper()
+	ad := pairedAuth()
+	ad.TachyonExpiry = exp
+	data, err := marshalSession(ad, "phone/1", "someone@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := newRecorder()
+	b, err := NewGMBridge(data, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(b.Close)
+	return b, rec
+}
+
+func TestUnpairRefreshesAnExpiredTokenFirst(t *testing.T) {
+	var calls []string
+	refreshErr, unpairErr := error(nil), error(nil)
+	stub(t, &refreshForUnpair, func(*libgm.Client) error { calls = append(calls, "refresh"); return refreshErr })
+	stub(t, &unpairGaia, func(context.Context, *libgm.Client) error { calls = append(calls, "unpair"); return unpairErr })
+	unpaired := func(t *testing.T, b *GMBridge, rec *recorder) stateDTO {
+		t.Helper()
+		if err := b.Unpair(); err != nil {
+			t.Fatalf("Unpair must not fail: %v", err)
+		}
+		drain(t, b)
+		st := rec.stateEvents()
+		if len(st) == 0 || st[len(st)-1].State != stateUnpaired || rec.lastSession() != nil || b.IsPaired() {
+			t.Fatalf("the local wipe must always happen: %+v paired=%v", st, b.IsPaired())
+		}
+		return st[len(st)-1]
+	}
+	cases := []struct {
+		name       string
+		exp        time.Time
+		live       bool
+		refreshErr error
+		unpairErr  error
+		calls      string
+		code       string
+	}{
+		{"expired, disconnected", time.Now().Add(-time.Hour), false, nil, nil, "refresh,unpair", ""},
+		{"expiring soon, disconnected", time.Now().Add(30 * time.Minute), false, nil, nil, "refresh,unpair", ""},
+		{"fresh token", time.Now().Add(20 * time.Hour), false, nil, nil, "unpair", ""},
+		{"live: the long poll keeps it fresh", time.Now().Add(-time.Hour), true, nil, nil, "unpair", ""},
+		{"refresh rejected", time.Now().Add(-time.Hour), false, fmt.Errorf("refresh: %w", events.ErrInvalidCredentials), nil, "refresh", codeUnpairRemoteFailed},
+		{"revoke rejected", time.Now().Add(20 * time.Hour), false, nil, events.HTTPError{Resp: &http.Response{StatusCode: 401}}, "unpair", codeUnpairRemoteFailed},
+		{"pairing already gone", time.Now().Add(20 * time.Hour), false, nil, fmt.Errorf("x: %w", events.ErrRequestedEntityNotFound), "unpair", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			calls, refreshErr, unpairErr = nil, c.refreshErr, c.unpairErr
+			b, rec := newBridgeWithToken(t, c.exp)
+			if c.live {
+				markLive(b)
+			}
+			st := unpaired(t, b, rec)
+			if got := strings.Join(calls, ","); got != c.calls {
+				t.Errorf("calls %q want %q", got, c.calls)
+			}
+			if st.Code != c.code {
+				t.Errorf("state %+v want code %q", st, c.code)
+			}
+		})
+	}
+}
+
+// While Unpair runs, the client's events (e.g. from the temporary
+// connection) must not reach Kotlin: no data, no re-persisted session.
+func TestUnpairDropsTheClientsEvents(t *testing.T) {
+	b, rec := newBridgeWithToken(t, time.Now().Add(-time.Hour))
+	b.mu.Lock()
+	h := b.handlerFor(b.gen)
+	b.mu.Unlock()
+	stub(t, &refreshForUnpair, func(*libgm.Client) error {
+		h(&events.AuthTokenRefreshed{})
+		h(&gmproto.Conversation{ConversationID: "c9"})
+		return nil
+	})
+	stub(t, &unpairGaia, func(context.Context, *libgm.Client) error { return nil })
+	if err := b.Unpair(); err != nil {
+		t.Fatal(err)
+	}
+	drain(t, b)
+	if len(rec.eventsOf(kindConversation)) != 0 || rec.sessionCount() != 1 || rec.lastSession() != nil {
+		t.Errorf("events leaked during unpair: conversations=%d sessions=%d", len(rec.eventsOf(kindConversation)), rec.sessionCount())
+	}
+}
+
+func TestMediaDownloadNeedsAValidToken(t *testing.T) {
+	expired, _ := newBridgeWithToken(t, time.Now().Add(-time.Minute))
+	if _, err := expired.DownloadMedia("media", make([]byte, 32)); codeOf(err) != codeNotConnected {
+		t.Errorf("expired token while disconnected: %v", err)
+	}
+	if _, err := expired.mediaClient(); codeOf(err) != codeNotConnected {
+		t.Errorf("mediaClient: %v", err)
+	}
+	markLive(expired)
+	if _, err := expired.mediaClient(); err != nil {
+		t.Errorf("while connected the long poll refreshes the token: %v", err)
+	}
+	fresh, _ := newBridgeWithToken(t, time.Now().Add(time.Hour))
+	if _, err := fresh.mediaClient(); err != nil {
+		t.Errorf("a valid token works while disconnected: %v", err)
+	}
+}
+
+func TestPairedDeviceName(t *testing.T) {
+	d := util.BrowserDetailsMessage
+	if d.GetOS() != "LightDecoder" || d.GetOS() != pairedDeviceName {
+		t.Errorf("the phone lists this name under Device pairing: %q", d.GetOS())
+	}
+	if d.GetDeviceType() != gmproto.DeviceType_TABLET || d.GetBrowserType() != gmproto.BrowserType_OTHER {
+		t.Errorf("device and browser type must stay libgm's defaults: %v %v", d.GetDeviceType(), d.GetBrowserType())
 	}
 }
