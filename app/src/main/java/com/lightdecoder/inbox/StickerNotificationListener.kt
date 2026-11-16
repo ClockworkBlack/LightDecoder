@@ -4,9 +4,7 @@ import android.net.Uri
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import androidx.core.app.NotificationCompat
-import com.lightdecoder.heif.HeifCodec
-import com.lightdecoder.heif.ImageSniffer
-import com.lightdecoder.heif.Media
+import com.lightdecoder.capture.StickerCapture
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.util.concurrent.Executors
@@ -113,7 +111,7 @@ class StickerNotificationListener : NotificationListenerService() {
         return result
     }
 
-    /** Runs on the worker thread. */
+    /** Runs on the worker thread. Reads the picture; [StickerCapture] does the rest. */
     private fun capture(attachment: Attachment) {
         val store = InboxStore.get(this)
         if (store.contains(attachment.id)) return
@@ -136,49 +134,19 @@ class StickerNotificationListener : NotificationListenerService() {
             return
         }
 
-        val heif = ImageSniffer.isHeif(bytes)
-        val extension = ImageSniffer.extensionFor(bytes, attachment.mime)
-        val isPicture = heif || extension in PICTURE_EXTENSIONS
-        if (!isPicture) {
-            store.markSeen(attachment.id)
-            InboxLog.add(this, "Attachment ($label): not a picture, skipped")
-            return
-        }
-        if (!heif && !InboxPrefs.catchAllImages(this)) {
-            store.markSeen(attachment.id)
-            InboxLog.add(this, "Picture ($label, .$extension): Messages can show it, skipped")
-            return
-        }
-
-        val animated = heif && runCatching { HeifCodec.probe(bytes).isSequence }.getOrDefault(false)
-        val full = try {
-            Media.decodeFirstFrame(bytes)
-        } catch (e: HeifCodec.DecodeException) {
-            store.markSeen(attachment.id)
-            InboxLog.add(this, "Picture ($label, .$extension): could not be decoded: ${e.message}")
-            return
-        }
-        val preview = Media.scaledToFit(full, PREVIEW_MAX_SIDE)
-        val item = InboxItem(
-            id = attachment.id,
-            sender = attachment.sender,
-            title = attachment.conversation,
-            appPackage = attachment.appPackage,
-            timestampMs = attachment.timestampMs,
-            mime = attachment.mime.ifEmpty { ImageSniffer.mimeFor(extension) },
-            width = full.width,
-            height = full.height,
-            animated = animated,
-            originalExt = extension,
+        StickerCapture.capture(
+            this,
+            bytes,
+            StickerCapture.Meta(
+                id = attachment.id,
+                sender = attachment.sender,
+                title = attachment.conversation,
+                appPackage = attachment.appPackage,
+                timestampMs = attachment.timestampMs,
+                mime = attachment.mime,
+                source = InboxItem.SOURCE_NOTIFICATION,
+            ),
         )
-        val added = store.add(item, bytes, preview)
-        if (added) {
-            InboxLog.add(this, "Picture ($label, .$extension, ${full.width}×${full.height}): saved")
-            InboxEvents.notifyChanged()
-            StickerAlerts.show(this, item, preview)
-        }
-        if (preview !== full) preview.recycle()
-        full.recycle()
     }
 
     private fun readCapped(input: InputStream): ByteArray? {
@@ -194,8 +162,6 @@ class StickerNotificationListener : NotificationListenerService() {
     }
 
     companion object {
-        private const val MAX_BYTES = 32 * 1024 * 1024
-        private const val PREVIEW_MAX_SIDE = 1024
-        private val PICTURE_EXTENSIONS = setOf("png", "jpg", "gif", "webp", "avif")
+        private const val MAX_BYTES = StickerCapture.MAX_BYTES
     }
 }

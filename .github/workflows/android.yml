@@ -25,9 +25,34 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install NDK and CMake
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # Uses the toolchain line of gmbridge/go.mod (a patched go1.26).
+          go-version-file: gmbridge/go.mod
+          cache-dependency-path: gmbridge/go.sum
+
+      # The platform is needed by gomobile's javac step (android.jar >= 26).
+      - name: Install NDK, CMake and SDK platform
         run: |
-          sdkmanager "ndk;28.2.13676358" "cmake;3.31.6"
+          sdkmanager "ndk;28.2.13676358" "cmake;3.31.6" "platforms;android-36"
+
+      - name: Go bridge checks (vet, tests, Android cross-build)
+        working-directory: gmbridge
+        run: |
+          go vet ./...
+          go test ./...
+          CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build ./...
+
+      # gomobile silently drops methods whose types it cannot bind and only
+      # leaves a "skipped" comment in the generated Java; fail the build if so.
+      - name: Build Go bridge (gomobile) and check nothing was skipped
+        run: |
+          ./gradlew :app:buildGoBridge --no-daemon --stacktrace
+          if unzip -p app/libs/gmbridge-sources.jar '*.java' | grep -n skipped; then
+            echo "gomobile skipped part of the gmbridge API" >&2
+            exit 1
+          fi
 
       - name: Unit tests (decode real HEIC through the Bitmap path)
         run: ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace
