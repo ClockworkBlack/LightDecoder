@@ -11,6 +11,7 @@ import android.provider.Settings
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
+import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -22,19 +23,20 @@ import androidx.recyclerview.widget.GridLayoutManager
 import com.lightdecoder.R
 import com.lightdecoder.archive.ArchiveChange
 import com.lightdecoder.archive.ArchiveEvents
-import com.lightdecoder.archive.ArchiveRepository
+import com.lightdecoder.chat.ChatBackend
+import com.lightdecoder.chat.ChatService
 import com.lightdecoder.databinding.ActivityInboxBinding
 import com.lightdecoder.inbox.InboxEvents
 import com.lightdecoder.inbox.InboxItem
 import com.lightdecoder.inbox.InboxLog
 import com.lightdecoder.inbox.InboxPrefs
 import com.lightdecoder.inbox.InboxStore
-import com.lightdecoder.relay.RelayManager
+import com.lightdecoder.relay.RelayIntents
 import com.lightdecoder.relay.RelayState
+import com.lightdecoder.ui.chat.ChatErrors
 import com.lightdecoder.ui.chat.ConversationsActivity
-import com.lightdecoder.ui.relay.RelayErrors
-import com.lightdecoder.ui.relay.RelaySetupActivity
-import com.lightdecoder.ui.relay.RelayStatusActivity
+import com.lightdecoder.ui.chat.ScreenBackends
+import com.lightdecoder.ui.chat.ServiceUi
 import com.lightdecoder.ui.relay.RelayUi
 import com.lightdecoder.ui.relay.SignInWebData
 import kotlinx.coroutines.Dispatchers
@@ -45,7 +47,8 @@ import kotlinx.coroutines.withContext
  * The home screen: stickers caught from message notifications, and the switch
  * that turns catching on. Nothing is read until the user turns on notification
  * access for LightDecoder in Android's settings. A second card leads to the
- * Google Messages link (set it up, open the messages, or fix it).
+ * two links, Google Messages and WhatsApp: for each, set it up, open its
+ * messages, or fix it.
  */
 class InboxActivity : AppCompatActivity() {
 
@@ -53,11 +56,9 @@ class InboxActivity : AppCompatActivity() {
     private lateinit var store: InboxStore
     private lateinit var adapter: InboxAdapter
     private val refresh = Runnable { refreshItems() }
-    private val relay by lazy { RelayManager.get(this) }
-    private var relayState: RelayState? = null
-    private var relayPaired = false
+    private lateinit var links: List<LinkBlock>
     private val onArchiveChange: (ArchiveChange) -> Unit = { change ->
-        if (change.kind == ArchiveChange.Kind.CONVERSATIONS) renderRelayCard()
+        if (change.kind == ArchiveChange.Kind.CONVERSATIONS) links.firstOrNull { it.service == change.service }?.render()
     }
 
     private val openDocument = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -97,13 +98,19 @@ class InboxActivity : AppCompatActivity() {
         binding.statusAction.setOnClickListener { onStatusAction() }
         binding.statusHelp.setOnClickListener { showGreyedOutHelp() }
 
-        binding.relayAction.setOnClickListener { onRelayAction() }
-        binding.relaySettings.setOnClickListener { startActivity(Intent(this, RelayStatusActivity::class.java)) }
+        links = listOf(
+            LinkBlock(ChatService.MESSAGES, binding.relayBody, binding.relayAction, binding.relaySettings),
+            LinkBlock(ChatService.WHATSAPP, binding.waBody, binding.waAction, binding.waSettings),
+        )
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                relay.state.collect {
-                    relayState = it
-                    renderRelayCard()
+                for (link in links) {
+                    launch {
+                        link.backend.state.collect {
+                            link.state = it
+                            link.render()
+                        }
+                    }
                 }
             }
         }
@@ -222,62 +229,92 @@ class InboxActivity : AppCompatActivity() {
             .show()
     }
 
-    // --- Google Messages link card ---------------------------------------------
+    // --- the links' card -------------------------------------------------------
 
-    private fun renderRelayCard() {
-        val state = relayState ?: return
-        lifecycleScope.launch {
-            val (paired, unread) = withContext(Dispatchers.IO) {
-                relay.isPaired() to ArchiveRepository.get(this@InboxActivity).unreadCount()
-            }
-            relayPaired = paired
-            val problem = RelayUi.isProblem(state.phase)
-            when {
-                !paired && !problem -> {
-                    // Right after an unpair that could not reach Google, say how
-                    // to remove LightDecoder on the phone instead of "not set up".
-                    if (state.code == RelayState.UNPAIR_REMOTE_FAILED) {
-                        binding.relayBody.text = RelayErrors.message(this@InboxActivity, state.code)
-                    } else {
-                        binding.relayBody.setText(R.string.link_card_not_set_up)
+    /**
+     * One link's part of the card: what state it is in, the one thing to do
+     * about it (set it up, fix it, or open its messages), and its settings
+     * once there is something to set.
+     */
+    private inner class LinkBlock(
+        val service: ChatService,
+        private val body: TextView,
+        private val action: TextView,
+        private val settings: View,
+    ) {
+        val backend: ChatBackend = ScreenBackends.get(this@InboxActivity, service)
+        var state: RelayState? = null
+        private var paired = false
+
+        init {
+            action.setOnClickListener { act() }
+            settings.setOnClickListener { startActivity(ServiceUi.status(this@InboxActivity, service)) }
+        }
+
+        fun render() {
+            val state = state ?: return
+            lifecycleScope.launch {
+                val (isPaired, unread) = withContext(Dispatchers.IO) { backend.isPaired() to backend.repo.unreadCount() }
+                paired = isPaired
+                val problem = RelayUi.isProblem(state.phase)
+                when {
+                    !paired && !problem -> {
+                        // Right after an unpair that could not reach the service, say how
+                        // to remove LightDecoder on the phone instead of "not set up".
+                        if (state.code == RelayState.UNPAIR_REMOTE_FAILED) {
+                            body.text = ChatErrors.message(this@InboxActivity, service, state.code)
+                        } else {
+                            body.setText(ServiceUi.linkCardBody(service))
+                        }
+                        action.setText(R.string.link_card_set_up)
                     }
-                    binding.relayAction.setText(R.string.link_card_set_up)
+                    problem -> {
+                        val reason = if (state.code.isNotEmpty()) ChatErrors.message(this@InboxActivity, service, state.code)
+                        else getString(ServiceUi.phaseBody(service, state.phase, RelayUi.Fix.NONE))
+                        body.text = getString(RelayUi.title(state.phase)) + "\n" + reason
+                        action.setText(R.string.link_card_fix)
+                    }
+                    state.isOnline -> {
+                        body.text = if (unread > 0) getString(R.string.link_card_connected_unread, unread)
+                        else getString(R.string.link_card_connected)
+                        action.setText(openLabel())
+                    }
+                    else -> {
+                        // "Notifications are off" rather than just "Disconnected": the link
+                        // never runs without its notification (the conversations' banner
+                        // then offers the settings).
+                        val fix = RelayUi.fix(state, paired, RelayUi.notificationsOn(this@InboxActivity, service))
+                        body.setText(RelayUi.title(state.phase, fix))
+                        action.setText(openLabel())
+                    }
                 }
-                problem -> {
-                    val reason = if (state.code.isNotEmpty()) RelayErrors.message(this@InboxActivity, state.code)
-                    else getString(RelayUi.body(state.phase))
-                    binding.relayBody.text = getString(RelayUi.title(state.phase)) + "\n" + reason
-                    binding.relayAction.setText(R.string.link_card_fix)
-                }
-                state.isOnline -> {
-                    binding.relayBody.text = if (unread > 0) getString(R.string.link_card_connected_unread, unread)
-                    else getString(R.string.link_card_connected)
-                    binding.relayAction.setText(R.string.link_card_open)
-                }
-                else -> {
-                    // "Notifications are off" rather than just "Disconnected": the link
-                    // never runs without its notification (the conversations' banner
-                    // then offers the settings).
-                    val fix = RelayUi.fix(state, paired, RelayUi.notificationsOn(this@InboxActivity))
-                    binding.relayBody.setText(RelayUi.title(state.phase, fix))
-                    binding.relayAction.setText(R.string.link_card_open)
-                }
+                settings.visibility = if (paired || problem) View.VISIBLE else View.GONE
             }
-            binding.relaySettings.visibility = if (paired || problem) View.VISIBLE else View.GONE
+        }
+
+        private fun openLabel(): Int = when (service) {
+            ChatService.MESSAGES -> R.string.link_card_open
+            ChatService.WHATSAPP -> R.string.chat_wa_card_open
+        }
+
+        private fun act() {
+            val state = state
+            val context = this@InboxActivity
+            startActivity(
+                when {
+                    state != null && RelayUi.isProblem(state.phase) ->
+                        if (RelayUi.fix(state, paired) == RelayUi.Fix.SET_UP) ServiceUi.setup(context, service)
+                        else ServiceUi.status(context, service)
+                    !paired -> ServiceUi.setup(context, service)
+                    else -> conversations(service)
+                }
+            )
         }
     }
 
-    private fun onRelayAction() {
-        val state = relayState
-        val target = when {
-            state != null && RelayUi.isProblem(state.phase) ->
-                if (RelayUi.fix(state, relayPaired) == RelayUi.Fix.SET_UP) RelaySetupActivity::class.java
-                else RelayStatusActivity::class.java
-            !relayPaired -> RelaySetupActivity::class.java
-            else -> ConversationsActivity::class.java
-        }
-        startActivity(Intent(this, target))
-    }
+    /** The conversation list, on [service]'s tab. */
+    private fun conversations(service: ChatService): Intent =
+        Intent(this, ConversationsActivity::class.java).putExtra(RelayIntents.EXTRA_SERVICE, service.key)
 
     // --- list ----------------------------------------------------------------
 
@@ -314,6 +351,7 @@ class InboxActivity : AppCompatActivity() {
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         when (item.itemId) {
+            // Wherever the list was last: it remembers its tab.
             R.id.action_messages -> startActivity(Intent(this, ConversationsActivity::class.java))
             R.id.action_open -> openDocument.launch(arrayOf("image/*", "*/*"))
             R.id.action_all_images -> {

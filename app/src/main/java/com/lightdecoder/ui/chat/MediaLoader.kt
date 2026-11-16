@@ -11,11 +11,11 @@ import androidx.annotation.RequiresApi
 import com.lightdecoder.R
 import com.lightdecoder.archive.MediaCache
 import com.lightdecoder.archive.MediaRow
+import com.lightdecoder.chat.ChatBackend
 import com.lightdecoder.heif.HeifCodec
 import com.lightdecoder.heif.ImageSniffer
 import com.lightdecoder.heif.Media
 import com.lightdecoder.relay.RelayException
-import com.lightdecoder.relay.RelayManager
 import com.lightdecoder.ui.relay.RelayErrors
 import com.lightdecoder.ui.relay.relayAttempt
 import kotlinx.coroutines.CoroutineScope
@@ -33,8 +33,9 @@ import java.nio.ByteBuffer
 import java.util.WeakHashMap
 
 /**
- * The pictures in a conversation, shown the way messaging apps show them:
- * the picture itself, at full size, without being asked.
+ * The pictures in a conversation of one service (its [ChatBackend] does the
+ * downloading), shown the way messaging apps show them: the picture itself,
+ * at full size, without being asked.
  *
  * - **The picture itself** comes from its downloaded file, a download through
  *   the link (up to [AUTO_DOWNLOAD_MAX]), or inline bytes when those are the
@@ -63,7 +64,7 @@ import java.util.WeakHashMap
  * [clearFailures], once connected, lets the rebound rows try again.
  */
 class MediaLoader(
-    private val manager: RelayManager,
+    private val manager: ChatBackend,
     private val scope: CoroutineScope,
 ) {
     /** What was shown: the picture under [keyFor], a stand-in under [standInKey]. */

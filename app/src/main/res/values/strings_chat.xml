@@ -1,8 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    Text of the Google Messages screens (setup, link status, conversations,
-    threads). The link's runtime and notifications use strings_relay.xml.
-    Names start with link_ (the link screens) or chat_ (the messaging screens).
+    Text of the Google Messages link's screens (setup, link status) and of
+    the messaging screens (conversations, threads), which show Google
+    Messages and WhatsApp alike. The links' runtimes and notifications use
+    strings_relay.xml and strings_wa*.xml.
+    Names start with link_ (the link screens) or chat_ (the messaging
+    screens); chat_wa_ is the wording for WhatsApp where it differs.
 -->
 <resources>
 
@@ -93,6 +96,7 @@
     <!-- The link never runs without its notification -->
     <string name="link_notifications_needed_title">Notifications needed</string>
     <string name="link_notifications_needed_body">While the link is connected, LightDecoder always shows a notification with a Disconnect button, so you can see it is running and stop it at any time. It cannot connect without it. Turn on LightDecoder\'s notifications (at least \"Google Messages link\") in system settings.</string>
+    <string name="link_notifications_needed_body_whatsapp">While the link is connected, LightDecoder always shows a notification with a Disconnect button, so you can see it is running and stop it at any time. It cannot connect without it. Turn on LightDecoder\'s notifications (at least \"WhatsApp link\") in system settings.</string>
     <string name="link_notifications_open_settings">Open settings</string>
 
     <!-- Error codes from the link, in plain words -->
@@ -174,6 +178,27 @@
 
     <!-- Conversation list -->
     <string name="chat_title">Messages</string>
+    <!-- The two service tabs above the folders. -->
+    <string name="chat_service_messages">Messages</string>
+    <string name="chat_service_whatsapp">WhatsApp</string>
+    <!-- What TalkBack adds to a service tab that has unread conversations. -->
+    <plurals name="chat_unread_conversations">
+        <item quantity="one">%1$d unread conversation</item>
+        <item quantity="other">%1$d unread conversations</item>
+    </plurals>
+    <!-- The card a service that is not linked shows in place of its conversations (Google Messages uses link_setup_title and link_card_not_set_up). -->
+    <string name="chat_wa_link_title">Link WhatsApp</string>
+    <string name="chat_wa_link_body">Not set up. Link LightDecoder to your WhatsApp account as a linked device to read and send your WhatsApp chats here.</string>
+    <string name="chat_wa_empty_inbox">No chats yet. They arrive from your phone after linking; pull down to check again.</string>
+    <!-- The banner, where WhatsApp needs other words than link_body_*. -->
+    <string name="chat_wa_body_unpaired">Link WhatsApp to read and send your chats here.</string>
+    <string name="chat_wa_body_pairing">Waiting for you to confirm in WhatsApp on your phone.</string>
+    <string name="chat_wa_body_connecting">Connecting to WhatsApp.</string>
+    <string name="chat_wa_body_logged_out">This device was removed from the linked devices in WhatsApp on your phone. Link it again to reconnect. Messages already here are kept.</string>
+    <string name="chat_wa_delete_conversation_body">It is removed from this device, with all its messages. It stays in WhatsApp on your phone, and a new message in it brings it back here.</string>
+    <!-- The home screen's WhatsApp link block. -->
+    <string name="chat_wa_card_title">WhatsApp link</string>
+    <string name="chat_wa_card_open">Open chats</string>
     <string name="chat_folder_inbox">Inbox</string>
     <string name="chat_folder_archive">Archived</string>
     <string name="chat_folder_spam">Spam</string>
@@ -286,6 +311,44 @@
     <string name="chat_typing_two">%1$s and %2$s are typing…</string>
     <string name="chat_typing_many">Several people are typing…</string>
     <string name="chat_read_only">You can\'t reply in this conversation.</string>
+    <!-- Under a one-to-one conversation's title, where the service tells (WhatsApp). Lower case, as a status line. -->
+    <string name="chat_presence_online">online</string>
+    <string name="chat_presence_typing">typing…</string>
+    <string name="chat_presence_last_seen_today">last seen today at %1$s</string>
+    <string name="chat_presence_last_seen_yesterday">last seen yesterday at %1$s</string>
+    <!-- %1$s is a weekday or a date. -->
+    <string name="chat_presence_last_seen">last seen %1$s</string>
+    <!-- Deleting a message where it can also be taken back from everyone (WhatsApp). -->
+    <string name="chat_delete_message_choice">Delete this message? \"Delete for everyone\" also removes it for the other people in the conversation. \"Delete for me\" removes it from your own devices only.</string>
+    <string name="chat_delete_message_for_me_question">Delete this message for you? It is removed from your own devices; the other people in the conversation keep it.</string>
+    <string name="chat_delete_for_everyone">Delete for everyone</string>
+    <string name="chat_delete_for_me">Delete for me</string>
+    <string name="chat_wa_compose_hint">Message</string>
+    <string name="chat_wa_failed_phone_detail">WhatsApp could not send this message.</string>
+    <string name="chat_wa_resend_body">WhatsApp did not confirm this message, so it may already have been sent. Sending it again could deliver it twice. To check, look for it in WhatsApp on your phone.</string>
+    <string name="chat_wa_media_needs_connection">Connect to WhatsApp to load this attachment.</string>
+
+    <!-- WhatsApp's error codes in plain words (Google Messages' are link_error_*) -->
+    <string name="chat_wa_error_not_paired">LightDecoder is not linked to WhatsApp. Link it first.</string>
+    <string name="chat_wa_error_not_connected">Not connected to WhatsApp right now. Turn on \"Stay connected\" in the WhatsApp link\'s settings and try again.</string>
+    <string name="chat_wa_error_connection_closed">The connection closed before WhatsApp answered. Try again.</string>
+    <string name="chat_wa_error_not_found">WhatsApp could not find that. It may have been deleted.</string>
+    <string name="chat_wa_error_invalid_argument">WhatsApp cannot use that as it is. A phone number needs its country code.</string>
+    <string name="chat_wa_error_send_failed">WhatsApp could not send this message.</string>
+    <string name="chat_wa_error_logged_out">This device was removed from the linked devices in WhatsApp on your phone. Link it again to reconnect.</string>
+    <string name="chat_wa_error_timeout">WhatsApp did not answer in time. Try again.</string>
+    <string name="chat_wa_error_rate_limited">WhatsApp is asking to slow down. Wait a little, then try again.</string>
+    <string name="chat_wa_error_not_on_whatsapp">That number is not on WhatsApp. Check that it includes the country code.</string>
+    <string name="chat_wa_error_not_allowed">WhatsApp did not allow that. You may not have permission for it in this chat.</string>
+    <string name="chat_wa_error_unsupported">LightDecoder cannot do that with WhatsApp.</string>
+    <string name="chat_wa_error_not_ready">WhatsApp is still syncing. Try again in a moment.</string>
+    <string name="chat_wa_error_stream_replaced">WhatsApp closed this connection because the same link connected somewhere else.</string>
+    <string name="chat_wa_error_temp_banned">WhatsApp has temporarily blocked this account. WhatsApp on your phone says why, and for how long.</string>
+    <string name="chat_wa_error_client_outdated">WhatsApp no longer accepts this version of LightDecoder. Update the app to connect again.</string>
+    <string name="chat_wa_error_connect_failure">WhatsApp refused the connection. Try again later.</string>
+    <string name="chat_wa_error_connection_lost">The connection to WhatsApp dropped. LightDecoder is reconnecting.</string>
+    <string name="chat_wa_error_unpair_remote_failed">LightDecoder could not reach WhatsApp to remove this device from your account. To finish, open WhatsApp on your phone, go to Settings, then Linked devices, and log out \"LightDecoder\" there.</string>
+    <string name="chat_wa_error_internal">Something went wrong in the WhatsApp link. Try again; if it keeps happening, the activity log in the link\'s settings may help.</string>
     <string name="chat_compose_hint">Text message</string>
     <string name="chat_compose_unpaired">Not linked</string>
     <string name="chat_attach">Attach a picture or video</string>
@@ -315,6 +378,7 @@
     <string name="chat_use_number">Send to %1$s</string>
     <string name="chat_contacts_empty">No contacts yet. They load from your phone when the link is connected.</string>
     <string name="chat_contacts_no_match">No contact matches. Type a phone number to text it.</string>
+    <string name="chat_wa_contacts_no_match">No contact matches. Type a phone number with its country code to message it.</string>
     <string name="chat_contacts_offline">Not connected: showing the contacts saved earlier.</string>
     <string name="chat_contact_selected">selected</string>
     <string name="chat_contact_not_selected">not selected</string>

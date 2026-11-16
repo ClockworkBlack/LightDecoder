@@ -42,6 +42,9 @@ import com.lightdecoder.archive.LocalState
 import com.lightdecoder.archive.MediaRow
 import com.lightdecoder.archive.MessageRow
 import com.lightdecoder.archive.ParticipantRow
+import com.lightdecoder.chat.Capability
+import com.lightdecoder.chat.ChatBackend
+import com.lightdecoder.chat.ChatService
 import com.lightdecoder.databinding.ActivityThreadBinding
 import com.lightdecoder.databinding.SheetMessageActionsBinding
 import com.lightdecoder.relay.Folder
@@ -49,12 +52,8 @@ import com.lightdecoder.relay.MessageNotifier
 import com.lightdecoder.relay.ReactionDto
 import com.lightdecoder.relay.RelayException
 import com.lightdecoder.relay.RelayIntents
-import com.lightdecoder.relay.RelayManager
 import com.lightdecoder.relay.RelayState
 import com.lightdecoder.ui.ViewerActivity
-import com.lightdecoder.ui.relay.NotificationPermission
-import com.lightdecoder.ui.relay.RelayErrors
-import com.lightdecoder.ui.relay.RelayStatusActivity
 import com.lightdecoder.ui.relay.SignInWebData
 import com.lightdecoder.ui.relay.relayAttempt
 import com.lightdecoder.ui.relay.runInBackground
@@ -62,7 +61,10 @@ import com.lightdecoder.ui.voice.Dictation
 import com.lightdecoder.ui.voice.MessageReader
 import com.lightdecoder.ui.voice.ReadAloudText
 import com.lightdecoder.ui.voice.VoicePrefs
+import com.lightdecoder.wa.WaErrors
+import com.lightdecoder.wa.WaManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -71,24 +73,32 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
- * One conversation: its messages from the local archive, older history
- * fetched from the phone on scroll, and the composer. Sends go through the
- * link's outbox, so a message typed while offline shows as "sending" and goes
- * out once connected.
+ * One conversation of either service: its messages from that service's
+ * local archive, older history fetched from the phone on scroll, and the
+ * composer. Sends go through the link's outbox, so a message typed while
+ * offline shows as "sending" and goes out once connected. What the service
+ * cannot do (its [ChatBackend.capabilities]) is not offered; where it tells
+ * who is online, a one-to-one conversation says so under its title.
  *
- * Extras: [RelayIntents.EXTRA_CONVERSATION_ID] (required) and optionally
+ * Extras: [RelayIntents.EXTRA_CONVERSATION_ID] (required),
+ * [RelayIntents.EXTRA_SERVICE] (Google Messages without it) and optionally
  * [RelayIntents.EXTRA_MESSAGE_ID] to open at that message.
  */
 class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     private lateinit var binding: ActivityThreadBinding
-    private lateinit var manager: RelayManager
+
+    /** The service this conversation belongs to: its link, and through [repo] its archive. */
+    private lateinit var manager: ChatBackend
     private lateinit var repo: ArchiveRepository
     private lateinit var adapter: MessagesAdapter
     private lateinit var media: MediaLoader
     private lateinit var layoutManager: LinearLayoutManager
     private lateinit var banner: ConnectionBanner
-    private val notifications = NotificationPermission(this)
+    private val notifications = ServiceNotifications(this)
+
+    /** Follows [manager]'s state, typing and presence while the screen is started; restarted when the service changes. */
+    private var linkJob: Job? = null
 
     private var conversationId = ""
     private var conversation: ConversationRow? = null
@@ -177,7 +187,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private val readAloudSeen = HashSet<String>()
 
     private val onArchiveChange: (ArchiveChange) -> Unit = { change ->
-        val mine = change.conversationId == null || change.conversationId == conversationId
+        // The same id can be a conversation of the other service: only this one's archive counts.
+        val mine = change.service == manager.service &&
+            (change.conversationId == null || change.conversationId == conversationId)
         if (mine && change.kind != ArchiveChange.Kind.HEALTH) scheduleReload()
     }
 
@@ -190,8 +202,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         applySystemBarAndImePadding(binding.root)
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
-        manager = RelayManager.get(this)
-        repo = ArchiveRepository.get(this)
+        manager = ScreenBackends.get(this, RelayIntents.serviceOf(intent))
+        repo = manager.repo
         banner = ConnectionBanner(this, binding.banner, manager, notifications)
         media = MediaLoader(manager, lifecycleScope)
 
@@ -220,12 +232,44 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             }
         })
 
-        lifecycleScope.launch {
+        followLink()
+    }
+
+    /**
+     * Draws [manager]'s link from now on: its state (banner, composer), who
+     * is typing, and who is online. Runs while the screen is started.
+     */
+    private fun followLink() {
+        linkJob?.cancel()
+        val link = manager
+        linkJob = lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                launch { manager.state.collect { onState(it) } }
-                launch { manager.typing.collect { renderTyping(it[conversationId].orEmpty()) } }
+                launch { link.state.collect { onState(link, it) } }
+                launch { link.typing.collect { renderPeerActivity() } }
+                launch { link.presence.collect { renderPeerActivity() } }
             }
         }
+    }
+
+    /**
+     * The conversation belongs to another service than the one on screen (a
+     * notification of the other service was tapped): everything that came
+     * from the old one's link and archive is replaced by the new one's.
+     */
+    private fun switchService(service: ChatService) {
+        if (started) ChatVisibility.leave(manager)
+        manager = ScreenBackends.get(this, service)
+        repo = manager.repo
+        if (started) ChatVisibility.enter(manager)
+        banner.bind(manager)
+        // Pictures are fetched through the link, and the list draws them through the loader.
+        media = MediaLoader(manager, lifecycleScope)
+        adapter = MessagesAdapter(media, this)
+        binding.messages.adapter = adapter
+        // Until the new link's state is in: cheap to ask, and nothing is tried while "offline".
+        paired = manager.isPaired()
+        online = false
+        followLink()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -233,10 +277,18 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         setIntent(intent)
         val id = intent.getStringExtra(RelayIntents.EXTRA_CONVERSATION_ID).orEmpty()
         if (id.isEmpty()) return
-        if (id != conversationId) {
+        val service = RelayIntents.serviceOf(intent)
+        val otherService = service != manager.service
+        // The same id in the other service is another conversation.
+        if (id != conversationId || otherService) {
             // Everything that belonged to the other conversation goes, above all
             // a half-typed reply: one tap on Send would deliver it to the wrong person.
             // A paging call still running for it is dropped when it returns (loadOlderFromPhone).
+            // The notifier's "on screen" mark is per service: the old service's goes with it
+            // (onResume, which follows a new intent, sets the new one).
+            if (otherService && MessageNotifier.visibleConversationId(manager.service) == conversationId) {
+                MessageNotifier.setVisibleConversationId(manager.service, null)
+            }
             conversationId = id
             // The long-press sheet and an open question (delete, send again) still act on the old
             // conversation's message or id: close them, and the overflow menu built from its row.
@@ -265,15 +317,15 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             binding.input.setText("")
             clearReply()
             clearAttachment()
-            renderTyping(manager.typing.value[id].orEmpty())
             submitSeq++
             pendingScrollTo = null
-            adapter.submitList(emptyList())
+            if (otherService) switchService(service) else adapter.submitList(emptyList())
             // The old conversation's row must not decide the title, the menu, mark-read
             // or who can be replied to until the new one's has been read.
             conversation = null
             participants = emptyList()
             renderConversation()
+            if (started) manager.watchPresence(id)
         }
         targetMessageId = intent.getStringExtra(RelayIntents.EXTRA_MESSAGE_ID)
         reload()
@@ -282,6 +334,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     override fun onStart() {
         super.onStart()
         started = true
+        // In front: the service may show this account as online, and tells who else is.
+        ChatVisibility.enter(manager)
+        if (conversationId.isNotEmpty()) manager.watchPresence(conversationId)
         ArchiveEvents.register(onArchiveChange)
         // Back in front: what arrived meanwhile is not read out, only what comes from now on.
         readAloudSince = null
@@ -291,6 +346,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     override fun onStop() {
         started = false
+        ChatVisibility.leave(manager)
         ArchiveEvents.unregister(onArchiveChange)
         readerInstance?.stop()
         super.onStop()
@@ -309,12 +365,14 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      */
     override fun onResume() {
         super.onResume()
-        MessageNotifier.visibleConversationId = conversationId
-        MessageNotifier.cancel(this, conversationId)
+        MessageNotifier.setVisibleConversationId(manager.service, conversationId)
+        MessageNotifier.cancel(this, conversationId, manager.service)
     }
 
     override fun onPause() {
-        if (MessageNotifier.visibleConversationId == conversationId) MessageNotifier.visibleConversationId = null
+        if (MessageNotifier.visibleConversationId(manager.service) == conversationId) {
+            MessageNotifier.setVisibleConversationId(manager.service, null)
+        }
         super.onPause()
     }
 
@@ -390,6 +448,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      */
     private suspend fun loadNow() = loadMutex.withLock {
         val id = conversationId
+        val link = manager
+        val repo = link.repo
         val target = targetMessageId
         val grow = growWindow
         growWindow = false
@@ -420,12 +480,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 conversation = conversation,
                 participants = repo.participants(id),
                 rows = rows,
-                quotes = quotesFor(rows),
+                quotes = quotesFor(repo, rows),
                 historyComplete = repo.syncState(id)?.historyComplete == true,
             )
         }
         if (grow) growPending = false
-        if (id != conversationId) return@withLock
+        if (!isCurrent(link, id)) return@withLock
         val localExhausted = snapshot.rows.size < wanted
         windowSize = maxOf(PAGE, snapshot.rows.size)
         messages = snapshot.rows
@@ -444,14 +504,21 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         // threads meanwhile. The reload onNewIntent queued handles the new conversation.
         // (Not "skip unless submit applied": a resubmit() in the same conversation also
         // supersedes it, and mark-read and auto-paging must still run then.)
-        if (id != conversationId) return@withLock
+        if (!isCurrent(link, id)) return@withLock
         markReadIfNeeded()
         // The archive has no more: ask the phone (also fills a thread that was never imported).
         if ((grow && localExhausted) || snapshot.rows.size < PAGE) loadOlderFromPhone(auto = !grow)
     }
 
+    /**
+     * Whether conversation [id] of [link] is still the one on screen: a
+     * notification tap may have switched the conversation, or the service
+     * (where the same id is another conversation), while something waited.
+     */
+    private fun isCurrent(link: ChatBackend, id: String) = link === manager && id == conversationId
+
     /** Quoted messages: from the window, else from the archive. Runs on IO. */
-    private fun quotesFor(rows: List<MessageRow>): Map<String, Quote> {
+    private fun quotesFor(repo: ArchiveRepository, rows: List<MessageRow>): Map<String, Quote> {
         val byId = rows.associateBy { it.id }
         val mediaLabel = getString(R.string.chat_media_picture)
         val quotes = HashMap<String, Quote>()
@@ -599,12 +666,13 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         loadingOlder = true
         resubmit()
         val id = conversationId
+        val link = manager
         lifecycleScope.launch {
-            val result = relayAttempt { manager.loadOlder(id, PAGE) }
+            val result = relayAttempt { link.loadOlder(id, PAGE) }
             loadingOlder = false
             // The screen may have switched to another conversation meanwhile
             // (a notification tap): this result is not about the one shown now.
-            if (id == conversationId) {
+            if (isCurrent(link, id)) {
                 result
                     .onSuccess { added ->
                         if (added == 0) {
@@ -616,8 +684,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                     }
                     .onFailure {
                         remoteFailedAtMs = System.currentTimeMillis()
-                        val code = RelayErrors.codeOf(it)
-                        if (!auto && code != RelayException.NOT_CONNECTED) toast(RelayErrors.message(this@ThreadActivity, code))
+                        val code = ChatErrors.codeOf(it)
+                        if (!auto && code != RelayException.NOT_CONNECTED) toast(errorText(link, code))
                     }
             }
             // For a switched conversation this runs its own automatic load, now that loadingOlder is free.
@@ -634,23 +702,65 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             ?: others.map { it.name.ifBlank { it.formattedNumber.ifBlank { it.number } } }.filter { it.isNotBlank() }
                 .joinToString(", ").ifBlank { getString(R.string.chat_untitled) }
         supportActionBar?.title = title
-        supportActionBar?.subtitle = when {
-            conv?.isGroup == true -> resources.getQuantityString(R.plurals.chat_people, others.size + 1, others.size + 1)
-            others.size == 1 -> others[0].formattedNumber.ifBlank { others[0].number }.takeIf { it != title }
-            else -> null
-        }
+        renderPeerActivity()
         invalidateOptionsMenu()
         renderComposerState()
     }
 
-    private fun onState(state: RelayState) {
+    /**
+     * Under the title: how many people a group has; for one person, what the
+     * service tells about them right now ("online", "typing…", "last seen
+     * …") where it does ([Capability.PRESENCE]), else their number.
+     * Who is typing shows above the composer, unless the line under the
+     * title already says it.
+     */
+    private fun renderPeerActivity() {
+        val conv = conversation
+        val others = participants.filter { !it.isMe }
+        val typing = manager.typing.value[conversationId].orEmpty()
+        val presence = if (conv?.isGroup == true) null else presenceLine(conv, others, typing)
+        supportActionBar?.subtitle = when {
+            conv?.isGroup == true -> resources.getQuantityString(R.plurals.chat_people, others.size + 1, others.size + 1)
+            presence != null -> presence
+            others.size == 1 -> others[0].formattedNumber.ifBlank { others[0].number }.takeIf { it != title }
+            else -> null
+        }
+        renderTyping(if (presence != null) emptySet() else typing)
+    }
+
+    /**
+     * "typing…", "online" or "last seen …" for the other person of a
+     * one-to-one conversation; null when the service does not tell, the
+     * link is not connected (what it last said may be stale), or nothing is
+     * known about them yet.
+     */
+    private fun presenceLine(conv: ConversationRow?, others: List<ParticipantRow>, typing: Set<String>): String? {
+        if (Capability.PRESENCE !in manager.capabilities || conv == null || conv.isGroup || others.size > 1 || !online) return null
+        if (typing.isNotEmpty()) return getString(R.string.chat_presence_typing)
+        val known = manager.presence.value
+        // Presence is kept per person; a one-to-one conversation's id is that person's too.
+        val presence = others.firstOrNull()?.let { known[it.id] } ?: known[conv.id] ?: return null
+        return when {
+            presence.online -> getString(R.string.chat_presence_online)
+            presence.lastSeenMs > 0 -> TimeFormat.lastSeen(this, presence.lastSeenMs)
+            else -> null
+        }
+    }
+
+    private fun onState(link: ChatBackend, state: RelayState) {
         lifecycleScope.launch {
-            paired = withContext(Dispatchers.IO) { manager.isPaired() }
+            val isPaired = withContext(Dispatchers.IO) { link.isPaired() }
+            // The screen moved to the other service's conversation meanwhile: its own state follows.
+            if (link !== manager) return@launch
+            paired = isPaired
             val wasOnline = online
             online = paired && state.isOnline
             banner.render(state, paired)
             renderComposerState()
+            renderPeerActivity()
             if (online && !wasOnline) {
+                // Asked again on every connection: a subscription does not outlive one.
+                if (started) link.watchPresence(conversationId)
                 // Originals of pictures shown while offline: ask for them now.
                 for ((key, wanted) in fullSizeWanted.entries.toList()) requestOriginal(key, wanted.first, wanted.second)
                 // Pictures that failed to download while offline: try again now.
@@ -694,14 +804,15 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         lastMarkedId = newestIncoming
         lastMarkAtMs = now
         val id = conversationId
+        val link = manager
         if (conv.folderEnum == Folder.DELETED) {
             // Gone from the phone: read here only.
-            if (conv.unread) runInBackground { repo.markConversationRead(id) }
+            if (conv.unread) runInBackground { link.repo.markConversationRead(id) }
             return
         }
         lifecycleScope.launch {
-            relayAttempt { manager.markRead(id) }.onFailure {
-                withContext(Dispatchers.IO) { repo.markConversationRead(id) }
+            relayAttempt { link.markRead(id) }.onFailure {
+                withContext(Dispatchers.IO) { link.repo.markConversationRead(id) }
             }
         }
     }
@@ -743,7 +854,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         binding.attach.isEnabled = paired
         binding.stickers.isEnabled = paired
         binding.voiceInput.isEnabled = paired
-        binding.input.hint = getString(if (paired) R.string.chat_compose_hint else R.string.chat_compose_unpaired)
+        binding.input.hint = getString(if (paired) ServiceUi.composeHint(manager.service) else R.string.chat_compose_unpaired)
         updateSendEnabled()
     }
 
@@ -846,7 +957,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         if (now - lastTypingPingMs < TYPING_PING_MS) return
         lastTypingPingMs = now
         val id = conversationId
-        runInBackground { manager.typing(id) }
+        val link = manager
+        runInBackground { link.typing(id) }
     }
 
     private fun send() {
@@ -860,15 +972,16 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         binding.input.setText("")
         clearReply()
         clearAttachment()
+        val link = manager
         lifecycleScope.launch {
             // The outbox writes to the archive (and copies an attachment), so not on the main thread.
             val result = withContext(Dispatchers.IO) {
                 relayAttempt {
-                    if (file != null) manager.sendMedia(id, file, text.ifEmpty { null }, replyTo)
-                    else manager.sendText(id, text, replyTo)
+                    if (file != null) link.sendMedia(id, file, text.ifEmpty { null }, replyTo)
+                    else link.sendText(id, text, replyTo)
                 }
             }
-            result.onFailure { toast(RelayErrors.message(this@ThreadActivity, it)) }
+            result.onFailure { toast(errorText(link, it)) }
         }
     }
 
@@ -934,10 +1047,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     private fun sendSticker(file: File) {
         val id = conversationId
+        val link = manager
         scrollToBottomNext = true
         lifecycleScope.launch {
-            withContext(Dispatchers.IO) { relayAttempt { manager.sendMedia(id, Uri.fromFile(file), null, null) } }
-                .onFailure { toast(RelayErrors.message(this@ThreadActivity, it)) }
+            withContext(Dispatchers.IO) { relayAttempt { link.sendMedia(id, Uri.fromFile(file), null, null) } }
+                .onFailure { toast(errorText(link, it)) }
         }
     }
 
@@ -1030,9 +1144,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      */
     private fun restoreReply(messageId: String) {
         val id = conversationId
+        val link = manager
         lifecycleScope.launch {
-            val row = withContext(Dispatchers.IO) { repo.message(messageId) } ?: return@launch
-            if (id != conversationId || replyTarget != null || row.conversationId != id) return@launch
+            val row = withContext(Dispatchers.IO) { link.repo.message(messageId) } ?: return@launch
+            if (!isCurrent(link, id) || replyTarget != null || row.conversationId != id) return@launch
             onReply(row)
         }
     }
@@ -1110,7 +1225,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             sheet.dismiss()
             if (!isShown(row)) return@setOnClickListener
             val tmpId = row.tmpId
-            runInBackground { manager.discardFailed(tmpId) }
+            val link = manager
+            runInBackground { link.discardFailed(tmpId) }
         }
         b.actionDelete.visibility = if (real) View.VISIBLE else View.GONE
         b.actionDelete.setOnClickListener {
@@ -1124,7 +1240,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     override fun onFailedTap(row: MessageRow) {
-        if (MessageStatus.canRetryLocally(row)) retryOrAsk(row) else toast(getString(R.string.chat_failed_phone_detail))
+        if (MessageStatus.canRetryLocally(row)) retryOrAsk(row) else toast(getString(ServiceUi.failedOnPhone(manager.service)))
     }
 
     override fun onReactionTap(row: MessageRow, reaction: ReactionDto) {
@@ -1154,6 +1270,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      * arrives as an update of the message, which then shows it full size.
      */
     override fun onLoadFullSize(row: MessageRow, part: MediaRow) {
+        // Only a service whose phone keeps originals back can be asked for them.
+        if (Capability.FULL_SIZE_REQUEST !in manager.capabilities) return
         val key = row.id + "|" + part.partId
         if (key in fullSizeAsked) return
         if (!online) {
@@ -1167,29 +1285,31 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         fullSizeWanted.remove(key)
         if (!fullSizeAsked.add(key)) return
         val forConversation = conversationId
+        val link = manager
         lifecycleScope.launch {
-            relayAttempt { manager.requestFullSize(messageId, partId) }
+            relayAttempt { link.requestFullSize(messageId, partId) }
                 .onFailure {
                     fullSizeAsked.remove(key)
                     // Not connected after all: ask again when it is (unless the thread changed).
-                    if (conversationId == forConversation) fullSizeWanted[key] = messageId to partId
+                    if (isCurrent(link, forConversation)) fullSizeWanted[key] = messageId to partId
                 }
         }
     }
 
     override fun onMediaTap(row: MessageRow, part: MediaRow) {
+        val link = manager
         lifecycleScope.launch {
             val local = listOf(part.localPath, if (part.needsFullSize) part.thumbPath else "")
                 .firstOrNull { it.isNotEmpty() && File(it).isFile }?.let(::File)
             val file = local ?: run {
                 toast(getString(R.string.chat_media_downloading))
-                relayAttempt { manager.mediaFile(row.id, part.partId, thumbnail = part.needsFullSize) }
+                relayAttempt { link.mediaFile(row.id, part.partId, thumbnail = part.needsFullSize) }
                     .getOrElse {
                         // not_connected: it can be downloaded, just not until the link is connected.
-                        val code = RelayErrors.codeOf(it)
+                        val code = ChatErrors.codeOf(it)
                         toast(
-                            if (code == RelayException.NOT_CONNECTED) getString(R.string.chat_media_needs_connection)
-                            else RelayErrors.message(this@ThreadActivity, code)
+                            if (code == RelayException.NOT_CONNECTED) getString(ServiceUi.mediaNeedsConnection(link.service))
+                            else errorText(link, code)
                         )
                         return@launch
                     }
@@ -1229,9 +1349,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     private fun react(row: MessageRow, emoji: String, remove: Boolean) {
+        val link = manager
         lifecycleScope.launch {
-            relayAttempt { manager.react(row.id, emoji, remove) }
-                .onFailure { toast(RelayErrors.message(this@ThreadActivity, it)) }
+            relayAttempt { link.react(row.id, emoji, remove) }
+                .onFailure { toast(errorText(link, it)) }
         }
     }
 
@@ -1246,7 +1367,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private fun retry(row: MessageRow) {
         val tmpId = row.tmpId
         if (tmpId.isEmpty()) return
-        runInBackground { manager.retry(tmpId) }
+        val link = manager
+        runInBackground { link.retry(tmpId) }
     }
 
     /**
@@ -1257,14 +1379,15 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private fun confirmResend(row: MessageRow) {
         if (!isShown(row)) return
         val tmpId = row.tmpId
+        val link = manager
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.chat_resend_title)
-            .setMessage(R.string.chat_resend_body)
+            .setMessage(ServiceUi.resendBody(link.service))
             .setPositiveButton(R.string.chat_resend_send) { _, _ ->
                 if (isShown(row)) retry(row)
             }
             .setNeutralButton(R.string.chat_action_discard) { _, _ ->
-                if (isShown(row)) runInBackground { manager.discardFailed(tmpId) }
+                if (isShown(row)) runInBackground { link.discardFailed(tmpId) }
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
@@ -1282,28 +1405,51 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      * With a pairing it goes on the phone too; without one (an archive an
      * unpair kept) the manager deletes it here only. If the pairing changed
      * while the question was up, it is asked again with the right wording.
+     *
+     * Where the service can take a message back from everyone
+     * ([Capability.DELETE_FOR_EVERYONE]), the question is which: "for me"
+     * (this account's devices), or for one's own messages also "for everyone".
      */
     private fun confirmDeleteMessage(row: MessageRow) {
         if (!isShown(row)) return
-        val linked = manager.isPaired()
+        val link = manager
+        val linked = link.isPaired()
         val id = row.id
-        MaterialAlertDialogBuilder(this)
-            .setMessage(if (linked) R.string.chat_delete_message_question else R.string.chat_delete_message_question_local)
-            .setPositiveButton(R.string.chat_action_delete) { _, _ ->
-                // The thread switched under the question (onNewIntent closes it; this is the backstop).
-                if (!isShown(row)) return@setPositiveButton
-                if (manager.isPaired() != linked) {
-                    confirmDeleteMessage(row)
-                    return@setPositiveButton
-                }
-                lifecycleScope.launch {
-                    relayAttempt { manager.deleteMessage(id) }
-                        .onFailure { toast(RelayErrors.message(this@ThreadActivity, it)) }
-                }
+        fun delete(forEveryone: Boolean) {
+            // The thread switched under the question (onNewIntent closes it; this is the backstop).
+            if (!isShown(row) || link !== manager) return
+            if (link.isPaired() != linked) {
+                confirmDeleteMessage(row)
+                return
             }
-            .setNegativeButton(android.R.string.cancel, null)
+            lifecycleScope.launch {
+                relayAttempt { if (forEveryone) deleteForEveryone(link, id) else link.deleteMessage(id) }
+                    .onFailure { toast(errorText(link, it)) }
+            }
+        }
+        val builder = MaterialAlertDialogBuilder(this)
+        if (linked && Capability.DELETE_FOR_EVERYONE in link.capabilities) {
+            if (row.isOutgoing) {
+                builder.setMessage(R.string.chat_delete_message_choice)
+                    .setPositiveButton(R.string.chat_delete_for_everyone) { _, _ -> delete(forEveryone = true) }
+                    .setNeutralButton(R.string.chat_delete_for_me) { _, _ -> delete(forEveryone = false) }
+            } else {
+                builder.setMessage(R.string.chat_delete_message_for_me_question)
+                    .setPositiveButton(R.string.chat_delete_for_me) { _, _ -> delete(forEveryone = false) }
+            }
+        } else {
+            builder.setMessage(if (linked) R.string.chat_delete_message_question else R.string.chat_delete_message_question_local)
+                .setPositiveButton(R.string.chat_action_delete) { _, _ -> delete(forEveryone = false) }
+        }
+        builder.setNegativeButton(android.R.string.cancel, null)
             .show()
             .let(::trackConfirm)
+    }
+
+    /** "Delete for everyone" is the one thing [ChatBackend] leaves to the service's own manager. */
+    private suspend fun deleteForEveryone(link: ChatBackend, messageId: String) {
+        if (link is WaManager) link.deleteMessage(messageId, forEveryone = true)
+        else throw RelayException(WaErrors.UNSUPPORTED, "no delete for everyone")
     }
 
     /** Keeps [dialog] as the open question (delete, or send again) until it is dismissed. */
@@ -1328,7 +1474,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             setTitle(if (archived) R.string.chat_action_unarchive else R.string.chat_action_archive)
         }
         val deleted = conv?.folderEnum == Folder.DELETED
-        menu.findItem(R.id.action_not_spam)?.isVisible = conv?.folderEnum == Folder.SPAM
+        menu.findItem(R.id.action_not_spam)?.isVisible =
+            conv?.folderEnum == Folder.SPAM && Capability.SPAM_FOLDER in manager.capabilities
         // Deleted on the phone already: what is left is this device's copy.
         menu.findItem(R.id.action_restore)?.isVisible = deleted
         menu.findItem(R.id.action_delete_forever)?.isVisible = deleted
@@ -1355,23 +1502,23 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             R.id.action_archive -> if (conv != null) {
                 val archive = conv.folderEnum != Folder.ARCHIVE
                 runAction(if (archive) R.string.chat_archived else R.string.chat_unarchived) {
-                    manager.setArchived(conv.id, archive)
+                    it.setArchived(conv.id, archive)
                 }
             }
             R.id.action_mute -> if (conv != null) {
                 runAction(if (conv.muted) R.string.chat_unmuted_done else R.string.chat_muted_done) {
-                    manager.setMuted(conv.id, !conv.muted)
+                    it.setMuted(conv.id, !conv.muted)
                 }
             }
             R.id.action_not_spam -> if (conv != null) {
-                runAction(R.string.chat_not_spam_done) { manager.markNotSpam(conv.id) }
+                runAction(R.string.chat_not_spam_done) { it.markNotSpam(conv.id) }
             }
             R.id.action_restore -> if (conv != null) {
-                runAction(R.string.chat_restored) { manager.restoreDeletedLocally(conv.id) }
+                runAction(R.string.chat_restored) { it.restoreDeletedLocally(conv.id) }
             }
             R.id.action_delete_forever -> confirmDeleteForever()
             R.id.action_delete_conversation -> confirmDeleteConversation()
-            R.id.action_link_status -> startActivity(Intent(this, RelayStatusActivity::class.java))
+            R.id.action_link_status -> startActivity(ServiceUi.status(this, manager.service))
             R.id.action_read_new_aloud -> {
                 val on = !VoicePrefs.readNewAloud(this)
                 VoicePrefs.setReadNewAloud(this, on)
@@ -1389,35 +1536,40 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     /**
-     * Up: always the conversation list. CLEAR_TOP|SINGLE_TOP returns to the
-     * one below this thread when there is one, else starts it (on top of the
-     * sticker inbox, or as the task's root after a cold start).
+     * Up: always the conversation list, on this conversation's service.
+     * CLEAR_TOP|SINGLE_TOP returns to the one below this thread when there
+     * is one, else starts it (on top of the sticker inbox, or as the task's
+     * root after a cold start).
      */
     private fun openConversations() {
         startActivity(
             Intent(this, ConversationsActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                .putExtra(RelayIntents.EXTRA_SERVICE, manager.service.key)
         )
     }
 
     /** Like [confirmDeleteMessage]: on the phone too with a pairing, else here only. */
     private fun confirmDeleteConversation() {
         val id = conversation?.id ?: return
-        val linked = manager.isPaired()
+        val link = manager
+        val linked = link.isPaired()
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.chat_delete_conversation_title)
-            .setMessage(if (linked) R.string.chat_delete_conversation_body else R.string.chat_delete_conversation_body_local)
+            .setMessage(
+                if (linked) ServiceUi.deleteConversationBody(link.service) else R.string.chat_delete_conversation_body_local
+            )
             .setPositiveButton(R.string.chat_action_delete) { _, _ ->
                 // Deleting is final: never for a conversation that is no longer the one on screen.
-                if (id != conversationId) return@setPositiveButton
-                if (manager.isPaired() != linked) {
+                if (!isCurrent(link, id)) return@setPositiveButton
+                if (link.isPaired() != linked) {
                     confirmDeleteConversation()
                     return@setPositiveButton
                 }
                 lifecycleScope.launch {
-                    relayAttempt { manager.deleteConversation(id) }
-                        .onSuccess { if (id == conversationId) finish() }
-                        .onFailure { toast(RelayErrors.message(this@ThreadActivity, it)) }
+                    relayAttempt { link.deleteConversation(id) }
+                        .onSuccess { if (isCurrent(link, id)) finish() }
+                        .onFailure { toast(errorText(link, it)) }
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -1428,15 +1580,16 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     /** A conversation the phone deleted, removed from this device for good. */
     private fun confirmDeleteForever() {
         val id = conversation?.id ?: return
+        val link = manager
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.chat_delete_forever_title)
             .setMessage(R.string.chat_delete_forever_body)
             .setPositiveButton(R.string.chat_action_delete_forever) { _, _ ->
-                if (id != conversationId) return@setPositiveButton
+                if (!isCurrent(link, id)) return@setPositiveButton
                 lifecycleScope.launch {
-                    relayAttempt { manager.purgeDeleted(id) }
-                        .onSuccess { if (id == conversationId) finish() }
-                        .onFailure { toast(RelayErrors.message(this@ThreadActivity, it)) }
+                    relayAttempt { link.purgeDeleted(id) }
+                        .onSuccess { if (isCurrent(link, id)) finish() }
+                        .onFailure { toast(errorText(link, it)) }
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -1444,13 +1597,20 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             .let(::trackConfirm)
     }
 
-    private fun runAction(doneMessage: Int, block: suspend () -> Unit) {
+    /** Runs [block] on the service this conversation belongs to, and says how it went. */
+    private fun runAction(doneMessage: Int, block: suspend (ChatBackend) -> Unit) {
+        val link = manager
         lifecycleScope.launch {
-            relayAttempt { block() }
+            relayAttempt { block(link) }
                 .onSuccess { toast(getString(doneMessage)) }
-                .onFailure { toast(RelayErrors.message(this@ThreadActivity, it)) }
+                .onFailure { toast(errorText(link, it)) }
         }
     }
+
+    /** A failure of [link], in its service's words. */
+    private fun errorText(link: ChatBackend, t: Throwable): String = ChatErrors.message(this, link.service, t)
+
+    private fun errorText(link: ChatBackend, code: String): String = ChatErrors.message(this, link.service, code)
 
     private fun toast(message: String) {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).apply { setGravity(Gravity.CENTER, 0, 0) }.show()

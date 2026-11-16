@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Strings of the WhatsApp link's runtime: its foreground service's notification and its "link again" notice. -->
+<resources>
+    <!-- The service notification's title, by state -->
+    <string name="wa_state_unpaired">Not linked to WhatsApp</string>
+    <string name="wa_state_pairing">Linking to WhatsApp…</string>
+    <string name="wa_state_disconnected">Disconnected from WhatsApp</string>
+    <string name="wa_state_connecting">Connecting to WhatsApp…</string>
+    <string name="wa_state_connected">Connected to WhatsApp</string>
+    <string name="wa_state_reconnecting">Reconnecting to WhatsApp…</string>
+    <string name="wa_state_logged_out">WhatsApp link ended: link again</string>
+    <string name="wa_state_error">WhatsApp connection problem, trying again soon</string>
+
+    <!-- The service notification -->
+    <string name="wa_service_text">Messages stay on this phone. Tap to open them.</string>
+    <string name="wa_action_disconnect">Disconnect</string>
+    <string name="wa_service_title_unpairing">Unlinking…</string>
+    <string name="wa_service_text_unpairing">Telling WhatsApp to remove this device.</string>
+
+    <!-- Shown once when the phone, or WhatsApp, ended the link -->
+    <string name="wa_relink_title">WhatsApp link ended</string>
+    <string name="wa_relink_text">This device was removed from your WhatsApp account. Tap to link it again.</string>
+</resources>

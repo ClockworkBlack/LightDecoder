@@ -69,6 +69,27 @@ object TimeFormat {
         }
     }
 
+    /**
+     * When someone was last online, as the line under a conversation's
+     * title: "last seen today at 14:05", "last seen yesterday at 14:05",
+     * then the weekday or date as in the conversation list.
+     */
+    fun lastSeen(
+        context: Context,
+        timestampMs: Long,
+        nowMs: Long = System.currentTimeMillis(),
+        zone: TimeZone = TimeZone.getDefault(),
+        locale: Locale = Locale.getDefault(),
+    ): String {
+        val days = daysBetween(timestampMs, nowMs, zone)
+        return when {
+            // A little in the future is the other clock running ahead: still today.
+            days <= 0 -> context.getString(R.string.chat_presence_last_seen_today, clock(context, timestampMs, zone, locale))
+            days == 1 -> context.getString(R.string.chat_presence_last_seen_yesterday, clock(context, timestampMs, zone, locale))
+            else -> context.getString(R.string.chat_presence_last_seen, listTime(context, timestampMs, nowMs, zone, locale))
+        }
+    }
+
     /** Midnight at the start of the day [timestampMs] falls in, for grouping. */
     fun startOfDay(timestampMs: Long, zone: TimeZone = TimeZone.getDefault()): Long {
         val z = zone.toZoneId()

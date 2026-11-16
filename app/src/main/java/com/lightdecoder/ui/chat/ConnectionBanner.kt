@@ -1,35 +1,32 @@
 package com.lightdecoder.ui.chat
 
-import android.content.Intent
 import android.view.View
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
+import com.lightdecoder.chat.Capability
+import com.lightdecoder.chat.ChatBackend
 import com.lightdecoder.databinding.ViewConnectionBannerBinding
-import com.lightdecoder.relay.RelayManager
 import com.lightdecoder.relay.RelayState
-import com.lightdecoder.ui.relay.NotificationPermission
-import com.lightdecoder.ui.relay.RelayErrors
-import com.lightdecoder.ui.relay.RelaySetupActivity
-import com.lightdecoder.ui.relay.RelayStatusActivity
 import com.lightdecoder.ui.relay.RelayUi
 import com.lightdecoder.ui.relay.relayAttempt
 import kotlinx.coroutines.launch
 
 /**
- * The strip at the top of the messaging screens that says when the link is
- * not live (offline, connecting, in use elsewhere, needs fixing) and offers
- * the one action that helps. Hidden while connected.
+ * The strip at the top of the messaging screens that says when the link of
+ * the service on screen is not live (offline, connecting, in use elsewhere,
+ * needs fixing) and offers the one action that helps. Hidden while connected.
  *
  * The owner re-renders it whenever it comes back to the front (its state
  * collection restarts), so returning from the notification settings updates
- * the "notifications are off" case.
+ * the "notifications are off" case. When the screen changes service, [bind]
+ * points it at the other link.
  */
-class ConnectionBanner(
+internal class ConnectionBanner(
     private val activity: AppCompatActivity,
     private val binding: ViewConnectionBannerBinding,
-    private val manager: RelayManager,
-    private val notifications: NotificationPermission,
+    private var backend: ChatBackend,
+    private val notifications: ServiceNotifications,
 ) {
     private var fix = RelayUi.Fix.NONE
 
@@ -37,19 +34,38 @@ class ConnectionBanner(
         binding.bannerAction.setOnClickListener { act() }
     }
 
-    fun render(state: RelayState, paired: Boolean) {
+    /** From now on the banner is about [backend]'s link. It stays hidden until that link's state is rendered. */
+    fun bind(backend: ChatBackend) {
+        if (backend === this.backend) return
+        this.backend = backend
+        fix = RelayUi.Fix.NONE
+        binding.root.visibility = View.GONE
+    }
+
+    /**
+     * Shows [state]. With [quietWhenUnlinked] a link that is simply not set
+     * up shows nothing (the screen says so itself, with a card); a link that
+     * was removed or failed still says why.
+     */
+    fun render(state: RelayState, paired: Boolean, quietWhenUnlinked: Boolean = false) {
         if (paired && state.isOnline) {
             binding.root.visibility = View.GONE
             return
         }
-        binding.root.visibility = View.VISIBLE
+        val service = backend.service
         // Without a pairing say "not linked", unless the link knows why (logged out, say).
         val phase = if (!paired && !RelayUi.isProblem(state.phase)) RelayState.Phase.UNPAIRED else state.phase
-        fix = RelayUi.fix(state, paired, RelayUi.notificationsOn(activity))
+        fix = fixFor(state, paired)
+        if (quietWhenUnlinked && phase == RelayState.Phase.UNPAIRED) {
+            binding.root.visibility = View.GONE
+            return
+        }
+        binding.root.visibility = View.VISIBLE
         binding.bannerText.setText(RelayUi.title(phase, fix))
         // The specific reason, when the link gave one we can explain.
-        val reason = if (state.code.isNotEmpty() && RelayUi.isProblem(phase)) RelayErrors.message(activity, state.code) else null
-        binding.bannerDetail.text = reason ?: activity.getString(RelayUi.body(phase, fix))
+        val reason =
+            if (state.code.isNotEmpty() && RelayUi.isProblem(phase)) ChatErrors.message(activity, service, state.code) else null
+        binding.bannerDetail.text = reason ?: activity.getString(ServiceUi.phaseBody(service, phase, fix))
         if (fix == RelayUi.Fix.NONE) {
             binding.bannerAction.visibility = View.GONE
         } else {
@@ -62,18 +78,26 @@ class ConnectionBanner(
         }
     }
 
+    /** What to offer: [RelayUi.fix] for this link's own notification, and "Use here" only where the service has it. */
+    private fun fixFor(state: RelayState, paired: Boolean): RelayUi.Fix {
+        val fix = RelayUi.fix(state, paired, RelayUi.notificationsOn(activity, backend.service))
+        return if (fix == RelayUi.Fix.USE_HERE && Capability.USE_HERE !in backend.capabilities) RelayUi.Fix.STATUS else fix
+    }
+
     private fun act() {
+        val backend = backend
+        val service = backend.service
         when (fix) {
-            RelayUi.Fix.SET_UP -> activity.startActivity(Intent(activity, RelaySetupActivity::class.java))
-            RelayUi.Fix.STATUS -> activity.startActivity(Intent(activity, RelayStatusActivity::class.java))
+            RelayUi.Fix.SET_UP -> activity.startActivity(ServiceUi.setup(activity, service))
+            RelayUi.Fix.STATUS -> activity.startActivity(ServiceUi.status(activity, service))
             // Cheap and main-thread safe; called directly so it orders with a Disconnect tap.
-            RelayUi.Fix.CONNECT -> notifications.ensureThen { manager.startLive() }
+            RelayUi.Fix.CONNECT -> notifications[service].ensureThen { ServiceUi.startLive(backend) }
             // A link the user wants starts by itself once they are on and a screen is in
-            // front again (RelayManager.onAppVisible); otherwise the banner then offers Connect.
-            RelayUi.Fix.NOTIFICATIONS -> notifications.openSettings()
+            // front again (the manager's onAppVisible); otherwise the banner then offers Connect.
+            RelayUi.Fix.NOTIFICATIONS -> notifications[service].openSettings()
             RelayUi.Fix.USE_HERE -> activity.lifecycleScope.launch {
-                relayAttempt { manager.useHere() }.onFailure {
-                    Toast.makeText(activity, RelayErrors.message(activity, it), Toast.LENGTH_LONG).show()
+                relayAttempt { backend.useHere() }.onFailure {
+                    Toast.makeText(activity, ChatErrors.message(activity, service, it), Toast.LENGTH_LONG).show()
                 }
             }
             RelayUi.Fix.NONE -> Unit

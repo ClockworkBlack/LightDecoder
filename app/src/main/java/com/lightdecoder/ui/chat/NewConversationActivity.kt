@@ -15,11 +15,11 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.lightdecoder.R
 import com.lightdecoder.archive.ArchiveRepository
 import com.lightdecoder.archive.ContactRow
+import com.lightdecoder.chat.Capability
+import com.lightdecoder.chat.ChatBackend
 import com.lightdecoder.databinding.ActivityNewConversationBinding
 import com.lightdecoder.databinding.DialogGroupNameBinding
 import com.lightdecoder.relay.RelayIntents
-import com.lightdecoder.relay.RelayManager
-import com.lightdecoder.ui.relay.RelayErrors
 import com.lightdecoder.ui.relay.SignInWebData
 import com.lightdecoder.ui.relay.relayAttempt
 import kotlinx.coroutines.Dispatchers
@@ -29,17 +29,22 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Starts a conversation: pick one or more of the phone's contacts, or type a
- * number. Several picks start a group (RCS groups can have a name). The phone
- * finds an existing conversation with the same people instead of making a
- * second one.
+ * Starts a conversation in one service ([RelayIntents.EXTRA_SERVICE]; Google
+ * Messages without it): pick one of its contacts, or type a number. Where
+ * the service can start groups ([Capability.NEW_GROUP]) several picks start
+ * one (RCS groups can have a name); elsewhere a new pick replaces the last.
+ * The service finds an existing conversation with the same people instead
+ * of making a second one.
  */
 class NewConversationActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityNewConversationBinding
-    private lateinit var manager: RelayManager
+    private lateinit var manager: ChatBackend
     private lateinit var repo: ArchiveRepository
     private lateinit var adapter: ContactsAdapter
+
+    /** Whether several people can be picked, to start a group. */
+    private var groups = false
 
     /** Picked numbers, in the order picked, with the label shown on their chip. */
     private val selected = LinkedHashMap<String, String>()
@@ -55,8 +60,9 @@ class NewConversationActivity : AppCompatActivity() {
         applySystemBarAndImePadding(binding.root)
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
-        manager = RelayManager.get(this)
-        repo = ArchiveRepository.get(this)
+        manager = ScreenBackends.get(this, RelayIntents.serviceOf(intent))
+        repo = manager.repo
+        groups = Capability.NEW_GROUP in manager.capabilities
 
         savedInstanceState?.getStringArrayList(STATE_NUMBERS)?.let { numbers ->
             val labels = savedInstanceState.getStringArrayList(STATE_LABELS).orEmpty()
@@ -138,7 +144,9 @@ class NewConversationActivity : AppCompatActivity() {
         }
         adapter.submitList(items)
         binding.emptyText.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
-        binding.emptyText.setText(if (query.isBlank()) R.string.chat_contacts_empty else R.string.chat_contacts_no_match)
+        binding.emptyText.setText(
+            if (query.isBlank()) R.string.chat_contacts_empty else ServiceUi.contactsNoMatch(manager.service)
+        )
     }
 
     // --- picking -------------------------------------------------------------
@@ -156,7 +164,11 @@ class NewConversationActivity : AppCompatActivity() {
     }
 
     private fun toggle(number: String, label: String) {
-        if (selected.remove(number) == null) selected[number] = label
+        if (selected.remove(number) == null) {
+            // One person only where the service starts no groups from here.
+            if (!groups) selected.clear()
+            selected[number] = label
+        }
         renderSelection()
         adapter.submitList(adapter.currentList.map { it.copy(selected = it.number in selected) })
     }
@@ -183,7 +195,7 @@ class NewConversationActivity : AppCompatActivity() {
     private fun start() {
         val numbers = selected.keys.toList()
         if (numbers.isEmpty()) return
-        if (numbers.size == 1) {
+        if (numbers.size == 1 || !groups) {
             startConversation(numbers, null)
             return
         }
@@ -208,6 +220,7 @@ class NewConversationActivity : AppCompatActivity() {
                     startActivity(
                         Intent(this@NewConversationActivity, ThreadActivity::class.java)
                             .putExtra(RelayIntents.EXTRA_CONVERSATION_ID, conversationId)
+                            .putExtra(RelayIntents.EXTRA_SERVICE, manager.service.key)
                     )
                     finish()
                 }
@@ -216,7 +229,9 @@ class NewConversationActivity : AppCompatActivity() {
                     binding.progress.visibility = View.GONE
                     renderSelection()
                     Toast.makeText(
-                        this@NewConversationActivity, RelayErrors.message(this@NewConversationActivity, it), Toast.LENGTH_LONG,
+                        this@NewConversationActivity,
+                        ChatErrors.message(this@NewConversationActivity, manager.service, it),
+                        Toast.LENGTH_LONG,
                     ).show()
                 }
         }

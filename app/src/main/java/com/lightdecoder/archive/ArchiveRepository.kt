@@ -89,7 +89,8 @@ class ArchiveRepository private constructor(
      * Stores what the phone says about a conversation and replaces its
      * participants. The phone is authoritative, except that a zero
      * lastMessageTs leaves the stored latest message alone, and mute (which
-     * the phone does not report) is only ever turned on from here.
+     * Google Messages does not report) is only ever turned on from here for
+     * Google Messages; WhatsApp reports it, and is followed both ways.
      * A conversation the phone reports as deleted (or trashed) is not
      * deleted here: it moves to the local [Folder.DELETED] folder with its
      * messages, until the user restores ([restoreDeleted]) or purges it
@@ -231,6 +232,66 @@ class ArchiveRepository private constructor(
 
     /** Removes a message the phone deleted, with its search entry and media files. */
     fun applyDeletion(messageId: String) = write { deleteMessage(it, messageId) }
+
+    /**
+     * Moves messages this account sent forward to [status] (with
+     * [statusCode]), as a delivery or read receipt reports it. Never
+     * backwards: [rankOf] orders the status names, and a message already at
+     * [status] or beyond keeps what it has (receipts arrive late, twice and
+     * out of order). Incoming messages and local copies still being sent are
+     * left alone. Returns the ids that are stored at all, changed or not, so
+     * the caller knows which receipts came before their message.
+     */
+    fun advanceMessageStatus(messageIds: Collection<String>, status: String, statusCode: Int, rankOf: (String) -> Int): Set<String> =
+        if (messageIds.isEmpty()) emptySet() else write { b ->
+            val found = HashSet<String>()
+            val target = rankOf(status)
+            for (id in messageIds.distinct()) {
+                val row = query(
+                    b.db, "SELECT conversation_id, message_status, is_outgoing, direction FROM messages WHERE message_id = ?", arrayOf(id),
+                ) { c -> listOf(c.getString(0).orEmpty(), c.getString(1).orEmpty(), c.getInt(2).toString(), c.getString(3).orEmpty()) }
+                    .firstOrNull() ?: continue
+                found.add(id)
+                val (conversationId, current, outgoing, direction) = row
+                if (outgoing != "1" || direction != "out" || id.startsWith(MessageRow.TMP_PREFIX)) continue
+                if (rankOf(current) >= target) continue
+                b.db.update("messages", ContentValues().apply {
+                    put("message_status", status)
+                    put("status_code", statusCode)
+                    put("updated_at", b.now)
+                }, "message_id = ?", arrayOf(id))
+                b.changed(Kind.MESSAGES, conversationId)
+            }
+            found
+        }
+
+    /**
+     * The id and timestamp of the oldest message from the phone in one
+     * conversation (ties broken by id), or null if there is none: where a
+     * service whose history pages by "older than this message" starts from.
+     */
+    fun oldestStored(conversationId: String): Pair<String, Long>? = query(
+        "SELECT message_id, timestamp_ms FROM messages WHERE conversation_id = ? AND substr(message_id, 1, ${MessageRow.TMP_PREFIX.length}) != ? " +
+            "ORDER BY timestamp_ms ASC, message_id ASC LIMIT 1",
+        arrayOf(conversationId, MessageRow.TMP_PREFIX),
+    ) { it.getString(0) to it.getLong(1) }.firstOrNull()
+
+    /** How many messages from the phone (local copies of sends not counted) one conversation holds. */
+    fun storedMessageCount(conversationId: String): Int = query(
+        "SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND substr(message_id, 1, ${MessageRow.TMP_PREFIX.length}) != ?",
+        arrayOf(conversationId, MessageRow.TMP_PREFIX),
+    ) { it.getInt(0) }.firstOrNull() ?: 0
+
+    /** Which of [messageIds] are stored. */
+    fun knownMessageIds(messageIds: Collection<String>): Set<String> {
+        val known = HashSet<String>()
+        messageIds.distinct().chunked(500).forEach { ids ->
+            query("SELECT message_id FROM messages WHERE message_id IN (${ids.joinToString(",") { "?" }})", ids.toTypedArray()) {
+                known.add(it.getString(0))
+            }
+        }
+        return known
+    }
 
     /**
      * Shows a message being sent right away, as "tmp:<tmpId>" in state
@@ -609,7 +670,9 @@ class ArchiveRepository private constructor(
             put("unread", dto.unread.toInt())
             put("pinned", dto.pinned.toInt())
             put("read_only", dto.readOnly.toInt())
-            if (dto.muted) put("muted", 1)
+            // Google Messages does not report mute, so there it is only ever turned
+            // on from here; WhatsApp's bridge reports it either way.
+            if (dto.muted || service == ChatService.WHATSAPP) put("muted", dto.muted.toInt())
             if (dto.lastMessageTs > 0) {
                 put("last_message_ts", dto.lastMessageTs)
                 put("latest_message_id", dto.latestMessageId)

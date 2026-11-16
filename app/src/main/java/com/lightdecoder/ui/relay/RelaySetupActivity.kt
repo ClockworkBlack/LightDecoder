@@ -32,9 +32,11 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.lightdecoder.R
 import com.lightdecoder.archive.ArchiveRepository
+import com.lightdecoder.chat.ChatService
 import com.lightdecoder.databinding.ActivityRelaySetupBinding
 import com.lightdecoder.databinding.DialogPasteCookiesBinding
 import com.lightdecoder.relay.CookieParser
+import com.lightdecoder.relay.RelayIntents
 import com.lightdecoder.relay.RelayManager
 import com.lightdecoder.relay.RelayState
 import com.lightdecoder.ui.chat.ConversationsActivity
@@ -95,7 +97,11 @@ class RelaySetupActivity : AppCompatActivity() {
         binding.confirmRetry.setOnClickListener { model.pair(manager, null) }
         binding.confirmSignInAgain.setOnClickListener { model.goTo(Step.SIGN_IN) }
         binding.doneOpen.setOnClickListener {
-            startActivity(Intent(this, ConversationsActivity::class.java))
+            // Its own tab of the conversation list, whichever tab was open last.
+            startActivity(
+                Intent(this, ConversationsActivity::class.java)
+                    .putExtra(RelayIntents.EXTRA_SERVICE, ChatService.MESSAGES.key)
+            )
             finish()
         }
         binding.doneStatus.setOnClickListener {

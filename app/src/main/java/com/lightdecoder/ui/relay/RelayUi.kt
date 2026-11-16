@@ -16,6 +16,7 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.lightdecoder.R
+import com.lightdecoder.chat.ChatService
 import com.lightdecoder.relay.RelayNotifications
 import com.lightdecoder.relay.RelayState
 import com.lightdecoder.relay.RelayState.Phase
@@ -104,19 +105,21 @@ object RelayUi {
     fun isProblem(phase: Phase): Boolean =
         phase == Phase.LOGGED_OUT || phase == Phase.COOKIES_INVALID || phase == Phase.ERROR
 
-    /** Whether the link's ongoing notification can be seen (see [RelayNotifications.statusVisible]). */
-    fun notificationsOn(context: Context): Boolean = RelayNotifications.statusVisible(context)
+    /** Whether the ongoing notification of [service]'s link can be seen (see [RelayNotifications.statusVisible]). */
+    fun notificationsOn(context: Context, service: ChatService = ChatService.MESSAGES): Boolean =
+        RelayNotifications.statusVisible(context, service)
 
     /**
-     * The system screen where the link's notification can be turned back on:
-     * the app's notification settings when all of them are off (or, on
-     * Android 13+, not allowed), else the settings of the link's channel.
+     * The system screen where the notification of [service]'s link can be
+     * turned back on: the app's notification settings when all of them are
+     * off (or, on Android 13+, not allowed), else the settings of that
+     * link's channel.
      */
-    fun notificationSettingsIntent(context: Context): Intent =
+    fun notificationSettingsIntent(context: Context, service: ChatService = ChatService.MESSAGES): Intent =
         if (NotificationManagerCompat.from(context).areNotificationsEnabled()) {
             Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
                 .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-                .putExtra(Settings.EXTRA_CHANNEL_ID, RelayNotifications.CHANNEL_STATUS)
+                .putExtra(Settings.EXTRA_CHANNEL_ID, RelayNotifications.statusChannel(service))
         } else {
             Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
                 .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
@@ -154,9 +157,15 @@ internal fun runInBackground(block: suspend () -> Unit) {
  * turned on there. The runtime enforces the same rule by itself
  * ([RelayNotifications.statusVisible]); this only makes it understandable.
  *
+ * Each link has its own notification channel, so a gate is for one
+ * [service]'s link: the Google Messages one unless told otherwise.
+ *
  * Create it during the activity's construction or onCreate.
  */
-class NotificationPermission(private val activity: ComponentActivity) {
+class NotificationPermission(
+    private val activity: ComponentActivity,
+    private val service: ChatService = ChatService.MESSAGES,
+) {
     private var then: (() -> Unit)? = null
     private var refused: (() -> Unit)? = null
     private var afterSettings: (() -> Unit)? = null
@@ -168,7 +177,7 @@ class NotificationPermission(private val activity: ComponentActivity) {
         refused = null
         // After a rotation the pending action is gone: nothing to run or explain.
         if (action == null) return@registerForActivityResult
-        if (granted && RelayUi.notificationsOn(activity)) {
+        if (granted && RelayUi.notificationsOn(activity, service)) {
             action()
         } else {
             onRefused?.invoke()
@@ -179,7 +188,7 @@ class NotificationPermission(private val activity: ComponentActivity) {
     private val settings = activity.registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         val action = afterSettings
         afterSettings = null
-        if (action != null && RelayUi.notificationsOn(activity)) action()
+        if (action != null && RelayUi.notificationsOn(activity, service)) action()
     }
 
     /**
@@ -188,7 +197,7 @@ class NotificationPermission(private val activity: ComponentActivity) {
      * to put a switch back) and [action] does not.
      */
     fun ensureThen(onRefused: () -> Unit = {}, action: () -> Unit) {
-        if (RelayUi.notificationsOn(activity)) {
+        if (RelayUi.notificationsOn(activity, service)) {
             action()
             return
         }
@@ -222,7 +231,7 @@ class NotificationPermission(private val activity: ComponentActivity) {
     fun openSettings(after: (() -> Unit)? = null) {
         afterSettings = after
         try {
-            settings.launch(RelayUi.notificationSettingsIntent(activity))
+            settings.launch(RelayUi.notificationSettingsIntent(activity, service))
         } catch (e: ActivityNotFoundException) {
             try {
                 settings.launch(
@@ -239,7 +248,12 @@ class NotificationPermission(private val activity: ComponentActivity) {
         if (activity.isFinishing || activity.isDestroyed) return
         MaterialAlertDialogBuilder(activity)
             .setTitle(R.string.link_notifications_needed_title)
-            .setMessage(R.string.link_notifications_needed_body)
+            .setMessage(
+                when (service) {
+                    ChatService.MESSAGES -> R.string.link_notifications_needed_body
+                    ChatService.WHATSAPP -> R.string.link_notifications_needed_body_whatsapp
+                }
+            )
             .setPositiveButton(R.string.link_notifications_open_settings) { _, _ -> openSettings(action) }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
