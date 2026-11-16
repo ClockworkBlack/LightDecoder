@@ -1150,6 +1150,32 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         refresh()
     }
 
+    /** Downloads the picture if need be and adds it to the user's stickers. */
+    private fun addToStickers(row: MessageRow, part: MediaRow) {
+        val link = manager
+        lifecycleScope.launch {
+            val local = listOf(part.localPath, if (part.needsFullSize) part.thumbPath else "")
+                .firstOrNull { it.isNotEmpty() && File(it).isFile }?.let(::File)
+            val file = local ?: relayAttempt { link.mediaFile(row.id, part.partId, thumbnail = part.needsFullSize) }.getOrElse {
+                val code = ChatErrors.codeOf(it)
+                toast(
+                    if (code == RelayException.NOT_CONNECTED) getString(ServiceUi.mediaNeedsConnection(link.service))
+                    else errorText(link, code)
+                )
+                return@launch
+            }
+            val added = file?.let { f ->
+                withContext(Dispatchers.IO) {
+                    runCatching {
+                        if (f.length() > MAX_STICKER_SOURCE_BYTES) null
+                        else com.lightdecoder.sticker.StickerLibrary.addPicture(applicationContext, f.readBytes())
+                    }.getOrNull()
+                }
+            }
+            toast(getString(if (added != null) R.string.sticker_added_to_mine else R.string.sticker_add_failed))
+        }
+    }
+
     private fun confirmStickerDelete(file: File, after: () -> Unit) {
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.sticker_delete_title)
@@ -1329,6 +1355,13 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         b.actionReply.setOnClickListener {
             sheet.dismiss()
             onReply(row)
+        }
+        // A picture or sticker in the message: kept among the user's own stickers.
+        val picture = row.media.firstOrNull { PictureGalleryActivity.isPicture(it) }
+        b.actionSaveSticker.visibility = if (picture != null) View.VISIBLE else View.GONE
+        b.actionSaveSticker.setOnClickListener {
+            sheet.dismiss()
+            if (picture != null) addToStickers(row, picture)
         }
         b.actionCopy.visibility = if (row.text.isNotEmpty()) View.VISIBLE else View.GONE
         b.actionCopy.setOnClickListener {
@@ -1777,6 +1810,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
         /** At most this many pictures are taken in at once as stickers. */
         private const val MAX_STICKER_IMPORT = 50
+
+        /** A picture larger than this is not made into a sticker. */
+        private const val MAX_STICKER_SOURCE_BYTES = 20L * 1024 * 1024
 
         /** Shorter than any callable number (short codes from businesses are not offered). */
         private const val MIN_CALL_DIGITS = 6

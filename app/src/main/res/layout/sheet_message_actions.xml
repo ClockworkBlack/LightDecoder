@@ -59,6 +59,22 @@
         android:drawableStart="@drawable/ic_copy"
         android:text="@string/chat_action_copy" />
 
+    <!-- A picture or sticker someone sent: kept among the user's own stickers. -->
+    <TextView
+        android:id="@+id/actionSaveSticker"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?attr/selectableItemBackground"
+        android:clickable="true"
+        android:drawablePadding="20dp"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:minHeight="52dp"
+        android:paddingHorizontal="24dp"
+        android:textAppearance="?attr/textAppearanceBodyLarge"
+        android:drawableStart="@drawable/ic_sticker"
+        android:text="@string/sticker_add_to_mine" />
+
     <TextView
         android:id="@+id/actionReadAloud"
         android:layout_width="match_parent"

@@ -134,6 +134,25 @@ object StickerLibrary {
         return added
     }
 
+    /**
+     * Adds a picture someone sent (a sticker from an iPhone or Android user,
+     * HEIC included, transparency kept) to the library as it is, fitted to a
+     * sticker's size, and copies it to the gallery. It is saved with itself as
+     * its original, so it can be edited later (an outline added, say). An
+     * animation keeps its first frame. Null if the bytes are not a picture.
+     */
+    fun addPicture(context: Context, bytes: ByteArray): File? {
+        if (bytes.isEmpty() || bytes.size > MAX_IMPORT_BYTES) return null
+        val decoded = runCatching { Media.decodeFirstFrame(bytes) }.getOrNull() ?: return null
+        val fitted = Media.scaledToFit(decoded, StickerMaker.SIZE * 2)
+        val sticker = Media.scaledToFit(fitted, StickerMaker.SIZE)
+        val file = save(context, sticker)
+        runCatching {
+            StickerProject.save(context, file, fitted, StickerProject.Edits(StickerMaker.Options(outline = false), null, emptyList()))
+        }
+        return file
+    }
+
     // --- the gallery copies -------------------------------------------------------------
 
     private fun prefs(context: Context) = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

@@ -6,6 +6,10 @@
         android:title="@string/action_share"
         app:showAsAction="ifRoom" />
     <item
+        android:id="@+id/action_gallery_add_sticker"
+        android:title="@string/sticker_add_to_mine"
+        app:showAsAction="never" />
+    <item
         android:id="@+id/action_gallery_details"
         android:title="@string/gallery_details"
         app:showAsAction="never" />

@@ -22,6 +22,14 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.7
+- **Stickers others send** (iPhone or Android): "Add to my stickers" in a message's touch-and-hold
+  menu (any picture or sticker), in the picture gallery's menu and in the picture viewer's top bar
+  (also the sticker inbox). `StickerLibrary.addPicture(bytes)` decodes the first frame (HEIC,
+  WebP, GIF, PNG...), keeps it as a library sticker and saves an editing project with no outline,
+  so it can be edited like one the user made. Downloads the full picture first when needed.
+  Tests: `sticker/ReceivedStickerTest`.
+
 ## 0.5.6
 - Fine-tune: "Redo stroke"; "Clear brushing" is undoable (Redo brings the strokes back in order);
   "Redo cut-out" after "Undo cut-out".

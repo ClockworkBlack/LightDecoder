@@ -29,4 +29,7 @@
     <string name="sticker_trace_too_small">Keep your finger down and draw all the way around the part to keep, then lift it.</string>
     <string name="sticker_brush_redo">Redo stroke</string>
     <string name="sticker_trace_redo">Redo cut-out</string>
+    <string name="sticker_add_to_mine">Add to my stickers</string>
+    <string name="sticker_added_to_mine">Added to your stickers</string>
+    <string name="sticker_add_failed">This picture could not be added to your stickers.</string>
 </resources>

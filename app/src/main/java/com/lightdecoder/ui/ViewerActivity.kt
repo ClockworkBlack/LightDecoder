@@ -86,6 +86,7 @@ class ViewerActivity : AppCompatActivity() {
                 R.id.action_save -> saveToGallery()
                 R.id.action_share -> chooseShare()
                 R.id.action_info -> showDetails()
+                R.id.action_add_sticker -> addToStickers()
                 else -> return@setOnMenuItemClickListener false
             }
             true
@@ -333,6 +334,17 @@ class ViewerActivity : AppCompatActivity() {
     }
 
     private fun sharedDir() = File(cacheDir, "shared").apply { mkdirs() }
+
+    /** The picture on screen (a sticker someone sent, say) into the user's own stickers. */
+    private fun addToStickers() {
+        val l = loaded ?: return
+        io.execute {
+            val file = runCatching { com.lightdecoder.sticker.StickerLibrary.addPicture(applicationContext, l.bytes) }.getOrNull()
+            main.post {
+                toast(getString(if (file != null) R.string.sticker_added_to_mine else R.string.sticker_add_failed))
+            }
+        }
+    }
 
     private fun saveToGallery() {
         val l = loaded ?: return

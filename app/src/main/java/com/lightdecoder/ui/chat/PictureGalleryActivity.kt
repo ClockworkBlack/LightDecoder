@@ -145,6 +145,19 @@ class PictureGalleryActivity : AppCompatActivity() {
         when (item.itemId) {
             android.R.id.home -> finish()
             R.id.action_gallery_share -> picture?.let { withFile(it) { file -> share(file, it.part.mime) } }
+            R.id.action_gallery_add_sticker -> picture?.let { p ->
+                withFile(p) { file ->
+                    lifecycleScope.launch {
+                        val added = withContext(Dispatchers.IO) {
+                            runCatching {
+                                if (file.length() > MAX_READ) null
+                                else com.lightdecoder.sticker.StickerLibrary.addPicture(applicationContext, file.readBytes())
+                            }.getOrNull()
+                        }
+                        toast(getString(if (added != null) R.string.sticker_added_to_mine else R.string.sticker_add_failed))
+                    }
+                }
+            }
             R.id.action_gallery_details -> picture?.let { p ->
                 withFile(p) { file ->
                     try {
