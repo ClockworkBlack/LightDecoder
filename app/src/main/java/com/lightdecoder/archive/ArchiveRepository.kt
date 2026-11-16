@@ -248,6 +248,7 @@ class ArchiveRepository private constructor(
         replyToId: String?,
         nowMs: Long,
     ) = write { b ->
+        requireOwnDirectory(mediaPath.orEmpty())
         val id = MessageRow.tmpMessageId(tmpId)
         if (rowIdOf(b.db, id) != null) return@write
         ensureConversation(b, conversationId)
@@ -300,6 +301,7 @@ class ArchiveRepository private constructor(
 
     /** Adds a send to the queue, replacing an entry with the same key. */
     fun enqueueOutbox(row: OutboxRow) = write { b ->
+        requireOwnDirectory(row.mediaLocalPath)
         b.db.insertWithOnConflict("outbox_queue", null, row.toValues(), SQLiteDatabase.CONFLICT_REPLACE)
         b.changed(Kind.OUTBOX, row.conversationId)
     }
@@ -853,6 +855,7 @@ class ArchiveRepository private constructor(
         condition: String,
         conditionArgs: Array<String>,
     ): Boolean = write { b ->
+        requireOwnDirectory(path)
         val column = if (thumbnail) "thumb_path" else "local_path"
         val where = "message_id = ? AND part_id = ?$condition"
         val args = arrayOf(messageId, partId, *conditionArgs)
@@ -926,6 +929,23 @@ class ArchiveRepository private constructor(
     private fun mediaFileOrNull(path: String): File? = fileInside(path, mediaDir)
 
     private fun outboxFileOrNull(path: String): File? = fileInside(path, outboxDir)
+
+    /**
+     * Refuses to record a file that lies in another service's media or
+     * outbox directory (a caller that forgot to say which service's
+     * [MediaCache] directory it wanted). This archive could never clean such
+     * a file up, since it only deletes inside its own directories, and the
+     * other service's "delete everything" would take it away under it.
+     */
+    private fun requireOwnDirectory(path: String) {
+        if (path.isEmpty()) return
+        for (other in ChatService.entries) {
+            if (other == service) continue
+            val foreign = fileInside(path, MediaCache.mediaDir(filesDir, other)) != null ||
+                fileInside(path, MediaCache.outboxDir(filesDir, other)) != null
+            require(!foreign) { "a file in $other's directory cannot belong to $service's archive" }
+        }
+    }
 
     private fun fileInside(path: String, dir: File): File? {
         if (path.isEmpty()) return null

@@ -5,6 +5,8 @@ import androidx.test.core.app.ApplicationProvider
 import com.lightdecoder.archive.ArchiveDb
 import com.lightdecoder.archive.ArchiveRepository
 import com.lightdecoder.inbox.InboxStore
+import com.lightdecoder.wa.WaManager
+import com.lightdecoder.wa.WaPrefs
 import org.junit.Assert.fail
 import javax.crypto.KeyGenerator
 
@@ -36,6 +38,7 @@ internal class RelayTestEnv {
         SessionVault.save(context, null)
         context.getSharedPreferences("relay", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("inbox", Context.MODE_PRIVATE).edit().clear().commit()
+        context.getSharedPreferences(WaPrefs.FILE, Context.MODE_PRIVATE).edit().clear().commit()
         // History import is started explicitly where a test wants it.
         RelayPrefs.setBackfillDepth(context, BackfillDepth.OFF)
         RelayLog.clear(context)
@@ -56,6 +59,9 @@ internal class RelayTestEnv {
 
     fun tearDown() {
         RelayManager.resetForTesting()
+        // The other service's manager is a process-wide singleton too: one a
+        // screen created must not live on into the next test.
+        WaManager.resetForTesting()
         RelayBridges.factory = null
         SessionVault.save(context, null)
         SessionVault.cipherProvider = originalCipher

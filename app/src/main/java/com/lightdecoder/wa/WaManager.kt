@@ -52,7 +52,8 @@ class WaManager private constructor(
     override val repo: ArchiveRepository,
 ) : ChatBackend {
 
-    private val app: Context = context.applicationContext
+    /** The application's context, never a screen's (the manager outlives every screen). */
+    private val appContext: Context = context.applicationContext
 
     override val service: ChatService get() = ChatService.WHATSAPP
 
@@ -179,7 +180,7 @@ class WaManager private constructor(
         } catch (e: RuntimeException) {
             // markRead does not throw.
         }
-        MessageNotifier.cancel(app, conversationId, ChatService.WHATSAPP)
+        MessageNotifier.cancel(appContext, conversationId, ChatService.WHATSAPP)
     }
 
     override suspend fun loadOlder(conversationId: String, count: Int): Int = notLinked()
@@ -222,10 +223,14 @@ class WaManager private constructor(
     override suspend fun markNotSpam(conversationId: String): Unit =
         throw RelayException(WaErrors.UNSUPPORTED, "WhatsApp has no spam folder")
 
-    /** WhatsApp has no local deleted folder: always false. */
+    /**
+     * WhatsApp keeps no local deleted folder (see [capabilities]): a chat
+     * deleted on the phone is deleted here too, since no screen would show
+     * what was kept. So there is never anything to restore: always false.
+     */
     override suspend fun restoreDeletedLocally(conversationId: String): Boolean = false
 
-    /** WhatsApp has no local deleted folder: always 0. */
+    /** As [restoreDeletedLocally]: nothing is ever kept in a deleted folder, so always 0. */
     override suspend fun purgeDeleted(conversationId: String?): Int = 0
 
     override suspend fun deleteLocalArchive(): Boolean {
