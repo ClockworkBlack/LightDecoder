@@ -431,4 +431,6 @@
     <string name="gallery_counter">%1$d of %2$d</string>
     <string name="gallery_details">Save, details and effects</string>
     <string name="gallery_loading_failed">This picture could not be loaded.</string>
+    <string name="chat_call">Call</string>
+    <string name="chat_call_no_app">No phone app on this device can make the call.</string>
 </resources>

@@ -252,6 +252,25 @@
                 android:minHeight="48dp"
                 android:text="@string/sticker_outline" />
 
+            <TextView
+                android:id="@+id/outlineWidthLabel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:labelFor="@+id/outlineWidth"
+                android:text="@string/sticker_outline_width"
+                android:textAppearance="?attr/textAppearanceBodySmall"
+                android:textColor="?attr/colorOnSurfaceVariant" />
+
+            <com.google.android.material.slider.Slider
+                android:id="@+id/outlineWidth"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:contentDescription="@string/sticker_outline_width"
+                android:stepSize="1"
+                android:value="12"
+                android:valueFrom="2"
+                android:valueTo="40" />
+
             <com.google.android.material.materialswitch.MaterialSwitch
                 android:id="@+id/solid"
                 android:layout_width="match_parent"

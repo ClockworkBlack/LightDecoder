@@ -758,6 +758,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             ?: others.map { it.name.ifBlank { it.formattedNumber.ifBlank { it.number } } }.filter { it.isNotBlank() }
                 .joinToString(", ").ifBlank { getString(R.string.chat_untitled) }
         supportActionBar?.title = title
+        // The person's (or group's) avatar next to the name, as in the conversation list.
+        val density = resources.displayMetrics.density
+        val avatar = Avatars.drawable(this, title, conv?.id ?: conversationId, conv?.avatarColor.orEmpty(), (TOOLBAR_AVATAR_DP * density).toInt())
+        binding.toolbar.logo = android.graphics.drawable.InsetDrawable(avatar, 0, 0, (TOOLBAR_AVATAR_GAP_DP * density).toInt(), 0)
         renderPeerActivity()
         invalidateOptionsMenu()
         renderComposerState()
@@ -1045,6 +1049,16 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     private var stickerSheet: BottomSheetDialog? = null
 
+    /** Pictures picked to add to the sticker library (the gallery copies, after a reinstall). */
+    private val restoreStickers = registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(MAX_STICKER_IMPORT)) { uris ->
+        if (uris.isEmpty()) return@registerForActivityResult
+        lifecycleScope.launch {
+            val added = withContext(Dispatchers.IO) { com.lightdecoder.sticker.StickerLibrary.import(applicationContext, uris) }
+            toast(if (added > 0) getString(R.string.sticker_restored, added) else getString(R.string.sticker_restore_none))
+            if (added > 0) showStickers()
+        }
+    }
+
     private val makeSticker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         // A new sticker was saved: show the library again with it in front.
         if (result.resultCode == RESULT_OK) showStickers()
@@ -1062,6 +1076,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             sheet.dismiss()
             makeSticker.launch(com.lightdecoder.ui.sticker.StickerMakerActivity.intent(this))
         }
+        view.findViewById<View>(R.id.stickersRestore).setOnClickListener {
+            sheet.dismiss()
+            restoreStickers.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+        }
         sheet.setContentView(view)
         sheet.setOnDismissListener { if (stickerSheet === sheet) stickerSheet = null }
         stickerSheet = sheet
@@ -1070,6 +1088,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         fun refresh() {
             lifecycleScope.launch {
                 val tiles = withContext(Dispatchers.IO) {
+                    // Stickers made before the gallery copies existed get theirs now.
+                    runCatching { com.lightdecoder.sticker.StickerLibrary.copyMissingToGallery(applicationContext) }
                     com.lightdecoder.sticker.StickerLibrary.list(applicationContext).mapNotNull { file ->
                         runCatching { MediaLoader.decodePreview(file.readBytes(), side) }.getOrNull()?.let { file to it }
                     }
@@ -1529,6 +1549,20 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     // --- menu ----------------------------------------------------------------
 
+    /**
+     * The phone number to call from this conversation: its one other person's,
+     * in a one-to-one conversation of a phone-number service. Null in a group,
+     * in email, or without a number.
+     */
+    private fun callNumber(): String? {
+        if (manager.service == ChatService.GMAIL) return null
+        val conv = conversation ?: return null
+        if (conv.isGroup) return null
+        val other = participants.filter { !it.isMe }.singleOrNull() ?: return null
+        val number = other.number.ifBlank { other.formattedNumber }.trim()
+        return number.takeIf { it.count(Char::isDigit) >= MIN_CALL_DIGITS }
+    }
+
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
         menuInflater.inflate(R.menu.thread_actions, menu)
         return true
@@ -1536,6 +1570,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     override fun onPrepareOptionsMenu(menu: Menu): Boolean {
         val conv = conversation
+        menu.findItem(R.id.action_call)?.isVisible = callNumber() != null
         val archived = conv?.folderEnum == Folder.ARCHIVE
         menu.findItem(R.id.action_archive)?.apply {
             isVisible = conv != null && (conv.folderEnum == Folder.INBOX || archived)
@@ -1566,6 +1601,14 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             android.R.id.home -> {
                 openConversations()
                 finish()
+            }
+            R.id.action_call -> callNumber()?.let { number ->
+                try {
+                    // The dialer, with the number filled in: the user places the call there.
+                    startActivity(Intent(Intent.ACTION_DIAL, Uri.fromParts("tel", number, null)))
+                } catch (e: ActivityNotFoundException) {
+                    toast(getString(R.string.chat_call_no_app))
+                }
             }
             R.id.action_archive -> if (conv != null) {
                 val archive = conv.folderEnum != Folder.ARCHIVE
@@ -1687,6 +1730,14 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     companion object {
         private const val STATE_WINDOW = "window"
         private const val STATE_ATTACHMENT = "attachment"
+
+        /** At most this many pictures are taken in at once as stickers. */
+        private const val MAX_STICKER_IMPORT = 50
+
+        /** Shorter than any callable number (short codes from businesses are not offered). */
+        private const val MIN_CALL_DIGITS = 6
+        private const val TOOLBAR_AVATAR_DP = 36
+        private const val TOOLBAR_AVATAR_GAP_DP = 14
 
         /** How far a bubble follows a swipe to reply, and how far it must go to start the reply. */
         private const val REPLY_MAX_SHIFT_DP = 96

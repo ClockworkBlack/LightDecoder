@@ -35,4 +35,12 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
         android:text="@string/sticker_new" />
+
+    <!-- Made stickers are copied to the gallery; after reinstalling, they come back from there. -->
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/stickersRestore"
+        style="@style/Widget.Material3.Button.TextButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/sticker_restore" />
 </LinearLayout>

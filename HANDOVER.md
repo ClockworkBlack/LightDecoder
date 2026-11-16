@@ -22,6 +22,14 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.2
+- Thread top bar: the conversation's avatar next to the name, and a call button for one-to-one
+  conversations with a phone number (opens the dialer with the number; no call permission).
+- Sticker maker: outline thickness slider (2-40 px of the 512 px sticker, default 12).
+- Made stickers are also copied to the gallery (Pictures/LightDecoder Stickers, Android 10+);
+  "Add from gallery (restore stickers)" in the sticker panel brings them (or any picture) back after
+  a reinstall. App-private storage already survives updates signed with the release key.
+
 ## 0.5.1 (hotfix)
 - **Gmail paused** (user's request): `chat/Features.GMAIL = false` hides the tab and stops the
   background check; the code and tests stay.

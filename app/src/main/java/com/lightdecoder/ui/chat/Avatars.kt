@@ -63,6 +63,29 @@ object Avatars {
     }
 
     /** Shows [name]'s initials on a circle in its colour. The view needs @drawable/bg_avatar. */
+    /**
+     * The same avatar as a drawable of [sizePx] (a coloured circle with the
+     * initials), for places that take a drawable, such as a toolbar's logo.
+     */
+    fun drawable(context: android.content.Context, name: String, key: String, phoneColor: String, sizePx: Int): android.graphics.drawable.Drawable {
+        val background = colorFor(key, phoneColor)
+        val bitmap = android.graphics.Bitmap.createBitmap(sizePx, sizePx, android.graphics.Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(bitmap)
+        val r = sizePx / 2f
+        canvas.drawCircle(r, r, r, android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = background })
+        val text = initials(name)
+        if (text.isNotEmpty()) {
+            val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                color = textColorOn(background)
+                textSize = sizePx * 0.42f
+                textAlign = android.graphics.Paint.Align.CENTER
+                typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+            }
+            canvas.drawText(text, r, r - (paint.descent() + paint.ascent()) / 2f, paint)
+        }
+        return android.graphics.drawable.BitmapDrawable(context.resources, bitmap)
+    }
+
     fun bind(view: TextView, name: String, key: String, phoneColor: String) {
         val color = colorFor(key, phoneColor)
         view.text = initials(name)

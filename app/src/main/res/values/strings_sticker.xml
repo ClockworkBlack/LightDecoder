@@ -13,4 +13,8 @@
     <string name="sticker_brush_undo">Undo stroke</string>
     <string name="sticker_brush_reset">Clear brushing</string>
     <string name="sticker_refine_done">Done</string>
+    <string name="sticker_restore">Add from gallery (restore stickers)</string>
+    <string name="sticker_restored">%1$d sticker(s) added</string>
+    <string name="sticker_restore_none">No pictures could be added</string>
+    <string name="sticker_outline_width">Outline thickness: thin to thick</string>
 </resources>

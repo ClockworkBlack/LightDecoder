@@ -134,4 +134,46 @@ class StickerMakerTest {
         val sticker = StickerMaker.make(big, StickerMaker.Options(outline = false), StickerMaker.Edits(big, listOf(erase)))
         assertEquals(0, Color.alpha(sticker.getPixel(StickerMaker.SIZE / 2, StickerMaker.SIZE / 2)))
     }
+
+    @Test
+    fun theOutlineCanBeThinOrThick() {
+        fun whitePixels(width: Int): Int {
+            val sticker = StickerMaker.make(redOnGreen(), StickerMaker.Options(removeBackground = true, outline = true, outlineWidth = width))
+            val pixels = IntArray(sticker.width * sticker.height)
+            sticker.getPixels(pixels, 0, sticker.width, 0, 0, sticker.width, sticker.height)
+            return pixels.count { Color.alpha(it) > 200 && Color.red(it) > 240 && Color.green(it) > 240 && Color.blue(it) > 240 }
+        }
+        val thin = whitePixels(StickerMaker.MIN_OUTLINE)
+        val normal = whitePixels(StickerMaker.OUTLINE)
+        val thick = whitePixels(StickerMaker.MAX_OUTLINE)
+        assertTrue("thin $thin < normal $normal < thick $thick", thin in 1 until normal && normal < thick)
+        // Thick has no gaps: the band right around the subject is solid white.
+        val sticker = StickerMaker.make(redOnGreen(), StickerMaker.Options(removeBackground = true, outline = true, outlineWidth = StickerMaker.MAX_OUTLINE))
+        val y = sticker.height / 2
+        var x = 0
+        while (x < sticker.width && Color.alpha(sticker.getPixel(x, y)) < 200) x++
+        for (i in 0 until StickerMaker.MAX_OUTLINE - 4) {
+            val c = sticker.getPixel(x + i, y)
+            assertTrue("solid at ${x + i}", Color.alpha(c) > 200 && Color.green(c) > 200)
+        }
+    }
+
+    @Test
+    fun stickersAddedFromTheGalleryJoinTheLibrary() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        StickerLibrary.list(context).forEach { StickerLibrary.delete(context, it) }
+        val png = File(context.cacheDir, "saved-sticker.png").apply {
+            outputStream().use { redOnGreen().compress(Bitmap.CompressFormat.PNG, 100, it) }
+        }
+        val notAPicture = File(context.cacheDir, "notes.txt").apply { writeText("hello") }
+        val added = StickerLibrary.import(context, listOf(android.net.Uri.fromFile(png), android.net.Uri.fromFile(notAPicture)))
+        assertEquals(1, added)
+        val library = StickerLibrary.list(context)
+        assertEquals(1, library.size)
+        val kept = BitmapFactory.decodeFile(library.single().path)
+        assertEquals(Color.RED, kept.getPixel(kept.width / 2, kept.height / 2))
+        assertTrue(StickerLibrary.delete(context, library.single()))
+        assertTrue(StickerLibrary.list(context).isEmpty())
+        assertFalse("only the library's own files", StickerLibrary.delete(context, png))
+    }
 }

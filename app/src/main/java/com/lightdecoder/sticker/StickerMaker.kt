@@ -42,6 +42,8 @@ object StickerMaker {
         val tolerance: Int = 24,
         val shape: Shape = Shape.ORIGINAL,
         val outline: Boolean = true,
+        /** The outline's thickness in pixels of the 512 px sticker ([MIN_OUTLINE]..[MAX_OUTLINE]). */
+        val outlineWidth: Int = OUTLINE,
         /** White behind the sticker instead of transparency (for carriers that turn MMS pictures into JPEG). */
         val solidBackground: Boolean = false,
     )
@@ -111,7 +113,7 @@ object StickerMaker {
         var work = cutOut(source, options, edits)
         if (options.shape != Shape.ORIGINAL) work = clipped(work, options.shape)
         work = trimmed(work)
-        val border = if (options.outline) OUTLINE else 0
+        val border = if (options.outline) options.outlineWidth.coerceIn(MIN_OUTLINE, MAX_OUTLINE) else 0
         val inner = SIZE - 2 * (border + MARGIN)
         val scale = min(inner.toFloat() / work.width, inner.toFloat() / work.height)
         val w = max(1, (work.width * scale).roundToInt())
@@ -126,10 +128,16 @@ object StickerMaker {
             val white = Paint(Paint.FILTER_BITMAP_FLAG).apply {
                 colorFilter = PorterDuffColorFilter(Color.WHITE, PorterDuff.Mode.SRC_IN)
             }
-            // The picture's own silhouette in white, stamped around a circle: an even outline.
-            for (step in 0 until OUTLINE_STEPS) {
-                val angle = 2 * Math.PI * step / OUTLINE_STEPS
-                canvas.drawBitmap(fitted, left + (cos(angle) * border).toFloat(), top + (sin(angle) * border).toFloat(), white)
+            // The picture's own silhouette in white, stamped around circles out to the
+            // thickness: an even outline, without gaps however thick it is.
+            val steps = max(OUTLINE_STEPS, border * 4)
+            var radius = border.toFloat()
+            while (radius > 0f) {
+                for (step in 0 until steps) {
+                    val angle = 2 * Math.PI * step / steps
+                    canvas.drawBitmap(fitted, left + (cos(angle) * radius).toFloat(), top + (sin(angle) * radius).toFloat(), white)
+                }
+                radius -= OUTLINE_RING_STEP
             }
         }
         canvas.drawBitmap(fitted, left, top, Paint(Paint.FILTER_BITMAP_FLAG))
@@ -273,7 +281,11 @@ object StickerMaker {
         return Bitmap.createBitmap(bitmap, left, top, right - left + 1, bottom - top + 1)
     }
 
-    private const val OUTLINE = 12
+    /** The default outline thickness, and its range on the slider. */
+    const val OUTLINE = 12
+    const val MIN_OUTLINE = 2
+    const val MAX_OUTLINE = 40
+    private const val OUTLINE_RING_STEP = 6f
     private const val MARGIN = 4
     private const val OUTLINE_STEPS = 32
 

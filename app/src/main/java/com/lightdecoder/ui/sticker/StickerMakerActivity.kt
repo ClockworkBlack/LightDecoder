@@ -77,7 +77,9 @@ class StickerMakerActivity : AppCompatActivity() {
             updateBrushButtons()
             render(refreshBrushedPicture = false)
         }
-        binding.outline.setOnCheckedChangeListener { _, _ -> render() }
+        binding.outline.setOnCheckedChangeListener { _, _ -> render(refreshBrushedPicture = false) }
+        // While the slider moves the preview follows; only the newest request is shown.
+        binding.outlineWidth.addOnChangeListener { _, _, fromUser -> if (fromUser) render(refreshBrushedPicture = false) }
         binding.solid.setOnCheckedChangeListener { _, _ -> render() }
         binding.shape.addOnButtonCheckedListener { _, _, isChecked -> if (isChecked) render() }
         binding.tolerance.addOnChangeListener { _, _, fromUser -> if (fromUser) render() }
@@ -240,6 +242,7 @@ class StickerMakerActivity : AppCompatActivity() {
             else -> StickerMaker.Shape.ORIGINAL
         },
         outline = binding.outline.isChecked,
+        outlineWidth = binding.outlineWidth.value.toInt(),
         solidBackground = binding.solid.isChecked,
     )
 
@@ -247,6 +250,9 @@ class StickerMakerActivity : AppCompatActivity() {
         val shown = if (binding.removeBackground.isChecked) View.VISIBLE else View.GONE
         binding.tolerance.visibility = shown
         binding.toleranceLabel.visibility = shown
+        val outlined = if (binding.outline.isChecked) View.VISIBLE else View.GONE
+        binding.outlineWidth.visibility = outlined
+        binding.outlineWidthLabel.visibility = outlined
     }
 
     /** Re-makes the preview with the current options; only the latest request is shown. */
