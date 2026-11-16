@@ -25,6 +25,8 @@ class LightDecoderApp : Application() {
         SignInWebData.wipeIfDirty(this)
         RelayNotifications.ensureChannels(this)
         RelayManager.get(this)
+        // With a Gmail account added, its background check is scheduled (survives updates).
+        if (com.lightdecoder.mail.MailVault.exists(this)) com.lightdecoder.mail.MailCheckJob.schedule(this)
         // If the user wants the link connected and it is not running (Android
         // refused to start its service from the background, its notification
         // was turned off, or, with "start automatically" on, the app was

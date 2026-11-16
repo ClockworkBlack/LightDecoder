@@ -142,6 +142,7 @@ object ChatBackends {
     fun get(context: Context, service: ChatService): ChatBackend = when (service) {
         ChatService.MESSAGES -> RelayManager.get(context)
         ChatService.WHATSAPP -> WaManager.get(context)
+        ChatService.GMAIL -> com.lightdecoder.mail.MailManager.get(context)
     }
 
     /** Every service's backend, in the order of [ChatService]. */

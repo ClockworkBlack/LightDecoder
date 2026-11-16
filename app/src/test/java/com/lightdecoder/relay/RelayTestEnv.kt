@@ -62,6 +62,7 @@ internal class RelayTestEnv {
         // The other service's manager is a process-wide singleton too: one a
         // screen created must not live on into the next test.
         WaManager.resetForTesting()
+        com.lightdecoder.mail.MailManager.resetForTesting()
         RelayBridges.factory = null
         SessionVault.save(context, null)
         SessionVault.cipherProvider = originalCipher

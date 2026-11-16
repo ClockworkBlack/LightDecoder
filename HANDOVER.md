@@ -3,8 +3,9 @@
 Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request has been opened.
 
 ## Priorities (user's direction, latest first)
-1. App features first; **WhatsApp work is paused** (it is built and tested, untouched since) and comes next after them.
-2. Requested next: Discord, Gmail and Instagram tabs (not started; see "Open decisions").
+1. App features first; **WhatsApp work is paused** (built and tested, untouched since); it comes next.
+2. **Gmail: done in 0.5.0** (see below). **Discord: paused** by the user (they chose "build with a
+   warning", then "pause on Discord"). **Instagram: skipped** (ban risk, like Messenger).
 
 ## Releases and signing
 - Latest: **0.4.2** (versionCode 6), signed with the permanent release key (CN=LightDecoder,
@@ -21,11 +22,27 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
-## Open decisions (ask the user)
-- Discord and Instagram have no official API for a person's own DMs; only unofficial clients
-  (against their terms, ban risk; Instagram's is the same risk the user declined for Messenger).
-- Gmail: official IMAP/SMTP with an app password (no Google review), or the Gmail API (needs a
-  Google Cloud OAuth client tied to the signing key).
+## 0.5.0: the Gmail tab
+- A third service, `ChatService.GMAIL`: IMAP (imap.gmail.com:993) to read and SMTP
+  (smtp.gmail.com:465) to send, with the user's Gmail address and an **app password** (the user's
+  choice; needs 2-Step Verification). Library: Jakarta Mail for Android 1.6.7 (EPL-2.0 or
+  GPL-2.0 + CPE; licence in assets/licenses/41-jakarta-mail.txt and NOTICE).
+- `mail/`: `MailBridge` (+ `ImapMailBridge`), `MailManager` (the ChatBackend), `MailIndex`
+  (server locations and headers), `MailVault` (encrypted with the same Keystore key as the
+  Google Messages session), `MailPrefs`, `MailText`, `MailCheckJob` (JobScheduler, ~15 min).
+- Threads are built from Message-ID / In-Reply-To / References (the library has no Gmail X-GM
+  extensions). A conversation id is a hash of the thread's first Message-ID. A message sent in a
+  thread is a reply-all to its latest email; emails this app sends carry `X-LightDecoder-Tmp` so
+  their copy in Sent replaces the local one.
+- Screens: Gmail tab (third tab), `ui/mail/MailSetupActivity` (add account / settings),
+  `ui/mail/MailComposeActivity` (the Gmail tab's + button). No reactions or quote-reply for email.
+- Deleting or archiving here is local only (Gmail is not changed); reading marks \Seen in Gmail.
+- **Not yet tested against real Gmail** (the build container cannot reach IMAP/SMTP); all tests
+  use `FakeMailBridge`.
+
+## 0.4.3
+- Catching stickers from other apps' notifications is switched off: the listener is not declared
+  in the manifest and the home screen card and its menu options are gone.
 
 ## Done in the previous session
 - **WhatsApp as a second service: finished.**

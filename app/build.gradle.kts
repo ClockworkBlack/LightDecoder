@@ -38,8 +38,8 @@ android {
         applicationId = "com.lightdecoder"
         minSdk = 26
         targetSdk = 36
-        versionCode = 7
-        versionName = "0.4.3"
+        versionCode = 8
+        versionName = "0.5.0"
 
         // The decoder is plain software, so it runs on every ABI. These cover
         // phones (64- and 32-bit ARM) and the emulator.
@@ -103,6 +103,11 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = false
+        }
+        resources {
+            // Both Jakarta Mail jars carry the same licence files; their text ships in
+            // assets/licenses (bundleLicenses), shown under About > Licences.
+            excludes += setOf("META-INF/LICENSE.md", "META-INF/NOTICE.md")
         }
     }
 
@@ -308,6 +313,10 @@ val bundleLicenses by tasks.registering {
     // licence text in their artifacts (and AGP drops META-INF licence files),
     // so the Apache-2.0 text they are under is kept in the repository.
     val apacheLicense = rootProject.file("third_party/licenses/Apache-2.0.txt")
+    // Jakarta Mail for Android (the Gmail tab's IMAP/SMTP): EPL-2.0 or GPL-2.0 with the Classpath Exception.
+    val mailLicense = rootProject.file("third_party/licenses/EPL-2.0-OR-GPL-2.0-CPE-jakarta-mail.txt")
+    val mailNotice = rootProject.file("third_party/licenses/NOTICE-jakarta-mail.md")
+    val mailLibrary = Regex("com\\.sun\\.mail:(android-mail|android-activation)")
     val apacheLibrary = Regex(
         "(androidx\\.[^:]+|com\\.google\\.android\\.material|org\\.jetbrains\\.kotlinx?):[^:]+" +
             "|org\\.jetbrains:annotations|org\\.jspecify:jspecify" +
@@ -322,7 +331,7 @@ val bundleLicenses by tasks.registering {
     }
     inputs.files(buildGoBridge).withPropertyName("goBridge")
     inputs.file(notice).withPropertyName("notice")
-    inputs.files(fixed.map { it.third } + apacheLicense).withPropertyName("licenseFiles")
+    inputs.files(fixed.map { it.third } + apacheLicense + mailLicense + mailNotice).withPropertyName("licenseFiles")
     // Licence files and PATCHES.md of Go modules replaced by a copy in the repository.
     inputs.files(fileTree(File(goModuleDir, "third_party")) { exclude("**/*.go") })
         .withPropertyName("replacedGoModules").withPathSensitivity(PathSensitivity.RELATIVE)
@@ -358,7 +367,8 @@ val bundleLicenses by tasks.registering {
         // The Android libraries compiled into classes.dex.
         val libraries = androidLibraries.get()
         if (libraries.isEmpty()) throw GradleException("No Android libraries on the release runtime classpath")
-        val unknown = libraries.filterNot { apacheLibrary.matches(it.substringBeforeLast(':')) }
+        val mail = libraries.filter { mailLibrary.matches(it.substringBeforeLast(':')) }
+        val unknown = libraries.filterNot { apacheLibrary.matches(it.substringBeforeLast(':')) || it in mail }
         if (unknown.isNotEmpty()) {
             throw GradleException(
                 "Not known to be Apache-2.0: ${unknown.joinToString()}; add its licence text to bundleLicenses " +
@@ -373,9 +383,18 @@ val bundleLicenses by tasks.registering {
                 "AndroidX, Material Components, Kotlin standard library, kotlinx.coroutines (Apache-2.0, in classes.dex)",
                 listOf(apacheLicense),
                 intro = "These libraries are under the Apache License 2.0, below:\n\n" +
-                    libraries.joinToString("\n") { "  $it" },
+                    (libraries - mail.toSet()).joinToString("\n") { "  $it" },
             ),
         )
+        if (mail.isNotEmpty()) {
+            File(licenses, "41-jakarta-mail.txt").writeText(
+                licenceText(
+                    "Jakarta Mail for Android (in classes.dex): Eclipse Public License 2.0, or GPL-2.0 with the Classpath Exception",
+                    listOf(mailLicense, mailNotice),
+                    intro = mail.joinToString("\n") { "  $it" },
+                ),
+            )
+        }
 
         // The Go modules linked into libgojni.so, from each ABI's build info.
         val work = temporaryDir.apply { listFiles()?.forEach { it.deleteRecursively() } }
@@ -525,6 +544,9 @@ dependencies {
     implementation("androidx.recyclerview:recyclerview:1.3.2")
     implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
     implementation("androidx.viewpager2:viewpager2:1.1.0")
+    // The Gmail tab: IMAP to read, SMTP to send (Jakarta Mail 1.6 for Android; EPL-2.0 or GPL-2.0 + CPE).
+    implementation("com.sun.mail:android-mail:1.6.7")
+    implementation("com.sun.mail:android-activation:1.6.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     // Draws the QR code of the WhatsApp setup screen (encoding only; Apache-2.0).
     implementation("com.google.zxing:core:3.5.3")

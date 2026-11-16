@@ -79,6 +79,7 @@ internal object ServiceUi {
     fun tabLabel(service: ChatService): Int = when (service) {
         ChatService.MESSAGES -> R.string.chat_service_messages
         ChatService.WHATSAPP -> R.string.chat_service_whatsapp
+        ChatService.GMAIL -> R.string.chat_service_gmail
     }
 
     /**
@@ -89,12 +90,14 @@ internal object ServiceUi {
     fun setup(context: Context, service: ChatService): Intent = when (service) {
         ChatService.MESSAGES -> RelayIntents.setup(context)
         ChatService.WHATSAPP -> RelayIntents.waSetup(context)
+        ChatService.GMAIL -> RelayIntents.mailSetup(context)
     }.setFlags(0)
 
     /** The status and settings of [service]'s link, started from one of the app's own screens. */
     fun status(context: Context, service: ChatService): Intent = when (service) {
         ChatService.MESSAGES -> RelayIntents.status(context)
         ChatService.WHATSAPP -> RelayIntents.waStatus(context)
+        ChatService.GMAIL -> RelayIntents.mailSetup(context)
     }.setFlags(0)
 
     /**
@@ -105,12 +108,23 @@ internal object ServiceUi {
         when (backend) {
             is RelayManager -> backend.startLive()
             is WaManager -> backend.startLive()
+            is com.lightdecoder.mail.MailManager -> backend.syncSoon()
         }
     }
 
     /** What the banner says under the title for a state of [service]'s link. */
     @StringRes
     fun phaseBody(service: ChatService, phase: Phase, fix: RelayUi.Fix): Int {
+        if (service == ChatService.GMAIL && fix != RelayUi.Fix.NOTIFICATIONS) {
+            when (phase) {
+                Phase.UNPAIRED -> return R.string.mail_body_unpaired
+                Phase.CONNECTED, Phase.ACTIVE -> return R.string.mail_body_connected
+                Phase.CONNECTING -> return R.string.mail_body_checking
+                Phase.LOGGED_OUT -> return R.string.mail_body_auth_failed
+                Phase.DISCONNECTED, Phase.ERROR -> return R.string.mail_body_offline
+                else -> Unit
+            }
+        }
         if (service == ChatService.WHATSAPP && fix != RelayUi.Fix.NOTIFICATIONS) {
             when (phase) {
                 Phase.UNPAIRED -> return R.string.chat_wa_body_unpaired
@@ -128,24 +142,28 @@ internal object ServiceUi {
     fun linkCardTitle(service: ChatService): Int = when (service) {
         ChatService.MESSAGES -> R.string.link_setup_title
         ChatService.WHATSAPP -> R.string.chat_wa_link_title
+        ChatService.GMAIL -> R.string.mail_link_title
     }
 
     @StringRes
     fun linkCardBody(service: ChatService): Int = when (service) {
         ChatService.MESSAGES -> R.string.link_card_not_set_up
         ChatService.WHATSAPP -> R.string.chat_wa_link_body
+        ChatService.GMAIL -> R.string.mail_link_body
     }
 
     @StringRes
     fun emptyInbox(service: ChatService): Int = when (service) {
         ChatService.MESSAGES -> R.string.chat_empty_inbox
         ChatService.WHATSAPP -> R.string.chat_wa_empty_inbox
+        ChatService.GMAIL -> R.string.mail_empty_inbox
     }
 
     @StringRes
     fun composeHint(service: ChatService): Int = when (service) {
         ChatService.MESSAGES -> R.string.chat_compose_hint
         ChatService.WHATSAPP -> R.string.chat_wa_compose_hint
+        ChatService.GMAIL -> R.string.mail_compose_hint
     }
 
     /** Said when a message the service itself failed to send is tapped: only the phone's app can retry it. */
@@ -153,6 +171,7 @@ internal object ServiceUi {
     fun failedOnPhone(service: ChatService): Int = when (service) {
         ChatService.MESSAGES -> R.string.chat_failed_phone_detail
         ChatService.WHATSAPP -> R.string.chat_wa_failed_phone_detail
+        ChatService.GMAIL -> R.string.mail_failed_detail
     }
 
     /** The "Send again?" question for a send that was never confirmed. */
@@ -160,24 +179,28 @@ internal object ServiceUi {
     fun resendBody(service: ChatService): Int = when (service) {
         ChatService.MESSAGES -> R.string.chat_resend_body
         ChatService.WHATSAPP -> R.string.chat_wa_resend_body
+        ChatService.GMAIL -> R.string.mail_resend_body
     }
 
     @StringRes
     fun mediaNeedsConnection(service: ChatService): Int = when (service) {
         ChatService.MESSAGES -> R.string.chat_media_needs_connection
         ChatService.WHATSAPP -> R.string.chat_wa_media_needs_connection
+        ChatService.GMAIL -> R.string.mail_media_needs_connection
     }
 
     @StringRes
     fun contactsNoMatch(service: ChatService): Int = when (service) {
         ChatService.MESSAGES -> R.string.chat_contacts_no_match
         ChatService.WHATSAPP -> R.string.chat_wa_contacts_no_match
+        ChatService.GMAIL -> R.string.mail_contacts_no_match
     }
 
     @StringRes
     fun deleteConversationBody(service: ChatService): Int = when (service) {
         ChatService.MESSAGES -> R.string.chat_delete_conversation_body
         ChatService.WHATSAPP -> R.string.chat_wa_delete_conversation_body
+        ChatService.GMAIL -> R.string.mail_delete_conversation_body
     }
 }
 
@@ -199,6 +222,20 @@ internal object ChatErrors {
     fun messageRes(service: ChatService, code: String): Int = when (service) {
         ChatService.MESSAGES -> RelayErrors.messageRes(code)
         ChatService.WHATSAPP -> whatsAppRes(code)
+        ChatService.GMAIL -> mailRes(code)
+    }
+
+    @StringRes
+    private fun mailRes(code: String): Int = when (code) {
+        RelayException.NOT_PAIRED -> R.string.mail_error_not_set_up
+        RelayException.NOT_CONNECTED, RelayException.CONNECTION_CLOSED -> R.string.mail_error_offline
+        RelayException.LOGGED_OUT, com.lightdecoder.mail.MailErrors.AUTH_FAILED -> R.string.mail_error_auth_failed
+        RelayException.INVALID_ARGUMENT -> R.string.mail_error_invalid_address
+        RelayException.TOO_LARGE -> R.string.mail_error_too_large
+        RelayException.SEND_FAILED -> R.string.mail_error_send_failed
+        RelayException.NOT_FOUND -> R.string.mail_error_not_found
+        RelayState.NOTIFICATIONS_OFF -> R.string.link_error_notifications_off
+        else -> R.string.mail_error_internal
     }
 
     @StringRes

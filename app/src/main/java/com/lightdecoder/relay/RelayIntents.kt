@@ -72,6 +72,9 @@ object RelayIntents {
     /** WhatsApp: linking (the pairing code, or the QR code). */
     fun waSetup(context: Context): Intent = activity(context, WaSetupActivity::class.java)
 
+    /** Gmail: adding the account (or, with one, its settings). */
+    fun mailSetup(context: Context): Intent = activity(context, com.lightdecoder.ui.mail.MailSetupActivity::class.java)
+
     /** WhatsApp: the link's status and settings. */
     fun waStatus(context: Context): Intent = activity(context, WaStatusActivity::class.java)
 

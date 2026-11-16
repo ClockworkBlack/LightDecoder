@@ -161,8 +161,9 @@ class PictureGalleryActivity : AppCompatActivity() {
 
     private fun showPosition(position: Int) {
         val picture = pictures.getOrNull(position) ?: return
-        binding.toolbar.title = senderOf(picture)
-        binding.toolbar.subtitle = DateUtils.formatDateTime(
+        // Through the action bar: set on the toolbar alone, the activity's own title could replace it.
+        supportActionBar?.title = senderOf(picture)
+        supportActionBar?.subtitle = DateUtils.formatDateTime(
             this, picture.message.timestampMs,
             DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_TIME or DateUtils.FORMAT_ABBREV_MONTH,
         )

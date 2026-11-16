@@ -144,6 +144,11 @@ class ConversationsActivity : AppCompatActivity() {
         renderFolderControls()
         binding.swipe.setOnRefreshListener { refreshFromPhone() }
         binding.fab.setOnClickListener {
+            if (backend.service == ChatService.GMAIL) {
+                // An email needs a subject and addresses, not a phone number.
+                startActivity(Intent(this, com.lightdecoder.ui.mail.MailComposeActivity::class.java))
+                return@setOnClickListener
+            }
             startActivity(
                 Intent(this, NewConversationActivity::class.java).putExtra(RelayIntents.EXTRA_SERVICE, backend.service.key)
             )

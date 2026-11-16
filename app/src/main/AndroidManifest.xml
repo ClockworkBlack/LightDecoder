@@ -160,6 +160,22 @@
             android:exported="false"
             android:parentActivityName=".ui.chat.ConversationsActivity"
             android:windowSoftInputMode="adjustResize" />
+        <!-- Gmail: adding the account and its settings (an app password is typed here), and a new email. -->
+        <activity
+            android:name=".ui.mail.MailSetupActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".ui.mail.MailComposeActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
+        <!-- Checks Gmail for new email about every 15 minutes (JobScheduler; only the system binds it). -->
+        <service
+            android:name=".mail.MailCheckJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+
         <!-- A conversation's pictures, full screen: swipe between them, pinch or double-tap to zoom. -->
         <activity
             android:name=".ui.chat.PictureGalleryActivity"

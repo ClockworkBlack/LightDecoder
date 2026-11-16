@@ -46,12 +46,14 @@ class ArchiveDb(context: Context, name: String? = NAME) :
 
         /** The WhatsApp archive. */
         const val NAME_WHATSAPP = "whatsapp-archive.db"
+        const val NAME_GMAIL = "gmail-archive.db"
         const val VERSION = 2
 
         /** The database file of [service]'s archive. */
         fun nameFor(service: ChatService): String = when (service) {
             ChatService.MESSAGES -> NAME
             ChatService.WHATSAPP -> NAME_WHATSAPP
+            ChatService.GMAIL -> NAME_GMAIL
         }
 
         /**

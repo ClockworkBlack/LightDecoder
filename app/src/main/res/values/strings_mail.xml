@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Gmail tab: IMAP/SMTP with an app password. -->
+<resources>
+    <string name="chat_service_gmail">Gmail</string>
+    <string name="mail_channel_messages">Gmail</string>
+    <string name="mail_channel_messages_description">New email in your Gmail inbox.</string>
+    <string name="mail_card_open">Open Gmail</string>
+    <string name="mail_notifications_needed_body">LightDecoder tells you about new email with a notification. Turn on LightDecoder\'s notifications in Android\'s settings to get them.</string>
+
+    <!-- States -->
+    <string name="mail_body_unpaired">Add your Gmail account to read and send email here.</string>
+    <string name="mail_body_connected">Checked just now. New email shows up here and as a notification.</string>
+    <string name="mail_body_checking">Checking for new email…</string>
+    <string name="mail_body_auth_failed">Gmail did not accept the app password any more. Add the account again with a new app password.</string>
+    <string name="mail_body_offline">Could not reach Gmail right now. LightDecoder checks again by itself; pull down to try now.</string>
+
+    <!-- List and thread -->
+    <string name="mail_link_title">Add Gmail</string>
+    <string name="mail_link_body">Read, send and receive your Gmail here, next to your messages. You sign in with an app password from your Google account.</string>
+    <string name="mail_empty_inbox">No email yet. Pull down to check again.</string>
+    <string name="mail_compose_hint">Reply</string>
+    <string name="mail_failed_detail">Gmail could not send this email.</string>
+    <string name="mail_resend_body">It is not known whether Gmail sent this email. Sending it again could deliver it twice; look in Sent in Gmail first.</string>
+    <string name="mail_media_needs_connection">Connect to the internet to open this attachment.</string>
+    <string name="mail_contacts_no_match">No one matches. Type a full email address.</string>
+    <string name="mail_delete_conversation_body">It is removed from this phone only. It stays in Gmail, and a new email in it brings it back here.</string>
+
+    <!-- Errors -->
+    <string name="mail_error_not_set_up">No Gmail account is added yet.</string>
+    <string name="mail_error_offline">Could not reach Gmail. Check the internet connection and try again.</string>
+    <string name="mail_error_auth_failed">Gmail did not accept this address and app password. Check them, or create a new app password. App passwords need 2-Step Verification on the Google account.</string>
+    <string name="mail_error_invalid_address">That is not a valid email address.</string>
+    <string name="mail_error_too_large">The attachment is too large for Gmail (25 MB at most).</string>
+    <string name="mail_error_send_failed">Gmail could not send this email. Try again.</string>
+    <string name="mail_error_not_found">That email is no longer in Gmail.</string>
+    <string name="mail_error_internal">Something went wrong with Gmail. Try again.</string>
+
+    <!-- Setup and settings -->
+    <string name="mail_setup_title">Gmail</string>
+    <string name="mail_setup_intro">LightDecoder reads and sends your Gmail over Gmail\'s standard mail access (IMAP and SMTP), the way other mail apps do. It signs in with an app password: a separate 16-letter password just for LightDecoder, which you can revoke at any time.</string>
+    <string name="mail_setup_steps_title">Get an app password</string>
+    <string name="mail_setup_steps">1. Turn on 2-Step Verification for your Google account, if it is not on yet.\n2. Open the app passwords page (button below) and sign in.\n3. Name it \"LightDecoder\" and tap Create.\n4. Copy the 16 letters and paste them here.</string>
+    <string name="mail_setup_open_page">Open app passwords page</string>
+    <string name="mail_setup_email">Gmail address</string>
+    <string name="mail_setup_password">App password (16 letters)</string>
+    <string name="mail_setup_data">Stored only on this phone: the app password (encrypted) and the email LightDecoder downloads. Nothing is uploaded anywhere else, and nothing is in backups.</string>
+    <string name="mail_setup_add">Add account</string>
+    <string name="mail_setup_checking">Checking with Gmail…</string>
+    <string name="mail_setup_added">Gmail added.</string>
+    <string name="mail_status_account">Signed in as %1$s</string>
+    <string name="mail_status_last_check">Last checked: %1$s</string>
+    <string name="mail_switch_auto">Check for new email in the background</string>
+    <string name="mail_switch_auto_help">About every 15 minutes while there is a network. Android may wait longer to save battery.</string>
+    <string name="mail_switch_notify">Notify about new email</string>
+    <string name="mail_check_now">Check now</string>
+    <string name="mail_open_inbox">Open inbox</string>
+    <string name="mail_remove">Remove account</string>
+    <string name="mail_remove_title">Remove Gmail from LightDecoder?</string>
+    <string name="mail_remove_body">The app password is deleted from this phone. Your email stays in Gmail. To stop the password working anywhere, revoke it on the app passwords page.</string>
+    <string name="mail_remove_delete_archive">Also delete the downloaded email</string>
+    <string name="mail_removed">Gmail removed.</string>
+
+    <!-- Compose -->
+    <string name="mail_compose_title">New email</string>
+    <string name="mail_compose_to">To (separate addresses with commas)</string>
+    <string name="mail_compose_subject">Subject</string>
+    <string name="mail_compose_body">Message</string>
+    <string name="mail_compose_attach">Attach</string>
+    <string name="mail_compose_send">Send</string>
+    <string name="mail_compose_need_to">Add at least one email address.</string>
+</resources>

@@ -51,10 +51,12 @@ object MessageNotifier {
     /** All of a service's message notifications share one id; the conversation's tag tells them apart. */
     private const val NOTIFICATION_ID = 0x5245_4c10
     private const val NOTIFICATION_ID_WHATSAPP = 0x5245_4c11
+    private const val NOTIFICATION_ID_GMAIL = 0x5245_4c12
     private const val MAX_LINES = 6
 
     /** Tags of WhatsApp's notifications start with this; Google Messages' are the bare conversation id, as before. */
     private const val WHATSAPP_TAG_PREFIX = "wa:"
+    private const val GMAIL_TAG_PREFIX = "gm:"
 
     /** What makes each conversation's Reply, Mark as read and dismissal intents distinct ([receiverIntent]). */
     private const val INTENT_SCHEME = "lightdecoder-notify"
@@ -85,6 +87,7 @@ object MessageNotifier {
     fun enabled(context: Context, service: ChatService): Boolean = when (service) {
         ChatService.MESSAGES -> RelayPrefs.notifyMessages(context)
         ChatService.WHATSAPP -> WaPrefs.notifyMessages(context)
+        ChatService.GMAIL -> com.lightdecoder.mail.MailPrefs.notifyMessages(context)
     }
 
     private class Line(val sender: String, val text: CharSequence, val timestampMs: Long, val fromMe: Boolean)
@@ -158,6 +161,7 @@ object MessageNotifier {
     private fun idFor(service: ChatService): Int = when (service) {
         ChatService.MESSAGES -> NOTIFICATION_ID
         ChatService.WHATSAPP -> NOTIFICATION_ID_WHATSAPP
+        ChatService.GMAIL -> NOTIFICATION_ID_GMAIL
     }
 
     /**
@@ -167,6 +171,8 @@ object MessageNotifier {
     internal fun tagFor(context: Context, service: ChatService, conversationId: String): String = when (service) {
         ChatService.MESSAGES -> conversationId
         ChatService.WHATSAPP -> WHATSAPP_TAG_PREFIX + WaIds.opaque(context, conversationId)
+        // A mail conversation id is a hash of a Message-ID: it names no one.
+        ChatService.GMAIL -> GMAIL_TAG_PREFIX + conversationId
     }
 
     private fun add(key: Key, line: Line): List<Line> = synchronized(this) {

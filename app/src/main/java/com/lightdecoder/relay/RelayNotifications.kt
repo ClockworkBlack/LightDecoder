@@ -44,6 +44,12 @@ object RelayNotifications {
 
     /** The notification of WhatsApp's foreground service. */
     const val ID_WA_SERVICE = 0x5245_4c21
+
+    /** Gmail has no foreground service; an id is still reserved so the services never share one. */
+    const val ID_MAIL_UNUSED = 0x5245_4c22
+
+    /** New Gmail messages. */
+    const val CHANNEL_MAIL_MESSAGES = "mail_messages"
     private const val ID_WA_RELINK = 0x5245_4c22
 
     /**
@@ -62,18 +68,22 @@ object RelayNotifications {
     fun statusChannel(service: ChatService): String = when (service) {
         ChatService.MESSAGES -> CHANNEL_STATUS
         ChatService.WHATSAPP -> CHANNEL_WA_STATUS
+        // Gmail keeps no connection open, so it has no ongoing notification: its messages channel stands in.
+        ChatService.GMAIL -> CHANNEL_MAIL_MESSAGES
     }
 
     /** The channel of [service]'s new-message notifications. */
     fun messagesChannel(service: ChatService): String = when (service) {
         ChatService.MESSAGES -> CHANNEL_MESSAGES
         ChatService.WHATSAPP -> CHANNEL_WA_MESSAGES
+        ChatService.GMAIL -> CHANNEL_MAIL_MESSAGES
     }
 
     /** The id of the notification [service]'s foreground service runs under. */
     fun serviceNotificationId(service: ChatService): Int = when (service) {
         ChatService.MESSAGES -> ID_SERVICE
         ChatService.WHATSAPP -> ID_WA_SERVICE
+        ChatService.GMAIL -> ID_MAIL_UNUSED
     }
 
     /**
@@ -88,6 +98,7 @@ object RelayNotifications {
             when (service) {
                 ChatService.MESSAGES -> messagesChannels(context)
                 ChatService.WHATSAPP -> whatsAppChannels(context)
+                ChatService.GMAIL -> mailChannels(context)
             }
         )
     }
@@ -111,6 +122,14 @@ object RelayNotifications {
             context.getString(R.string.relay_channel_messages),
             NotificationManager.IMPORTANCE_HIGH,
         ).apply { description = context.getString(R.string.relay_channel_messages_description) },
+    )
+
+    private fun mailChannels(context: Context): List<NotificationChannel> = listOf(
+        NotificationChannel(
+            CHANNEL_MAIL_MESSAGES,
+            context.getString(R.string.mail_channel_messages),
+            NotificationManager.IMPORTANCE_HIGH,
+        ).apply { description = context.getString(R.string.mail_channel_messages_description) },
     )
 
     private fun whatsAppChannels(context: Context): List<NotificationChannel> = listOf(

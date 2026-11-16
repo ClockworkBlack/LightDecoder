@@ -1209,8 +1209,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
     }
 
+    // Email replies always go to the whole thread: no quoting one message.
     private fun canReplyTo(row: MessageRow) =
-        !row.isLocal && row.direction != "system" && conversation?.readOnly != true && conversation?.folderEnum != Folder.DELETED
+        manager.service != ChatService.GMAIL && !row.isLocal && row.direction != "system" && conversation?.readOnly != true && conversation?.folderEnum != Folder.DELETED
 
     // --- message callbacks ---------------------------------------------------
 
@@ -1239,8 +1240,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val real = !row.isLocal
         val mine = row.reactions.firstOrNull { it.fromMe }?.emoji
 
-        b.reactionRow.visibility = if (real) View.VISIBLE else View.GONE
-        if (real) {
+        // Email has no reactions.
+        val reacts = real && manager.service != ChatService.GMAIL
+        b.reactionRow.visibility = if (reacts) View.VISIBLE else View.GONE
+        if (reacts) {
             for (emoji in QUICK_REACTIONS) {
                 val view = layoutInflater.inflate(R.layout.item_quick_reaction, b.reactionRow, false) as TextView
                 view.text = emoji

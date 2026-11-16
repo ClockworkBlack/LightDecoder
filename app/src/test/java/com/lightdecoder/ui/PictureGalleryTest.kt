@@ -104,7 +104,7 @@ class PictureGalleryTest {
                 assertEquals("opened at the tapped picture", 1, pager.currentItem)
                 assertEquals(3, pager.adapter?.itemCount)
                 assertEquals(activity.getString(R.string.gallery_counter, 2, 3), counter(activity))
-                assertEquals("Alice", activity.supportActionBar?.title ?: activity.findViewById<com.google.android.material.appbar.MaterialToolbar>(R.id.toolbar).title)
+                assertEquals("Alice", activity.supportActionBar?.title?.toString())
                 // The picture shown is m2's (green), decoded from the file on this phone.
                 val shown = (picture(activity)!!.drawable as android.graphics.drawable.BitmapDrawable).bitmap
                 assertEquals(Color.GREEN, shown.getPixel(shown.width / 2, shown.height / 2))
@@ -113,8 +113,7 @@ class PictureGalleryTest {
             }
             scenario.waitFor("the next picture") { counter(it) == it.getString(R.string.gallery_counter, 3, 3) }
             scenario.onActivity { activity ->
-                val toolbar = activity.findViewById<com.google.android.material.appbar.MaterialToolbar>(R.id.toolbar)
-                assertEquals("your own picture", activity.getString(R.string.chat_you), toolbar.title.toString())
+                assertEquals("your own picture", activity.getString(R.string.chat_you), activity.supportActionBar?.title?.toString())
             }
         }
     }

@@ -14,7 +14,10 @@ enum class ChatService(val key: String) {
     MESSAGES("messages"),
 
     /** WhatsApp, as a linked device. */
-    WHATSAPP("whatsapp");
+    WHATSAPP("whatsapp"),
+
+    /** Gmail, over IMAP and SMTP with the user's app password. */
+    GMAIL("gmail");
 
     companion object {
         /** The service for [key]; anything unknown (or missing) is [MESSAGES], which is all there was before. */
