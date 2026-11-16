@@ -327,24 +327,36 @@ class RelayLimitsTest {
     @Test
     fun aPhoneNotRespondingSendIsLookedUpOnThePhoneAndItsEchoSettlesIt() {
         val (manager, fake) = env.pairedManager(RelayTestEnv.FAST.copy(unconfirmedSendCheckMs = 0))
+        // Google took it and the phone did send it, but the answer timed out.
+        fake.duringSend = { sent ->
+            fake.history[CONV] = listOf(outgoing("real-1", sent.text, sent.tmpId, ts = System.currentTimeMillis()))
+        }
         fake.sendAnswers += { throw RelayException(RelayException.PHONE_NOT_RESPONDING, "timed out") }
         fake.goOnline()
         val tmpId = manager.sendText(CONV, "did it go?")
-        env.eventually(manager, what = "the failure and its planned lookup") {
-            env.repo.outbox(tmpId)?.status == OutboxStatus.FAILED && RelayPrefs.lookupSends(env.context).containsKey(tmpId)
-        }
+        env.eventually(manager, what = "the failure") { env.repo.outbox(tmpId)?.status == OutboxStatus.FAILED || fake.fetches.isNotEmpty() }
 
-        // The phone has it: the lookup (about a second later) finds its echo.
-        fake.history[CONV] = listOf(outgoing("real-1", "did it go?", tmpId, ts = System.currentTimeMillis()))
-        try {
-            env.eventually(manager, timeoutMs = 8_000, what = "the lookup") { env.repo.outbox(tmpId) == null }
-        } catch (e: AssertionError) {
-            throw AssertionError("DEBUG fetches=${fake.fetches} log=${RelayLog.read(env.context)} outbox=${env.repo.outbox(tmpId)} lookups=${RelayPrefs.lookupSends(env.context)}")
-        }
+        // Looked up on the phone (about a second later): its echo settles it.
+        env.eventually(manager, timeoutMs = 8_000, what = "the lookup") { env.repo.outbox(tmpId) == null }
+        assertEquals(listOf(CONV), fake.fetches.map { it.first })
         assertNull(env.repo.message(MessageRow.tmpMessageId(tmpId)))
         assertNotNull(env.repo.message("real-1"))
         assertEquals("sent once", 1, fake.sent.size)
-        assertTrue(RelayPrefs.lookupSends(env.context).isEmpty())
+        assertTrue("the lookup is done", RelayPrefs.lookupSends(env.context).isEmpty())
+    }
+
+    @Test
+    fun aLookupThePhoneAnsweredWithoutTheEchoIsNotRepeated() {
+        val (manager, fake) = env.pairedManager(RelayTestEnv.FAST.copy(unconfirmedSendCheckMs = 0))
+        fake.sendAnswers += { throw RelayException(RelayException.PHONE_NOT_RESPONDING, "timed out") }
+        fake.goOnline()
+        val tmpId = manager.sendText(CONV, "maybe")
+        env.eventually(manager, timeoutMs = 8_000, what = "the lookup") {
+            fake.fetches.isNotEmpty() && RelayPrefs.lookupSends(env.context).isEmpty()
+        }
+        assertEquals(OutboxStatus.FAILED, env.repo.outbox(tmpId)!!.status)
+        assertEquals(RelayException.PHONE_NOT_RESPONDING, env.repo.message(MessageRow.tmpMessageId(tmpId))!!.errorText)
+        assertEquals("never sent again by itself", 1, fake.sent.size)
     }
 
     @Test
