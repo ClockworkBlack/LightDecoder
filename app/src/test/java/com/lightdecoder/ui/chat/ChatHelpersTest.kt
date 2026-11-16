@@ -9,6 +9,8 @@ import com.lightdecoder.R
 import com.lightdecoder.archive.LocalState
 import com.lightdecoder.archive.MediaRow
 import com.lightdecoder.archive.MessageRow
+import com.lightdecoder.relay.Outbox
+import com.lightdecoder.relay.RelayException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -148,6 +150,17 @@ class ChatHelpersTest {
 
         assertTrue(MessageStatus.canRetryLocally(message(id = "tmp:a", tmpId = "a", localState = LocalState.FAILED)))
         assertFalse(MessageStatus.canRetryLocally(message(status = "OUTGOING_FAILED_GENERIC")))
+
+        // A failed send that may have gone out all the same is asked about before a retry.
+        val failed = message(id = "tmp:a", tmpId = "a", localState = LocalState.FAILED)
+        for (reason in listOf(Outbox.UNCONFIRMED, Outbox.INTERRUPTED, RelayException.PHONE_NOT_RESPONDING)) {
+            assertTrue(reason, MessageStatus.outcomeUnknown(failed.copy(errorText = reason)))
+        }
+        for (reason in listOf("", RelayException.SEND_FAILED, RelayException.TOO_LARGE, "FAILURE_4")) {
+            assertFalse(reason, MessageStatus.outcomeUnknown(failed.copy(errorText = reason)))
+        }
+        assertFalse(MessageStatus.outcomeUnknown(failed.copy(localState = LocalState.PENDING, errorText = Outbox.UNCONFIRMED)))
+        assertFalse(MessageStatus.outcomeUnknown(message(status = "OUTGOING_FAILED_GENERIC").copy(errorText = Outbox.UNCONFIRMED)))
     }
 
     // --- ThreadItems ------------------------------------------------------------

@@ -116,10 +116,10 @@ Grouped; the doc comments in `gmbridge/*.go` are authoritative.
 | Status | `IsPaired`, `IsConnected`, `StatusJSON` → StatusDTO | Never throw. `IsConnected` is false during reconnect gaps. |
 | Pairing | `StartPairing(cookiesJSON)` → PairingChallengeDTO, `FinishPairing(timeoutMs)` → phone id, `CancelPairing()` | See "Pairing". |
 | Lifecycle | `Connect`, `Disconnect`, `SetActiveSession`, `Unpair`, `ExportSession`, `Close` | `Connect` returns when the long poll is starting; "connected" follows as an event. While connected it does nothing, except restart a long poll that is down. `Unpair` succeeds even when unpaired (it is also "wipe"); see "Unpair". |
-| Local | `SeedProtocolSwitches(seedJSON)` | Never touches the network. A JSON array of the archive's protocol-switch tombstones, `{"conversationId","status","statusCode","timestampMs"}` as in MessageDTO (either status field is enough; other statuses are ignored; anything but an array is `invalid_argument`). Forgotten on Unpair and on a new pairing. |
+| Local | `SeedProtocolSwitches(seedJSON)`, `ClearProtocolSwitches()` | Never touch the network. The seed is a JSON array of the archive's protocol-switch tombstones, `{"conversationId","status","statusCode","timestampMs"}` as in MessageDTO (either status field is enough; other statuses are ignored). Each call replaces the previous seed; empty input or `[]` drops it; anything but an array is `invalid_argument` and changes nothing. `ClearProtocolSwitches` drops the seed (the same as `[]`). Go keeps the seed apart from what it learned from this pairing's live messages and pages, so neither call touches the latter. Unpair and a new pairing forget both. |
 | Reads | `ListConversations(folder, count)`, `GetConversation(id)`, `FetchMessages(id, count, cursorJSON)` → MessagePageDTO, `ListContacts`, `ParticipantThumbnails(idsJSON)` | Need a live connection; fail fast with `not_paired` / `not_connected`, otherwise up to 90 s. |
 | Media | `DownloadMedia(mediaId, key)`, `RequestFullSizeImage(messageId, partId)` | Download needs a pairing but not a connection; while disconnected the stored token must still be valid for at least a minute, otherwise `not_connected` (the app then shows "Connect to load"); 32-byte key; capped at 64 MiB (`too_large`). The full-size image arrives later as an updated `message` event. |
-| Writes | `SendText(convId, tmpId, text, replyToId)`, `SendMedia(convId, tmpId, data, fileName, mime, caption, replyToId)` → SendResultDTO; `SendReaction(messageId, emoji, add\|remove\|switch)`, `MarkRead(convId, messageId)`, `SetTyping(convId)`, `DeleteMessage(id)`, `SetConversationStatus(convId, archived\|active)`, `SetConversationMuted(convId, muted)`, `DeleteConversation(convId)`, `GetOrCreateConversation(numbersJSON, rcsGroupName)` → ConversationDTO | Go never retries a send. Attachments up to 100 MiB; `SendMedia` uploads outside the 90 s budget (libgm bounds each of its HTTP calls at 5 minutes), then sends under a fresh one. Replies to SMS/MMS go without reply metadata, as in the connector. `ForceRCS` is set, as in the connector, for an RCS chat in automatic send mode whose newest protocol-switch tombstone turned end-to-end encryption on; the bridge learns those from live messages, from every history page, and from the seed. |
+| Writes | `SendText(convId, tmpId, text, replyToId)`, `SendMedia(convId, tmpId, data, fileName, mime, caption, replyToId)` → SendResultDTO; `SendReaction(messageId, emoji, add\|remove\|switch)`, `MarkRead(convId, messageId)`, `SetTyping(convId)`, `DeleteMessage(id)`, `SetConversationStatus(convId, archived\|active)`, `SetConversationMuted(convId, muted)`, `DeleteConversation(convId)`, `GetOrCreateConversation(numbersJSON, rcsGroupName)` → ConversationDTO | Go never retries a send. Attachments up to 100 MiB; `SendMedia` uploads outside the 90 s budget (libgm bounds each of its HTTP calls at 5 minutes), then sends under a fresh one. Replies to SMS/MMS go without reply metadata, as in the connector. `ForceRCS` is set, as in the connector, for an RCS chat in automatic send mode whose newest protocol-switch tombstone turned end-to-end encryption on; the bridge learns those from live messages, from every history page, and from the seed, and follows the newest (at equal times, what this pairing reported wins over the seed). |
 
 ### Error codes
 
@@ -153,8 +153,11 @@ The outbox also records a few reasons of its own that are not bridge codes:
 Unpair, or on pairing a phone that may not be the archive's), `interrupted` (a
 send a previous run left mid-call whose echo was not found on the phone; never
 re-sent by itself), `unconfirmed` (Google accepted it, but no echo arrived
-within an hour and the phone did not show it when asked), and the phone's
-send statuses (`FAILURE_2`, …).
+within an hour and the phone did not show it when asked; or an Unpair held it
+while it was being sent and Google accepted it), and the phone's send
+statuses (`FAILURE_2`, …). After `interrupted`, `unconfirmed` and
+`phone_not_responding` the message may have gone out; after any other reason
+it did not (see "Outbox").
 
 ### Events
 
@@ -402,11 +405,12 @@ gone does nothing.
   connect is running.
 - Before every connect, `connectNow` checks the archive's owner (see "Archive
   owner") and does not connect while another phone's archive could not be
-  deleted; it retries with the backoff. Once per pairing it then hands the
-  bridge the newest protocol-switch tombstone of each conversation in the
-  archive (`seedProtocolSwitches`; after a failure the next connect tries
-  again). It checks once more that the link is still wanted just before
-  `connect()`, and disconnects if that changed while `connect()` was blocking.
+  deleted; it retries with the backoff. Once per pairing, and again after
+  each archive deletion, it then hands the bridge the newest protocol-switch
+  tombstone of each conversation in the archive (`seedProtocolSwitches`;
+  after a failure the next connect tries again). It checks once more that
+  the link is still wanted just before `connect()`, and disconnects if that
+  changed while `connect()` was blocking.
 
 ## State machine
 
@@ -607,8 +611,18 @@ leave the old phone recorded).
   with "also delete" is the way. It keeps the health row's status and last
   error, so "logged out" still shows.
 - **Wiping** (`wipeArchive`) clears every table and both media directories,
-  the owner, the list of unconfirmed sends and the catch-up bounds. The
-  callers also reset `backfill_done_at` and cancel message notifications.
+  the owner, the list of unconfirmed sends and the catch-up bounds. It then
+  makes the bridge forget the protocol-switch seed taken from the deleted
+  archive (`forgetProtocolSwitches`, which calls `ClearProtocolSwitches`):
+  that archive may have been another phone's, where the same conversation id
+  is a different chat. The next connect seeds again from the archive as it is
+  then. A failed clear is logged by its error code or class name only, and
+  that next seed replaces the old one all the same. Seeding and forgetting share
+  `seedLock`, so a seed read while the archive was being deleted is undone.
+  Every deletion goes through `wipeArchive`: Unpair with "also delete",
+  `deleteLocalArchive`, and another phone's archive (on pairing, before a
+  connect, in the initial sync). The callers also reset `backfill_done_at`
+  and cancel message notifications.
 
 ### Files and preferences
 
@@ -716,11 +730,29 @@ The sticker inbox is never touched.
   `unpaired`, and so does a pairing whose phone is not known to be the
   archive's: conversation ids only mean something on the phone they came
   from. A pairing with a different phone deletes the queue with the archive.
+  An entry that was being sent when the hold came is settled by its sender
+  (`markSent`): if Google accepted it, it becomes FAILED `unconfirmed`, so it
+  does not look as if it never went out (it is forgotten instead if its echo
+  already arrived).
 - The user can retry or discard a FAILED send; discarding removes the local
-  copy and the attachment copy. The thread shows every FAILED send the same
-  way ("Not sent. Tap to try again.") and retries at once, so retrying an
-  `interrupted`, `unconfirmed` or `phone_not_responding` send can deliver it
-  twice (see "Known limitations").
+  copy and the attachment copy. The thread tells two kinds of failed send
+  apart (`Outbox.outcomeUnknown`, used through `MessageStatus.outcomeUnknown`):
+  - *Outcome unknown* (`interrupted`, `unconfirmed`, `phone_not_responding`;
+    the list is `Outbox.OUTCOME_UNKNOWN_REASONS`): the message may have gone
+    out. It reads "Not confirmed. It may have been sent." under the bubble,
+    and TalkBack reads the same as the bubble's status. Tapping it, or Retry
+    in the long-press sheet, first asks "Send again?", saying that it may
+    already have been sent, that sending it again could deliver it twice, and
+    to look for it in Google Messages on the phone. The answers are Send
+    again, Discard (the copy on this device only) and Cancel. Like the delete
+    questions, it closes when the thread switches.
+  - *Not sent* (every other reason): "Not sent. Tap to try again.", and one
+    tap sends it again.
+
+  For TalkBack, the tap on the label or the bubble is named "Send again or
+  discard" for the first kind and "Try sending again" for the second. A
+  message the phone itself reports as failed reads "Not sent"; tapping it
+  says to retry it in Google Messages on the phone.
 
 ## Forward catch-up
 
@@ -906,7 +938,10 @@ import and "load older" pages are not.
   build. Without a keystore the release APK is signed with the local debug key,
   with a warning.
 - **CI** (`.github/workflows/android.yml`, with `contents: read`
-  permissions):
+  permissions) runs on pushes and pull requests to `main` and by hand
+  (`workflow_dispatch`), in two jobs. The `build` job runs every time. It is
+  in no environment and names no secret, so it never sees the release key.
+  It:
   - installs exactly the Go of the `toolchain` line (`actions/setup-go@v6`,
     which also exports `GOTOOLCHAIN=local`) and checks `go env GOVERSION`;
   - runs `go vet`, `go test -count=1 -race -timeout 5m` and an `android/arm64`
@@ -919,17 +954,48 @@ import and "load older" pages are not.
     fetch the modules it needs;
   - rebuilds the aar with `-Pgmbridge.go` set to a Go wrapper and a failing
     `go` first on `PATH`, and requires the same aar;
-  - builds the release APK. Only builds of `main` are release-signed: only
-    they decode the keystore, get its passwords, and enter the `release`
-    environment, which should hold the four `LIGHTDECODER_*` secrets with a
-    deployment-branch policy of `main` only. Pull requests and runs on other
-    branches are signed with the runner's throwaway debug key;
-  - checks the release APK: package `com.lightdecoder`, not debuggable, one
-    signer (for anything but `main`, exactly the debug key), `zipalign -c -P 16`,
-    the licence assets and the arm64 native libraries present, and
-    `40-android-libraries.txt` naming the Apache License and the libraries;
-  - uploads it as `lightdecoder` from `main`, otherwise as
-    `lightdecoder-preview` (which cannot update an installed release).
+  - builds the release APK. No `LIGHTDECODER_*` variable is set, so Gradle
+    signs it with the runner's throwaway debug key, on every event and
+    branch, `main` included;
+  - checks that APK with the tools of build-tools 35.0.0
+    (`BUILD_TOOLS_VERSION`): package `com.lightdecoder`, not debuggable,
+    exactly one signer and that signer the runner's debug key,
+    `zipalign -c -P 16`, the licence assets and the arm64 native libraries
+    present, and `40-android-libraries.txt` naming the Apache License and the
+    libraries;
+  - uploads it as `lightdecoder-preview` (it cannot update an installed
+    release).
+
+  The `sign` job (`needs: build`) runs only for a push to `main`, never for a
+  pull request or a manual run. It is the only job in the `release`
+  environment and the only one that reads the release key's secrets:
+  `LIGHTDECODER_KEYSTORE_BASE64` (the keystore file, PKCS12 or JKS, in
+  base64), `LIGHTDECODER_KEYSTORE_PASSWORD`, `LIGHTDECODER_KEY_ALIAS` and
+  optionally `LIGHTDECODER_KEY_PASSWORD` (default: the keystore password). CI
+  never passes them to Gradle. Without the keystore secret the job warns and
+  signs nothing, so `main` then has only the preview; a keystore without its
+  password or alias fails the job. Otherwise it downloads the preview APK,
+  re-signs it with the `apksigner` of build-tools 35.0.0
+  (`--lib-page-alignment 16384`, v2 and v3 signatures, no v4; the passwords
+  come from the environment, never the command line), deletes the decoded
+  keystore whatever happened, and checks the result again: package name, not
+  debuggable, one signer that is not the Android debug key,
+  `zipalign -c -P 16`, and the same entries as the preview apart from v1
+  signature files. It uploads that APK as `lightdecoder`.
+
+  **What the repository owner sets up once**, in the GitHub repository's
+  Settings > Environments:
+  1. create an environment named `release`;
+  2. limit its deployment branches to `main`, so that a workflow edited on
+     another branch or in a pull request cannot enter it and read the key;
+  3. add the four secrets above to that environment, and delete any
+     repository-level copies (those reach a run from any branch of the
+     repository, a pull request that edits the workflow included).
+
+  If the environment does not exist, GitHub creates it, without protection,
+  on the first `sign` run, and the job then uses repository-level secrets if
+  there are any. Required reviewers on the environment would hold each
+  push's `sign` job until someone approves it.
 
   CI does not run lint or build the debug APK.
 
@@ -1022,7 +1088,7 @@ same steps 1–2.
 
 ## Testing
 
-**Go** (`cd gmbridge && go vet ./... && go test -race -count=1 ./...`; 63
+**Go** (`cd gmbridge && go vet ./... && go test -race -count=1 ./...`; 64
 tests, offline): DTO conversion and JSON shape, status → direction, MIME
 fallbacks, folders, paging order and cursors; error-code mapping and safe
 details; send failures through a real HTTP/2 test server (which ones count as
@@ -1034,9 +1100,10 @@ states, resyncs and state priority; stale events from older clients or
 connections being ignored; the SetActiveSession retries and the throttle
 resync per connection and per long-poll loop; dropped clients failing locally
 (checked against a test server); an unwanted long poll being closed; Unpair
-refreshing an expired token first; ForceRCS from tombstones, pages and seeds.
+refreshing an expired token first; ForceRCS from tombstones, pages and seeds,
+and a seed being replaced and cleared without losing what was learned.
 
-**Kotlin** (`./gradlew :app:testDebugUnitTest`; 253 tests in 19 classes;
+**Kotlin** (`./gradlew :app:testDebugUnitTest`; 263 tests in 20 classes;
 Robolectric on real SQLite with FTS4; needs Go and a host C++ toolchain, see
 the README):
 
@@ -1049,15 +1116,19 @@ the README):
   including Unpair's late `unpaired` from its own thread. `duringSend` delivers
   the echo before the send returns, as the phone often does.
 - Suites: `RelayManagerTest` (pairing, states, session storage, logs, stickers,
-  unpair, archive owner, catch-up, seeding), `OutboxTest`, `BackfillTest`,
+  unpair, archive owner, catch-up, seeding and forgetting the seed when the
+  archive is deleted), `OutboxTest` (also which failures may have gone out,
+  and a send that an Unpair held while Google accepted it), `BackfillTest`,
   `RelayServiceTest` (service, notification visibility, alarms),
   `RelayPrefsTest`, `ArchiveRepositoryTest`, `SessionVaultTest`, `DtoTest`,
   `CookieParserTest`, `StickerCaptureTest`, `InboxStoreDedupeTest`,
   `ScreensSmokeTest` (each screen reaches RESUMED with seeded data),
   `ChatHelpersTest`, `RelayUiTest`, and `LinkFixesTest`, `LinkFollowUpTest`,
-  `LinkRound2Test` (screen behaviour: notifications off, unpair, kept archive,
-  "Connect to load", licences, thread switching, the viewer's sources),
-  besides the decoder's `HeifCodecTest` and `ImageSnifferTest`.
+  `LinkRound2Test`, `LinkRound3Test` (screen behaviour: notifications off,
+  unpair, kept archive, "Connect to load", licences, thread switching, the
+  viewer's sources, the "Not confirmed" label and the question before sending
+  again, a thread switch while the link comes online), besides the decoder's
+  `HeifCodecTest` and `ImageSnifferTest`.
   `RelayManagerTest` also asserts that the activity log never contains the
   emoji, the account, message text or cookie values.
 
@@ -1125,10 +1196,9 @@ Google and libgm:
   active.
 - ForceRCS follows the newest protocol-switch tombstone the bridge has seen.
   A chat whose switch is neither in the archive nor on a page fetched since
-  pairing is sent without it until one shows up. If the archive is deleted
-  for another phone after the seed was handed over (a connection made while
-  the phone id was not known yet), Go keeps that seed until the next pairing
-  or Unpair; it only matters for a chat with the same id.
+  pairing is sent without it until one shows up. Deleting the archive drops
+  its seed at once. If that call to Go fails (only a panic there could make
+  it), the old seed stays until the next connect replaces it.
 
 Connection and Android:
 
@@ -1160,15 +1230,15 @@ Connection and Android:
 
 Sending:
 
-- The thread shows every failed send as "Not sent. Tap to try again." and
-  retries at once. For `interrupted`, `unconfirmed` and `phone_not_responding`
-  failures the message may in fact have been delivered, so a retry can send it
-  twice; there is no separate label and no confirmation yet.
+- For an `interrupted`, `unconfirmed` or `phone_not_responding` send the app
+  cannot tell whether it went out (a `phone_not_responding` send, or one an
+  Unpair held while it went out, is not even looked up on the phone; only a
+  late echo settles it). The thread says so and asks before sending it
+  again, but if the user confirms and the first one did go out, it arrives
+  twice.
 - A forward catch-up fetches at most 10 pages (500 messages) per conversation;
   anything further back in a gap is left to "load older" and the import.
 - Media sends hold the whole attachment (up to 100 MB) in memory.
-- If a send succeeds at the moment Unpair holds it, the local copy shows FAILED
-  while the queue entry is SENT; retry does nothing, discard works.
 
 Archive and UI:
 
@@ -1183,8 +1253,5 @@ Archive and UI:
   file; it is downloaded again when next shown.
 - No "Not spam" action. The reply target is not restored after rotation.
   Links inside a bubble cannot be activated with TalkBack.
-- If the link comes online exactly while the thread screen switches to
-  another conversation, the new thread can be paged from the phone before
-  its stored messages are read (harmless, but one extra request).
 - The contact picker's "offline" hint only shows when no contacts are stored,
   because `listContacts` falls back to the stored list quietly.

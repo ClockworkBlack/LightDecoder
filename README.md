@@ -61,8 +61,8 @@ Verified against real iPhone sticker files and against synthetic files whose
 every pixel is known: still, opaque, transparent, animated (intra- and
 inter-coded) all decode correctly — through the native probe, through the JVM
 across the real JNI boundary (`tools/jni-smoke/`), and through the Android
-`Bitmap` path under Robolectric (`app/src/test/`: 16 decoder tests, out of 253
-unit tests in all; the Go bridge has another 63 of its own).
+`Bitmap` path under Robolectric (`app/src/test/`: 16 decoder tests, out of 263
+unit tests in all; the Go bridge has another 64 of its own).
 
 ## Automatic sticker inbox
 
@@ -155,8 +155,10 @@ connection and loads nothing.
   survives restarts and waits for the connection. A send whose fate is
   unclear (Google took it but the phone's answer never came, the app was
   killed in the middle of it, or the phone never confirmed it within an hour,
-  even when asked) is never sent again by itself: it shows as not sent, and
-  you decide whether to try again, which may deliver it twice.
+  even when asked) is never sent again by itself. It shows "Not confirmed. It
+  may have been sent.", and tapping it asks first: send it again (which may
+  deliver it twice), discard it, or leave it. A send that certainly did not
+  go out shows "Not sent. Tap to try again." and goes again with one tap.
 - **Read and typing.** Opening a thread marks it read on the phone; typing sends
   the "is typing" signal.
 - **Search.** Full-text search over everything in the local archive.
@@ -314,11 +316,14 @@ APK is signed with the local debug key; it is still not debuggable.
 
 CI (`.github/workflows/android.yml`) runs the Go checks with `-race`, the unit
 tests, and checks on the release APK (not debuggable, signer, 16 KB
-alignment, licence files). Only builds of `main` are signed with the release
-key (its secrets belong in the repository's `release` environment, limited
-to `main`); the artifact is then `lightdecoder`. Pull requests and other
-branches build `lightdecoder-preview`, signed with the CI runner's throwaway
-debug key, so it cannot update an installed release.
+alignment, licence files). Every run uploads it as `lightdecoder-preview`,
+signed with the CI runner's throwaway debug key, so it cannot update an
+installed release. On pushes to `main` that APK is also re-signed with the
+release key, in a separate job that alone reads its secrets (they belong in
+the repository's `release` environment, limited to `main`); that artifact is
+`lightdecoder`. Without the key, `main` gets only the preview, with a
+warning. What the repository owner has to set up on GitHub is listed under
+"CI" in `docs/google-messages-link.md`.
 
 Debug builds (`assembleDebug`, installed side by side as
 `com.lightdecoder.debug`) are debuggable: anyone with adb on the phone can read

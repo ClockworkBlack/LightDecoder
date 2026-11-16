@@ -21,6 +21,7 @@ import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.VisibleForTesting
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
@@ -97,6 +98,15 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     /** A wider window was asked for and not loaded yet; scroll events must not widen it again. */
     private var growPending = false
     private var messages: List<MessageRow> = emptyList()
+
+    /**
+     * The conversation whose own rows [messages] holds: null from opening or a
+     * thread switch until that conversation's first local read is in. Paging
+     * from the phone waits for it: before then [messages] is the empty list a
+     * switch leaves, which says nothing about how much the archive holds.
+     * (That first read pages the thread itself when it holds less than a page.)
+     */
+    private var localRowsFor: String? = null
     private var historyComplete = false
     private var remoteExhausted = false
     private var loadingOlder = false
@@ -111,8 +121,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private var attachment: Uri? = null
 
     /**
-     * The long-press sheet and the open delete question, if any. Both belong
-     * to the conversation they were opened in, so a thread switch closes them.
+     * The long-press sheet and the open question (delete, or send again), if
+     * any. Both belong to the conversation they were opened in, so a thread
+     * switch closes them.
      */
     private var actionSheet: Dialog? = null
     private var confirmDialog: Dialog? = null
@@ -190,8 +201,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             // a half-typed reply: one tap on Send would deliver it to the wrong person.
             // A paging call still running for it is dropped when it returns (loadOlderFromPhone).
             conversationId = id
-            // The long-press sheet and a delete question still act on the old conversation's
-            // message or id: close them, and the overflow menu built from its row.
+            // The long-press sheet and an open question (delete, send again) still act on the old
+            // conversation's message or id: close them, and the overflow menu built from its row.
             actionSheet?.dismiss()
             confirmDialog?.dismiss()
             closeOptionsMenu()
@@ -199,6 +210,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             growWindow = false
             growPending = false
             messages = emptyList()
+            // Until the new conversation's own rows are read, nothing pages it from the phone.
+            localRowsFor = null
             historyComplete = false
             remoteExhausted = false
             remoteFailedAtMs = 0L
@@ -333,6 +346,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val oldestShown = if (reset) null else messages.firstOrNull()?.timestampMs
         val wanted = windowSize
         val snapshot = withContext(Dispatchers.IO) {
+            beforeLocalRead?.invoke(id)
             var rows: List<MessageRow>
             if (grow || oldestShown == null) {
                 rows = repo.messages(id, limit = wanted)
@@ -360,6 +374,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val localExhausted = snapshot.rows.size < wanted
         windowSize = maxOf(PAGE, snapshot.rows.size)
         messages = snapshot.rows
+        localRowsFor = id
         conversation = snapshot.conversation
         participants = snapshot.participants
         historyComplete = snapshot.historyComplete
@@ -503,7 +518,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     // --- older history -------------------------------------------------------
 
     private fun loadOlder() {
-        if (loadingOlder || growPending) return
+        if (loadingOlder || growPending || localRowsFor != conversationId) return
         if (messages.size >= windowSize) {
             // The archive may hold more: widen the window first.
             windowSize += PAGE
@@ -583,7 +598,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                     media.clearFailures()
                     adapter.notifyItemRangeChanged(0, adapter.itemCount)
                 }
-                if (messages.size < PAGE) loadOlderFromPhone(auto = true)
+                // Only once this thread's own rows are in (see localRowsFor). During a thread
+                // switch the new thread's first load pages it, reading `online` when it is done.
+                if (localRowsFor == conversationId && messages.size < PAGE) loadOlderFromPhone(auto = true)
                 markReadIfNeeded(force = true)
             }
         }
@@ -812,7 +829,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         b.actionRetry.visibility = if (MessageStatus.canRetryLocally(row)) View.VISIBLE else View.GONE
         b.actionRetry.setOnClickListener {
             sheet.dismiss()
-            if (isShown(row)) retry(row)
+            if (isShown(row)) retryOrAsk(row)
         }
         val discardable = row.isLocal && row.localState == LocalState.FAILED
         b.actionDiscard.visibility = if (discardable) View.VISIBLE else View.GONE
@@ -834,7 +851,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     override fun onFailedTap(row: MessageRow) {
-        if (MessageStatus.canRetryLocally(row)) retry(row) else toast(getString(R.string.chat_failed_phone_detail))
+        if (MessageStatus.canRetryLocally(row)) retryOrAsk(row) else toast(getString(R.string.chat_failed_phone_detail))
     }
 
     override fun onReactionTap(row: MessageRow, reaction: ReactionDto) {
@@ -918,10 +935,40 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
     }
 
+    /**
+     * A send that definitely did not go out is retried at once. One whose
+     * outcome is unknown may have been sent already, so the user is asked first.
+     */
+    private fun retryOrAsk(row: MessageRow) {
+        if (MessageStatus.outcomeUnknown(row)) confirmResend(row) else retry(row)
+    }
+
     private fun retry(row: MessageRow) {
         val tmpId = row.tmpId
         if (tmpId.isEmpty()) return
         runInBackground { manager.retry(tmpId) }
+    }
+
+    /**
+     * "Send again?" for a send the phone never confirmed: sending it again
+     * could deliver it twice. Send again, Discard (only the copy here), or Cancel.
+     * Like the delete questions, it belongs to the thread on screen.
+     */
+    private fun confirmResend(row: MessageRow) {
+        if (!isShown(row)) return
+        val tmpId = row.tmpId
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.chat_resend_title)
+            .setMessage(R.string.chat_resend_body)
+            .setPositiveButton(R.string.chat_resend_send) { _, _ ->
+                if (isShown(row)) retry(row)
+            }
+            .setNeutralButton(R.string.chat_action_discard) { _, _ ->
+                if (isShown(row)) runInBackground { manager.discardFailed(tmpId) }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+            .let(::trackConfirm)
     }
 
     private fun copy(text: String) {
@@ -959,7 +1006,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             .let(::trackConfirm)
     }
 
-    /** Keeps [dialog] as the open delete question until it is dismissed. */
+    /** Keeps [dialog] as the open question (delete, or send again) until it is dismissed. */
     private fun trackConfirm(dialog: Dialog) {
         confirmDialog?.takeIf { it !== dialog }?.dismiss()
         confirmDialog = dialog
@@ -1085,5 +1132,13 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
         /** The quick reactions offered on long press, in Google Messages' order. */
         val QUICK_REACTIONS = listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
+
+        /**
+         * Tests only: runs on the IO thread before every read of a
+         * conversation's rows, with its id (e.g. to hold one, as a busy database would).
+         */
+        @VisibleForTesting
+        @Volatile
+        internal var beforeLocalRead: ((String) -> Unit)? = null
     }
 }

@@ -303,6 +303,20 @@ func TestForceRCSAfterRestart(t *testing.T) {
 		}
 	})
 
+	t.Run("bad JSON keeps the seed", func(t *testing.T) {
+		b, _ := newPairedBridge(t)
+		seed := `[{"conversationId":"c1","status":"MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_RCS_TO_E2EE","timestampMs":1}]`
+		if err := b.SeedProtocolSwitches([]byte(seed)); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.SeedProtocolSwitches([]byte(`[{`)); codeOf(err) != codeInvalidArgument {
+			t.Errorf("broken JSON: %v", err)
+		}
+		if !force(b) {
+			t.Error("a rejected seed changed what was seeded")
+		}
+	})
+
 	t.Run("learned from an older page", func(t *testing.T) {
 		b, _ := newPairedBridge(t)
 		b.messagePage(&gmproto.ListMessagesResponse{Messages: []*gmproto.Message{plain}}, nil)
@@ -325,4 +339,74 @@ func TestForceRCSAfterRestart(t *testing.T) {
 			t.Error("an older page overrode a newer one")
 		}
 	})
+}
+
+// When the archive is deleted (it may have been another phone's, where the
+// same conversation id is someone else), what it seeded must go, but what
+// this pairing itself reported stays. Seeding again replaces the seed.
+func TestProtocolSwitchSeedsAreReplacedAndCleared(t *testing.T) {
+	const (
+		toE2EE   = "MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_RCS_TO_E2EE"
+		fromE2EE = "MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_E2EE_TO_RCS"
+	)
+	b, _ := newPairedBridge(t)
+	force := func(convID string) bool {
+		conv := &gmproto.Conversation{ConversationID: convID, Type: gmproto.ConversationType_RCS, SendMode: gmproto.ConversationSendMode_SEND_MODE_AUTO}
+		return b.buildSendRequest(conv, "tmp", []*gmproto.MessageInfo{textInfo("x")}, "").GetForceRCS()
+	}
+	seed := func(entries ...string) {
+		t.Helper()
+		if err := b.SeedProtocolSwitches([]byte("[" + strings.Join(entries, ",") + "]")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entry := func(convID, status string, ts int64) string {
+		return fmt.Sprintf(`{"conversationId":%q,"status":%q,"timestampMs":%d}`, convID, status, ts)
+	}
+	tomb := func(id, convID string, ts int64, st gmproto.MessageStatusType) *gmproto.Message {
+		return &gmproto.Message{MessageID: id, ConversationID: convID, Timestamp: ts, MessageStatus: &gmproto.MessageStatus{Status: st}}
+	}
+
+	seed(entry("c1", toE2EE, 4000), entry("c2", toE2EE, 4000))
+	// This pairing reports c3 encrypted, and an older switch away for c1.
+	b.messagePage(&gmproto.ListMessagesResponse{Messages: []*gmproto.Message{
+		tomb("m3", "c3", 3_000_000, gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_TEXT_TO_E2EE),
+	}}, nil)
+	b.messagePage(&gmproto.ListMessagesResponse{Messages: []*gmproto.Message{
+		tomb("m1", "c1", 1_000_000, gmproto.MessageStatusType_MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_E2EE_TO_RCS),
+	}}, &gmproto.Cursor{LastItemID: "m9", LastItemTimestamp: 9_000})
+	if !force("c1") || !force("c2") || !force("c3") {
+		t.Fatal("seeded and learned switches should both count (the newer one per chat)")
+	}
+
+	// Seeding again replaces the earlier seed: c2 is no longer in the archive.
+	seed(entry("c1", toE2EE, 4000))
+	if !force("c1") || force("c2") || !force("c3") {
+		t.Errorf("reseed: c1=%v c2=%v c3=%v, want true false true", force("c1"), force("c2"), force("c3"))
+	}
+
+	// The archive was deleted: its seeds go; c1 falls back to what this
+	// pairing reported (an older switch away), c3 stays as learned.
+	if err := b.ClearProtocolSwitches(); err != nil {
+		t.Fatal(err)
+	}
+	if force("c1") || force("c2") || !force("c3") {
+		t.Errorf("after clear: c1=%v c2=%v c3=%v, want false false true", force("c1"), force("c2"), force("c3"))
+	}
+
+	// The new archive's seeds (empty, or the new phone's) are used from now on.
+	seed()
+	if force("c1") || !force("c3") {
+		t.Error("an empty seed should leave only what was learned")
+	}
+	seed(entry("c2", toE2EE, 5000), entry("c3", fromE2EE, 100))
+	if !force("c2") || !force("c3") {
+		t.Error("a new seed counts, but not over a newer learned switch")
+	}
+
+	// A new pairing or Unpair forgets both.
+	b.cache.reset()
+	if force("c2") || force("c3") {
+		t.Error("cache reset should forget seeded and learned switches")
+	}
 }

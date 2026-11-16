@@ -22,8 +22,10 @@ class LightDecoderApp : Application() {
         SignInWebData.wipeIfDirty(this)
         RelayNotifications.ensureChannels(this)
         RelayManager.get(this)
-        // If the user wants the link connected but Android refused to start
-        // its service from the background, start it once a screen is shown.
+        // If the user wants the link connected and it is not running (Android
+        // refused to start its service from the background, its notification
+        // was turned off, or, with "start automatically" on, the app was
+        // restarted), start it once a screen is shown (RelayManager.onAppVisible).
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityStarted(activity: Activity) = RelayManager.get(activity).onAppVisible()
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit

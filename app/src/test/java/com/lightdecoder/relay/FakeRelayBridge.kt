@@ -125,6 +125,7 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
         calls += "finishPairing"
         val phoneId = finishPairing.invoke()
         paired = true
+        seeded = emptyList() // Go resets its cache on a new pairing
         sink.onSession(sessionAfterPairing)
         return phoneId
     }
@@ -157,6 +158,7 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
         duringUnpair?.invoke()
         paired = false
         connected = false
+        seeded = emptyList() // Go resets its cache on unpair
         val code = unpairCode
         val delayMs = unpairCallbackDelayMs
         // As Go's dispatcher would: in order, from its own thread, after unpair() returned.
@@ -172,8 +174,30 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
     /** Every seedProtocolSwitches() call's seed, in order (kept out of [calls]). */
     val seeds = CopyOnWriteArrayList<List<ProtocolSwitchSeed>>()
 
+    /**
+     * What Go holds as seeded right now: the last seed (each replaces the
+     * one before), nothing after clearProtocolSwitches(), a new pairing or
+     * unpair().
+     */
+    @Volatile
+    var seeded: List<ProtocolSwitchSeed> = emptyList()
+
+    /** How many times clearProtocolSwitches() was called (kept out of [calls]). */
+    val clears = java.util.concurrent.atomic.AtomicInteger()
+
+    /** clearProtocolSwitches() throws this when set (it must never stop a wipe). */
+    @Volatile
+    var clearError: Exception? = null
+
     override fun seedProtocolSwitches(seed: List<ProtocolSwitchSeed>) {
         seeds += seed
+        seeded = seed
+    }
+
+    override fun clearProtocolSwitches() {
+        clears.incrementAndGet()
+        clearError?.let { throw it }
+        seeded = emptyList()
     }
 
     override fun listConversations(folder: Folder, count: Int): List<ConversationDto> {

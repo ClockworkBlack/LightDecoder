@@ -148,32 +148,50 @@ func (b *GMBridge) FetchMessages(conversationID string, count int64, cursorJSON 
 // the newest page reach. seedJSON is a JSON array of the protocol-switch
 // tombstones stored in the archive, {"conversationId","status","statusCode",
 // "timestampMs"} as in MessageDTO (status or statusCode is enough; other
-// statuses are ignored). Passing only each chat's newest one is enough. A
-// chat follows its newest tombstone, whether seeded, live or in a history
-// page. Call it after NewGMBridge; it never touches the network.
+// statuses are ignored). Passing only each chat's newest one is enough.
+//
+// Each call replaces what earlier calls seeded (an empty array or empty
+// input drops it all); what the bridge learned itself from this pairing's
+// live events and history pages stays. A chat follows its newest tombstone,
+// seeded or learned. Invalid JSON changes nothing. Call it after
+// NewGMBridge; it never touches the network. A new pairing or Unpair forgets
+// both.
 func (b *GMBridge) SeedProtocolSwitches(seedJSON []byte) (err error) {
 	defer recoverInto(&err)
-	if len(strings.TrimSpace(string(seedJSON))) == 0 {
-		return nil
-	}
-	var seeds []struct {
-		ConversationID string `json:"conversationId"`
-		Status         string `json:"status"`
-		StatusCode     int32  `json:"statusCode"`
-		TimestampMs    int64  `json:"timestampMs"`
-	}
-	if err := json.Unmarshal(seedJSON, &seeds); err != nil {
-		return newError(codeInvalidArgument, "protocol switches must be a JSON array of messages")
-	}
-	for _, s := range seeds {
-		st := gmproto.MessageStatusType(s.StatusCode)
-		if code, ok := gmproto.MessageStatusType_value[s.Status]; ok {
-			st = gmproto.MessageStatusType(code)
+	seeded := make(map[string]protocolSwitch)
+	if len(strings.TrimSpace(string(seedJSON))) != 0 {
+		var seeds []struct {
+			ConversationID string `json:"conversationId"`
+			Status         string `json:"status"`
+			StatusCode     int32  `json:"statusCode"`
+			TimestampMs    int64  `json:"timestampMs"`
 		}
-		if force, ok := protocolSwitchForce(st); ok {
-			b.cache.recordProtocolSwitch(s.ConversationID, force, s.TimestampMs)
+		if err := json.Unmarshal(seedJSON, &seeds); err != nil {
+			return newError(codeInvalidArgument, "protocol switches must be a JSON array of messages")
+		}
+		for _, s := range seeds {
+			st := gmproto.MessageStatusType(s.StatusCode)
+			if code, ok := gmproto.MessageStatusType_value[s.Status]; ok {
+				st = gmproto.MessageStatusType(code)
+			}
+			if force, ok := protocolSwitchForce(st); ok && s.ConversationID != "" {
+				putNewer(seeded, s.ConversationID, protocolSwitch{force: force, tsMs: s.TimestampMs})
+			}
 		}
 	}
+	b.cache.replaceSeededProtocolSwitches(seeded)
+	return nil
+}
+
+// ClearProtocolSwitches forgets everything SeedProtocolSwitches seeded, for
+// when the archive it came from was deleted (it may have been another
+// phone's, where the same conversation id is a different chat). What the
+// bridge learned from this pairing's live events and history pages stays.
+// The same as SeedProtocolSwitches with an empty array; never touches the
+// network.
+func (b *GMBridge) ClearProtocolSwitches() (err error) {
+	defer recoverInto(&err)
+	b.cache.replaceSeededProtocolSwitches(make(map[string]protocolSwitch))
 	return nil
 }
 

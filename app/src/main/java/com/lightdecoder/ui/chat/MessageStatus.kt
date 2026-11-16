@@ -2,6 +2,7 @@ package com.lightdecoder.ui.chat
 
 import com.lightdecoder.archive.LocalState
 import com.lightdecoder.archive.MessageRow
+import com.lightdecoder.relay.Outbox
 
 /** What the little status mark under an outgoing message shows. */
 enum class Tick { NONE, PENDING, SENT, DELIVERED, READ, FAILED }
@@ -59,4 +60,10 @@ object MessageStatus {
     /** A message this app could not hand to the phone; the user can retry or discard it. */
     fun canRetryLocally(row: MessageRow): Boolean =
         row.localState == LocalState.FAILED && row.tmpId.isNotEmpty()
+
+    /**
+     * A failed send that may have gone out all the same ([Outbox.outcomeUnknown]):
+     * retrying it could deliver it twice, so the user is asked first.
+     */
+    fun outcomeUnknown(row: MessageRow): Boolean = canRetryLocally(row) && Outbox.outcomeUnknown(row)
 }

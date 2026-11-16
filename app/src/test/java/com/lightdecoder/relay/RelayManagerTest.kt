@@ -1032,6 +1032,72 @@ class RelayManagerTest {
     }
 
     @Test
+    fun anArchiveDeletedAfterItWasSeededIsForgottenByTheBridge() {
+        // A connection came up while the phone was not known yet, so the
+        // archive (phone-1's) seeded the bridge; its first sync then finds the
+        // pairing is phone-2's and deletes the archive.
+        val (manager, fake) = env.pairedManager()
+        RelayPrefs.setArchiveOwner(env.context, "phone-1", "someone@example.com")
+        val e2ee = "MESSAGE_STATUS_TOMBSTONE_PROTOCOL_SWITCH_RCS_TO_E2EE"
+        env.repo.upsertMessages(
+            listOf(MessageDto(id = "t1", conversationId = CONV, timestampMs = 1_000, direction = "system", status = e2ee)),
+        )
+        fake.phoneId = ""
+        RelayPrefs.setLiveEnabled(env.context, true)
+        manager.serviceRunning = true
+        manager.onServiceStarted()
+        env.eventually(manager, what = "the connect") { connects(fake) == 1 }
+        assertEquals(listOf(ProtocolSwitchSeed(CONV, e2ee, 0, 1_000)), fake.seeded)
+
+        fake.phoneId = "phone-2"
+        fake.goOnline()
+        env.eventually(manager, what = "the wipe") { env.repo.message("t1") == null }
+        env.eventually(manager, what = "the seed to be forgotten") { fake.clears.get() >= 1 }
+        assertTrue("phone-1's chats no longer force RCS", fake.seeded.isEmpty())
+
+        // The next connect seeds again, from the archive as it is now.
+        fake.emitState("error", RelayException.INTERNAL, "listen failed")
+        manager.awaitIdleForTesting()
+        manager.onAppVisible()
+        env.eventually(manager, what = "the retry") { connects(fake) == 2 }
+        assertEquals(2, fake.seeds.size)
+        assertTrue(fake.seeds.last().isEmpty())
+        assertLogIsContentFree()
+        manager.stopLive()
+    }
+
+    @Test
+    fun everyArchiveDeletionForgetsTheSeedEvenIfTheBridgeFails() {
+        val (manager, fake) = env.pairedManager()
+        fake.emitMessage(incoming("m1", "hello there"))
+        manager.awaitIdleForTesting()
+
+        // Keeping the archive: nothing to forget (Go itself drops everything on unpair).
+        runBlocking { manager.unpair(deleteArchive = false) }
+        assertEquals(0, fake.clears.get())
+
+        // Deleting it while unpaired; the bridge refusing does not stop the deletion.
+        fake.clearError = RelayException(RelayException.INTERNAL, "boom")
+        assertTrue(runBlocking { manager.deleteLocalArchive() })
+        assertNull(env.repo.message("m1"))
+        assertEquals(1, fake.clears.get())
+        assertTrue(RelayLog.read(env.context).any { it.endsWith("Could not clear the link's list of encrypted chats: internal") })
+
+        // Unpairing with the archive deleted forgets it too.
+        fake.clearError = null
+        runBlocking { manager.startPairing(COOKIES) }
+        runBlocking { manager.finishPairing() }
+        manager.awaitIdleForTesting()
+        fake.emitMessage(incoming("m2", "on my way"))
+        manager.awaitIdleForTesting()
+        runBlocking { manager.unpair(deleteArchive = true) }
+        assertNull(env.repo.message("m2"))
+        assertEquals(2, fake.clears.get())
+        assertEquals(RelayState.Phase.UNPAIRED, manager.state.value.phase)
+        assertLogIsContentFree()
+    }
+
+    @Test
     fun offThenOnDuringAConnectLeavesTheLinkUp() {
         val (manager, fake) = env.pairedManager()
         val connecting = CountDownLatch(1)

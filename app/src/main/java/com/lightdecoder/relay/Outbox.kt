@@ -147,7 +147,8 @@ internal class Outbox(
      * meaningful on the phone they came from (another phone can have a
      * different person behind the same id), so each send waits as failed for
      * the user to retry or discard. An entry being sent right now is
-     * included: its sender only puts back entries that are still SENDING.
+     * included: its sender only puts back entries that are still SENDING,
+     * and marks one Google accepted meanwhile [UNCONFIRMED] ([markSent]).
      */
     fun holdAll(reason: String) = synchronized(claimLock) {
         for (row in repo.pendingOutbox()) {
@@ -326,11 +327,7 @@ internal class Outbox(
             repo.updateOutbox(key, OutboxStatus.SENDING, attemptsDelta = 1)
             when (val verdict = attempt(row, payload)) {
                 Verdict.Sent -> {
-                    // Removes the entry at once if the echo already arrived;
-                    // otherwise the echo removes it. The local copy stays
-                    // "sending" until then.
-                    repo.updateOutbox(key, OutboxStatus.SENT)
-                    awaitEcho(key)
+                    if (markSent(row)) awaitEcho(key)
                     return true
                 }
                 is Verdict.Retry -> {
@@ -398,6 +395,42 @@ internal class Outbox(
         repo.updateOutbox(key, OutboxStatus.SENDING)
         repo.setLocalState(key, LocalState.SENDING)
         row
+    }
+
+    /**
+     * Records that Google accepted the send. That removes the entry at once
+     * if the echo already arrived; otherwise the echo removes it, and the
+     * local copy stays "sending" until then. Returns whether it now waits for
+     * its echo.
+     *
+     * An entry [holdAll] failed while it was being sent (an unpair) went out
+     * all the same: it is marked [UNCONFIRMED], not left showing a reason
+     * that says it was never sent, so a retry asks the user first. A late
+     * echo still clears it.
+     */
+    private fun markSent(row: OutboxRow): Boolean {
+        val key = row.idempotencyKey
+        val held = synchronized(claimLock) {
+            when (repo.outbox(key)?.status) {
+                OutboxStatus.SENDING -> {
+                    repo.updateOutbox(key, OutboxStatus.SENT)
+                    return true
+                }
+                OutboxStatus.FAILED -> if (repo.message(MessageRow.tmpMessageId(key)) == null) {
+                    repo.deleteOutbox(key)
+                    deleteCopy(key)
+                    false
+                } else {
+                    repo.setLocalState(key, LocalState.FAILED, UNCONFIRMED)
+                    repo.updateOutbox(key, OutboxStatus.FAILED, error = UNCONFIRMED)
+                    true
+                }
+                // Gone: the archive was deleted meanwhile.
+                else -> false
+            }
+        }
+        if (held) RelayLog.add(context, "A ${kindOf(row)} held while it was being sent went out; it waits as unconfirmed")
+        return false
     }
 
     /**
@@ -546,6 +579,34 @@ internal class Outbox(
         /** Content-free reasons a send waits for the user. */
         const val INTERRUPTED = "interrupted"
         const val UNCONFIRMED = "unconfirmed"
+
+        /**
+         * The reasons (stored as the failed local copy's [MessageRow.errorText])
+         * after which the message may have reached the phone, so a retry could
+         * send it twice:
+         *  - [INTERRUPTED]: the app died mid-send and the phone, asked, did
+         *    not show the message (or did not answer);
+         *  - [UNCONFIRMED]: Google accepted the send, but the phone's echo
+         *    never came;
+         *  - [RelayException.PHONE_NOT_RESPONDING]: the link broke off or
+         *    timed out after the send went out to Google (the phone may still
+         *    send it from Google's queue).
+         *
+         * None of them is retried by the outbox on its own; a late echo
+         * still replaces the local copy. Every other reason on a failed send
+         * means it did not go out (the phone or Google refused it, or it
+         * never left this device).
+         */
+        val OUTCOME_UNKNOWN_REASONS: Set<String> = setOf(INTERRUPTED, UNCONFIRMED, RelayException.PHONE_NOT_RESPONDING)
+
+        /**
+         * True for a send this app gave up on whose outcome is unknown: it
+         * may have been sent ("not confirmed by your phone"), so the user
+         * should confirm before retrying. False for a send that definitely
+         * did not go out, and for anything that is not a failed local send.
+         */
+        fun outcomeUnknown(row: MessageRow): Boolean =
+            row.localState == LocalState.FAILED && row.tmpId.isNotEmpty() && row.errorText in OUTCOME_UNKNOWN_REASONS
 
         /** Messages per page, and at most this many pages, when looking for echoes. */
         private const val LOOKUP_PAGE = Backfill.PAGE_SIZE

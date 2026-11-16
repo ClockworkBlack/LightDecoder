@@ -163,13 +163,29 @@ class MessagesAdapter(
         // Time and delivery status.
         b.time.text = TimeFormat.clock(context, row.timestampMs)
         val tick = MessageStatus.tickFor(row)
-        bindTick(holder, tick, metaColor)
+        // A send that may have gone out all the same has its own words: "Not sent" would invite a resend.
+        val unconfirmed = MessageStatus.outcomeUnknown(row)
+        bindTick(holder, tick, metaColor, unconfirmed)
 
         // Failure notice under the bubble.
         val retryable = MessageStatus.canRetryLocally(row)
         b.failedText.visibility = if (tick == Tick.FAILED) View.VISIBLE else View.GONE
-        b.failedText.setText(if (retryable) R.string.chat_failed_retry else R.string.chat_failed_phone)
+        b.failedText.setText(
+            when {
+                unconfirmed -> R.string.chat_failed_unconfirmed
+                retryable -> R.string.chat_failed_retry
+                else -> R.string.chat_failed_phone
+            }
+        )
         b.failedText.setOnClickListener { callbacks.onFailedTap(row) }
+        // What a tap does, for TalkBack ("double-tap to send again or discard").
+        val failedTapLabel = when {
+            tick != Tick.FAILED -> null
+            unconfirmed -> context.getString(R.string.chat_failed_unconfirmed_action)
+            retryable -> context.getString(R.string.chat_action_retry)
+            else -> null
+        }
+        ViewCompat.replaceAccessibilityAction(b.failedText, AccessibilityActionCompat.ACTION_CLICK, failedTapLabel, null)
 
         bindReactions(holder, row)
 
@@ -182,6 +198,7 @@ class MessagesAdapter(
         b.body.setOnLongClickListener(longPress)
         b.bubble.setOnClickListener(if (tick == Tick.FAILED) View.OnClickListener { callbacks.onFailedTap(row) } else null)
         if (tick != Tick.FAILED) b.bubble.isClickable = false
+        ViewCompat.replaceAccessibilityAction(b.bubble, AccessibilityActionCompat.ACTION_CLICK, failedTapLabel, null)
 
         b.bubble.contentDescription = describe(holder, item, tick)
         // TalkBack users cannot swipe a bubble: offer reply as an action.
@@ -199,7 +216,8 @@ class MessagesAdapter(
         }
     }
 
-    private fun bindTick(holder: MessageHolder, tick: Tick, metaColor: Int) {
+    /** [unconfirmed]: a failed send that may have gone out ([MessageStatus.outcomeUnknown]). */
+    private fun bindTick(holder: MessageHolder, tick: Tick, metaColor: Int, unconfirmed: Boolean) {
         val icon = holder.binding.statusIcon
         val context = icon.context
         val (drawable, description) = when (tick) {
@@ -212,7 +230,8 @@ class MessagesAdapter(
             Tick.SENT -> R.drawable.ic_msg_sent to R.string.chat_status_sent
             Tick.DELIVERED -> R.drawable.ic_msg_delivered to R.string.chat_status_delivered
             Tick.READ -> R.drawable.ic_msg_delivered to R.string.chat_status_read
-            Tick.FAILED -> R.drawable.ic_msg_failed to R.string.chat_status_failed
+            Tick.FAILED -> R.drawable.ic_msg_failed to
+                if (unconfirmed) R.string.chat_failed_unconfirmed else R.string.chat_status_failed
         }
         icon.visibility = View.VISIBLE
         icon.setImageResource(drawable)

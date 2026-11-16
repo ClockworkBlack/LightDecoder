@@ -35,7 +35,15 @@ object RelayPrefs {
     fun setLiveEnabled(context: Context, enabled: Boolean) =
         prefs(context).edit().putBoolean(KEY_LIVE, enabled).apply()
 
-    /** Reconnect after the phone restarts, if paired and live. On by default. */
+    /**
+     * "Start automatically": whether the link may start by itself when a
+     * phone is paired and the user chose to stay connected, namely after the
+     * phone restarts or the app is updated ([BootReceiver]), and when one of
+     * the app's screens comes to the front while it is not running
+     * ([RelayManager.onAppVisible]). On by default. Whatever it says, a start
+     * Android refused from the background, or a link stopped because its
+     * notification was turned off, is started again on the next screen.
+     */
     fun autoStart(context: Context) = prefs(context).getBoolean(KEY_AUTO_START, true)
 
     fun setAutoStart(context: Context, enabled: Boolean) =

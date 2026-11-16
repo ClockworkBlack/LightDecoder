@@ -194,9 +194,16 @@ class RelayManager private constructor(
     @Volatile
     private var bridge: RelayBridge? = null
 
-    /** The archive's protocol switches were handed to the bridge (once per pairing: Go forgets them on a new one). */
-    @Volatile
+    /**
+     * The archive's protocol switches were handed to the bridge: once per
+     * pairing (Go forgets them on a new one or on unpair), and again after
+     * the archive was deleted ([forgetProtocolSwitches]). Guarded by
+     * [seedLock].
+     */
     private var protocolSwitchesSeeded = false
+
+    /** Taken while the bridge is seeded from the archive, or told to forget the seed. */
+    private val seedLock = Any()
 
     @Volatile
     private var paired: Boolean = _state.value.phase != RelayState.Phase.UNPAIRED
@@ -1102,7 +1109,7 @@ class RelayManager private constructor(
     private fun onPaired(b: RelayBridge, phoneId: String) {
         val (previousPhone, previousAccount) = storedArchiveOwner()
         paired = true
-        protocolSwitchesSeeded = false
+        synchronized(seedLock) { protocolSwitchesSeeded = false }
         RelayNotifications.cancelRepairNeeded(app)
         RelayPrefs.setBackfillDoneAt(app, 0)
         onEventThread("session") { b.exportSession()?.let { SessionVault.save(app, it) } }
@@ -1266,6 +1273,31 @@ class RelayManager private constructor(
         unfinishedCatchUps.clear()
         // Nothing of another phone is left to keep sends from.
         archiveForeign = false
+        forgetProtocolSwitches()
+    }
+
+    /**
+     * After the archive was deleted: the bridge forgets the protocol switches
+     * it was seeded with from it (they may be another phone's chats, where
+     * the same conversation id is someone else), and the next connect seeds
+     * it from the archive as it is now. What the bridge learned from the
+     * paired phone itself stays. Best effort, never throws: if the bridge
+     * cannot be told, that next seed replaces the old one all the same.
+     * Runs after the deletion, so a seed being read meanwhile ([seedLock])
+     * is undone here.
+     */
+    private fun forgetProtocolSwitches() {
+        synchronized(seedLock) {
+            protocolSwitchesSeeded = false
+            // No bridge yet: nothing was seeded (a new one starts empty).
+            val b = bridge ?: return
+            try {
+                b.clearProtocolSwitches()
+            } catch (e: Exception) {
+                val kind = (e as? RelayException)?.code ?: e.javaClass.simpleName
+                RelayLog.add(app, "Could not clear the link's list of encrypted chats: $kind")
+            }
+        }
     }
 
     private fun pairingEnded(e: Throwable) {
@@ -1386,20 +1418,23 @@ class RelayManager private constructor(
     }
 
     /**
-     * Before the first connection of a pairing (once the archive is known to
-     * be this phone's): which chats the archive saw switch to or from
-     * end-to-end encryption, so a send after a restart keeps such a chat on
-     * RCS even when its switch lies far back in the history. On failure the
-     * bridge still learns from live events and pages, and the next connect
-     * tries again.
+     * Before the first connection of a pairing, and the first one after the
+     * archive was deleted (once the archive is known to be this phone's):
+     * which chats the archive saw switch to or from end-to-end encryption,
+     * so a send after a restart keeps such a chat on RCS even when its switch
+     * lies far back in the history. On failure the bridge still learns from
+     * live events and pages, and the next connect tries again.
      */
     private fun seedProtocolSwitches(b: RelayBridge) {
-        if (protocolSwitchesSeeded) return
-        try {
-            b.seedProtocolSwitches(repo.protocolSwitchSeeds())
-            protocolSwitchesSeeded = true
-        } catch (e: Exception) {
-            RelayLog.add(app, "Could not tell the link which chats are encrypted: ${e.javaClass.simpleName}")
+        synchronized(seedLock) {
+            if (protocolSwitchesSeeded) return
+            try {
+                // Replaces any earlier seed in the bridge (e.g. one of an archive since deleted).
+                b.seedProtocolSwitches(repo.protocolSwitchSeeds())
+                protocolSwitchesSeeded = true
+            } catch (e: Exception) {
+                RelayLog.add(app, "Could not tell the link which chats are encrypted: ${e.javaClass.simpleName}")
+            }
         }
     }
 

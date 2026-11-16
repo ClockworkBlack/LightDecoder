@@ -25,12 +25,17 @@ type stateCache struct {
 	// isDefaultSMSApp is optional in the settings proto and missing from some
 	// events, so the last value seen is kept (connector mergeSettings).
 	isDefaultSMSApp bool
-	// forceRCS: per conversation, what its newest protocol-switch tombstone
-	// seen so far says (connector PortalMetadata.ForceRCS). The connector
-	// keeps that in its database; here it comes from live events, history
-	// pages and the archive (SeedProtocolSwitches), in any order, so each
-	// entry keeps its tombstone's time and an older one never overrides it.
-	forceRCS map[string]protocolSwitch
+	// Per conversation, what its newest protocol-switch tombstone says
+	// (connector PortalMetadata.ForceRCS). The connector keeps that in its
+	// database; here it comes from two places, kept apart so that the
+	// archive's part can be dropped on its own when the archive is deleted:
+	//   - learnedRCS: live events and history pages of this pairing;
+	//   - seededRCS: the archive (SeedProtocolSwitches).
+	// Tombstones arrive in any order, so each entry keeps its tombstone's
+	// time: an older one never overrides a newer one, and of the two maps
+	// the newer entry counts (shouldForceRCS).
+	learnedRCS map[string]protocolSwitch
+	seededRCS  map[string]protocolSwitch
 }
 
 type protocolSwitch struct {
@@ -58,7 +63,8 @@ func (c *stateCache) reset() {
 	c.msgIndex = make(map[string]indexedMessage)
 	c.msgOrder = nil
 	c.isDefaultSMSApp = false
-	c.forceRCS = make(map[string]protocolSwitch)
+	c.learnedRCS = make(map[string]protocolSwitch)
+	c.seededRCS = make(map[string]protocolSwitch)
 }
 
 func (c *stateCache) putConversation(conv *gmproto.Conversation) {
@@ -184,25 +190,46 @@ func protocolSwitchForce(st gmproto.MessageStatusType) (force, ok bool) {
 	return false, false
 }
 
-// recordProtocolSwitch records what a tombstone at tsMs says, unless a newer
-// one was recorded for the conversation already. At equal times the later
-// report wins.
+// recordProtocolSwitch records what a tombstone at tsMs, seen live or in a
+// history page, says, unless a newer one was recorded for the conversation
+// already. At equal times the later report wins.
 func (c *stateCache) recordProtocolSwitch(conversationID string, force bool, tsMs int64) {
 	if conversationID == "" {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if cur, known := c.forceRCS[conversationID]; known && tsMs < cur.tsMs {
+	putNewer(c.learnedRCS, conversationID, protocolSwitch{force: force, tsMs: tsMs})
+}
+
+// replaceSeededProtocolSwitches makes seeds (by conversation) what the
+// archive says, dropping whatever an earlier seed said. What was learned
+// from this pairing's events and pages stays.
+func (c *stateCache) replaceSeededProtocolSwitches(seeds map[string]protocolSwitch) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.seededRCS = seeds
+}
+
+// putNewer stores sw for the conversation unless m holds a newer one. At
+// equal times sw wins.
+func putNewer(m map[string]protocolSwitch, conversationID string, sw protocolSwitch) {
+	if cur, known := m[conversationID]; known && sw.tsMs < cur.tsMs {
 		return
 	}
-	c.forceRCS[conversationID] = protocolSwitch{force: force, tsMs: tsMs}
+	m[conversationID] = sw
 }
 
 // shouldForceRCS reports what the conversation's newest known tombstone says
-// (false if none is known, as for a new connector portal).
+// (false if none is known, as for a new connector portal). At equal times
+// what this pairing reported wins over the archive's seed.
 func (c *stateCache) shouldForceRCS(conversationID string) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.forceRCS[conversationID].force
+	learned, haveLearned := c.learnedRCS[conversationID]
+	seeded, haveSeeded := c.seededRCS[conversationID]
+	if haveLearned && (!haveSeeded || learned.tsMs >= seeded.tsMs) {
+		return learned.force
+	}
+	return seeded.force
 }

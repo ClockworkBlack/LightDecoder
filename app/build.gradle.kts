@@ -12,8 +12,8 @@ plugins {
 // so adb cannot read its data (the message archive, the Google Messages
 // session) or attach a debugger to it. The debug build is for development only.
 //
-// The release key is read from environment variables (CI secrets) or from
-// Gradle properties (-P..., or ~/.gradle/gradle.properties):
+// The release key is read from environment variables or from Gradle
+// properties (-P..., or ~/.gradle/gradle.properties):
 //   LIGHTDECODER_KEYSTORE           lightdecoder.keystore          keystore file
 //   LIGHTDECODER_KEYSTORE_PASSWORD  lightdecoder.keystorePassword
 //   LIGHTDECODER_KEY_ALIAS          lightdecoder.keyAlias

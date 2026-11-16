@@ -21,10 +21,24 @@ import kotlinx.coroutines.launch
  * it runs, says what the link is doing, and has a one-tap Disconnect.
  *
  * Foreground type remoteMessaging on Android 14+ (it relays messages from
- * the phone), dataSync before that. It is only started by a user action
- * ([RelayManager.startLive]) or by [BootReceiver] when the user chose to stay
- * connected; the connection itself is [RelayManager]'s. It never runs while
- * its notification cannot be seen (notifications or its channel turned off).
+ * the phone), dataSync before that. The connection itself is
+ * [RelayManager]'s. The service is started (through [start]) only while a
+ * phone is paired and the user chose to stay connected, by:
+ *  - the user: [RelayManager.startLive] (Connect, or the end of pairing);
+ *  - [BootReceiver], after the phone restarts or the app is updated, if
+ *    "start automatically" ([RelayPrefs.autoStart]) is on;
+ *  - [RelayManager.onAppVisible] (called by [com.lightdecoder.LightDecoderApp]
+ *    when one of the app's screens comes to the front): it repairs a start
+ *    Android refused from the background, or a link stopped because its
+ *    notification was turned off; a link that is simply not running starts
+ *    there only if "start automatically" is on;
+ *  - [NotificationBlockReceiver] (through
+ *    [RelayManager.onNotificationSettingsChanged]), when the user turns the
+ *    app's notifications back on after turning them off took the link down.
+ * Android may also restart it after killing the process (START_STICKY);
+ * like any start, that stops at once unless a phone is paired and the user
+ * still wants the link connected. It never runs while its notification
+ * cannot be seen (notifications or its channel turned off).
  */
 class RelayService : Service() {
 

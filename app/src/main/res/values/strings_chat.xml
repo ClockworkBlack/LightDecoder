@@ -233,6 +233,13 @@
     <string name="chat_failed_retry">Not sent. Tap to try again.</string>
     <string name="chat_failed_phone">Not sent</string>
     <string name="chat_failed_phone_detail">Your phone could not send this message. Open Google Messages on your phone to retry it there.</string>
+    <!-- A send whose outcome is unknown (the app stopped mid-send, or the phone never confirmed it).
+         Shown under the bubble and read by TalkBack as the bubble's status. -->
+    <string name="chat_failed_unconfirmed">Not confirmed. It may have been sent.</string>
+    <string name="chat_failed_unconfirmed_action">Send again or discard</string>
+    <string name="chat_resend_title">Send again?</string>
+    <string name="chat_resend_body">Your phone did not confirm this message, so it may already have been sent. Sending it again could deliver it twice. To check, look for it in Google Messages on your phone.</string>
+    <string name="chat_resend_send">Send again</string>
     <string name="chat_media_picture">Picture</string>
     <string name="chat_media_video">Video</string>
     <string name="chat_media_file">Attachment</string>

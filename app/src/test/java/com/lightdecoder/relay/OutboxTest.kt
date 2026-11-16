@@ -9,9 +9,11 @@ import com.lightdecoder.archive.OutboxRow
 import com.lightdecoder.archive.OutboxStatus
 import com.lightdecoder.relay.RelayManagerTest.Companion.CONV
 import com.lightdecoder.relay.RelayManagerTest.Companion.outgoing
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -133,10 +135,86 @@ class OutboxTest {
         val local = env.repo.message(MessageRow.tmpMessageId(tmpId))!!
         assertEquals(LocalState.FAILED, local.localState)
         assertEquals("FAILURE_4", local.errorText)
+        assertFalse("the phone refused it: definitely not sent", Outbox.outcomeUnknown(local))
 
         manager.retry(tmpId)
         env.eventually(manager, what = "the resend") { env.repo.outbox(tmpId)?.status == OutboxStatus.SENT }
         assertEquals(2, fake.sent.size)
+    }
+
+    @Test
+    fun aSendCutOffAfterGoogleTookItIsNeverSentAgainByItself() {
+        // Go: the link broke off after the POST went out (sendError), so the
+        // phone may still send it from Google's queue.
+        val (manager, fake) = env.pairedManager()
+        fake.sendAnswers += {
+            throw RelayException.fromThrowable(Exception("phone_not_responding: disconnected after Google accepted the message"))
+        }
+        fake.goOnline()
+        val tmpId = manager.sendText(CONV, "maybe delivered")
+
+        env.eventually(manager, what = "the failure") { env.repo.outbox(tmpId)?.status == OutboxStatus.FAILED }
+        val local = env.repo.message(MessageRow.tmpMessageId(tmpId))!!
+        assertEquals(LocalState.FAILED, local.localState)
+        assertEquals(RelayException.PHONE_NOT_RESPONDING, local.errorText)
+        assertEquals(RelayException.PHONE_NOT_RESPONDING, env.repo.outbox(tmpId)!!.lastError)
+        assertTrue("the outcome is unknown", Outbox.outcomeUnknown(local))
+
+        // Neither a pause nor the next connection sends it again.
+        Thread.sleep(150)
+        fake.emitState("disconnected")
+        manager.awaitIdleForTesting()
+        fake.goOnline()
+        manager.awaitIdleForTesting()
+        Thread.sleep(150)
+        manager.awaitIdleForTesting()
+        assertEquals("sent once", 1, fake.sent.size)
+        assertEquals(OutboxStatus.FAILED, env.repo.outbox(tmpId)!!.status)
+
+        // The phone did send it: its echo clears the failure.
+        fake.emitMessage(outgoing("real-1", "maybe delivered", tmpId))
+        manager.awaitIdleForTesting()
+        assertNull(env.repo.outbox(tmpId))
+        assertNull(env.repo.message(MessageRow.tmpMessageId(tmpId)))
+        assertFalse(Outbox.outcomeUnknown(env.repo.message("real-1")!!))
+    }
+
+    @Test
+    fun aSendHeldByAnUnpairWhileGoingOutIsShownAsUnconfirmed() {
+        // The user unpairs (keeping the archive) while Google is taking the
+        // send: the hold marks it failed as never sent, but it went out.
+        val (manager, fake) = env.pairedManager()
+        fake.duringSend = {
+            fake.duringSend = null
+            runBlocking { manager.unpair(deleteArchive = false) }
+        }
+        fake.goOnline()
+        val tmpId = manager.sendText(CONV, "went out during the unpair")
+
+        env.eventually(manager, what = "the send to settle") {
+            env.repo.message(MessageRow.tmpMessageId(tmpId))?.errorText == Outbox.UNCONFIRMED
+        }
+        val local = env.repo.message(MessageRow.tmpMessageId(tmpId))!!
+        assertEquals(LocalState.FAILED, local.localState)
+        assertTrue("may have been sent: the user is asked before a retry", Outbox.outcomeUnknown(local))
+        val entry = env.repo.outbox(tmpId)!!
+        assertEquals(OutboxStatus.FAILED, entry.status)
+        assertEquals(Outbox.UNCONFIRMED, entry.lastError)
+        assertEquals(1, fake.sent.size)
+        assertTrue(RelayLog.read(env.context).any { it.endsWith("held while it was being sent went out; it waits as unconfirmed") })
+    }
+
+    @Test
+    fun aSendHeldByAnUnpairBeforeItWentOutIsNotUnconfirmed() {
+        val (manager, fake) = env.pairedManager()
+        val tmpId = manager.sendText(CONV, "queued")
+        manager.awaitIdleForTesting()
+        runBlocking { manager.unpair(deleteArchive = false) }
+        val local = env.repo.message(MessageRow.tmpMessageId(tmpId))!!
+        assertEquals(LocalState.FAILED, local.localState)
+        assertEquals(RelayManager.UNPAIRED_ERROR, local.errorText)
+        assertFalse("never left this device", Outbox.outcomeUnknown(local))
+        assertTrue(fake.sent.isEmpty())
     }
 
     @Test
@@ -203,6 +281,7 @@ class OutboxTest {
         val lost = env.repo.message(MessageRow.tmpMessageId("tmp-lost"))!!
         assertEquals(LocalState.FAILED, lost.localState)
         assertEquals(Outbox.INTERRUPTED, lost.errorText)
+        assertTrue("may have gone out", Outbox.outcomeUnknown(lost))
 
         // The user decides: retry sends it.
         manager.retry("tmp-lost")
@@ -242,6 +321,7 @@ class OutboxTest {
         val local = env.repo.message(MessageRow.tmpMessageId(tmpId))!!
         assertEquals(LocalState.FAILED, local.localState)
         assertEquals(Outbox.UNCONFIRMED, local.errorText)
+        assertTrue("may have gone out", Outbox.outcomeUnknown(local))
         assertTrue("looked up before giving up", fake.fetches.isNotEmpty())
         assertEquals("not sent again by itself", 1, fake.sent.size)
 
