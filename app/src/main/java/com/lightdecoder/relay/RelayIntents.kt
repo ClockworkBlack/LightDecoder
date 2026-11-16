@@ -3,6 +3,8 @@ package com.lightdecoder.relay
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import com.lightdecoder.ui.chat.ConversationsActivity
 import com.lightdecoder.ui.chat.ThreadActivity
 import com.lightdecoder.ui.relay.RelaySetupActivity
@@ -41,6 +43,35 @@ object RelayIntents {
     fun setup(context: Context): Intent = activity(context, RelaySetupActivity::class.java)
 
     fun status(context: Context): Intent = activity(context, RelayStatusActivity::class.java)
+
+    /**
+     * "Let it run in the background": asks Android, in its own dialog, to
+     * exempt the app from battery optimisation (Doze), so the link keeps its
+     * connection while the phone is idle. The user decides; nothing is
+     * granted by this. Needs the REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+     * permission in the manifest. Start it from a screen; if no activity
+     * handles it (some builds remove the dialog), use [batterySettings].
+     * See [RelayNotifications.isIgnoringBatteryOptimizations].
+     */
+    fun batteryExemption(context: Context): Intent =
+        Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + context.packageName))
+
+    /** The system's list of apps and their battery optimisation, the fallback for [batteryExemption]. */
+    fun batterySettings(): Intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+
+    /**
+     * [batteryExemption] if something on this device handles it, else
+     * [batterySettings]: what a "Let it run in the background" button starts.
+     */
+    fun batteryExemptionOrSettings(context: Context): Intent {
+        val ask = batteryExemption(context)
+        val handled = try {
+            ask.resolveActivity(context.packageManager) != null
+        } catch (e: RuntimeException) {
+            false
+        }
+        return if (handled) ask else batterySettings()
+    }
 
     private fun activity(context: Context, screen: Class<out Activity>): Intent =
         Intent(context, screen)

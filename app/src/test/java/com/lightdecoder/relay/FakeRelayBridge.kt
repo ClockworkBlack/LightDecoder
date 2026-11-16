@@ -20,6 +20,8 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
         val media: ByteArray? = null,
         val mime: String = "",
         val fileName: String = "",
+        /** The file a sendMediaFile() was given (null for sendText/sendMedia). */
+        val path: String? = null,
     )
 
     @Volatile
@@ -126,6 +128,7 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
         val phoneId = finishPairing.invoke()
         paired = true
         seeded = emptyList() // Go resets its cache on a new pairing
+        seededSettings = null
         sink.onSession(sessionAfterPairing)
         return phoneId
     }
@@ -159,6 +162,7 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
         paired = false
         connected = false
         seeded = emptyList() // Go resets its cache on unpair
+        seededSettings = null
         val code = unpairCode
         val delayMs = unpairCallbackDelayMs
         // As Go's dispatcher would: in order, from its own thread, after unpair() returned.
@@ -167,6 +171,8 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
             sink.onSession(null)
             emitState("unpaired", code, if (code.isEmpty()) "" else "the phone may still list this device")
         }.apply { isDaemon = true }.start()
+        // As Go's Unpair: the local wipe happened, the phone could not be told.
+        if (code == RelayException.UNPAIR_REMOTE_FAILED) throw RelayException(code, "the phone may still list this device")
     }
 
     override fun exportSession(): ByteArray? = if (paired) SESSION else null
@@ -200,8 +206,26 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
         seeded = emptyList()
     }
 
+    /** Every seedSettings() payload, in order (kept out of [calls]). */
+    val settingsSeeds = CopyOnWriteArrayList<String?>()
+
+    /** What Go holds as seeded settings right now (null: none). */
+    @Volatile
+    var seededSettings: String? = null
+
+    /** seedSettings() throws this when set. */
+    @Volatile
+    var seedSettingsError: RelayException? = null
+
+    override fun seedSettings(settingsJson: String?) {
+        settingsSeeds += settingsJson
+        seedSettingsError?.let { throw it }
+        seededSettings = settingsJson?.takeIf { it.isNotBlank() && it != "null" }
+    }
+
     override fun listConversations(folder: Folder, count: Int): List<ConversationDto> {
         calls += "listConversations"
+        if (!folder.listable) throw RelayException(RelayException.INVALID_ARGUMENT, "folder is local only")
         requireConnected()
         val list = conversations.filter { it.folder == folder.wire }.take(count)
         beforeListReturns?.invoke()
@@ -260,6 +284,23 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
         caption: String?,
         replyToId: String?,
     ): SendResult = send(Sent(conversationId, tmpId, caption.orEmpty(), data.copyOf(), mime, fileName))
+
+    override fun sendMediaFile(
+        conversationId: String,
+        tmpId: String,
+        path: String,
+        fileName: String,
+        mime: String,
+        caption: String?,
+        replyToId: String?,
+    ): SendResult {
+        requireConnected()
+        // As Go: the bridge reads the file itself.
+        val file = java.io.File(path)
+        if (!file.isFile) throw RelayException(RelayException.INVALID_ARGUMENT, "attachment is missing")
+        if (file.length() > 100L * 1024 * 1024) throw RelayException(RelayException.TOO_LARGE, "")
+        return send(Sent(conversationId, tmpId, caption.orEmpty(), file.readBytes(), mime, fileName, path))
+    }
 
     private fun send(what: Sent): SendResult {
         requireConnected()
@@ -333,6 +374,9 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
         JSONObject().put("sims", JSONArray().put(JSONObject().put("participantId", "me").put("number", "+15550000")))
             .put("rcsEnabled", true),
     )
+
+    /** As Go on *events.AuthTokenRefreshed. */
+    fun emitTokenRefreshed() = emit("token_refreshed", JSONObject())
 
     fun emitTyping(conversationId: String, participantId: String, typing: Boolean) = emit(
         "typing",

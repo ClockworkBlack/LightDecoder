@@ -3,6 +3,7 @@ package gmbridge
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,10 @@ const (
 	kindSettings     = "settings"
 	kindResync       = "resync"
 	kindAccount      = "account"
+	// kindTokenRefreshed: libgm refreshed the session token (payload {}). The
+	// "session" callback that follows a refresh also follows cookie
+	// rotations, so it cannot tell the two apart.
+	kindTokenRefreshed = "token_refreshed"
 )
 
 // States carried by kindState events.
@@ -253,6 +258,7 @@ func (b *GMBridge) processEvent(gen, seq uint64, raw any) {
 		b.cache.putConversation(evt)
 		b.deliverEvent(kindConversation, toConversationDTO(evt, b.cache))
 		b.resyncIfDataResumed(gen, seq)
+		b.noteDataReceived(0)
 	case *gmproto.TypingData:
 		b.deliverEvent(kindTyping, toTypingDTO(evt, b.cache.conversation(evt.GetConversationID())))
 	case *gmproto.Settings:
@@ -262,6 +268,11 @@ func (b *GMBridge) processEvent(gen, seq uint64, raw any) {
 		}
 		isDefault := b.cache.applySettings(evt)
 		b.deliverEvent(kindSettings, toSettingsDTO(evt, isDefault))
+		// Like the connector: while data is missing, settings do not move
+		// the stall check's anchor (they arrive on every reconnect).
+		if !b.noDataRecently.Load() {
+			b.noteDataReceived(0)
+		}
 	case *events.AccountChange:
 		if !evt.IsFake {
 			b.deliverEvent(kindAccount, accountDTO{Account: evt.GetAccount(), Enabled: evt.GetEnabled()})
@@ -270,6 +281,7 @@ func (b *GMBridge) processEvent(gen, seq uint64, raw any) {
 		if data := b.snapshotSession(); data != nil {
 			b.deliverSession(data)
 		}
+		b.deliverEvent(kindTokenRefreshed, struct{}{})
 	case *events.GaiaLoggedOut:
 		go b.invalidate(gen, 0, stateLoggedOut, newError(codeLoggedOut, "Google account pairing was removed"))
 	case *gmproto.RevokePairData:
@@ -344,8 +356,10 @@ func (b *GMBridge) processConnectionEvent(gen, seq uint64, raw any) {
 	case *events.NoDataReceived:
 		// libgm noticed a gap (long poll down for a while, phone silent, or
 		// the phone answering again) and asked for updates; events from the
-		// gap may not be redelivered. Catch up once data flows again.
+		// gap may not be redelivered. Catch up once data flows again, and
+		// check whether the phone's push subscription has gone stale.
 		b.noDataRecently.Store(true)
+		b.scheduleStallRecovery(gen, seq)
 	}
 }
 
@@ -407,6 +421,31 @@ func (b *GMBridge) handleMessage(gen, seq uint64, evt *libgm.WrappedMessage) {
 	conv := b.cache.conversation(evt.GetConversationID())
 	b.deliverEvent(kindMessage, toMessageDTO(evt.Message, evt.IsOld, conv, b.cache))
 	b.resyncIfDataResumed(gen, seq)
+	b.noteDataReceived(evt.GetTimestamp())
+}
+
+// noteDataReceived records that data came from the phone now: the stall
+// check's anchor becomes now, or tsMicros (a message's own time) if that is
+// later, as in the connector.
+func (b *GMBridge) noteDataReceived(tsMicros int64) {
+	b.lastDataMicros.Store(max(time.Now().UnixMicro(), tsMicros))
+}
+
+// panicHandlerFor returns the handler for panics in the background
+// goroutines of client generation gen (patched libgm recovers them). The
+// goroutine that panicked is gone, so the connection it belonged to is torn
+// down and reported as an "error" state with code internal, as for a fatal
+// long-poll error. A panic while that connection is not wanted changes
+// nothing. The panic value is not reported: it may quote data.
+func (b *GMBridge) panicHandlerFor(gen uint64) func(where string, recovered any) {
+	return func(where string, recovered any) {
+		defer func() { _ = recover() }()
+		b.mu.Lock()
+		seq := b.connSeq
+		b.mu.Unlock()
+		err := newError(codeInternal, fmt.Sprintf("unexpected failure in the connection (%s, %T)", where, recovered))
+		go b.invalidate(gen, seq, stateError, err)
+	}
 }
 
 func (b *GMBridge) handleUserAlert(gen, seq uint64, evt *gmproto.UserAlertEvent) {
@@ -589,10 +628,195 @@ func (b *GMBridge) scheduleHackySetActive(gen, seq uint64) {
 		if err != nil {
 			return
 		}
-		callCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
-		defer cancel()
-		_ = call(callCtx, cli)
+		func() {
+			callCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
+			defer cancel()
+			_ = call(callCtx, cli)
+		}()
+		// The connector's second step: still not confirmed another 7 s later,
+		// with the phone answering, so the client is replaced and connected
+		// again (at most once per Connect).
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		if b.hackyEpoch.Load() != epoch || b.activations.Load() != activations || b.phoneNotResponding.Load() {
+			return
+		}
+		if cur, live := b.liveSeq(gen); !live || cur != seq {
+			return
+		}
+		if b.hackyResetDone.CompareAndSwap(false, true) {
+			b.resetClient(gen, seq)
+		}
 	}()
+}
+
+// resetClient is the connector's ResetClient + Connect: the client of
+// connection seq is torn down and replaced by a new one for the same session
+// (its pending acks are sent first), which is connected at once. Kotlin sees
+// "connecting" and what follows as for any Connect; a resync follows the next
+// BROWSER_ACTIVE, for anything the stuck session missed.
+func (b *GMBridge) resetClient(gen, seq uint64) {
+	defer func() { _ = recover() }()
+	b.lifecycle.Lock()
+	defer b.lifecycle.Unlock()
+	if cur, live := b.liveSeq(gen); !live || cur != seq {
+		return
+	}
+	b.teardownLocked(gen)
+	b.mu.Lock()
+	old := b.client
+	if b.closed || b.gen != gen || old == nil {
+		b.mu.Unlock()
+		return
+	}
+	b.mu.Unlock()
+	stopAcks(old)
+	sendPendingAcks(old, ackFlushTimeout)
+	b.mu.Lock()
+	if b.closed || b.gen != gen || b.client != old {
+		b.mu.Unlock()
+		return
+	}
+	b.client = b.newClientLocked()
+	b.mu.Unlock()
+	if resetConnect(b) == nil {
+		b.needResync.Store(true)
+	}
+}
+
+// resetConnect connects the new client of resetClient; tests replace it.
+var resetConnect = (*GMBridge).connectLocked
+
+// stallRecoveryDelays are the connector's waits before each check of a
+// receive-stall recovery (2 min, then 5 min). Tests shorten them.
+var stallRecoveryDelays = []time.Duration{2 * time.Minute, 5 * time.Minute, 5 * time.Minute}
+
+// stallCheckCount is how many inbox conversations the stall check compares
+// (the connector's initial_chat_sync_count default).
+const stallCheckCount = 25
+
+// listInboxForStallCheck lists the newest inbox conversations; tests replace it.
+var listInboxForStallCheck = func(ctx context.Context, cli *libgm.Client) (*gmproto.ListConversationsResponse, error) {
+	return cli.ListConversations(ctx, &gmproto.ListConversationsRequest{Count: stallCheckCount, Folder: gmproto.ListConversationsRequest_INBOX})
+}
+
+// scheduleStallRecovery is the connector's recoverReceiveStall (its optional
+// hacky_stall_detect, always on here). libgm reported that no data came for
+// a while and asked the phone for updates; give that time to arrive, then
+// compare the phone's newest conversations with the last data received. If
+// the phone has newer messages than the event stream delivered, the push
+// subscription has gone stale although the connection looks fine: ask
+// Kotlin to catch up and re-arm the subscription (SetActiveSession); if the
+// next check still finds a gap, reconnect the long poll; after a third, give
+// up until the next report. It only runs while the phone answers and this
+// session is the active one, and stops as soon as data flows again. A newer
+// report replaces a running recovery.
+func (b *GMBridge) scheduleStallRecovery(gen, seq uint64) {
+	ctx, epoch := b.supersedeForConnection(gen, seq, &b.stallEpoch)
+	if ctx == nil {
+		return
+	}
+	delays := slices.Clone(stallRecoveryDelays)
+	list, call, restart := listInboxForStallCheck, setActiveSession, restartLongPoll
+	go func() {
+		defer func() { _ = recover() }()
+		for attempt, delay := range delays {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(delay):
+			}
+			if b.stallEpoch.Load() != epoch || !b.noDataRecently.Load() {
+				return
+			}
+			if cur, live := b.liveSeq(gen); !live || cur != seq {
+				return
+			}
+			if !b.browserActive.Load() || b.phoneNotResponding.Load() || b.inactiveElsewhere.Load() {
+				return
+			}
+			anchor := b.lastDataMicros.Load()
+			if anchor == 0 {
+				return
+			}
+			cli, err := b.liveClient()
+			if err != nil {
+				return
+			}
+			newest, gap := b.findReceiveGap(ctx, cli, list, anchor)
+			if !gap {
+				return
+			}
+			// Like the connector, move the anchor up to what the catch-up
+			// covers, so the same gap is not found again.
+			for cur := b.lastDataMicros.Load(); newest > cur; cur = b.lastDataMicros.Load() {
+				if b.lastDataMicros.CompareAndSwap(cur, newest) {
+					break
+				}
+			}
+			b.disp.push(func() {
+				if cur, live := b.liveSeq(gen); live && cur == seq {
+					b.deliverEvent(kindResync, struct{}{})
+				}
+			})
+			switch attempt {
+			case 0:
+				func() {
+					callCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
+					defer cancel()
+					_ = call(callCtx, cli)
+				}()
+			case 1:
+				b.restartForStall(gen, seq, restart)
+			default:
+				return
+			}
+		}
+	}()
+}
+
+// findReceiveGap reports whether one of the phone's newest inbox
+// conversations has a message newer than anchorMicros, and the newest
+// message time seen. An error counts as no gap.
+func (b *GMBridge) findReceiveGap(ctx context.Context, cli *libgm.Client,
+	list func(context.Context, *libgm.Client) (*gmproto.ListConversationsResponse, error), anchorMicros int64) (newest int64, gap bool) {
+	callCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+	var resp *gmproto.ListConversationsResponse
+	var err error
+	b.whileSyncingConversations(func() { resp, err = list(callCtx, cli) })
+	if err != nil {
+		return 0, false
+	}
+	for _, conv := range resp.GetConversations() {
+		ts := conv.GetLastMessageTimestamp()
+		newest = max(newest, ts)
+		if ts > anchorMicros {
+			gap = true
+		}
+	}
+	return newest, gap
+}
+
+// restartForStall restarts the long poll of connection seq, under the
+// lifecycle lock so that it cannot reopen a connection that was closed.
+// What the phone sent meanwhile is caught up on the next data (as Connect's
+// restart does).
+func (b *GMBridge) restartForStall(gen, seq uint64, restart func(*libgm.Client) error) {
+	defer func() { _ = recover() }()
+	b.lifecycle.Lock()
+	defer b.lifecycle.Unlock()
+	if cur, live := b.liveSeq(gen); !live || cur != seq {
+		return
+	}
+	cli, err := b.liveClient()
+	if err != nil {
+		return
+	}
+	_ = restart(cli)
 }
 
 // scheduleSetActiveRetry retries the SetActiveSession that libgm's

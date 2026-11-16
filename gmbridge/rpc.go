@@ -1,6 +1,7 @@
 package gmbridge
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -180,6 +181,29 @@ func (b *GMBridge) SeedProtocolSwitches(seedJSON []byte) (err error) {
 		}
 	}
 	b.cache.replaceSeededProtocolSwitches(seeded)
+	return nil
+}
+
+// SeedSettings restores the SIM/settings cache from the payload of an
+// earlier "settings" event (the JSON exactly as delivered; Kotlin keeps it),
+// so that sends right after a restart use the conversation's SIM before the
+// phone sends its settings again. Call it before Connect; it never touches
+// the network. Empty input or null clears what an earlier seed restored.
+// Settings the phone sends always replace a seed, and once they have arrived
+// in this pairing a seed is ignored. Unpair and a new pairing forget both.
+// Invalid JSON is invalid_argument and changes nothing.
+func (b *GMBridge) SeedSettings(settingsJSON []byte) (err error) {
+	defer recoverInto(&err)
+	raw := bytes.TrimSpace(settingsJSON)
+	if len(raw) == 0 || string(raw) == "null" {
+		b.cache.seedSettings(nil)
+		return nil
+	}
+	var s settingsDTO
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return newError(codeInvalidArgument, "settings must be the JSON of a settings event")
+	}
+	b.cache.seedSettings(&s)
 	return nil
 }
 
@@ -547,10 +571,15 @@ func (b *GMBridge) DeleteMessage(messageID string) (err error) {
 }
 
 // SetConversationStatus archives ("archived") or unarchives ("active") a
-// conversation. Those are the two statuses UpdateConversation is known to
-// accept from a web client.
+// conversation, or moves it out of spam ("not_spam"). Archive and unarchive
+// are the two statuses UpdateConversation is known to accept from a web
+// client; "not_spam" is the connector's unblock (see markNotSpam).
 func (b *GMBridge) SetConversationStatus(conversationID, status string) (err error) {
 	defer recoverInto(&err)
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "not_spam", "notspam", "not-spam":
+		return b.markNotSpam(conversationID)
+	}
 	st, ok := map[string]gmproto.ConversationStatus{
 		"archived":   gmproto.ConversationStatus_ARCHIVED,
 		"archive":    gmproto.ConversationStatus_ARCHIVED,
@@ -559,7 +588,7 @@ func (b *GMBridge) SetConversationStatus(conversationID, status string) (err err
 		"unarchived": gmproto.ConversationStatus_ACTIVE,
 	}[strings.ToLower(strings.TrimSpace(status))]
 	if !ok {
-		return newError(codeInvalidArgument, "status must be archived or active")
+		return newError(codeInvalidArgument, "status must be archived, active or not_spam")
 	}
 	return b.updateConversation(conversationID, &gmproto.UpdateConversationData_Status{Status: st})
 }
@@ -573,6 +602,50 @@ func (b *GMBridge) SetConversationMuted(conversationID string, muted bool) (err 
 		mute = gmproto.ConversationMuteStatus_MUTE
 	}
 	return b.updateConversation(conversationID, &gmproto.UpdateConversationData_Mute{Mute: mute})
+}
+
+// markNotSpam moves a conversation out of the spam & blocked folder. Google
+// Messages has no separate "not spam" request for web clients; the
+// connector moves a chat out of that folder with UNBLOCK (its
+// HandleMatrixBlockUser), with the other participant's number for one-to-one
+// chats, and so does this. The phone then sends the conversation with its new
+// status. A chat the phone no longer has is not_found.
+func (b *GMBridge) markNotSpam(conversationID string) error {
+	if conversationID == "" {
+		return newError(codeInvalidArgument, "conversation ID is empty")
+	}
+	cli, ctx, cancel, err := b.rpc()
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	conv, err := b.conversationForWrite(ctx, cli, conversationID)
+	if err != nil {
+		return exported(err)
+	}
+	if conv.GetStatus() == gmproto.ConversationStatus_DELETED {
+		return newError(codeNotFound, "conversation not found")
+	}
+	resp, err := updateConversationCall(ctx, cli, &gmproto.UpdateConversationRequest{
+		Action:         gmproto.ConversationActionStatus_UNBLOCK,
+		ConversationID: conversationID,
+		Data: &gmproto.UpdateConversationRequest_DeleteData{DeleteData: &gmproto.DeleteConversationData{
+			ConversationID: conversationID,
+			Phone:          ptr.NonZero(otherParticipantNumber(conv)),
+		}},
+	})
+	if err != nil {
+		return exported(err)
+	}
+	if !resp.GetSuccess() {
+		return newError(codeSendFailed, "the phone rejected the change")
+	}
+	return nil
+}
+
+// updateConversationCall is cli.UpdateConversation; tests replace it.
+var updateConversationCall = func(ctx context.Context, cli *libgm.Client, req *gmproto.UpdateConversationRequest) (*gmproto.UpdateConversationResponse, error) {
+	return cli.UpdateConversation(ctx, req)
 }
 
 // updateConversation sends an UpdateConversationData; data is one of the

@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -43,6 +45,9 @@ var requiredCookies = []string{"SID", "HSID", "SSID", "APISID", "SAPISID", "OSID
 type pairingAttempt struct {
 	cancelOnce sync.Once
 	cancelled  chan struct{}
+	// failure is set when libgm panicked in one of the temporary client's
+	// background goroutines; the attempt is then cancelled and reports it.
+	failure atomic.Pointer[bridgeError]
 
 	mu        sync.Mutex
 	client    *libgm.Client
@@ -95,6 +100,45 @@ func (a *pairingAttempt) end() {
 func (a *pairingAttempt) abandon() {
 	a.cancel()
 	a.end()
+}
+
+// withdraw abandons the attempt and, if the phone may be showing its emoji
+// prompt, tells Google to withdraw the request, so the prompt goes away.
+// While FinishPairing waits, libgm sends that cancel itself when its wait is
+// cancelled. The request runs in the background with its own short timeout.
+func (a *pairingAttempt) withdraw() {
+	a.mu.Lock()
+	cli, ps, finishing := a.client, a.ps, a.finishing
+	a.mu.Unlock()
+	a.abandon()
+	if cli != nil && ps != nil && !finishing {
+		call := cancelGaiaPairing
+		go func() {
+			defer func() { _ = recover() }()
+			_ = call(cli, ps)
+		}()
+	}
+}
+
+// cancelGaiaPairing withdraws a pairing request on the phone; tests replace it.
+var cancelGaiaPairing = func(cli *libgm.Client, ps *libgm.PairingSession) error {
+	return cli.CancelGaiaPairing(context.Background(), ps)
+}
+
+// cancelledError is what a cancelled attempt reports: a libgm failure that
+// cancelled it, or pairing_cancelled.
+func (a *pairingAttempt) cancelledError(detail string) error {
+	if f := a.failure.Load(); f != nil {
+		return f
+	}
+	return newError(codePairingCancelled, detail)
+}
+
+// panicHandler records a panic in the temporary client's background
+// goroutines and cancels the attempt (see GMBridge.panicHandlerFor).
+func (a *pairingAttempt) panicHandler(where string, recovered any) {
+	a.failure.CompareAndSwap(nil, newError(codeInternal, fmt.Sprintf("unexpected failure while pairing (%s, %T)", where, recovered)))
+	a.cancel()
 }
 
 // parseCookies validates the cookie map before any network use: every
@@ -157,7 +201,7 @@ func (b *GMBridge) StartPairing(cookiesJSON []byte) (out string, err error) {
 	b.mu.Unlock()
 	if prev != nil {
 		// The previous emoji was never confirmed; start over.
-		prev.abandon()
+		prev.withdraw()
 	}
 
 	// Release the attempt on every failure path, including a libgm panic, so
@@ -172,7 +216,7 @@ func (b *GMBridge) StartPairing(cookiesJSON []byte) (out string, err error) {
 	challenge, err := b.startPairing(a, cookies)
 	if err != nil {
 		if a.isCancelled() {
-			return "", newError(codePairingCancelled, "pairing was cancelled")
+			return "", a.cancelledError("pairing was cancelled")
 		}
 		return "", exported(err)
 	}
@@ -185,12 +229,13 @@ func (b *GMBridge) startPairing(a *pairingAttempt, cookies map[string]string) (p
 	ad.SetCookies(cookies)
 	cli := libgm.NewClient(ad, nil, zerolog.Nop(), exhttp.SensibleClientSettings)
 	cli.SetEventHandler(func(any) {}) // nothing before pairing is of interest
+	cli.SetPanicHandler(a.panicHandler)
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	a.mu.Lock()
 	a.client, a.auth, a.bgCancel = cli, ad, bgCancel
 	a.mu.Unlock()
 	if a.isCancelled() {
-		return pairingChallengeDTO{}, newError(codePairingCancelled, "pairing was cancelled")
+		return pairingChallengeDTO{}, a.cancelledError("pairing was cancelled")
 	}
 
 	// FetchConfig sets the device ID that sign-in uses and tells us which
@@ -216,7 +261,14 @@ func (b *GMBridge) startPairing(a *pairingAttempt, cookies map[string]string) (p
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.isCancelled() {
-		return pairingChallengeDTO{}, newError(codePairingCancelled, "pairing was cancelled")
+		// The phone may show the emoji already: withdraw it (StartPairing's
+		// failure path ends the attempt).
+		call := cancelGaiaPairing
+		go func() {
+			defer func() { _ = recover() }()
+			_ = call(cli, ps)
+		}()
+		return pairingChallengeDTO{}, a.cancelledError("pairing was cancelled")
 	}
 	a.ps, a.account = ps, account
 	a.idle = time.AfterFunc(pairingIdleExpiry, func() { b.expirePairing(a) })
@@ -224,10 +276,10 @@ func (b *GMBridge) startPairing(a *pairingAttempt, cookies map[string]string) (p
 }
 
 // startGaiaPairingWithWatchdog runs StartGaiaPairing on its own goroutine.
-// libgm's call waits for its pairing long poll to open without watching ctx,
-// so it can block forever (for example after a 401 on the long poll). On
-// timeout or cancel the caller ends the attempt, which disconnects the client;
-// the abandoned goroutine then finishes or stays parked, holding nothing else.
+// The patched libgm stops waiting for its pairing long poll when ctx ends or
+// the long poll gives up (a 401), so the goroutine always finishes; its
+// requests also use ctx, but the watchdog does not rely on that. On timeout
+// or cancel the caller ends the attempt, which disconnects the client.
 func startGaiaPairingWithWatchdog(cli *libgm.Client, bgCtx context.Context, cancelled <-chan struct{}) (string, *libgm.PairingSession, error) {
 	ctx, cancel := contextWithCancelSignal(startPairingWatchdog, cancelled)
 	defer cancel()
@@ -336,7 +388,7 @@ func (b *GMBridge) FinishPairing(timeoutMs int64) (phoneID string, err error) {
 			// orphaned pairing is left on the phone.
 			go revokeQuietly(a)
 		}
-		return "", newError(codePairingCancelled, "pairing was cancelled")
+		return "", a.cancelledError("pairing was cancelled")
 	case ferr != nil && timedOut:
 		return "", newError(codePairingTimeout, "the phone did not confirm in time")
 	case ferr != nil:
@@ -353,7 +405,9 @@ func (b *GMBridge) FinishPairing(timeoutMs int64) (phoneID string, err error) {
 }
 
 // CancelPairing abandons the current attempt. A FinishPairing that is waiting
-// returns pairing_cancelled. The phone's dialog times out by itself.
+// returns pairing_cancelled. If the phone may be showing the emoji prompt,
+// Google is told to withdraw the request (in the background, within 10 s),
+// so the prompt goes away; whether the phone obeys is up to the phone.
 func (b *GMBridge) CancelPairing() {
 	defer func() { _ = recover() }()
 	b.mu.Lock()
@@ -361,7 +415,7 @@ func (b *GMBridge) CancelPairing() {
 	b.pairing = nil
 	b.mu.Unlock()
 	if a != nil {
-		a.abandon()
+		a.withdraw()
 	}
 }
 

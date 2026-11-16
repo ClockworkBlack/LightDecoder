@@ -13,6 +13,7 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 /**
@@ -55,7 +56,8 @@ class RelayService : Service() {
         val manager = RelayManager.get(this)
         manager.serviceRunning = true
         scope.launch {
-            manager.state.collect { RelayNotifications.updateService(this@RelayService, it) }
+            combine(manager.state, manager.unpairing) { state, unpairing -> state to unpairing }
+                .collect { (state, unpairing) -> RelayNotifications.updateService(this@RelayService, state, unpairing) }
         }
         watchNetwork(manager)
     }
@@ -63,6 +65,14 @@ class RelayService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val manager = RelayManager.get(this)
         if (intent?.action == ACTION_DISCONNECT) {
+            if (manager.unpairing.value && inForeground) {
+                // An unpair is revoking the pairing, perhaps over a short
+                // connection of its own: the link is already off, and the
+                // service (with its "Unpairing…" notification) stays until
+                // the revoke has ended; the unpair stops it then.
+                RelayLog.add(this, "Disconnect waits for the unpair to finish")
+                return START_NOT_STICKY
+            }
             // From the notification's Disconnect button. stopSelf(startId):
             // a foreground start queued behind this one still has to reach
             // startForeground, and stops the service itself after that.
@@ -76,6 +86,11 @@ class RelayService : Service() {
             if (inForeground && manager.isPaired() && RelayPrefs.liveEnabled(this) && RelayNotifications.statusVisible(this)) {
                 RelayNotifications.updateService(this, manager.state.value)
                 return START_STICKY
+            }
+            if (inForeground && manager.unpairing.value) {
+                // Shown until the unpair's revoke has ended (the unpair stops the service then).
+                RelayNotifications.updateService(this, manager.state.value, unpairing = true)
+                return START_NOT_STICKY
             }
             // Not (or no longer) a live foreground service: leave no stray notification.
             stopSelf(startId)
@@ -141,7 +156,7 @@ class RelayService : Service() {
         }
         ServiceCompat.startForeground(
             this, RelayNotifications.ID_SERVICE,
-            RelayNotifications.serviceNotification(this, manager.state.value), type,
+            RelayNotifications.serviceNotification(this, manager.state.value, manager.unpairing.value), type,
         )
         inForeground = true
         true

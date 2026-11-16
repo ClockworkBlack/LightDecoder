@@ -25,9 +25,20 @@ object RelayPrefs {
     private const val KEY_ARCHIVE_PHONE = "archive_phone"
     private const val KEY_ARCHIVE_ACCOUNT = "archive_account"
     private const val KEY_UNCONFIRMED_SENDS = "unconfirmed_sends"
+    private const val KEY_LOOKUP_SENDS = "lookup_sends"
+    private const val KEY_LAST_SETTINGS = "last_settings"
+    private const val KEY_CATCH_UP_GAPS = "catch_up_gaps"
 
     private fun prefs(context: Context) =
         context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+
+    /**
+     * Whether Android lets the link run in the background without battery
+     * optimisation (Doze). Not a stored choice: it is asked of Android each
+     * time, since the user can change it in the system settings at any time.
+     * Same as [RelayNotifications.isIgnoringBatteryOptimizations].
+     */
+    fun batteryExempt(context: Context): Boolean = RelayNotifications.isIgnoringBatteryOptimizations(context)
 
     /** Whether the user wants the link connected ("stay connected"). Off until they turn it on. */
     fun liveEnabled(context: Context) = prefs(context).getBoolean(KEY_LIVE, false)
@@ -107,14 +118,7 @@ object RelayPrefs {
      * outbox key (a random tmpId, never content) to when it was sent.
      */
     fun unconfirmedSends(context: Context): Map<String, Long> =
-        prefs(context).getString(KEY_UNCONFIRMED_SENDS, null).orEmpty()
-            .split(';')
-            .mapNotNull { entry ->
-                val key = entry.substringBefore('=', "")
-                val at = entry.substringAfter('=', "").toLongOrNull()
-                if (key.isEmpty() || at == null) null else key to at
-            }
-            .toMap()
+        decodeSends(prefs(context).getString(KEY_UNCONFIRMED_SENDS, null).orEmpty())
 
     /**
      * Written to disk before it returns (the outbox calls it off the main
@@ -123,8 +127,61 @@ object RelayPrefs {
      */
     @SuppressLint("ApplySharedPref")
     fun setUnconfirmedSends(context: Context, sends: Map<String, Long>) {
-        prefs(context).edit()
-            .putString(KEY_UNCONFIRMED_SENDS, sends.entries.joinToString(";") { "${it.key}=${it.value}" })
-            .commit()
+        prefs(context).edit().putString(KEY_UNCONFIRMED_SENDS, encodeSends(sends)).commit()
+    }
+
+    /**
+     * Failed sends whose outcome is unknown (phone_not_responding, or one an
+     * unpair held while it went out) that the outbox still has to look up
+     * on the phone: outbox key (a random tmpId) to when it was sent.
+     */
+    fun lookupSends(context: Context): Map<String, Long> =
+        decodeSends(prefs(context).getString(KEY_LOOKUP_SENDS, null).orEmpty())
+
+    /** Written to disk before it returns, like [setUnconfirmedSends]. */
+    @SuppressLint("ApplySharedPref")
+    fun setLookupSends(context: Context, sends: Map<String, Long>) {
+        prefs(context).edit().putString(KEY_LOOKUP_SENDS, encodeSends(sends)).commit()
+    }
+
+    private fun encodeSends(sends: Map<String, Long>) = sends.entries.joinToString(";") { "${it.key}=${it.value}" }
+
+    private fun decodeSends(stored: String): Map<String, Long> =
+        stored.split(';')
+            .mapNotNull { entry ->
+                val key = entry.substringBefore('=', "")
+                val at = entry.substringAfter('=', "").toLongOrNull()
+                if (key.isEmpty() || at == null) null else key to at
+            }
+            .toMap()
+
+    /**
+     * The payload of the phone's last "settings" event (its SIMs and
+     * options), kept so the bridge can be seeded with it before the next
+     * connect. App-private and excluded from backups like everything here;
+     * never logged. Null if none is kept.
+     */
+    fun lastSettings(context: Context): String? = prefs(context).getString(KEY_LAST_SETTINGS, null)?.takeIf { it.isNotBlank() }
+
+    /** Keeps (or with null forgets) the last settings payload; on disk before it returns. */
+    @SuppressLint("ApplySharedPref")
+    fun setLastSettings(context: Context, settingsJson: String?) {
+        val edit = prefs(context).edit()
+        if (settingsJson.isNullOrBlank()) edit.remove(KEY_LAST_SETTINGS) else edit.putString(KEY_LAST_SETTINGS, settingsJson)
+        edit.commit()
+    }
+
+    /**
+     * Forward catch-ups that have not finished: per conversation, the gaps
+     * still to fill (see RelayManager's catch-up), as JSON. Holds only
+     * conversation and message ids and timestamps, never content.
+     */
+    internal fun catchUpGaps(context: Context): String? = prefs(context).getString(KEY_CATCH_UP_GAPS, null)
+
+    @SuppressLint("ApplySharedPref")
+    internal fun setCatchUpGaps(context: Context, json: String?) {
+        val edit = prefs(context).edit()
+        if (json.isNullOrEmpty()) edit.remove(KEY_CATCH_UP_GAPS) else edit.putString(KEY_CATCH_UP_GAPS, json)
+        edit.commit()
     }
 }

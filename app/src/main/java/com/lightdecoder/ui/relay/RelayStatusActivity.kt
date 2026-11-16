@@ -4,7 +4,6 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
-import android.os.PowerManager
 import android.provider.Settings
 import android.text.format.DateUtils
 import android.view.MenuItem
@@ -24,6 +23,7 @@ import com.lightdecoder.databinding.ActivityRelayStatusBinding
 import com.lightdecoder.databinding.DialogUnpairBinding
 import com.lightdecoder.relay.BackfillDepth
 import com.lightdecoder.relay.BackfillProgress
+import com.lightdecoder.relay.RelayIntents
 import com.lightdecoder.relay.RelayLog
 import com.lightdecoder.relay.RelayManager
 import com.lightdecoder.relay.RelayPrefs
@@ -89,6 +89,7 @@ class RelayStatusActivity : AppCompatActivity() {
             }
         }
         binding.batterySettings.setOnClickListener { openBatterySettings() }
+        binding.batteryExempt.setOnClickListener { askBatteryExemption() }
         binding.showLog.setOnClickListener { showLog() }
 
         lifecycleScope.launch {
@@ -104,8 +105,13 @@ class RelayStatusActivity : AppCompatActivity() {
         super.onStart()
         ArchiveEvents.register(onArchiveChange)
         refreshHealth()
-        renderBattery()
         syncSwitches()
+    }
+
+    /** Also on coming back from the system's battery question, which only pauses this screen. */
+    override fun onResume() {
+        super.onResume()
+        renderBattery()
     }
 
     override fun onStop() {
@@ -369,9 +375,24 @@ class RelayStatusActivity : AppCompatActivity() {
     }
 
     private fun renderBattery() {
-        val power = getSystemService(PowerManager::class.java)
-        val exempt = power?.isIgnoringBatteryOptimizations(packageName) == true
+        val exempt = RelayPrefs.batteryExempt(this)
         binding.batteryText.setText(if (exempt) R.string.link_battery_exempt else R.string.link_battery_optimized)
+        binding.batteryExempt.visibility = if (exempt) View.GONE else View.VISIBLE
+    }
+
+    /**
+     * "Let it run in the background": the system asks the user, in its own
+     * dialog, whether to exempt the app. Where a build has no such dialog,
+     * its battery settings list instead.
+     */
+    private fun askBatteryExemption() {
+        try {
+            startActivity(RelayIntents.batteryExemptionOrSettings(this))
+        } catch (e: ActivityNotFoundException) {
+            openBatterySettings()
+        } catch (e: SecurityException) {
+            openBatterySettings()
+        }
     }
 
     /** The system list where the user can exempt the app; no special permission needed for this one. */

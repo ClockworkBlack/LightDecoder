@@ -77,6 +77,9 @@ class MessagesAdapter(
 
         /** The "Reply" accessibility action added at the last bind, removed before the next. */
         var replyActionId = View.NO_ID
+
+        /** The "Open link" accessibility actions added at the last bind ([BubbleLinks]). */
+        var linkActionIds: List<Int> = emptyList()
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
@@ -214,6 +217,8 @@ class MessagesAdapter(
                 true
             }
         }
+        // The text view is hidden from TalkBack (the bubble reads it): its links are bubble actions.
+        holder.linkActionIds = BubbleLinks.bind(b.bubble, b.body, holder.linkActionIds)
     }
 
     /** [unconfirmed]: a failed send that may have gone out ([MessageStatus.outcomeUnknown]). */

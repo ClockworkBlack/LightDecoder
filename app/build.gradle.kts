@@ -217,7 +217,8 @@ val buildGoBridge by tasks.registering(Exec::class) {
 
     workingDir = goModuleDir // gomobile reads module info from the working directory
     inputs.files(buildGomobileTools).withPropertyName("gomobileTools") // also orders the two tasks
-    inputs.files(fileTree(goModuleDir) { include("**/*.go", "go.mod", "go.sum") })
+    // **/go.mod: the patched libgm in gmbridge/third_party is a module of its own.
+    inputs.files(fileTree(goModuleDir) { include("**/*.go", "**/go.mod", "**/go.sum") })
         .withPropertyName("goSources").withPathSensitivity(PathSensitivity.RELATIVE)
     inputs.property("targets", targets)
     inputs.property("javaPkg", javaPkg)
@@ -315,6 +316,9 @@ val bundleLicenses by tasks.registering {
     inputs.files(buildGoBridge).withPropertyName("goBridge")
     inputs.file(notice).withPropertyName("notice")
     inputs.files(fixed.map { it.third } + apacheLicense).withPropertyName("licenseFiles")
+    // Licence files and PATCHES.md of Go modules replaced by a copy in the repository.
+    inputs.files(fileTree(File(goModuleDir, "third_party")) { exclude("**/*.go") })
+        .withPropertyName("replacedGoModules").withPathSensitivity(PathSensitivity.RELATIVE)
     inputs.property("goToolchain", toolchain)
     inputs.property("androidLibraries", androidLibraries)
     outputs.dir(out)
@@ -329,6 +333,8 @@ val bundleLicenses by tasks.registering {
         }
         val licenceName = Regex("(?i)^(licen[cs]e|copying|unlicense)([._-].*)?$")
         val extraName = Regex("(?i)^(notice|patents)([._-].*)?$")
+        // A module replaced by a patched copy says what was changed here (AGPL §5a).
+        val patchesName = Regex("(?i)^patches([._-].*)?$")
         fun licenceText(heading: String, files: List<File>, intro: String = ""): String = buildString {
             append(heading).append("\n")
             if (intro.isNotEmpty()) append("\n").append(intro.trimEnd()).append("\n")
@@ -367,6 +373,7 @@ val bundleLicenses by tasks.registering {
         // The Go modules linked into libgojni.so, from each ABI's build info.
         val work = temporaryDir.apply { listFiles()?.forEach { it.deleteRecursively() } }
         val linked = sortedMapOf<String, String>() // module path -> version
+        val linkedReplace = sortedMapOf<String, String>() // module path -> replacement, as built
         ZipFile(aar).use { zip ->
             val libs = zip.entries().asSequence().filter { it.name.endsWith("/libgojni.so") }.toList()
             if (libs.isEmpty()) throw GradleException("No libgojni.so in $aar")
@@ -378,18 +385,28 @@ val bundleLicenses by tasks.registering {
                 if (built != toolchain) {
                     throw GradleException("${entry.name} was built with $built, not $toolchain from gmbridge/go.mod")
                 }
+                var lastDep: String? = null
                 for (line in info) {
                     val f = line.split('\t')
-                    if (f.size >= 4 && f[1] == "dep") linked[f[2]] = f[3]
+                    if (f.size >= 4 && f[1] == "dep") {
+                        linked[f[2]] = f[3]
+                        lastDep = f[2]
+                    } else if (f.size >= 3 && f[1] == "=>" && lastDep != null) {
+                        // A replaced module: "=>", then its replacement (a directory for a local copy).
+                        linkedReplace[lastDep] = f[2]
+                    } else {
+                        lastDep = null
+                    }
                 }
             }
         }
 
         // Where each module's source is (its licence files are at its root).
+        // Fields: main, path, version, source dir, replacement path ("" if none).
         fun moduleList() = go(
             modDir, "list", "-m", "-f",
-            "{{.Main}}\t{{.Path}}\t{{.Version}}\t{{with .Replace}}{{.Dir}}{{else}}{{.Dir}}{{end}}", "all",
-        ).lines().map { it.split('\t') }.filter { it.size == 4 }.associateBy { it[1] }
+            "{{.Main}}\t{{.Path}}\t{{.Version}}\t{{with .Replace}}{{.Dir}}{{else}}{{.Dir}}{{end}}\t{{with .Replace}}{{.Path}}{{end}}", "all",
+        ).lines().map { it.split('\t') }.filter { it.size == 5 }.associateBy { it[1] }
         var modules = moduleList()
         // `go list -m` reports .Dir only for a module already extracted in the
         // module cache (and exits 0 with an empty one otherwise): the cache may
@@ -414,14 +431,39 @@ val bundleLicenses by tasks.registering {
                 )
             }
             val dir = File(m[3])
+            // The replacement libgojni.so was built with must be the one go.mod names now.
+            val builtReplace = linkedReplace[path]
+            val replaced = m[4].isNotBlank()
+            if (replaced != (builtReplace != null)) {
+                throw GradleException(
+                    "Go module $path: libgojni.so was built " +
+                        (if (builtReplace != null) "with replacement $builtReplace" else "without a replacement") +
+                        ", go.mod " + (if (replaced) "replaces it with ${m[4]}" else "does not replace it"),
+                )
+            }
+            if (builtReplace != null) {
+                val builtDir = File(builtReplace).let { if (it.isAbsolute) it else File(modDir, builtReplace) }
+                if (!builtDir.isDirectory || builtDir.canonicalFile != dir.canonicalFile) {
+                    throw GradleException("Go module $path: libgojni.so was built with replacement $builtReplace, go.mod has $dir")
+                }
+            }
             val files = dir.listFiles().orEmpty().filter { it.isFile }.sortedBy { it.name }
             val texts = files.filter { licenceName.matches(it.name) }
             if (texts.isEmpty()) {
                 throw GradleException("No licence file in $dir for Go module $path $version; add its licence before shipping it")
             }
+            val patches = files.filter { patchesName.matches(it.name) }
+            if (replaced && patches.isEmpty()) {
+                throw GradleException("Go module $path is replaced by $dir, which has no PATCHES.md saying what was changed")
+            }
             val name = "20-go-" + path.replace(Regex("[^A-Za-z0-9.-]+"), "_") + ".txt"
+            val heading = if (replaced) {
+                "$path $version, patched for LightDecoder (Go module, in libgojni.so; the changes are listed below)"
+            } else {
+                "$path $version (Go module, in libgojni.so)"
+            }
             File(licenses, name).writeText(
-                licenceText("$path $version (Go module, in libgojni.so)", texts + files.filter { extraName.matches(it.name) }),
+                licenceText(heading, texts + files.filter { extraName.matches(it.name) } + patches),
             )
         }
 

@@ -25,6 +25,13 @@
     <string name="relay_service_text_elsewhere">Open LightDecoder and tap \"Use here\" to switch back.</string>
     <string name="relay_service_text_phone_offline">Check that your phone is on and has a connection.</string>
     <string name="relay_action_disconnect">Disconnect</string>
+    <string name="relay_service_title_unpairing">Unpairing…</string>
+    <string name="relay_service_text_unpairing">Telling your phone to remove this device.</string>
+
+    <!-- Battery optimisation (Doze) -->
+    <string name="relay_battery_exempt_action">Let it run in the background</string>
+    <string name="relay_battery_exempt_explanation">Android limits apps in the background to save battery, which can delay the link reconnecting while your phone is idle. Allowing LightDecoder to run in the background keeps it connected.</string>
+    <string name="relay_battery_exempt_done">LightDecoder may run in the background.</string>
 
     <!-- Asking the user to pair again -->
     <string name="relay_repair_title">Google Messages link stopped</string>

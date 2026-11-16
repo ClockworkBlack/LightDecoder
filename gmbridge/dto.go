@@ -154,6 +154,14 @@ type simDTO struct {
 	Number        string `json:"number"`
 	Label         string `json:"label"`
 	RCSEnabled    bool   `json:"rcsEnabled"`
+	// SIMPayload is what a send from this SIM carries; SeedSettings needs it
+	// to pick the right SIM after a restart. Opaque to Kotlin.
+	SIMPayload *simPayloadDTO `json:"simPayload,omitempty"`
+}
+
+type simPayloadDTO struct {
+	Two       int32 `json:"two"`
+	SIMNumber int32 `json:"simNumber"`
 }
 
 type settingsDTO struct {
@@ -597,9 +605,17 @@ func toSettingsDTO(s *gmproto.Settings, isDefaultSMSApp bool) settingsDTO {
 			Number:        firstNonEmpty(sim.GetSIMData().GetFormattedPhoneNumber(), sim.GetSIMData().GetInternationalPhoneNumber()),
 			Label:         sim.GetSIMData().GetCarrierName(),
 			RCSEnabled:    sim.GetRCSChats().GetEnabled(),
+			SIMPayload:    toSIMPayloadDTO(sim.GetSIMData().GetSIMPayload()),
 		})
 	}
 	return dto
+}
+
+func toSIMPayloadDTO(p *gmproto.SIMPayload) *simPayloadDTO {
+	if p == nil {
+		return nil
+	}
+	return &simPayloadDTO{Two: p.GetTwo(), SIMNumber: p.GetSIMNumber()}
 }
 
 // --- cursor ------------------------------------------------------------------

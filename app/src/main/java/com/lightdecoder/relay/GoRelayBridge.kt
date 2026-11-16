@@ -72,7 +72,13 @@ class GoRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) : R
 
     override fun clearProtocolSwitches() = call { go.clearProtocolSwitches() }
 
+    override fun seedSettings(settingsJson: String?) = call {
+        go.seedSettings(settingsJson?.takeIf { it.isNotBlank() }?.toByteArray())
+    }
+
     override fun listConversations(folder: Folder, count: Int): List<ConversationDto> = call {
+        // The local deleted folder is never asked of the phone.
+        if (!folder.listable) throw RelayException(RelayException.INVALID_ARGUMENT, "folder is local only")
         ConversationDto.listFromJson(array(go.listConversations(folder.wire, count.toLong())))
     }
 
@@ -114,6 +120,20 @@ class GoRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) : R
     ): SendResult = call {
         SendResult.fromJson(
             obj(go.sendMedia(conversationId, tmpId, data, fileName, mime, caption.orEmpty(), replyToId.orEmpty()))
+        )
+    }
+
+    override fun sendMediaFile(
+        conversationId: String,
+        tmpId: String,
+        path: String,
+        fileName: String,
+        mime: String,
+        caption: String?,
+        replyToId: String?,
+    ): SendResult = call {
+        SendResult.fromJson(
+            obj(go.sendMediaFile(conversationId, tmpId, path, fileName, mime, caption.orEmpty(), replyToId.orEmpty()))
         )
     }
 

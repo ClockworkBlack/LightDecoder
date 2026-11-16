@@ -459,6 +459,8 @@ class OutboxTest {
         fake.goOnline()
         env.eventually(manager, what = "the send") { fake.sent.size == 1 }
         val sent = fake.sent.single()
+        // Handed over by path (Go: SendMediaFile): the bytes never pass through the app.
+        assertEquals(copy.path, sent.path)
         assertArrayEquals(ByteArray(2048) { it.toByte() }, sent.media)
         assertEquals("look", sent.text)
         assertEquals("pick.png", sent.fileName)

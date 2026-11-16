@@ -266,9 +266,10 @@ class ScreensSmokeTest {
                 list.adapter?.itemCount == 2 && hasText(list, "Dora") && hasText(list, "Eve")
             }
             assertEquals(Lifecycle.State.RESUMED, scenario.state)
-            // The refresh needs the phone; offline, the runtime falls back to the stored list.
+            // The refresh needs the phone; offline, the runtime falls back to the stored list,
+            // and the hint says that is what is shown.
             scenario.waitFor("the refresh to finish") { !it.findViewById<View>(R.id.progress).isShown }
-            scenario.onActivity { assertFalse(it.findViewById<View>(R.id.offlineHint).isShown) }
+            scenario.onActivity { assertTrue(it.findViewById<View>(R.id.offlineHint).isShown) }
         }
     }
 

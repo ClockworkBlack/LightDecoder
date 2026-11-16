@@ -370,10 +370,12 @@ func TestUnpairRefreshesAnExpiredTokenFirst(t *testing.T) {
 	refreshErr, unpairErr := error(nil), error(nil)
 	stub(t, &refreshForUnpair, func(*libgm.Client) error { calls = append(calls, "refresh"); return refreshErr })
 	stub(t, &unpairGaia, func(context.Context, *libgm.Client) error { calls = append(calls, "unpair"); return unpairErr })
-	unpaired := func(t *testing.T, b *GMBridge, rec *recorder) stateDTO {
+	unpaired := func(t *testing.T, b *GMBridge, rec *recorder, wantCode string) stateDTO {
 		t.Helper()
-		if err := b.Unpair(); err != nil {
-			t.Fatalf("Unpair must not fail: %v", err)
+		// The error carries the same code as the state: the phone was not
+		// told. The wipe happened all the same.
+		if err := b.Unpair(); codeOf(err) != wantCode {
+			t.Fatalf("Unpair returned %v, want code %q", err, wantCode)
 		}
 		drain(t, b)
 		st := rec.stateEvents()
@@ -406,7 +408,7 @@ func TestUnpairRefreshesAnExpiredTokenFirst(t *testing.T) {
 			if c.live {
 				markLive(b)
 			}
-			st := unpaired(t, b, rec)
+			st := unpaired(t, b, rec, c.code)
 			if got := strings.Join(calls, ","); got != c.calls {
 				t.Errorf("calls %q want %q", got, c.calls)
 			}

@@ -177,10 +177,13 @@
     <string name="chat_folder_inbox">Inbox</string>
     <string name="chat_folder_archive">Archived</string>
     <string name="chat_folder_spam">Spam</string>
+    <!-- Local-only folder: conversations the phone deleted or trashed, kept here until the user restores or removes them. -->
+    <string name="chat_folder_deleted">Deleted</string>
     <string name="chat_empty_inbox">No conversations yet. Pull down to load them from your phone.</string>
     <string name="chat_empty_unpaired">Not linked. Imported conversations show up here.</string>
     <string name="chat_empty_archive">No archived conversations.</string>
     <string name="chat_empty_spam">No spam.</string>
+    <string name="chat_empty_deleted">Nothing here. Conversations deleted on your phone are kept here until you restore them or delete them for good.</string>
     <string name="chat_untitled">Conversation</string>
     <string name="chat_unread">unread</string>
     <string name="chat_pinned">pinned</string>
@@ -212,6 +215,20 @@
     <string name="chat_delete_conversation_title">Delete this conversation?</string>
     <string name="chat_delete_conversation_body">It is deleted on your phone too, with all its messages.</string>
     <string name="chat_delete_conversation_body_local">It is removed from this device only, with all its messages. Your phone is not linked, so nothing changes there.</string>
+    <string name="chat_action_not_spam">Not spam</string>
+    <string name="chat_not_spam_done">Moved to inbox</string>
+    <string name="chat_action_restore">Restore</string>
+    <string name="chat_restored">Restored to inbox on this device</string>
+    <string name="chat_action_delete_forever">Delete forever</string>
+    <string name="chat_delete_forever_title">Delete forever?</string>
+    <string name="chat_delete_forever_body">This conversation and its messages are removed from this device for good. Your phone already deleted it.</string>
+    <string name="chat_deleted_forever">Deleted for good</string>
+    <string name="chat_empty_deleted_folder">Empty Deleted</string>
+    <string name="chat_empty_deleted_title">Empty Deleted?</string>
+    <string name="chat_empty_deleted_body">Every conversation in Deleted is removed from this device for good, with its messages. Your phone already deleted them.</string>
+    <string name="chat_empty_deleted_action">Empty</string>
+    <string name="chat_emptied_deleted">Deleted is empty</string>
+    <string name="chat_deleted_banner">Your phone deleted this conversation. It is kept on this device only.</string>
 
     <!-- Thread -->
     <string name="chat_day_today">Today</string>
@@ -255,6 +272,8 @@
     <string name="chat_react_with">React with %1$s</string>
     <string name="chat_action_remove_reaction">Remove my reaction</string>
     <string name="chat_action_reply">Reply</string>
+    <!-- TalkBack action on a bubble for each link in its text; %1$s is the link as shown. -->
+    <string name="chat_open_link">Open link: %1$s</string>
     <string name="chat_action_copy">Copy text</string>
     <string name="chat_action_retry">Try sending again</string>
     <string name="chat_action_discard">Discard</string>

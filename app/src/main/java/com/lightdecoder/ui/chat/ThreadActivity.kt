@@ -174,6 +174,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
         setUpList()
         setUpComposer()
+        savedInstanceState?.getString(STATE_REPLY_TO)?.let(::restoreReply)
         // Opened from a message notification on a cold start, the thread is the
         // whole task: Back and Up lead to the conversation list, not out of the app.
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -268,6 +269,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         super.onSaveInstanceState(outState)
         outState.putInt(STATE_WINDOW, windowSize)
         attachment?.let { outState.putString(STATE_ATTACHMENT, it.toString()) }
+        replyTarget?.takeIf { it.conversationId == conversationId }?.let { outState.putString(STATE_REPLY_TO, it.id) }
     }
 
     // --- list ----------------------------------------------------------------
@@ -536,6 +538,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      */
     private fun loadOlderFromPhone(auto: Boolean) {
         if (loadingOlder || historyComplete || remoteExhausted || !paired) return
+        // The phone deleted it: it has no history left to page.
+        if (conversation?.folderEnum == Folder.DELETED) return
         // Automatic loads stop after a failure for a while, so an error never turns into a loop.
         if (auto && (!online || System.currentTimeMillis() - remoteFailedAtMs < REMOTE_RETRY_MS)) return
         loadingOlder = true
@@ -634,6 +638,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         lastMarkedId = newestIncoming
         lastMarkAtMs = now
         val id = conversationId
+        if (conv.folderEnum == Folder.DELETED) {
+            // Gone from the phone: read here only.
+            if (conv.unread) runInBackground { repo.markConversationRead(id) }
+            return
+        }
         lifecycleScope.launch {
             relayAttempt { manager.markRead(id) }.onFailure {
                 withContext(Dispatchers.IO) { repo.markConversationRead(id) }
@@ -662,7 +671,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     private fun renderComposerState() {
-        val readOnly = conversation?.readOnly == true
+        // The phone deleted it: there is nothing on the phone to send into any more.
+        val deleted = conversation?.folderEnum == Folder.DELETED
+        val readOnly = conversation?.readOnly == true || deleted
+        binding.readOnlyText.setText(if (deleted) R.string.chat_deleted_banner else R.string.chat_read_only)
         binding.readOnlyText.visibility = if (readOnly) View.VISIBLE else View.GONE
         binding.composer.visibility = if (readOnly) View.GONE else View.VISIBLE
         if (readOnly) {
@@ -771,7 +783,22 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         binding.replyBar.visibility = View.GONE
     }
 
-    private fun canReplyTo(row: MessageRow) = !row.isLocal && row.direction != "system" && conversation?.readOnly != true
+    /**
+     * The reply bar after a rotation (or the process being recreated): the
+     * message is read again from the archive. Gone (deleted meanwhile), or a
+     * reply picked or a thread switched to in the meantime: nothing to restore.
+     */
+    private fun restoreReply(messageId: String) {
+        val id = conversationId
+        lifecycleScope.launch {
+            val row = withContext(Dispatchers.IO) { repo.message(messageId) } ?: return@launch
+            if (id != conversationId || replyTarget != null || row.conversationId != id) return@launch
+            onReply(row)
+        }
+    }
+
+    private fun canReplyTo(row: MessageRow) =
+        !row.isLocal && row.direction != "system" && conversation?.readOnly != true && conversation?.folderEnum != Folder.DELETED
 
     // --- message callbacks ---------------------------------------------------
 
@@ -1027,11 +1054,16 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             isVisible = conv != null && (conv.folderEnum == Folder.INBOX || archived)
             setTitle(if (archived) R.string.chat_action_unarchive else R.string.chat_action_archive)
         }
+        val deleted = conv?.folderEnum == Folder.DELETED
+        menu.findItem(R.id.action_not_spam)?.isVisible = conv?.folderEnum == Folder.SPAM
+        // Deleted on the phone already: what is left is this device's copy.
+        menu.findItem(R.id.action_restore)?.isVisible = deleted
+        menu.findItem(R.id.action_delete_forever)?.isVisible = deleted
         menu.findItem(R.id.action_mute)?.apply {
-            isVisible = conv != null
+            isVisible = conv != null && !deleted
             setTitle(if (conv?.muted == true) R.string.chat_action_unmute else R.string.chat_action_mute)
         }
-        menu.findItem(R.id.action_delete_conversation)?.isVisible = conv != null
+        menu.findItem(R.id.action_delete_conversation)?.isVisible = conv != null && !deleted
         return super.onPrepareOptionsMenu(menu)
     }
 
@@ -1053,6 +1085,13 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                     manager.setMuted(conv.id, !conv.muted)
                 }
             }
+            R.id.action_not_spam -> if (conv != null) {
+                runAction(R.string.chat_not_spam_done) { manager.markNotSpam(conv.id) }
+            }
+            R.id.action_restore -> if (conv != null) {
+                runAction(R.string.chat_restored) { manager.restoreDeletedLocally(conv.id) }
+            }
+            R.id.action_delete_forever -> confirmDeleteForever()
             R.id.action_delete_conversation -> confirmDeleteConversation()
             R.id.action_link_status -> startActivity(Intent(this, RelayStatusActivity::class.java))
             else -> return super.onOptionsItemSelected(item)
@@ -1097,6 +1136,25 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             .let(::trackConfirm)
     }
 
+    /** A conversation the phone deleted, removed from this device for good. */
+    private fun confirmDeleteForever() {
+        val id = conversation?.id ?: return
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.chat_delete_forever_title)
+            .setMessage(R.string.chat_delete_forever_body)
+            .setPositiveButton(R.string.chat_action_delete_forever) { _, _ ->
+                if (id != conversationId) return@setPositiveButton
+                lifecycleScope.launch {
+                    relayAttempt { manager.purgeDeleted(id) }
+                        .onSuccess { if (id == conversationId) finish() }
+                        .onFailure { toast(RelayErrors.message(this@ThreadActivity, it)) }
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+            .let(::trackConfirm)
+    }
+
     private fun runAction(doneMessage: Int, block: suspend () -> Unit) {
         lifecycleScope.launch {
             relayAttempt { block() }
@@ -1112,6 +1170,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     companion object {
         private const val STATE_WINDOW = "window"
         private const val STATE_ATTACHMENT = "attachment"
+        private const val STATE_REPLY_TO = "replyTo"
 
         private const val PAGE = 50
         private const val RELOAD_SLACK = 50

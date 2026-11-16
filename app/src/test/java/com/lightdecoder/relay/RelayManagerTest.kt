@@ -173,6 +173,10 @@ class RelayManagerTest {
         fake.pushSession(rotated)
         manager.awaitIdleForTesting()
         assertArrayEquals(rotated, SessionVault.load(env.context))
+        // A save is not a token refresh: only Go's token_refreshed event counts as one.
+        assertEquals(0L, env.repo.health().lastTokenRefresh)
+        fake.emitTokenRefreshed()
+        manager.awaitIdleForTesting()
         assertTrue(env.repo.health().lastTokenRefresh > 0)
         val onDisk = File(File(env.context.filesDir, "relay"), "session.bin").readBytes()
         assertFalse(String(onDisk, Charsets.ISO_8859_1).contains("rotated"))

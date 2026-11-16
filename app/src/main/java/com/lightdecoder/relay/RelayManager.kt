@@ -5,6 +5,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.SystemClock
 import com.lightdecoder.R
 import com.lightdecoder.archive.ArchiveRepository
@@ -18,7 +19,6 @@ import com.lightdecoder.inbox.InboxItem
 import com.lightdecoder.inbox.InboxPrefs
 import com.lightdecoder.inbox.InboxStore
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -91,6 +91,13 @@ data class RelayState(val phase: Phase, val code: String = "", val detail: Strin
     }
 }
 
+/**
+ * The phone's contacts as [RelayManager.contacts] found them. [fromPhone] is
+ * false when a refresh was asked for but the phone could not be reached and
+ * the stored list is shown instead (the picker says it may be out of date).
+ */
+data class ContactsResult(val contacts: List<ContactRow>, val fromPhone: Boolean)
+
 /** How far a history import has got. [error] is a bridge error code if it stopped early. */
 data class BackfillProgress(
     val running: Boolean,
@@ -116,11 +123,12 @@ data class BackfillProgress(
  *
  * Suspend functions that act for the user ([useHere], [refreshConversations],
  * [loadOlder], [requestFullSize], [react], [deleteMessage], [setArchived],
- * [setMuted], [deleteConversation], [startConversation], and pairing) throw
- * [RelayException] when the phone or Google says no; [deleteMessage] and
- * [deleteConversation] work locally without a pairing. [markRead], [unpair]
- * and [deleteLocalArchive] do not throw; [mediaFile] only throws
- * not_connected.
+ * [setMuted], [markNotSpam], [deleteConversation], [startConversation],
+ * [contacts], and pairing) throw [RelayException] when the phone or Google
+ * says no; [deleteMessage] and [deleteConversation] work locally without a
+ * pairing. [markRead], [unpair], [deleteLocalArchive],
+ * [restoreDeletedLocally] and [purgeDeleted] do not throw; [mediaFile] only
+ * throws not_connected.
  *
  * Logs (RelayLog) only ever get kinds and outcomes: never message text,
  * names, numbers, the pairing emoji, cookies or keys.
@@ -154,6 +162,13 @@ class RelayManager private constructor(
         val archiveWipeWaitMs: Long = 60_000,
         /** Longest wait for the intake thread to hold the queued sends of another (or an unknown) pairing. */
         val holdSendsWaitMs: Long = 10_000,
+        /**
+         * Whether to look at the link's notification every [notificationCheckMs]
+         * while the service runs: Android 8 does not report notifications being
+         * turned off (Android 9+ broadcasts it, see NotificationBlockReceiver).
+         */
+        val pollNotifications: Boolean = Build.VERSION.SDK_INT < Build.VERSION_CODES.P,
+        val notificationCheckMs: Long = 120_000,
     )
 
     private val app: Context = context.applicationContext
@@ -182,10 +197,21 @@ class RelayManager private constructor(
     private val _backfill = MutableStateFlow(BackfillProgress(running = false, 0, 0, 0))
     val backfill: StateFlow<BackfillProgress> = _backfill.asStateFlow()
 
-    private val _settings = MutableStateFlow<SettingsDto?>(null)
+    private val _settings = MutableStateFlow(storedSettings(app))
 
-    /** The phone's settings, once it has sent them on this run of the app. */
+    /**
+     * The phone's settings: the last ones it sent, kept across restarts (so
+     * known right after start), null until it has sent any to this pairing.
+     */
     val settings: StateFlow<SettingsDto?> = _settings.asStateFlow()
+
+    /**
+     * The bridge was seeded with the stored settings before this connect
+     * ([seedSettings]): sends need not wait for the connection's first
+     * settings event. Cleared with them.
+     */
+    @Volatile
+    private var settingsSeeded = false
 
     // --- bridge -------------------------------------------------------------------
 
@@ -261,12 +287,24 @@ class RelayManager private constructor(
     private var catchUpMark: CatchUpMark? = null
 
     /**
-     * Conversations whose catch-up has not finished (the link dropped, the
-     * phone stopped answering), with the bound it pages back to. The next
-     * catch-up uses that bound rather than one moved up by what was stored
-     * since. Cleared when the archive is deleted.
+     * One stretch of a conversation a catch-up still has to fetch: from
+     * below [cursor] (null: from the phone's newest message) down to the
+     * message at [bound].
      */
-    private val unfinishedCatchUps = ConcurrentHashMap<String, Long>()
+    private data class Gap(val bound: Long, val cursor: Cursor?)
+
+    /** Guards [gaps] and their copy on disk. */
+    private val gapsLock = Any()
+
+    /**
+     * Per conversation, the gaps its catch-ups have not filled yet (the link
+     * dropped, the phone stopped answering, the app was killed), newest
+     * first. Each page a catch-up stores moves its gap's cursor down, and
+     * the list is kept on disk, so the next catch-up (also after a restart)
+     * resumes where the last one stopped instead of starting over or leaving
+     * the rest behind. Cleared when the archive is deleted.
+     */
+    private val gaps: MutableMap<String, MutableList<Gap>> by lazy { loadGaps() }
 
     /** Serializes unpairs (a second tap, or a recreated screen asking again). */
     private val unpairLock = Mutex()
@@ -282,9 +320,14 @@ class RelayManager private constructor(
     @Volatile
     private var bridgeUnpairedCode: String? = null
 
-    /** Completed with the code of the bridge's next "unpaired" state; set by [unpairNow] while it waits for it. */
-    @Volatile
-    private var unpairedHeard: CompletableDeferred<String>? = null
+    /**
+     * Unpairs whose last callbacks from Go ("session deleted", then the
+     * "unpaired" state) may still be on their way: Go queues them and
+     * returns, and [unpairNow] no longer waits for them. One that arrives
+     * once a new pairing is under way or made belongs to the old one and is
+     * ignored ([handleSession], [onState]).
+     */
+    private val unpairEchoes = AtomicInteger(0)
 
     /**
      * Intake tasks that hold the queued sends of another (or an unknown)
@@ -300,6 +343,17 @@ class RelayManager private constructor(
      */
     @Volatile
     private var archiveForeign = false
+
+    /**
+     * The archive has an owner, but the paired phone could not be told yet
+     * (the bridge did not know it when the connection began). Until the
+     * initial sync settles it ([reconcileArchiveOwner]), what the phone sends
+     * live is dropped ([handleEvent]) and nothing is sent: it could be
+     * another phone's, landing in this archive. The connection's catch-up
+     * fetches what was dropped once ownership is settled.
+     */
+    @Volatile
+    private var ownerPending = false
 
     /** Bumped by every "connecting": one number per connection. */
     private val connection = AtomicLong(0)
@@ -530,31 +584,31 @@ class RelayManager private constructor(
             null
         }
         bridgeUnpairedCode = null
-        // Go hands its last callbacks ("session deleted", then "unpaired" with
-        // the revoke's outcome) to its dispatcher and may return before they
-        // reach the app; that state is the only word on whether the phone
-        // was told.
-        val heard = CompletableDeferred<String>()
-        unpairedHeard = heard
-        var asked = false
         connectLock.withLock {
             val wasPaired = b?.isPaired == true
             try {
+                // Returns once the phone was told; unpair_remote_failed once the
+                // pairing is gone here but the phone could not be told. Its
+                // "unpaired" state still follows, but is not waited for.
+                // Counted first: Go may deliver them before unpair() returns.
+                if (b != null) unpairEchoes.incrementAndGet()
                 b?.unpair()
-                asked = b != null
             } catch (e: RelayException) {
-                RelayLog.add(app, "Unpair on the phone: ${e.code}")
-                // Not known whether the phone heard of it.
-                if (wasPaired) revokeFailed = true
+                if (e.code == RelayException.UNPAIR_REMOTE_FAILED) {
+                    revokeFailed = true
+                } else {
+                    // Not known whether Go got as far as queueing them.
+                    unpairEchoes.updateAndGet { (it - 1).coerceAtLeast(0) }
+                    RelayLog.add(app, "Unpair on the phone: ${e.code}")
+                    // Not known whether the phone heard of it.
+                    if (wasPaired) revokeFailed = true
+                }
             }
         }
-        // Only now, so that its notification was there for any connection the revoke needed.
+        // Only now, so that its notification was there for any connection the
+        // revoke needed (a Disconnect tapped meanwhile waited for this too).
         RelayService.stop(app)
-        if (asked && withTimeoutOrNull(EVENT_DRAIN_TIMEOUT_S * 1000) { heard.await() } == null) {
-            RelayLog.add(app, "The link did not report how the unpair went")
-        }
-        unpairedHeard = null
-        // Anything else the bridge sent before it lands first too.
+        // What the bridge sent so far lands first.
         awaitEventThread()
         SessionVault.save(app, null)
         paired = false
@@ -580,7 +634,7 @@ class RelayManager private constructor(
         } catch (e: RuntimeException) {
             RelayLog.add(app, "Link status could not be stored: ${e.javaClass.simpleName}")
         }
-        _settings.value = null
+        forgetSettings()
         clearTyping()
         MessageNotifier.cancelAll(app)
         RelayNotifications.cancelRepairNeeded(app)
@@ -631,8 +685,13 @@ class RelayManager private constructor(
 
     // --- sync -----------------------------------------------------------------------
 
-    /** Re-lists one folder from the phone into the archive; returns how many conversations came back. */
+    /**
+     * Re-lists one folder from the phone into the archive; returns how many
+     * conversations came back. The local [Folder.DELETED] is never asked of
+     * the phone: it returns 0 at once.
+     */
     suspend fun refreshConversations(folder: Folder = Folder.INBOX): Int = withContext(Dispatchers.IO) {
+        if (!folder.listable) return@withContext 0
         listAndStore(folder).size
     }
 
@@ -814,6 +873,17 @@ class RelayManager private constructor(
         repo.setConversationFolder(conversationId, if (archived) Folder.ARCHIVE else Folder.INBOX)
     }
 
+    /**
+     * Moves a conversation out of spam: on the phone (Go: SetConversationStatus
+     * "not_spam"), then here, into the inbox. Throws [RelayException] when the
+     * phone cannot be told; nothing changes here then.
+     */
+    suspend fun markNotSpam(conversationId: String): Unit = withContext(Dispatchers.IO) {
+        val since = gate.epoch()
+        requireBridge().setConversationStatus(conversationId, STATUS_NOT_SPAM)
+        gate.ifCurrent(since) { repo.setConversationFolder(conversationId, Folder.INBOX) }
+    }
+
     suspend fun setMuted(conversationId: String, muted: Boolean): Unit = withContext(Dispatchers.IO) {
         requireBridge().setConversationMuted(conversationId, muted)
         repo.setConversationMuted(conversationId, muted)
@@ -836,6 +906,31 @@ class RelayManager private constructor(
     }
 
     /**
+     * Moves a conversation the phone deleted (it is in [Folder.DELETED]) back
+     * to the inbox, here only: the phone is not asked. Returns false if it was
+     * not in the deleted folder. Does not throw [RelayException].
+     */
+    suspend fun restoreDeletedLocally(conversationId: String): Boolean {
+        var restored = false
+        deleteLocally { restored = repo.restoreDeleted(conversationId) }
+        return restored
+    }
+
+    /**
+     * Deletes for good, here only, the conversation [conversationId] if the
+     * phone had deleted it (it is in [Folder.DELETED]), or with null every
+     * conversation in that folder, with their messages, media and queued
+     * sends. Returns how many were deleted. Does not throw [RelayException].
+     */
+    suspend fun purgeDeleted(conversationId: String?): Int {
+        var purged = 0
+        deleteLocally { purged = repo.purgeDeleted(conversationId) }
+        if (conversationId != null) MessageNotifier.cancel(app, conversationId)
+        if (purged > 0) RelayLog.add(app, "Deleted $purged conversation(s) for good")
+        return purged
+    }
+
+    /**
      * A deletion in the archive alone (no pairing to tell): on the intake
      * thread, so it is ordered with queued sends, and through the archive
      * gate, so it never interleaves with a wipe.
@@ -849,7 +944,18 @@ class RelayManager private constructor(
      * phone first. A failed refresh falls back to the stored list (and only
      * throws if there is none).
      */
-    suspend fun listContacts(refresh: Boolean): List<ContactRow> = withContext(Dispatchers.IO) {
+    suspend fun listContacts(refresh: Boolean): List<ContactRow> = contacts(refresh).contacts
+
+    /**
+     * Like [listContacts], also saying where the list came from:
+     * [ContactsResult.fromPhone] is false when a refresh was asked for but
+     * the phone could not be reached, and the stored list was returned
+     * instead. Without [refresh] it is the stored list, and fromPhone is true
+     * (nothing failed). Throws [RelayException] only if the refresh failed
+     * and nothing is stored.
+     */
+    suspend fun contacts(refresh: Boolean): ContactsResult = withContext(Dispatchers.IO) {
+        var fromPhone = true
         if (refresh) {
             try {
                 val since = gate.epoch()
@@ -857,9 +963,10 @@ class RelayManager private constructor(
                 gate.ifCurrent(since) { repo.upsertContacts(contacts) }
             } catch (e: RelayException) {
                 if (repo.contacts().isEmpty()) throw e
+                fromPhone = false
             }
         }
-        repo.contacts()
+        ContactsResult(repo.contacts(), fromPhone)
     }
 
     /** Opens (or creates) the conversation with these numbers and returns its id. */
@@ -904,7 +1011,37 @@ class RelayManager private constructor(
     internal var resumeOnVisible = false
 
     /** The foreground service is running: connect if the user wants the link live. */
-    internal fun onServiceStarted() = connectIfWanted()
+    internal fun onServiceStarted() {
+        watchNotification()
+        connectIfWanted()
+    }
+
+    private var notificationWatch: Job? = null
+
+    /**
+     * Android 8 does not tell the app when its notifications are turned off
+     * (Android 9+ does: NotificationBlockReceiver). There, while the service
+     * runs, the link's notification is looked at every
+     * [Timing.notificationCheckMs] (at most 2 minutes), and a link whose
+     * notification cannot be seen goes down as on the newer versions.
+     */
+    private fun watchNotification() {
+        if (!timing.pollNotifications) return
+        synchronized(jobsLock) {
+            if (notificationWatch?.isActive == true) return
+            notificationWatch = scope.launch {
+                while (true) {
+                    delay(timing.notificationCheckMs)
+                    if (!serviceRunning) break
+                    if (wantConnected() && !RelayNotifications.statusVisible(app)) {
+                        RelayLog.add(app, "The link's notification was turned off")
+                        onNotificationsHidden()
+                        break
+                    }
+                }
+            }
+        }
+    }
 
     /**
      * One of the app's screens came to the front (on the main thread).
@@ -1110,6 +1247,8 @@ class RelayManager private constructor(
         val (previousPhone, previousAccount) = storedArchiveOwner()
         paired = true
         synchronized(seedLock) { protocolSwitchesSeeded = false }
+        // Another pairing: the last one's settings (its SIMs) are not this one's.
+        forgetSettings()
         RelayNotifications.cancelRepairNeeded(app)
         RelayPrefs.setBackfillDoneAt(app, 0)
         onEventThread("session") { b.exportSession()?.let { SessionVault.save(app, it) } }
@@ -1129,6 +1268,8 @@ class RelayManager private constructor(
             }
         }
         if (owned && phone.isNotEmpty()) RelayPrefs.setArchiveOwner(app, phone, account)
+        // Settled by this pairing, or checked again by the next connect.
+        ownerPending = false
         repo.updateHealth(status = "disconnected", lastError = "", account = account, phoneId = phone)
         setState(RelayState(RelayState.Phase.DISCONNECTED))
         RelayLog.add(app, "Paired with the phone")
@@ -1175,11 +1316,11 @@ class RelayManager private constructor(
         val status = try {
             b.status()
         } catch (e: RelayException) {
-            return !archiveForeign
+            return ownerUnknown()
         }
         val phone = status.phoneId
         val account = status.account
-        if (phone.isEmpty()) return !archiveForeign
+        if (phone.isEmpty()) return ownerUnknown()
         val (ownerPhone, ownerAccount) = storedArchiveOwner()
         if (isOtherOwner(ownerPhone, ownerAccount, phone, account)) {
             RelayLog.add(app, "The archive is from a different phone or account than the pairing")
@@ -1188,6 +1329,12 @@ class RelayManager private constructor(
         }
         // The archive is this phone's (or nobody's): nothing foreign to wait for.
         archiveForeign = false
+        if (ownerPending) {
+            ownerPending = false
+            RelayLog.add(app, "The archive belongs to the paired phone; live events are stored again")
+            // Sends waited for this too.
+            kickOutbox()
+        }
         gate.ifCurrent(since) {
             // Only over no owner or the same one (a pairing may have recorded another meanwhile).
             val now = RelayPrefs.archivePhone(app)
@@ -1196,6 +1343,21 @@ class RelayManager private constructor(
             repo.updateHealth(account = account, phoneId = phone)
         }
         return true
+    }
+
+    /**
+     * The paired phone is not known right now. With an archive whose owner
+     * is known, that leaves open whose archive it is: live events are held
+     * back ([ownerPending]) until a later check knows. Returns whether the
+     * link may connect: unless the archive is known to be another phone's.
+     */
+    private fun ownerUnknown(): Boolean {
+        val (ownerPhone, ownerAccount) = storedArchiveOwner()
+        if ((ownerPhone.isNotEmpty() || ownerAccount.isNotEmpty()) && !ownerPending) {
+            ownerPending = true
+            RelayLog.add(app, "The paired phone is not known yet; live events wait until it is")
+        }
+        return !archiveForeign
     }
 
     /**
@@ -1231,7 +1393,7 @@ class RelayManager private constructor(
             cancelBackfill()
             RelayPrefs.setBackfillDoneAt(app, 0)
         }
-        _settings.value = null
+        forgetSettings()
         clearTyping()
         MessageNotifier.cancelAll(app)
         return wiped
@@ -1270,10 +1432,42 @@ class RelayManager private constructor(
         RelayPrefs.setArchiveOwner(app, "", "")
         RelayPrefs.setUnconfirmedSends(app, emptyMap())
         fetchedConversations.clear()
-        unfinishedCatchUps.clear()
+        clearGaps()
+        RelayPrefs.setLookupSends(app, emptyMap())
         // Nothing of another phone is left to keep sends from.
         archiveForeign = false
+        ownerPending = false
         forgetProtocolSwitches()
+        forgetSettings()
+    }
+
+    /** Forgets the phone's stored settings (unpair, a new pairing, the archive deleted). */
+    private fun forgetSettings() {
+        settingsSeeded = false
+        RelayPrefs.setLastSettings(app, null)
+        _settings.value = null
+    }
+
+    /**
+     * Before each connect: hands the bridge the settings the phone last sent
+     * (Go: SeedSettings), so a send right after a restart goes from the right
+     * SIM without waiting for the connection's first settings event. Nothing
+     * stored: nothing to seed, and sends wait for that event as before.
+     */
+    private fun seedSettings(b: RelayBridge) {
+        val stored = RelayPrefs.lastSettings(app)
+        if (stored == null) {
+            settingsSeeded = false
+            return
+        }
+        settingsSeeded = try {
+            b.seedSettings(stored)
+            true
+        } catch (e: Exception) {
+            val kind = (e as? RelayException)?.code ?: e.javaClass.simpleName
+            RelayLog.add(app, "Could not hand the link the phone's stored settings: $kind")
+            false
+        }
     }
 
     /**
@@ -1401,6 +1595,7 @@ class RelayManager private constructor(
             return@withLock
         }
         seedProtocolSwitches(b)
+        seedSettings(b)
         // That can take a while (it waits for the intake thread): the user may have tapped Disconnect meanwhile.
         if (!linkAllowed()) return@withLock
         try {
@@ -1513,7 +1708,7 @@ class RelayManager private constructor(
     private fun canSend(): Boolean {
         val current = connection.get()
         return _state.value.isOnline && gateConnection == current && outboxPausedFor != current &&
-            ownerTasksPending.get() == 0 && !archiveForeign
+            ownerTasksPending.get() == 0 && !archiveForeign && !ownerPending
     }
 
     private fun kickOutbox() {
@@ -1532,9 +1727,14 @@ class RelayManager private constructor(
     // ============================== events ==============================
 
     private fun handleSession(data: ByteArray?) {
+        // A finished unpair's late "session deleted" must not delete a new pairing's session.
+        if (data == null && unpairEchoes.get() > 0 && staleForUnpairEcho()) return
+        // Every save (also the periodic one and on disconnect): not a token refresh by itself.
         SessionVault.save(app, data)
-        if (data != null) repo.updateHealth(lastTokenRefresh = System.currentTimeMillis())
     }
+
+    /** A new pairing is under way or made: an earlier unpair's late callbacks are not about it. */
+    private fun staleForUnpairEcho(): Boolean = paired || _state.value.phase == RelayState.Phase.PAIRING
 
     private fun handleEvent(kind: String, payload: String) {
         val now = System.currentTimeMillis()
@@ -1542,12 +1742,16 @@ class RelayManager private constructor(
             lastHealthEventWrite = now
             repo.updateHealth(lastEventTs = now)
         }
+        // The archive may be another phone's: nothing that phone sends is stored in it yet.
+        if ((ownerPending || archiveForeign) && kind in ARCHIVED_KINDS) return
         when (kind) {
             KIND_STATE -> onState(RelayStateEvent.fromJson(JSONObject(payload)), now)
             "message" -> onMessage(MessageDto.fromJson(JSONObject(payload)))
             "conversation" -> repo.upsertConversation(ConversationDto.fromJson(JSONObject(payload)))
             "typing" -> onTyping(TypingDto.fromJson(JSONObject(payload)))
-            "settings" -> onSettings(SettingsDto.fromJson(JSONObject(payload)))
+            "settings" -> onSettings(SettingsDto.fromJson(JSONObject(payload)), payload)
+            // Go: *events.AuthTokenRefreshed. The health's "last session refresh" counts only these.
+            KIND_TOKEN_REFRESHED -> repo.updateHealth(lastTokenRefresh = now)
             // The phone's data changed in ways live events do not replay.
             "resync" -> {
                 val mark = markArchive(connection.get())
@@ -1564,6 +1768,10 @@ class RelayManager private constructor(
 
     private fun onState(event: RelayStateEvent, now: Long) {
         val phase = PHASES[event.state] ?: return
+        if (phase == RelayState.Phase.UNPAIRED && unpairEchoes.getAndUpdate { (it - 1).coerceAtLeast(0) } > 0) {
+            // The echo of an unpair that has finished: only news if nothing was paired since.
+            if (staleForUnpairEcho()) return
+        }
         val previous = _state.value
         // Down because its notification is off: the UI says so, not just "disconnected".
         val code = if (phase == RelayState.Phase.DISCONNECTED && event.code.isEmpty() && wantConnected() &&
@@ -1596,7 +1804,6 @@ class RelayManager private constructor(
             RelayState.Phase.UNPAIRED -> {
                 paired = false
                 bridgeUnpairedCode = event.code
-                unpairedHeard?.complete(event.code)
             }
             RelayState.Phase.DISCONNECTED -> clearTyping()
             else -> Unit
@@ -1625,7 +1832,8 @@ class RelayManager private constructor(
                 if (!initialSync(current)) syncedConnection.compareAndSet(current, -1L)
             }
         }
-        if (settingsConnection == current) {
+        if (settingsConnection == current || settingsSeeded) {
+            // The bridge has the SIMs: from this connection's settings event, or seeded from the stored ones.
             openGate(current)
         } else if (gateConnection != current) {
             synchronized(jobsLock) {
@@ -1660,8 +1868,10 @@ class RelayManager private constructor(
         } catch (e: RelayException) {
             true // No bridge: the refresh below fails too.
         }
-        // Another phone's archive that could not be deleted: nothing of this phone is fetched into it.
-        if (!archiveSafe) return false
+        // Another phone's archive that could not be deleted, or one whose owner is
+        // still not known: nothing of this phone is fetched into it (the next
+        // "online" of this connection tries again).
+        if (!archiveSafe || ownerPending) return false
         val list = refreshQuietly()
         val sync = currentCoroutineContext()[Job]
         // The list call blocks and cannot be interrupted: Disconnect, Unpair or a
@@ -1721,52 +1931,66 @@ class RelayManager private constructor(
     }
 
     /**
-     * The bound each listed conversation's gap is filled down to, for those
-     * that have one: the newest message stored from the phone as of [mark]
-     * (a catch-up that did not finish keeps its own), unless the phone's
-     * newest message was already stored by then. A conversation with nothing
-     * stored has no gap: its history is the import's (or "load older"'s).
+     * The bound of the new gap a listed conversation has, if any: the newest
+     * message stored from the phone as of [mark], unless the phone's newest
+     * message was already stored by then. A conversation with nothing stored
+     * has no gap: its history is the import's (or "load older"'s).
      */
-    private fun behind(conversations: List<ConversationDto>, mark: CatchUpMark?, epoch: Long): List<Pair<ConversationDto, Long>> =
-        conversations.mapNotNull { conversation ->
-            if (conversation.latestMessageId.isEmpty()) return@mapNotNull null
-            unfinishedCatchUps[conversation.id]?.let { return@mapNotNull conversation to it }
-            val bound = when {
-                // The archive was deleted since: nothing in it to fill a gap above.
-                mark != null && mark.epoch != epoch -> null
-                mark?.newest != null -> mark.newest[conversation.id]
-                else -> repo.newestStoredTimestamp(conversation.id)
-            } ?: return@mapNotNull null
-            val latest = repo.message(conversation.latestMessageId)
-            if (latest != null && !latest.isLocal && latest.timestampMs <= bound) return@mapNotNull null
-            conversation to bound
-        }
+    private fun newGapBound(conversation: ConversationDto, mark: CatchUpMark?, epoch: Long): Long? {
+        if (conversation.latestMessageId.isEmpty()) return null
+        val bound = when {
+            // The archive was deleted since: nothing in it to fill a gap above.
+            mark != null && mark.epoch != epoch -> null
+            mark?.newest != null -> mark.newest[conversation.id]
+            else -> repo.newestStoredTimestamp(conversation.id)
+        } ?: return null
+        val latest = repo.message(conversation.latestMessageId)
+        if (latest != null && !latest.isLocal && latest.timestampMs <= bound) return null
+        return bound
+    }
 
+    /**
+     * Fills, for each listed conversation, what arrived while the link was
+     * down: its new gap (see [newGapBound]) and any gap an earlier catch-up
+     * left unfinished ([gaps]), newest first, each to its end however many
+     * pages that takes. Every page is recorded as it is stored, so a
+     * catch-up cancelled with its connection (or the app) resumes there.
+     */
     private suspend fun catchUp(conversations: List<ConversationDto>, mark: CatchUpMark?) {
         val epoch = gate.epoch()
-        val behind = behind(conversations, mark, epoch)
-        if (behind.isEmpty()) return
-        // Until each one is done: a later connection's catch-up starts from these
-        // bounds. Not if the archive was deleted meanwhile (they would be stale).
+        val fresh = conversations.mapNotNull { c -> newGapBound(c, mark, epoch)?.let { c.id to it } }
+        // Not if the archive was deleted meanwhile (the bounds would be stale).
         gate.ifCurrent(epoch) {
-            for ((conversation, bound) in behind) unfinishedCatchUps.putIfAbsent(conversation.id, bound)
+            synchronized(gapsLock) {
+                var changed = false
+                for ((id, bound) in fresh) {
+                    val list = gaps.getOrPut(id) { ArrayList() }
+                    // A gap from the newest message down to this bound or below already covers it.
+                    if (list.any { it.cursor == null && it.bound <= bound }) continue
+                    list.add(0, Gap(bound, null))
+                    changed = true
+                }
+                if (changed) saveGaps()
+            }
         } ?: return
+        val work = synchronized(gapsLock) { conversations.filter { gaps[it.id]?.isNotEmpty() == true } }
         var messages = 0
         var conversationsFilled = 0
         var failedInARow = 0
-        for ((conversation, bound) in behind) {
+        for (conversation in work) {
             currentCoroutineContext().ensureActive()
-            val fetched = try {
-                backfiller.catchUp(conversation.id, bound, ::onCaughtUp).also {
-                    failedInARow = 0
-                    unfinishedCatchUps.remove(conversation.id, bound)
+            var fetched = 0
+            try {
+                while (true) {
+                    val gap = synchronized(gapsLock) { gaps[conversation.id]?.firstOrNull() } ?: break
+                    fetched += fillGap(conversation.id, gap)
                 }
+                failedInARow = 0
             } catch (e: RelayException) {
                 if (e.code in Backfill.ABORT_CODES || ++failedInARow >= 2) {
                     RelayLog.add(app, "Catch-up stopped: ${e.code}")
                     return
                 }
-                0
             }
             if (fetched > 0) {
                 messages += fetched
@@ -1776,6 +2000,79 @@ class RelayManager private constructor(
             }
         }
         if (conversationsFilled > 0) RelayLog.add(app, "Caught up $conversationsFilled conversations, $messages messages")
+    }
+
+    /** Pages through one gap to its end, recording each page; the gap is forgotten once filled. */
+    private suspend fun fillGap(conversationId: String, gap: Gap): Int {
+        var current = gap
+        val fetched = backfiller.catchUp(
+            conversationId, gap.bound, ::onCaughtUp,
+            startCursor = gap.cursor,
+            onPage = { next ->
+                val moved = Gap(gap.bound, next)
+                synchronized(gapsLock) {
+                    val list = gaps[conversationId]
+                    val index = list?.indexOf(current) ?: -1
+                    if (index >= 0) {
+                        list!![index] = moved
+                        saveGaps()
+                    }
+                }
+                current = moved
+            },
+        )
+        synchronized(gapsLock) {
+            val list = gaps[conversationId]
+            if (list != null && list.remove(current)) {
+                if (list.isEmpty()) gaps.remove(conversationId)
+                saveGaps()
+            }
+        }
+        return fetched
+    }
+
+    private fun loadGaps(): MutableMap<String, MutableList<Gap>> {
+        val out = HashMap<String, MutableList<Gap>>()
+        try {
+            val json = JSONObject(RelayPrefs.catchUpGaps(app) ?: return out)
+            for (id in json.keys()) {
+                val array = json.getJSONArray(id)
+                val list = ArrayList<Gap>()
+                for (i in 0 until array.length()) {
+                    val o = array.getJSONObject(i)
+                    val cursor = if (o.has("ci")) Cursor(o.getString("ci"), o.getLong("ct")) else null
+                    list.add(Gap(o.getLong("b"), cursor))
+                }
+                if (list.isNotEmpty()) out[id] = list
+            }
+        } catch (e: Exception) {
+            // Unreadable: those gaps are left to "load older" and the import.
+            RelayLog.add(app, "Unfinished catch-ups could not be read: ${e.javaClass.simpleName}")
+        }
+        return out
+    }
+
+    /** Under [gapsLock]. */
+    private fun saveGaps() {
+        val json = JSONObject()
+        for ((id, list) in gaps) {
+            if (list.isEmpty()) continue
+            json.put(id, org.json.JSONArray(list.map { gap ->
+                JSONObject().put("b", gap.bound).apply {
+                    gap.cursor?.let { put("ci", it.lastItemId).put("ct", it.lastItemTimestampMs) }
+                }
+            }))
+        }
+        try {
+            RelayPrefs.setCatchUpGaps(app, if (json.length() == 0) null else json.toString())
+        } catch (e: RuntimeException) {
+            RelayLog.add(app, "Catch-up progress could not be kept: ${e.javaClass.simpleName}")
+        }
+    }
+
+    private fun clearGaps() = synchronized(gapsLock) {
+        gaps.clear()
+        RelayPrefs.setCatchUpGaps(app, null)
     }
 
     /** A message the catch-up stored: stickers in it go to the inbox like live ones (no notifications). */
@@ -1875,8 +2172,14 @@ class RelayManager private constructor(
         }
     }
 
-    private fun onSettings(dto: SettingsDto) {
+    private fun onSettings(dto: SettingsDto, payload: String) {
         _settings.value = dto
+        // Kept for the next run's seed (never logged): the event is this pairing's.
+        try {
+            RelayPrefs.setLastSettings(app, payload)
+        } catch (e: RuntimeException) {
+            RelayLog.add(app, "Could not keep the phone's settings: ${e.javaClass.simpleName}")
+        }
         val current = connection.get()
         settingsConnection = current
         if (_state.value.isOnline) openGate(current)
@@ -2054,9 +2357,12 @@ class RelayManager private constructor(
     ): File? = gate.ifCurrent(since) {
         if (repo.mediaPart(messageId, partId) == null) return@ifCurrent null
         val file = MediaCache.fileFor(app, cacheKey, ImageSniffer.extensionFor(bytes, mime))
-        MediaCache.writeAtomically(file, bytes)
-        // When not recorded, the repository has already deleted the file (unless another part uses it).
-        if (repo.setMediaLocalPath(messageId, partId, cacheKey, file.path, thumbnail)) file else null
+        // Written and recorded in one step as far as the cleanup of unused files can tell.
+        repo.withMediaFileLock {
+            MediaCache.writeAtomically(file, bytes)
+            // When not recorded, the repository has already deleted the file (unless another part uses it).
+            if (repo.setMediaLocalPath(messageId, partId, cacheKey, file.path, thumbnail)) file else null
+        }
     }
 
     // ============================== threads ==============================
@@ -2138,6 +2444,10 @@ class RelayManager private constructor(
 
     companion object {
         private const val KIND_STATE = "state"
+        private const val KIND_TOKEN_REFRESHED = "token_refreshed"
+
+        /** Events whose content goes into the archive (or is read against it); held back while its owner is unsettled. */
+        private val ARCHIVED_KINDS = setOf("message", "conversation", "typing", "resync")
         private const val PAIRING_TIMEOUT_MS = 180_000L
         private const val CONVERSATION_COUNT = 100
         private const val EVENT_DRAIN_TIMEOUT_S = 10L
@@ -2146,6 +2456,9 @@ class RelayManager private constructor(
         /** The detail of the INTERNAL error ensureBridge throws when the stored session is unreadable for now. */
         private const val SESSION_UNREADABLE = "session unreadable"
         private const val GOOGLE_MESSAGES_PACKAGE = "com.google.android.apps.messaging"
+
+        /** The conversation status that moves one out of spam (Go: SetConversationStatus). */
+        internal const val STATUS_NOT_SPAM = "not_spam"
 
         /** The error a send queued before an unpair is held with (content-free). */
         internal const val UNPAIRED_ERROR = "unpaired"
@@ -2201,6 +2514,13 @@ class RelayManager private constructor(
         internal fun resetForTesting() = synchronized(this) {
             instance?.shutdownForTesting()
             instance = null
+        }
+
+        /** The settings kept from the last run, or null (none, or unreadable). */
+        private fun storedSettings(context: Context): SettingsDto? = try {
+            RelayPrefs.lastSettings(context)?.let { SettingsDto.fromJson(JSONObject(it)) }
+        } catch (e: Exception) {
+            null
         }
 
         private fun named(name: String) = ThreadFactory { r -> Thread(r, name).apply { isDaemon = true } }

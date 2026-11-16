@@ -850,6 +850,7 @@ func TestHackySetActiveStaysOnItsConnection(t *testing.T) {
 	}
 
 	b, _ := newPairedBridge(t)
+	b.hackyResetDone.Store(true) // the client reset has its own test
 	h := b.handlerFor(markLive(b))
 	h(warn)
 	h(warn) // a later loop's warning replaces a pending one

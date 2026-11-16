@@ -30,3 +30,6 @@ tool (
 	golang.org/x/mobile/cmd/gobind
 	golang.org/x/mobile/cmd/gomobile
 )
+
+// A patched copy of libgm (pkg/libgm only); see third_party/mautrix-gmessages/PATCHES.md.
+replace go.mau.fi/mautrix-gmessages => ./third_party/mautrix-gmessages

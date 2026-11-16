@@ -33,8 +33,8 @@ data class ConversationRow(
     val defaultOutgoingId: String,
     val updatedAt: Long,
 ) {
-    /** Null for "other" and anything else that cannot be listed. */
-    val folderEnum: Folder? get() = Folder.fromWire(folder)
+    /** The folder, including the local [Folder.DELETED]; null for "other" and anything unknown. */
+    val folderEnum: Folder? get() = Folder.fromStored(folder)
 }
 
 data class ParticipantRow(

@@ -6,6 +6,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.lightdecoder.R
@@ -68,12 +69,29 @@ object RelayNotifications {
     }
 
     /**
+     * Whether the app is exempt from battery optimisation (Doze): then the
+     * link's connection and its reconnect alarms are not held back while the
+     * phone is idle. False when it is not exempt, or Android cannot say. The
+     * status screen offers [RelayIntents.batteryExemption] while it is false.
+     */
+    fun isIgnoringBatteryOptimizations(context: Context): Boolean = try {
+        context.getSystemService(PowerManager::class.java)
+            ?.isIgnoringBatteryOptimizations(context.packageName) == true
+    } catch (e: RuntimeException) {
+        false
+    }
+
+    /**
      * The foreground service's notification: what the link is doing, a tap
      * that opens the conversations, and the one-tap Disconnect the product
      * rules require. Android 14+ lets the user swipe it away even so; its
      * delete intent puts it straight back while the service runs.
+     *
+     * While an unpair runs ([unpairing]) it says "Unpairing…": the service
+     * stays (and Disconnect waits) until the revoke, which may need a short
+     * connection of its own, has ended.
      */
-    fun serviceNotification(context: Context, state: RelayState): Notification {
+    fun serviceNotification(context: Context, state: RelayState, unpairing: Boolean = false): Notification {
         ensureChannels(context)
         val open = PendingIntent.getActivity(
             context, 0, RelayIntents.conversations(context),
@@ -87,14 +105,16 @@ object RelayNotifications {
             context, 3, RelayService.repostIntent(context),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val text = when (state.phase) {
-            RelayState.Phase.ACTIVE_ELSEWHERE -> R.string.relay_service_text_elsewhere
-            RelayState.Phase.PHONE_OFFLINE -> R.string.relay_service_text_phone_offline
+        val text = when {
+            unpairing -> R.string.relay_service_text_unpairing
+            state.phase == RelayState.Phase.ACTIVE_ELSEWHERE -> R.string.relay_service_text_elsewhere
+            state.phase == RelayState.Phase.PHONE_OFFLINE -> R.string.relay_service_text_phone_offline
             else -> R.string.relay_service_text
         }
+        val title = if (unpairing) R.string.relay_service_title_unpairing else titleFor(state.phase)
         return NotificationCompat.Builder(context, CHANNEL_STATUS)
             .setSmallIcon(R.drawable.ic_stat_relay)
-            .setContentTitle(context.getString(titleFor(state.phase)))
+            .setContentTitle(context.getString(title))
             .setContentText(context.getString(text))
             .setContentIntent(open)
             .addAction(R.drawable.ic_relay_disconnect, context.getString(R.string.relay_action_disconnect), disconnect)
@@ -124,9 +144,9 @@ object RelayNotifications {
 
     /** Re-posts the service notification after a state change (the service owns it while running). */
     @SuppressLint("MissingPermission") // without the permission Android just does not show it
-    fun updateService(context: Context, state: RelayState) {
+    fun updateService(context: Context, state: RelayState, unpairing: Boolean = false) {
         try {
-            NotificationManagerCompat.from(context).notify(ID_SERVICE, serviceNotification(context, state))
+            NotificationManagerCompat.from(context).notify(ID_SERVICE, serviceNotification(context, state, unpairing))
         } catch (e: RuntimeException) {
             // A SecurityException on some builds without POST_NOTIFICATIONS.
         }

@@ -104,12 +104,16 @@ class NewConversationActivity : AppCompatActivity() {
 
     // --- contacts ------------------------------------------------------------
 
-    /** Asks the phone for its contact list once; the local copy shows meanwhile. */
+    /**
+     * Asks the phone for its contact list once; the local copy shows
+     * meanwhile. When the phone could not be reached the hint says the list
+     * is the one saved earlier (or that there is none).
+     */
     private fun refreshContacts() {
         binding.progress.visibility = View.VISIBLE
         lifecycleScope.launch {
-            relayAttempt { manager.listContacts(refresh = true) }
-                .onFailure { binding.offlineHint.visibility = View.VISIBLE }
+            val fromPhone = relayAttempt { manager.contacts(refresh = true) }.getOrNull()?.fromPhone == true
+            binding.offlineHint.visibility = if (fromPhone) View.GONE else View.VISIBLE
             binding.progress.visibility = View.GONE
             filter(debounce = false)
         }

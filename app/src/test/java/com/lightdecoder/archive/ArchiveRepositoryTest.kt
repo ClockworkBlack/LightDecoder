@@ -560,7 +560,7 @@ class ArchiveRepositoryTest {
     }
 
     @Test
-    fun deletedConversationIsRemovedWithEverythingInIt() {
+    fun aConversationThePhoneDeletedMovesToTheDeletedFolderWithEverythingInIt() {
         repo.upsertConversation(conversation(CONV, name = "Old"))
         repo.upsertMessage(message("m1", text = "findme", parts = listOf(mediaPart("p1", mediaId = "M1"))))
         repo.setSyncState(SyncStateRow(CONV, cursorId = "m1", cursorTs = 1))
@@ -569,6 +569,30 @@ class ArchiveRepositoryTest {
         repo.setMediaLocalPath("m1", "p1", file.path, thumbnail = false)
 
         repo.upsertConversation(conversation(CONV, folder = "deleted"))
+
+        val kept = repo.conversation(CONV)!!
+        assertEquals(Folder.DELETED, kept.folderEnum)
+        assertEquals("Old", kept.name)
+        assertTrue("not in the inbox", repo.conversations(Folder.INBOX).isEmpty())
+        assertEquals(listOf(CONV), repo.conversations(Folder.DELETED).map { it.id })
+        assertNotNull(repo.message("m1"))
+        assertEquals(1, repo.search("findme").size)
+        assertTrue(file.exists())
+        // One the archive never had is not created for that.
+        repo.upsertConversation(conversation("never-seen", folder = "deleted"))
+        assertNull(repo.conversation("never-seen"))
+
+        // Restored here: back in the inbox. Only from the deleted folder.
+        assertTrue(repo.restoreDeleted(CONV))
+        assertEquals(Folder.INBOX, repo.conversation(CONV)!!.folderEnum)
+        assertFalse(repo.restoreDeleted(CONV))
+
+        // Purged: gone for good, with everything in it.
+        repo.upsertConversation(conversation(CONV, folder = "deleted"))
+        repo.upsertConversation(conversation("other", folder = "inbox"))
+        assertEquals("only from the deleted folder", 0, repo.purgeDeleted("other"))
+        assertEquals(1, repo.purgeDeleted(null))
+        assertNotNull(repo.conversation("other"))
 
         assertNull(repo.conversation(CONV))
         assertNull(repo.message("m1"))
@@ -587,6 +611,68 @@ class ArchiveRepositoryTest {
         assertTrue(repo.messages(CONV).isEmpty())
         assertTrue(repo.search("bye").isEmpty())
     }
+
+    // --- media paths ----------------------------------------------------------
+
+    @Test
+    fun mediaPathsAreIndexedAlsoAfterAnUpgradeFromVersion1() {
+        val fresh = indexes(db.readableDatabase)
+        assertTrue(fresh.containsAll(listOf("idx_media_local_path", "idx_media_thumb_path")))
+
+        // A version 1 archive (no such indexes) gets them on upgrade, keeping its rows.
+        repo.upsertMessage(message("m1", parts = listOf(mediaPart("p1", mediaId = "M1"))))
+        val raw = db.writableDatabase
+        raw.execSQL("DROP INDEX idx_media_local_path")
+        raw.execSQL("DROP INDEX idx_media_thumb_path")
+        db.onUpgrade(raw, 1, ArchiveDb.VERSION)
+        assertTrue(indexes(raw).containsAll(listOf("idx_media_local_path", "idx_media_thumb_path")))
+        assertNotNull(repo.mediaPart("m1", "p1"))
+        assertEquals(2, ArchiveDb.VERSION)
+        // The used-file check goes through them, not a scan of the table.
+        val plan = raw.rawQuery(
+            "EXPLAIN QUERY PLAN SELECT 1 FROM media WHERE local_path = ? OR thumb_path = ? LIMIT 1", arrayOf("a", "a"),
+        ).use { c -> buildList { while (c.moveToNext()) add(c.getString(c.columnCount - 1)) } }.joinToString(" | ")
+        assertTrue(plan, plan.contains("idx_media_local_path") && plan.contains("idx_media_thumb_path"))
+    }
+
+    @Test
+    fun aDownloadLandingOnAFileBeingCleanedUpKeepsIt() {
+        // m1's part had media M1 on disk; m2 shows the same media M1 (the
+        // same file). m1's part gets other media, so M1's file may be unused:
+        // the cleanup checks it after its write. Meanwhile a download of M1
+        // for m2 writes that same path and records it.
+        repo.upsertMessage(message("m1", parts = listOf(mediaPart("p1", mediaId = "M1"))))
+        repo.upsertMessage(message("m2", parts = listOf(mediaPart("p1", mediaId = "M1"))))
+        val file = MediaCache.fileFor(context, "M1", "jpg").apply { writeText("old") }
+        assertTrue(repo.setMediaLocalPath("m1", "p1", "M1", file.path, thumbnail = false))
+
+        val downloading = java.util.concurrent.CountDownLatch(1)
+        val download = Thread {
+            repo.withMediaFileLock {
+                downloading.countDown()
+                // The cleanup's write commits meanwhile and waits for this.
+                Thread.sleep(300)
+                MediaCache.writeAtomically(file, "new".toByteArray())
+                assertTrue(repo.setMediaLocalPath("m2", "p1", "M1", file.path, thumbnail = false))
+            }
+        }.apply { start() }
+        assertTrue(downloading.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        repo.upsertMessage(message("m1", parts = listOf(mediaPart("p1", mediaId = "M9"))))
+        download.join(5_000)
+
+        assertTrue("the new download is kept", file.exists())
+        assertEquals("new", file.readText())
+        assertEquals(file.path, repo.mediaPart("m2", "p1")!!.localPath)
+
+        // Once nothing uses it, it does go.
+        repo.upsertMessage(message("m2", parts = listOf(mediaPart("p1", mediaId = "M8"))))
+        assertFalse(file.exists())
+    }
+
+    private fun indexes(database: android.database.sqlite.SQLiteDatabase): List<String> =
+        database.rawQuery("SELECT name FROM sqlite_master WHERE type = 'index'", null).use { c ->
+            buildList { while (c.moveToNext()) add(c.getString(0)) }
+        }
 
     // --- outbox, health, sync state, contacts -------------------------------------
 

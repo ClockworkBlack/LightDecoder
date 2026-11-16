@@ -5,6 +5,23 @@
         android:id="@+id/action_archive"
         android:title="@string/chat_action_archive"
         app:showAsAction="never" />
+    <!-- Only in Spam. -->
+    <item
+        android:id="@+id/action_not_spam"
+        android:title="@string/chat_action_not_spam"
+        android:visible="false"
+        app:showAsAction="never" />
+    <!-- Only in the local Deleted folder (the phone already deleted it). -->
+    <item
+        android:id="@+id/action_restore"
+        android:title="@string/chat_action_restore"
+        android:visible="false"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_delete_forever"
+        android:title="@string/chat_action_delete_forever"
+        android:visible="false"
+        app:showAsAction="never" />
     <item
         android:id="@+id/action_mute"
         android:title="@string/chat_action_mute"

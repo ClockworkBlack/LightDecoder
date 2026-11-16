@@ -37,6 +37,15 @@ class ArchiveRepository private constructor(private val helper: ArchiveDb) {
     /** When this instance last looked for partial files left by writes that never finished. */
     private val lastPartSweep = AtomicLong(0)
 
+    /**
+     * Held while a media file is written and its path recorded
+     * ([withMediaFileLock]), and while files that may have become unused are
+     * checked once more and deleted after a write. A download that lands on
+     * the same path as a file being cleaned up (the same media fetched
+     * again) therefore either comes after the deletion or is seen as used.
+     */
+    private val mediaFileLock = Any()
+
     /** What one upsert did. [newMediaParts] are the media parts worth downloading now. */
     data class UpsertResult(val inserted: Boolean, val replacedTmpId: String?, val newMediaParts: List<MediaRow>)
 
@@ -65,7 +74,10 @@ class ArchiveRepository private constructor(private val helper: ArchiveDb) {
      * participants. The phone is authoritative, except that a zero
      * lastMessageTs leaves the stored latest message alone, and mute (which
      * the phone does not report) is only ever turned on from here.
-     * A conversation the phone reports as deleted is deleted locally.
+     * A conversation the phone reports as deleted (or trashed) is not
+     * deleted here: it moves to the local [Folder.DELETED] folder with its
+     * messages, until the user restores ([restoreDeleted]) or purges it
+     * ([purgeDeleted]).
      */
     fun upsertConversation(dto: ConversationDto) = write { writeConversation(it, dto) }
 
@@ -97,6 +109,37 @@ class ArchiveRepository private constructor(private val helper: ArchiveDb) {
 
     /** Deletes a conversation with its messages, media files, history cursor and queued sends. */
     fun deleteConversationLocal(conversationId: String) = write { deleteConversation(it, conversationId) }
+
+    /**
+     * Moves a conversation the phone deleted back to the inbox, here only.
+     * False if it is not in [Folder.DELETED].
+     */
+    fun restoreDeleted(conversationId: String): Boolean = write { b ->
+        val moved = b.db.update(
+            "conversations", ContentValues().apply { put("folder", Folder.INBOX.wire) },
+            "conversation_id = ? AND folder = ?", arrayOf(conversationId, Folder.DELETED.wire),
+        ) > 0
+        if (moved) b.changed(Kind.CONVERSATIONS, conversationId)
+        moved
+    }
+
+    /**
+     * Deletes for good, as [deleteConversationLocal] does, the conversation
+     * [conversationId] if it is in [Folder.DELETED], or with null every
+     * conversation there. Returns how many were deleted.
+     */
+    fun purgeDeleted(conversationId: String?): Int = write { b ->
+        val ids = if (conversationId == null) {
+            query(b.db, "SELECT conversation_id FROM conversations WHERE folder = ?", arrayOf(Folder.DELETED.wire)) { it.getString(0) }
+        } else {
+            query(
+                b.db, "SELECT conversation_id FROM conversations WHERE conversation_id = ? AND folder = ?",
+                arrayOf(conversationId, Folder.DELETED.wire),
+            ) { it.getString(0) }
+        }
+        ids.forEach { deleteConversation(b, it) }
+        ids.size
+    }
 
     // --- messages ---------------------------------------------------------------
 
@@ -314,6 +357,13 @@ class ArchiveRepository private constructor(private val helper: ArchiveDb) {
      * it), so a late download never leaves a picture on disk that nothing
      * shows or cleans up. Returns whether the path was recorded.
      */
+    /**
+     * Runs [block], which writes a file into the media cache and records its
+     * path ([setMediaLocalPath]), so that no cleanup of unused files deletes
+     * it in between. Keep it short: other writes' cleanups wait for it.
+     */
+    fun <T> withMediaFileLock(block: () -> T): T = synchronized(mediaFileLock) { block() }
+
     fun setMediaLocalPath(messageId: String, partId: String, cacheKey: String, path: String, thumbnail: Boolean): Boolean =
         when {
             cacheKey.startsWith(MediaCache.INLINE_KEY_PREFIX) ->
@@ -492,17 +542,24 @@ class ArchiveRepository private constructor(private val helper: ArchiveDb) {
         val db = helper.writableDatabase
         val batch = Batch(db)
         val result: T
-        val orphans: List<File>
+        val orphans: List<String>
         db.beginTransaction()
         try {
             result = block(batch)
-            orphans = batch.maybeOrphaned.filterNot { isReferenced(db, it) }.mapNotNull { mediaFileOrNull(it) }
+            orphans = batch.maybeOrphaned.filter { mediaFileOrNull(it) != null && !isReferenced(db, it) }
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
         }
-        // Only once the rows are gone for good.
-        orphans.forEach { it.delete() }
+        // Only once the rows are gone for good, and checked again under the
+        // media file lock: a download may have recorded the same path since.
+        if (orphans.isNotEmpty()) {
+            synchronized(mediaFileLock) {
+                for (path in orphans) {
+                    if (!isReferenced(helper.readableDatabase, path)) mediaFileOrNull(path)?.delete()
+                }
+            }
+        }
         batch.outboxFiles.mapNotNull { outboxFileOrNull(it) }.forEach { it.delete() }
         batch.changes.forEach(ArchiveEvents::notify)
         return result
@@ -510,8 +567,8 @@ class ArchiveRepository private constructor(private val helper: ArchiveDb) {
 
     private fun writeConversation(b: Batch, dto: ConversationDto) {
         if (dto.id.isEmpty()) return
-        if (dto.folder == "deleted") {
-            deleteConversation(b, dto.id)
+        if (dto.folder == Folder.DELETED.wire) {
+            moveToDeleted(b, dto.id)
             return
         }
         val values = ContentValues().apply {
@@ -557,6 +614,22 @@ class ArchiveRepository private constructor(private val helper: ArchiveDb) {
             }, SQLiteDatabase.CONFLICT_REPLACE)
         }
         b.changed(Kind.CONVERSATIONS, dto.id)
+    }
+
+    /**
+     * The phone deleted (or trashed) a conversation: it is kept here, in the
+     * local deleted folder, with everything else as it was. One not stored
+     * yet is not created for that.
+     */
+    private fun moveToDeleted(b: Batch, conversationId: String) {
+        val moved = b.db.update(
+            "conversations", ContentValues().apply {
+                put("folder", Folder.DELETED.wire)
+                put("updated_at", b.now)
+            },
+            "conversation_id = ? AND folder != ?", arrayOf(conversationId, Folder.DELETED.wire),
+        )
+        if (moved > 0) b.changed(Kind.CONVERSATIONS, conversationId)
     }
 
     private fun deleteConversation(b: Batch, conversationId: String) {

@@ -31,14 +31,29 @@ class ArchiveDb(context: Context, name: String? = NAME) :
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // Version 1 is the first schema; later versions add migrations here.
+        // Version 2: indexes on the media paths, for the check whether a file is still used.
+        if (oldVersion < 2) MEDIA_PATH_INDEXES.forEach(db::execSQL)
     }
 
     companion object {
         const val NAME = "relay-archive.db"
-        const val VERSION = 1
+        const val VERSION = 2
 
-        private val SCHEMA = listOf(
+        /**
+         * Version 2. Whether a media file is still used is asked of both path
+         * columns ("local_path = ? OR thumb_path = ?") for every file that may
+         * have become unused; without these each such question scanned the
+         * whole media table.
+         */
+        private val MEDIA_PATH_INDEXES = listOf(
+            "CREATE INDEX IF NOT EXISTS idx_media_local_path ON media(local_path)",
+            "CREATE INDEX IF NOT EXISTS idx_media_thumb_path ON media(thumb_path)",
+        )
+
+        private val SCHEMA get() = BASE_SCHEMA + MEDIA_PATH_INDEXES
+
+        /** Version 1. */
+        private val BASE_SCHEMA = listOf(
             """CREATE TABLE conversations (
                 conversation_id TEXT PRIMARY KEY,
                 name TEXT NOT NULL DEFAULT '',

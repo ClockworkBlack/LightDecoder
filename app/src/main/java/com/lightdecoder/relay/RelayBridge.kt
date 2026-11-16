@@ -31,6 +31,14 @@ interface RelayBridge : java.io.Closeable {
     fun connect()
     fun disconnect()
     fun setActiveSession()
+
+    /**
+     * Revokes the pairing on the phone and wipes it here. Returns normally
+     * when the phone was told. Throws [RelayException] with code
+     * [RelayException.UNPAIR_REMOTE_FAILED] when the local wipe happened but
+     * the phone could not be told (the unpair is done all the same); any
+     * other code means it is not known whether anything happened.
+     */
     fun unpair()
     fun exportSession(): ByteArray?
 
@@ -50,6 +58,14 @@ interface RelayBridge : java.io.Closeable {
      */
     fun clearProtocolSwitches()
 
+    /**
+     * Restores the phone's settings (SIMs and the like) that the last
+     * "settings" event carried, before connecting, so a send right after a
+     * restart goes from the right SIM (Go: SeedSettings). [settingsJson] is
+     * that event's payload; null or empty clears it. Never touches the network.
+     */
+    fun seedSettings(settingsJson: String?)
+
     fun listConversations(folder: Folder, count: Int): List<ConversationDto>
     fun getConversation(id: String): ConversationDto
     fun fetchMessages(conversationId: String, count: Int, cursor: Cursor?): MessagePage
@@ -64,6 +80,21 @@ interface RelayBridge : java.io.Closeable {
         conversationId: String,
         tmpId: String,
         data: ByteArray,
+        fileName: String,
+        mime: String,
+        caption: String?,
+        replyToId: String?,
+    ): SendResult
+
+    /**
+     * Like [sendMedia], but the bridge reads the attachment from [path]
+     * itself (at most 100 MB), so its bytes never pass through the app's
+     * heap (Go: SendMediaFile).
+     */
+    fun sendMediaFile(
+        conversationId: String,
+        tmpId: String,
+        path: String,
         fileName: String,
         mime: String,
         caption: String?,
@@ -109,11 +140,14 @@ class RelayException(val code: String, message: String) : Exception(message) {
         const val LOGGED_OUT = "logged_out"
         const val INTERNAL = "internal"
 
+        /** Unpair wiped the pairing here but could not tell the phone (see [RelayBridge.unpair]). */
+        const val UNPAIR_REMOTE_FAILED = "unpair_remote_failed"
+
         val CODES = setOf(
             NOT_PAIRED, NOT_CONNECTED, NO_COOKIES, COOKIES_INVALID, NO_DEVICES, PAIRING_INIT_TIMEOUT,
             INCORRECT_EMOJI, PAIRING_CANCELLED, PAIRING_TIMEOUT, PAIRING_IN_PROGRESS, NO_PAIRING,
             PHONE_NOT_RESPONDING, CONNECTION_CLOSED, NOT_FOUND, INVALID_ARGUMENT, TOO_LARGE,
-            SEND_FAILED, LOGGED_OUT, INTERNAL,
+            SEND_FAILED, LOGGED_OUT, INTERNAL, UNPAIR_REMOTE_FAILED,
         )
 
         /**

@@ -25,6 +25,9 @@ type stateCache struct {
 	// isDefaultSMSApp is optional in the settings proto and missing from some
 	// events, so the last value seen is kept (connector mergeSettings).
 	isDefaultSMSApp bool
+	// phoneSettings: the phone sent settings with SIM cards since the last
+	// reset; a seed (SeedSettings) never overrides those.
+	phoneSettings bool
 	// Per conversation, what its newest protocol-switch tombstone says
 	// (connector PortalMetadata.ForceRCS). The connector keeps that in its
 	// database; here it comes from two places, kept apart so that the
@@ -63,6 +66,7 @@ func (c *stateCache) reset() {
 	c.msgIndex = make(map[string]indexedMessage)
 	c.msgOrder = nil
 	c.isDefaultSMSApp = false
+	c.phoneSettings = false
 	c.learnedRCS = make(map[string]protocolSwitch)
 	c.seededRCS = make(map[string]protocolSwitch)
 }
@@ -104,7 +108,43 @@ func (c *stateCache) applySettings(s *gmproto.Settings) bool {
 	if rcs := s.GetRCSSettings(); rcs != nil && rcs.IsDefaultSMSApp != nil {
 		c.isDefaultSMSApp = rcs.GetIsDefaultSMSApp()
 	}
+	c.phoneSettings = true
 	return c.isDefaultSMSApp
+}
+
+// seedSettings restores the SIM cards and default-SMS flag from a settings
+// payload saved by Kotlin (nil clears what an earlier seed restored). It
+// returns false, changing nothing, once the phone has sent settings: those
+// are newer. SIMs without a payload only count as our own participants.
+func (c *stateCache) seedSettings(s *settingsDTO) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.phoneSettings {
+		return false
+	}
+	c.sims = make(map[string]*gmproto.SIMCard)
+	c.isDefaultSMSApp = false
+	if s == nil {
+		return true
+	}
+	for _, sim := range s.SIMs {
+		if sim.ParticipantID == "" {
+			continue
+		}
+		c.selfIDs[sim.ParticipantID] = true
+		if sim.SIMPayload == nil {
+			continue
+		}
+		c.sims[sim.ParticipantID] = &gmproto.SIMCard{
+			SIMParticipant: &gmproto.SIMParticipant{ID: sim.ParticipantID},
+			SIMData: &gmproto.SIMData{SIMPayload: &gmproto.SIMPayload{
+				Two:       sim.SIMPayload.Two,
+				SIMNumber: sim.SIMPayload.SIMNumber,
+			}},
+		}
+	}
+	c.isDefaultSMSApp = s.IsDefaultSMSApp
+	return true
 }
 
 func (c *stateCache) isSelf(participantID string) bool {

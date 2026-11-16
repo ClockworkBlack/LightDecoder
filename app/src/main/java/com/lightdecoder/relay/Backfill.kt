@@ -111,43 +111,56 @@ internal class Backfill(
 
     /**
      * Fills a conversation's gap between [bound] and the phone's newest
-     * message: what arrived while the link was down. Live events after a gap
-     * are not replayed, so without this those messages would never be in
-     * the thread or in search.
+     * message (or, with [startCursor], the part of it below that cursor):
+     * what arrived while the link was down. Live events after a gap are not
+     * replayed, so without this those messages would never be in the thread
+     * or in search.
      *
      * [bound] is the timestamp of the newest message the archive had from
      * the phone when the link came back (the caller notes it then). Pages
-     * back from the newest until a page reaches it (at most [maxPages]).
-     * Only the bound ends the paging: messages stored since the link came
-     * back (live ones, say) are on the first pages and are stored again
-     * harmlessly, so they cannot hide the rest of the gap. The import's
-     * cursor is never touched. [onStored] is told about each message stored
-     * (for the sticker inbox); no notifications. Returns the number of
-     * messages fetched.
+     * back until a page reaches it, or the conversation's start, however
+     * many pages that takes: one at a time, with a pause between them, and
+     * cancellable between pages. Only the bound ends the paging: messages
+     * stored since the link came back (live ones, say) are on the first
+     * pages and are stored again harmlessly, so they cannot hide the rest of
+     * the gap. The import's cursor is never touched.
+     *
+     * [onPage] is told, in the same archive write as each page that does not
+     * finish the gap, the cursor the next page starts from: a caller that
+     * records it can resume an interrupted catch-up there ([startCursor])
+     * instead of starting over. [onStored] is told about each message stored
+     * (for the sticker inbox); no notifications. [maxPages] is for tests.
+     * Returns the number of messages fetched.
      */
     suspend fun catchUp(
         conversationId: String,
         bound: Long,
         onStored: (MessageDto, ArchiveRepository.UpsertResult) -> Unit = { _, _ -> },
-        maxPages: Int = CATCH_UP_PAGES,
+        startCursor: Cursor? = null,
+        onPage: (next: Cursor) -> Unit = {},
+        maxPages: Int = Int.MAX_VALUE,
     ): Int {
-        var cursor: Cursor? = null
+        var cursor: Cursor? = startCursor
         var fetched = 0
-        repeat(maxPages) {
+        var pages = 0
+        while (pages < maxPages) {
+            if (pages > 0) delay(pagePauseMs)
             currentCoroutineContext().ensureActive()
             val since = gate.epoch()
             val page = bridge().fetchMessages(conversationId, PAGE_SIZE, cursor)
             currentCoroutineContext().ensureActive()
+            pages++
             if (page.messages.isEmpty()) return fetched
+            val next = page.cursor
+            val done = next == null || page.messages.any { it.timestampMs <= bound }
             gate.ifCurrent(since) {
                 for (message in page.messages) onStored(message, repo.upsertMessage(message))
+                if (!done && next != null) onPage(next)
             } ?: throw ArchiveWiped()
             fetched += page.messages.size
-            if (page.messages.any { it.timestampMs <= bound } || page.cursor == null) return fetched
-            cursor = page.cursor
-            delay(pagePauseMs)
+            if (done) return fetched
+            cursor = next
         }
-        // Hit the cap: what lies between is left to "load older" and the import.
         return fetched
     }
 
@@ -217,9 +230,6 @@ internal class Backfill(
     companion object {
         /** Messages per request; the phone answers larger requests slowly. */
         const val PAGE_SIZE = 50
-
-        /** At most this many pages (newest first) to fill one conversation's gap. */
-        const val CATCH_UP_PAGES = 10
 
         /**
          * Messages to ask for. Below a cursor always a full page: the phone's

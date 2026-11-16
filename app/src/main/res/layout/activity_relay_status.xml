@@ -184,6 +184,16 @@
                         android:layout_marginTop="12dp"
                         android:textAppearance="?attr/textAppearanceBodySmall" />
 
+                    <!-- Only while the app is not exempt: the system's own allow / deny question. -->
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/batteryExempt"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:text="@string/relay_battery_exempt_action"
+                        android:visibility="gone" />
+
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/batterySettings"
                         style="@style/Widget.Material3.Button.TextButton"

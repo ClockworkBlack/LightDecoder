@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Only to show a caught sticker as a notification. Asked for at the moment it is needed. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -16,6 +17,17 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!--
+        Only for the "Let it run in the background" button on the link's
+        status screen, shown while the app is not exempt: it opens the
+        system's own allow / deny question. The link is a messaging
+        connection the user turned on and must stay up while the screen is
+        off; nothing asks without the user tapping that button.
+    -->
+    <uses-permission
+        android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
+        tools:ignore="BatteryLife" />
 
     <!--
         Backup is off because the inbox holds pictures from private

@@ -5,8 +5,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
+	"go.mau.fi/mautrix-gmessages/pkg/libgm"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
 )
 
@@ -90,6 +92,60 @@ func (b *GMBridge) SendMedia(conversationID, tmpID string, data []byte, fileName
 	if conversationID == "" || tmpID == "" {
 		return nil, newError(codeInvalidArgument, "conversation ID and tmp ID are required")
 	}
+	return b.sendMedia(conversationID, tmpID, data, fileName, mime, caption, replyToID)
+}
+
+// SendMediaFile is SendMedia for an attachment in a file: Go reads the file
+// at path itself, so the bytes never pass through Kotlin. The file is read
+// once, before anything is sent, and is not changed or deleted. The same
+// 100 MiB cap applies (too_large, checked before reading); a missing,
+// unreadable or empty file is invalid_argument. The result is SendMedia's.
+func (b *GMBridge) SendMediaFile(conversationID, tmpID, path, fileName, mime, caption, replyToID string) (out []byte, err error) {
+	defer recoverInto(&err)
+	if conversationID == "" || tmpID == "" {
+		return nil, newError(codeInvalidArgument, "conversation ID and tmp ID are required")
+	}
+	data, err := readAttachment(path)
+	if err != nil {
+		return nil, err
+	}
+	return b.sendMedia(conversationID, tmpID, data, fileName, mime, caption, replyToID)
+}
+
+// readAttachment reads an attachment file of at most maxUploadBytes. Errors
+// never quote the path (it may name the attachment).
+func readAttachment(path string) ([]byte, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, newError(codeInvalidArgument, "attachment path is empty")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, newError(codeInvalidArgument, "attachment file could not be opened")
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, newError(codeInvalidArgument, "attachment is not a readable file")
+	}
+	if info.Size() > maxUploadBytes {
+		return nil, newError(codeTooLarge, "attachment is larger than 100 MiB")
+	}
+	// The size may change while reading; the cap is checked again.
+	data, err := io.ReadAll(io.LimitReader(f, maxUploadBytes+1))
+	if err != nil {
+		return nil, newError(codeInvalidArgument, "attachment file could not be read")
+	}
+	if len(data) > maxUploadBytes {
+		return nil, newError(codeTooLarge, "attachment is larger than 100 MiB")
+	}
+	if len(data) == 0 {
+		return nil, newError(codeInvalidArgument, "attachment is empty")
+	}
+	return data, nil
+}
+
+// sendMedia is SendMedia after its ID checks.
+func (b *GMBridge) sendMedia(conversationID, tmpID string, data []byte, fileName, mime, caption, replyToID string) ([]byte, error) {
 	if len(data) == 0 {
 		return nil, newError(codeInvalidArgument, "attachment is empty")
 	}
@@ -118,7 +174,7 @@ func (b *GMBridge) SendMedia(conversationID, tmpID string, data []byte, fileName
 	// take minutes. libgm takes no context here; each of its HTTP calls is
 	// bounded by the client's 5 minute timeout. UploadMedia encrypts a copy
 	// before returning, so the Java-owned data slice is not used after it.
-	media, err := cli.UploadMedia(data, fileName, mime)
+	media, err := uploadMedia(cli, data, fileName, mime)
 	if err != nil {
 		return nil, uploadError(err)
 	}
@@ -138,6 +194,9 @@ func (b *GMBridge) SendMedia(conversationID, tmpID string, data []byte, fileName
 	}
 	return b.send(ctx, sendCli, conv, tmpID, infos, replyToID)
 }
+
+// uploadMedia is cli.UploadMedia; tests replace it.
+var uploadMedia = (*libgm.Client).UploadMedia
 
 // uploadError keeps auth failures recognisable and reports the rest as a
 // failed send (the outbox may retry it).

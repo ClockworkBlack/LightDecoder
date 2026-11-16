@@ -29,8 +29,14 @@ import java.io.FileOutputStream
  *
  * Sends whose outcome is unknown are looked up on the phone before anything
  * else goes out ([reconcile]): an entry a previous run left SENDING (the app
- * died mid-send) is never sent again blindly, and a send Google accepted
- * whose echo never came stops showing "sending" after [unconfirmedGiveUpMs].
+ * died mid-send) is never sent again blindly, a send Google accepted whose
+ * echo never came stops showing "sending" after [unconfirmedGiveUpMs], and a
+ * send that failed with phone_not_responding, or that an unpair held while
+ * it went out, is looked up too, so an echo the phone has settles it.
+ *
+ * Attachments are copied into app storage at intake and handed to the bridge
+ * by path ([RelayBridge.sendMediaFile]): their bytes never pass through the
+ * app's heap.
  */
 internal class Outbox(
     private val context: Context,
@@ -157,6 +163,37 @@ internal class Outbox(
         }
     }
 
+    /**
+     * A failed send whose outcome is unknown (phone_not_responding, or held
+     * by an unpair while it went out): look it up on the phone at the next
+     * drain after [unconfirmedCheckMs], as an interrupted one is, so its echo
+     * clears it if the phone has it.
+     */
+    private fun planLookup(key: String) {
+        synchronized(unconfirmedLock) {
+            RelayPrefs.setLookupSends(context, RelayPrefs.lookupSends(context) + (key to System.currentTimeMillis()))
+        }
+        drainLater(unconfirmedCheckMs + RECHECK_SLACK_MS)
+    }
+
+    /** The sends of [planLookup] still waiting as failed; forgets the ones that are settled (sent, retried, discarded). */
+    private fun pruneLookups(): Map<String, Long> = synchronized(unconfirmedLock) {
+        val all = RelayPrefs.lookupSends(context)
+        val waiting = all.filterKeys { key ->
+            repo.outbox(key)?.status == OutboxStatus.FAILED && repo.message(MessageRow.tmpMessageId(key)) != null
+        }
+        if (waiting != all) RelayPrefs.setLookupSends(context, waiting)
+        waiting
+    }
+
+    private fun forgetLookups(keys: Set<String>) {
+        if (keys.isEmpty()) return
+        synchronized(unconfirmedLock) {
+            val all = RelayPrefs.lookupSends(context)
+            if (all.keys.any { it in keys }) RelayPrefs.setLookupSends(context, all - keys)
+        }
+    }
+
     // --- sending (one coroutine) --------------------------------------------------
 
     /** Sends queued messages in order for as long as the link can send. */
@@ -191,9 +228,11 @@ internal class Outbox(
         val now = System.currentTimeMillis()
         val unconfirmed = pruneUnconfirmed()
         val giveUp = unconfirmed.filterValues { now - it >= unconfirmedGiveUpMs }.keys
+        // Failed with an unknown outcome: asked until the phone answers once.
+        val lookups = pruneLookups().filterValues { now - it >= unconfirmedCheckMs }.keys
         val ask = unconfirmed.filter { (key, sentAt) ->
             key in giveUp || (now - sentAt >= unconfirmedCheckMs && key !in lookedUp)
-        }.keys + interrupted
+        }.keys + interrupted + lookups
         val byConversation = LinkedHashMap<String, MutableMap<String, Long>>()
         for (key in ask) {
             val row = repo.outbox(key) ?: continue
@@ -217,7 +256,9 @@ internal class Outbox(
         }
         // Asked once each, answered or not (a phone that does not answer is not asked on every drain);
         // only the give-up time asks again, and then until it gets an answer.
-        lookedUp.addAll(ask)
+        lookedUp.addAll(ask - lookups)
+        // A failed send's lookup is done once the phone answered (its echo, if found, replaced it).
+        forgetLookups(lookups.filterTo(HashSet()) { it in answered })
         var gaveUp = 0
         for (key in giveUp) {
             if (key !in answered) continue
@@ -308,24 +349,15 @@ internal class Outbox(
     private suspend fun sendOne(queued: OutboxRow, interrupted: Boolean): Boolean {
         val key = queued.idempotencyKey
         val row = claim(key, interrupted) ?: return true
-        val payload = try {
-            payloadOf(row)
-        } catch (e: OutOfMemoryError) {
-            fail(row, RelayException.TOO_LARGE)
-            return true
-        } catch (e: java.io.IOException) {
+        attachmentProblem(row)?.let { problem ->
             // Otherwise the entry would stay SENDING and stall the queue behind it.
-            fail(row, "attachment_unreadable")
-            return true
-        }
-        if (payload == null) {
-            fail(row, if (File(row.mediaLocalPath).length() > MAX_ATTACHMENT_BYTES) RelayException.TOO_LARGE else "attachment_missing")
+            fail(row, problem)
             return true
         }
         var attempt = 0
         while (true) {
             repo.updateOutbox(key, OutboxStatus.SENDING, attemptsDelta = 1)
-            when (val verdict = attempt(row, payload)) {
+            when (val verdict = attempt(row)) {
                 Verdict.Sent -> {
                     if (markSent(row)) awaitEcho(key)
                     return true
@@ -423,6 +455,7 @@ internal class Outbox(
                 } else {
                     repo.setLocalState(key, LocalState.FAILED, UNCONFIRMED)
                     repo.updateOutbox(key, OutboxStatus.FAILED, error = UNCONFIRMED)
+                    planLookup(key)
                     true
                 }
                 // Gone: the archive was deleted meanwhile.
@@ -444,11 +477,12 @@ internal class Outbox(
         true
     }
 
-    private fun attempt(row: OutboxRow, payload: ByteArray): Verdict {
+    private fun attempt(row: OutboxRow): Verdict {
         val result = try {
             if (isMedia(row)) {
-                bridge().sendMedia(
-                    row.conversationId, row.idempotencyKey, payload,
+                // The bridge reads the file itself (at most 100 MB, as checked at intake).
+                bridge().sendMediaFile(
+                    row.conversationId, row.idempotencyKey, row.mediaLocalPath,
                     row.mediaName.ifEmpty { "attachment" }, row.mediaMime,
                     row.textBody.ifBlank { null }, row.replyToId.ifEmpty { null },
                 )
@@ -502,14 +536,19 @@ internal class Outbox(
             repo.updateOutbox(key, OutboxStatus.FAILED, error = reason)
         }
         RelayLog.add(context, "Send of a ${kindOf(row)} failed: $reason")
+        // Google accepted it and the phone may have sent it after all: ask the phone later.
+        if (reason == RelayException.PHONE_NOT_RESPONDING) planLookup(key)
     }
 
-    /** The bytes to send: the attachment for a media entry (null if it is gone or too large), else nothing. */
-    private fun payloadOf(row: OutboxRow): ByteArray? {
-        if (!isMedia(row)) return EMPTY
+    /** Why a media entry's attachment cannot be sent (gone, empty, too large); null if it can, or for text. */
+    private fun attachmentProblem(row: OutboxRow): String? {
+        if (!isMedia(row)) return null
         val file = File(row.mediaLocalPath)
-        if (!file.isFile || file.length() > MAX_ATTACHMENT_BYTES || file.length() == 0L) return null
-        return file.readBytes()
+        return when {
+            row.mediaLocalPath.isEmpty() || !file.isFile || file.length() == 0L -> "attachment_missing"
+            file.length() > MAX_ATTACHMENT_BYTES -> RelayException.TOO_LARGE
+            else -> null
+        }
     }
 
     private fun isMedia(row: OutboxRow) = row.mediaLocalPath.isNotEmpty() || row.mediaName.isNotEmpty()
@@ -610,7 +649,7 @@ internal class Outbox(
 
         /** Messages per page, and at most this many pages, when looking for echoes. */
         private const val LOOKUP_PAGE = Backfill.PAGE_SIZE
-        private const val LOOKUP_PAGES = Backfill.CATCH_UP_PAGES
+        private const val LOOKUP_PAGES = 10
 
         /**
          * An echo carries the phone's time, which can be a little off this
@@ -621,6 +660,5 @@ internal class Outbox(
         private const val RECHECK_SLACK_MS = 1_000L
 
         private val TRANSIENT_STATUSES = setOf("FAILURE_2", "FAILURE_3")
-        private val EMPTY = ByteArray(0)
     }
 }

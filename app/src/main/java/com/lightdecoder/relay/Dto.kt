@@ -52,11 +52,25 @@ data class PairingChallenge(
 enum class Folder(val wire: String) {
     INBOX("inbox"),
     ARCHIVE("archive"),
-    SPAM("spam");
+    SPAM("spam"),
+
+    /**
+     * Local only: conversations the phone deleted or moved to its trash. The
+     * archive keeps them here (instead of deleting them) until the user
+     * restores or purges them ([RelayManager.restoreDeletedLocally],
+     * [RelayManager.purgeDeleted]). Never listed from, or sent to, the phone.
+     */
+    DELETED("deleted");
+
+    /** Whether the phone can be asked for this folder (everything but [DELETED]). */
+    val listable: Boolean get() = this != DELETED
 
     companion object {
-        /** Null for folders that cannot be listed ("deleted", "other", unknown). */
-        fun fromWire(wire: String): Folder? = entries.firstOrNull { it.wire == wire }
+        /** Null for folders that cannot be listed from the phone ("deleted", "other", unknown). */
+        fun fromWire(wire: String): Folder? = entries.firstOrNull { it.wire == wire && it.listable }
+
+        /** The folder a stored conversation is in, including the local [DELETED]; null for "other" or unknown. */
+        fun fromStored(wire: String): Folder? = entries.firstOrNull { it.wire == wire }
     }
 }
 

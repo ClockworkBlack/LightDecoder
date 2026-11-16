@@ -42,7 +42,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * The Google Messages conversation list: Inbox, Archived and Spam, full-text
+ * The Google Messages conversation list: Inbox, Archived, Spam and the local
+ * Deleted folder (what the phone deleted, kept here until restored or
+ * deleted for good), full-text
  * search over the local archive, and the way into a thread. Everything shown
  * comes from the local archive, so it still works while the link is offline;
  * the banner on top says when it is.
@@ -66,6 +68,9 @@ class ConversationsActivity : AppCompatActivity() {
     private var restoredQuery: String? = null
     private var searchJob: Job? = null
     private var reloadScheduled = false
+
+    /** Whether the Deleted folder had anything at its last load (for "Empty Deleted"). */
+    private var hasDeleted = false
 
     private val onArchiveChange: (ArchiveChange) -> Unit = { change ->
         when (change.kind) {
@@ -102,6 +107,7 @@ class ConversationsActivity : AppCompatActivity() {
         binding.searchResults.addItemDecoration(DividerItemDecoration(this, DividerItemDecoration.VERTICAL))
 
         setUpTabs()
+        renderFolderControls()
         binding.swipe.setOnRefreshListener { refreshFromPhone() }
         binding.fab.setOnClickListener { startActivity(Intent(this, NewConversationActivity::class.java)) }
 
@@ -186,9 +192,11 @@ class ConversationsActivity : AppCompatActivity() {
             override fun onTabSelected(tab: TabLayout.Tab) {
                 folder = tab.tag as Folder
                 adapter.submitList(emptyList())
+                renderFolderControls()
                 reload()
                 // Archived and Spam are not part of the automatic sync; fetch them when opened.
-                if (folder != Folder.INBOX && relayState.isOnline) refreshFromPhone(quiet = true)
+                // Deleted is local only: the phone has nothing to list for it.
+                if (folder != Folder.INBOX && folder.listable && relayState.isOnline) refreshFromPhone(quiet = true)
             }
 
             override fun onTabUnselected(tab: TabLayout.Tab) = Unit
@@ -196,6 +204,12 @@ class ConversationsActivity : AppCompatActivity() {
                 binding.list.smoothScrollToPosition(0)
             }
         })
+    }
+
+    /** Pull to refresh and the menu's refresh ask the phone, which has nothing for the local Deleted folder. */
+    private fun renderFolderControls() {
+        binding.swipe.isEnabled = folder.listable
+        invalidateOptionsMenu()
     }
 
     // --- loading -------------------------------------------------------------
@@ -222,11 +236,16 @@ class ConversationsActivity : AppCompatActivity() {
             val items = withContext(Dispatchers.IO) { repo.conversations(shown).map { ConversationItem(it, titleFor(it)) } }
             if (shown != folder || searchQuery != null) return@launch
             adapter.submitList(items)
+            if (shown == Folder.DELETED && hasDeleted != items.isNotEmpty()) {
+                hasDeleted = items.isNotEmpty()
+                invalidateOptionsMenu()
+            }
             binding.emptyText.setText(
                 when (shown) {
                     Folder.INBOX -> if (paired) R.string.chat_empty_inbox else R.string.chat_empty_unpaired
                     Folder.ARCHIVE -> R.string.chat_empty_archive
                     Folder.SPAM -> R.string.chat_empty_spam
+                    Folder.DELETED -> R.string.chat_empty_deleted
                 }
             )
             binding.emptyText.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
@@ -244,6 +263,10 @@ class ConversationsActivity : AppCompatActivity() {
 
     private fun refreshFromPhone(quiet: Boolean = false) {
         val shown = folder
+        if (!shown.listable) {
+            binding.swipe.isRefreshing = false
+            return
+        }
         lifecycleScope.launch {
             if (!quiet) binding.swipe.isRefreshing = true
             relayAttempt { manager.refreshConversations(shown) }
@@ -294,7 +317,8 @@ class ConversationsActivity : AppCompatActivity() {
     override fun onPrepareOptionsMenu(menu: Menu): Boolean {
         // Without a pairing, what is listed is an archive an unpair kept: it can be deleted here.
         menu.findItem(R.id.action_delete_archive)?.isVisible = !paired
-        menu.findItem(R.id.action_refresh)?.isVisible = paired
+        menu.findItem(R.id.action_refresh)?.isVisible = paired && folder.listable
+        menu.findItem(R.id.action_empty_deleted)?.isVisible = folder == Folder.DELETED && hasDeleted && searchQuery == null
         return super.onPrepareOptionsMenu(menu)
     }
 
@@ -304,6 +328,7 @@ class ConversationsActivity : AppCompatActivity() {
             R.id.action_refresh -> refreshFromPhone()
             R.id.action_link_status -> startActivity(Intent(this, RelayStatusActivity::class.java))
             R.id.action_delete_archive -> LocalArchive.confirmDelete(this) { reload() }
+            R.id.action_empty_deleted -> confirmEmptyDeleted()
             else -> return super.onOptionsItemSelected(item)
         }
         return true
@@ -311,6 +336,7 @@ class ConversationsActivity : AppCompatActivity() {
 
     private fun enterSearch() {
         searchQuery = ""
+        invalidateOptionsMenu()
         binding.folders.visibility = View.GONE
         binding.swipe.visibility = View.GONE
         binding.fab.hide()
@@ -321,6 +347,7 @@ class ConversationsActivity : AppCompatActivity() {
 
     private fun exitSearch() {
         searchQuery = null
+        invalidateOptionsMenu()
         searchJob?.cancel()
         binding.folders.visibility = View.VISIBLE
         binding.swipe.visibility = View.VISIBLE
@@ -359,10 +386,17 @@ class ConversationsActivity : AppCompatActivity() {
         when (row.folderEnum) {
             Folder.INBOX -> actions += R.string.chat_action_archive to { setArchived(row, true) }
             Folder.ARCHIVE -> actions += R.string.chat_action_unarchive to { setArchived(row, false) }
+            Folder.SPAM -> actions += R.string.chat_action_not_spam to { markNotSpam(row) }
             else -> Unit
         }
-        actions += (if (row.muted) R.string.chat_action_unmute else R.string.chat_action_mute) to { setMuted(row, !row.muted) }
-        actions += R.string.chat_action_delete to { confirmDelete(item) }
+        if (row.folderEnum == Folder.DELETED) {
+            // The phone already deleted it: only this device's copy is left to decide on.
+            actions += R.string.chat_action_restore to { restoreDeleted(row) }
+            actions += R.string.chat_action_delete_forever to { confirmDeleteForever(item) }
+        } else {
+            actions += (if (row.muted) R.string.chat_action_unmute else R.string.chat_action_mute) to { setMuted(row, !row.muted) }
+            actions += R.string.chat_action_delete to { confirmDelete(item) }
+        }
         MaterialAlertDialogBuilder(this)
             .setTitle(item.title)
             .setItems(actions.map { getString(it.first) }.toTypedArray()) { _, which -> actions[which].second() }
@@ -372,6 +406,35 @@ class ConversationsActivity : AppCompatActivity() {
     private fun setArchived(row: ConversationRow, archived: Boolean) = runAction(
         if (archived) R.string.chat_archived else R.string.chat_unarchived,
     ) { manager.setArchived(row.id, archived) }
+
+    private fun markNotSpam(row: ConversationRow) = runAction(R.string.chat_not_spam_done) { manager.markNotSpam(row.id) }
+
+    private fun restoreDeleted(row: ConversationRow) = runAction(R.string.chat_restored) { manager.restoreDeletedLocally(row.id) }
+
+    /** Deleted for good, here only: the phone already deleted it. */
+    private fun confirmDeleteForever(item: ConversationItem) {
+        val id = item.row.id
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.chat_delete_forever_title)
+            .setMessage(R.string.chat_delete_forever_body)
+            .setPositiveButton(R.string.chat_action_delete_forever) { _, _ ->
+                runAction(R.string.chat_deleted_forever) { manager.purgeDeleted(id) }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /** Everything in the Deleted folder, for good, here only. */
+    private fun confirmEmptyDeleted() {
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.chat_empty_deleted_title)
+            .setMessage(R.string.chat_empty_deleted_body)
+            .setPositiveButton(R.string.chat_empty_deleted_action) { _, _ ->
+                runAction(R.string.chat_emptied_deleted) { manager.purgeDeleted(null) }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
 
     private fun setMuted(row: ConversationRow, muted: Boolean) = runAction(
         if (muted) R.string.chat_muted_done else R.string.chat_unmuted_done,
@@ -423,6 +486,7 @@ class ConversationsActivity : AppCompatActivity() {
             Folder.INBOX to R.string.chat_folder_inbox,
             Folder.ARCHIVE to R.string.chat_folder_archive,
             Folder.SPAM to R.string.chat_folder_spam,
+            Folder.DELETED to R.string.chat_folder_deleted,
         )
     }
 }
