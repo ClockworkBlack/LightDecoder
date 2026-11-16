@@ -27,6 +27,9 @@ class LassoView @JvmOverloads constructor(
     /** The closed outline, and the same outline as x,y pairs (both in the picture's pixels). */
     var onTraced: ((Path, FloatArray) -> Unit)? = null
 
+    /** A stroke too small to cut anything out (a tap, a short flick): the user is told how to trace. */
+    var onTooSmall: (() -> Unit)? = null
+
     private var bitmap: Bitmap? = null
     private val toView = Matrix()
     private val toBitmap = Matrix()
@@ -81,15 +84,26 @@ class LassoView @JvmOverloads constructor(
                 addPoint(event.x, event.y)
             }
             MotionEvent.ACTION_MOVE -> {
+                // A fast finger arrives as a few events carrying many points: take them all.
+                for (h in 0 until event.historySize) {
+                    path.lineTo(event.getHistoricalX(h), event.getHistoricalY(h))
+                    points++
+                    addPoint(event.getHistoricalX(h), event.getHistoricalY(h))
+                }
                 path.lineTo(event.x, event.y)
                 points++
                 addPoint(event.x, event.y)
             }
             MotionEvent.ACTION_UP -> {
-                if (points >= MIN_POINTS) {
+                // Judged by its size on screen, not by how many events the phone sent.
+                val bounds = android.graphics.RectF().also { path.computeBounds(it, true) }
+                val min = MIN_SIZE_DP * resources.displayMetrics.density
+                if (points >= 3 && bounds.width() >= min && bounds.height() >= min) {
                     path.close()
                     val outline = Path(path).apply { transform(toBitmap) }
                     onTraced?.invoke(outline, traced.toFloatArray())
+                } else {
+                    onTooSmall?.invoke()
                 }
                 path.reset()
             }
@@ -106,6 +120,7 @@ class LassoView @JvmOverloads constructor(
     }
 
     private companion object {
-        const val MIN_POINTS = 8
+        /** A trace smaller than this (both ways, on screen) cuts nothing out. */
+        const val MIN_SIZE_DP = 24
     }
 }

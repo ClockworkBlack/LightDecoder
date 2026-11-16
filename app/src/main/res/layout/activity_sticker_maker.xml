@@ -12,7 +12,8 @@
         android:layout_height="?attr/actionBarSize"
         app:title="@string/sticker_maker_title" />
 
-    <ScrollView
+    <com.lightdecoder.ui.sticker.DrawingScrollView
+        android:id="@+id/page"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1">
@@ -295,7 +296,7 @@
                 android:textAppearance="?attr/textAppearanceBodySmall"
                 android:textColor="?attr/colorOnSurfaceVariant" />
         </LinearLayout>
-    </ScrollView>
+    </com.lightdecoder.ui.sticker.DrawingScrollView>
 
     <com.google.android.material.button.MaterialButton
         android:id="@+id/save"

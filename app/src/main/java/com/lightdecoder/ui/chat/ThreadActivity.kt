@@ -105,6 +105,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private var participants: List<ParticipantRow> = emptyList()
     private var title = ""
 
+    /** What the toolbar's avatar was last drawn for (name, key, colour). */
+    private var shownAvatar: Triple<String, String, String>? = null
+
     /** How many of the newest messages are shown; grows as the user scrolls up. */
     private var windowSize = PAGE
     private var growWindow = false
@@ -757,11 +760,16 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         title = conv?.name?.takeIf { it.isNotBlank() }
             ?: others.map { it.name.ifBlank { it.formattedNumber.ifBlank { it.number } } }.filter { it.isNotBlank() }
                 .joinToString(", ").ifBlank { getString(R.string.chat_untitled) }
+        // The person's (or group's) avatar next to the name, as in the conversation list:
+        // only redrawn when it changes, and before the title, which is what the rest follows.
+        val avatarKey = Triple(title, conv?.id ?: conversationId, conv?.avatarColor.orEmpty())
+        if (avatarKey != shownAvatar) {
+            shownAvatar = avatarKey
+            val density = resources.displayMetrics.density
+            val avatar = Avatars.drawable(this, avatarKey.first, avatarKey.second, avatarKey.third, (TOOLBAR_AVATAR_DP * density).toInt())
+            binding.toolbar.logo = android.graphics.drawable.InsetDrawable(avatar, 0, 0, (TOOLBAR_AVATAR_GAP_DP * density).toInt(), 0)
+        }
         supportActionBar?.title = title
-        // The person's (or group's) avatar next to the name, as in the conversation list.
-        val density = resources.displayMetrics.density
-        val avatar = Avatars.drawable(this, title, conv?.id ?: conversationId, conv?.avatarColor.orEmpty(), (TOOLBAR_AVATAR_DP * density).toInt())
-        binding.toolbar.logo = android.graphics.drawable.InsetDrawable(avatar, 0, 0, (TOOLBAR_AVATAR_GAP_DP * density).toInt(), 0)
         renderPeerActivity()
         invalidateOptionsMenu()
         renderComposerState()

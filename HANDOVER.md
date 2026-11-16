@@ -22,6 +22,14 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.5
+- Tracing takes on the first touch: the sticker maker's page (`DrawingScrollView`) is locked while
+  tracing or brushing (a settling fling used to swallow the first touch), the picture is scrolled
+  into view, fast strokes use every batched point, and a trace is judged by its size (24 dp), with
+  a hint when it is too small instead of silently dropping it.
+- The thread's toolbar avatar is drawn only when it changes, before the title (redrawing it on
+  every refresh disturbed the thread-switch ordering LinkRound2Test checks).
+
 ## 0.5.4
 - The sticker panel has an "Edit stickers" button (pencil): while on, a tapped sticker opens in
   the editor instead of being sent; a hint line says touch and hold edits or deletes.

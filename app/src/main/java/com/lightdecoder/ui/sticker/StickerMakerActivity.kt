@@ -104,6 +104,9 @@ class StickerMakerActivity : AppCompatActivity() {
             render()
         }
         binding.resetOriginal.setOnClickListener { resetToOriginal() }
+        binding.lasso.onTooSmall = {
+            Toast.makeText(this, R.string.sticker_trace_too_small, Toast.LENGTH_SHORT).show()
+        }
         binding.lasso.onTraced = { outline, points ->
             // Cut from the original, so the same cut can be made again when the sticker is edited later.
             original?.let { source = StickerMaker.cutToPath(it, outline) }
@@ -223,6 +226,9 @@ class StickerMakerActivity : AppCompatActivity() {
         val picture = source ?: return
         binding.lasso.setBitmap(picture)
         binding.lasso.visibility = View.VISIBLE
+        // The page holds still while the finger draws, with the whole picture in view.
+        binding.page.locked = true
+        binding.page.post { binding.page.smoothScrollTo(0, binding.lasso.top) }
         binding.preview.visibility = View.GONE
         binding.hint.setText(R.string.sticker_trace_hint)
         binding.hint.visibility = View.VISIBLE
@@ -237,6 +243,8 @@ class StickerMakerActivity : AppCompatActivity() {
         if (source == null) return
         stopTracing()
         binding.refine.visibility = View.VISIBLE
+        binding.page.locked = true
+        binding.page.post { binding.page.smoothScrollTo(0, binding.refine.top) }
         binding.refinePanel.visibility = View.VISIBLE
         binding.preview.visibility = View.GONE
         binding.hint.setText(R.string.sticker_refine_hint)
@@ -246,6 +254,7 @@ class StickerMakerActivity : AppCompatActivity() {
 
     private fun stopRefining() {
         if (binding.refine.visibility != View.VISIBLE) return
+        binding.page.locked = false
         binding.refine.visibility = View.GONE
         binding.refinePanel.visibility = View.GONE
         binding.preview.visibility = View.VISIBLE
@@ -284,6 +293,7 @@ class StickerMakerActivity : AppCompatActivity() {
     }
 
     private fun stopTracing() {
+        binding.page.locked = binding.refine.visibility == View.VISIBLE
         binding.lasso.visibility = View.GONE
         binding.preview.visibility = View.VISIBLE
         binding.hint.visibility = View.GONE
