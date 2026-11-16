@@ -22,6 +22,10 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.4
+- The sticker panel has an "Edit stickers" button (pencil): while on, a tapped sticker opens in
+  the editor instead of being sent; a hint line says touch and hold edits or deletes.
+
 ## 0.5.3
 - Editing made stickers: touch and hold a sticker in the sticker panel > Edit (or Delete). The maker
   opens with how it was made (`sticker/StickerProject`: the original picture plus options, traced

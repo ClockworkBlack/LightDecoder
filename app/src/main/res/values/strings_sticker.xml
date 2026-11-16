@@ -22,4 +22,8 @@
     <string name="sticker_edit">Edit</string>
     <string name="sticker_delete">Delete</string>
     <string name="sticker_old_no_original">This sticker was made before LightDecoder kept original pictures, so it is edited as it is: its outline and cut-out are part of the picture.</string>
+    <string name="sticker_edit_mode">Edit stickers</string>
+    <string name="sticker_edit_mode_done">Done</string>
+    <string name="sticker_edit_mode_title">Tap a sticker to edit it</string>
+    <string name="sticker_sheet_hint">Tap a sticker to send it. Touch and hold it to edit or delete it.</string>
 </resources>

@@ -1072,6 +1072,22 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val grid = view.findViewById<RecyclerView>(R.id.stickersGrid)
         val empty = view.findViewById<View>(R.id.stickersEmpty)
         grid.layoutManager = androidx.recyclerview.widget.GridLayoutManager(this, STICKER_COLUMNS)
+        // "Edit stickers": while on, a tapped sticker opens in the editor instead of being sent.
+        val title = view.findViewById<TextView>(R.id.stickersTitle)
+        val editMode = view.findViewById<com.google.android.material.button.MaterialButton>(R.id.stickersEditMode)
+        var editing = false
+        fun renderEditMode() {
+            title.setText(if (editing) R.string.sticker_edit_mode_title else R.string.sticker_sheet_title)
+            editMode.setText(if (editing) R.string.sticker_edit_mode_done else R.string.sticker_edit_mode)
+        }
+        editMode.setOnClickListener {
+            editing = !editing
+            renderEditMode()
+        }
+        fun edit(file: File) {
+            sheet.dismiss()
+            makeSticker.launch(com.lightdecoder.ui.sticker.StickerMakerActivity.editIntent(this, file))
+        }
         view.findViewById<View>(R.id.stickersNew).setOnClickListener {
             sheet.dismiss()
             makeSticker.launch(com.lightdecoder.ui.sticker.StickerMakerActivity.intent(this))
@@ -1095,19 +1111,24 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                     }
                 }
                 empty.visibility = if (tiles.isEmpty()) View.VISIBLE else View.GONE
+                editMode.visibility = if (tiles.isEmpty()) View.GONE else View.VISIBLE
+                view.findViewById<View>(R.id.stickersHint).visibility = if (tiles.isEmpty()) View.GONE else View.VISIBLE
                 grid.adapter = StickerTiles(
                     tiles,
                     onTap = { file ->
-                        sheet.dismiss()
-                        sendSticker(file)
+                        if (editing) {
+                            edit(file)
+                        } else {
+                            sheet.dismiss()
+                            sendSticker(file)
+                        }
                     },
                     onHold = { file ->
                         // Edit it (all the maker's tools, or back to its original picture) or delete it.
                         MaterialAlertDialogBuilder(this@ThreadActivity)
                             .setItems(arrayOf(getString(R.string.sticker_edit), getString(R.string.sticker_delete))) { _, which ->
                                 if (which == 0) {
-                                    sheet.dismiss()
-                                    makeSticker.launch(com.lightdecoder.ui.sticker.StickerMakerActivity.editIntent(this@ThreadActivity, file))
+                                    edit(file)
                                 } else {
                                     confirmStickerDelete(file) { refresh() }
                                 }
