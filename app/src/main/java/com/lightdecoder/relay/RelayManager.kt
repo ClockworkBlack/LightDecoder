@@ -480,6 +480,15 @@ class RelayManager private constructor(
         }
     }
 
+    /**
+     * Loads the bridge ahead of pairing (the Go library and its store take a
+     * moment), so that it is ready by the time the user has signed in.
+     * Cheap; safe on the main thread; touches no network.
+     */
+    fun prepareForPairing() {
+        scope.launch { runCatching { ensureBridge() } }
+    }
+
     /** Abandons the pairing in progress. A waiting [finishPairing] throws pairing_cancelled. */
     fun cancelPairing() {
         scope.launch { bridge?.cancelPairing() }
@@ -801,7 +810,15 @@ class RelayManager private constructor(
     override fun sendMedia(conversationId: String, uri: Uri, caption: String?, replyToId: String?): String {
         val tmpId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
-        onIntake("queue an attachment") { outbox.enqueueMedia(tmpId, conversationId, uri, caption, replyToId, now) }
+        // The picture alone, then its text as a message of its own, as Google's apps
+        // deliver them: a picture and its caption in one request reached the phone as
+        // the text only. Queued in this order on the one intake thread, they go out in it.
+        onIntake("queue an attachment") { outbox.enqueueMedia(tmpId, conversationId, uri, null, replyToId, now) }
+        val text = caption?.trim().orEmpty()
+        if (text.isNotEmpty()) {
+            val textTmpId = UUID.randomUUID().toString()
+            onIntake("queue a message") { outbox.enqueueText(textTmpId, conversationId, text, null, now + 1) }
+        }
         return tmpId
     }
 
@@ -2160,6 +2177,7 @@ class RelayManager private constructor(
     private fun onMessage(dto: MessageDto) {
         // Read before the upsert moves it: the conversation's newest message so far.
         val previousLatest = if (dto.isDeleted) 0L else repo.conversation(dto.conversationId)?.lastMessageTs ?: 0L
+        if (dto.fromMe && !dto.isDeleted) logOutgoing(dto)
         val result = repo.upsertMessage(dto)
         if (dto.isDeleted || dto.id.isEmpty()) return
         requestFullSizes(dto, result.newMediaParts)
@@ -2175,6 +2193,37 @@ class RelayManager private constructor(
             // what the conversation already had.
             val stale = System.currentTimeMillis() - dto.timestampMs > STALE_MESSAGE_MS && dto.timestampMs < previousLatest
             if (!dto.isOld && !stale && !dto.fromMe && dto.direction == "in") MessageNotifier.onIncoming(app, repo, dto)
+        }
+    }
+
+    /**
+     * For the problem report: what the phone did with a message sent from
+     * here (its echo) and how an outgoing picture's status moves. Kinds and
+     * status names only, never text, names or numbers.
+     */
+    private fun logOutgoing(dto: MessageDto) {
+        try {
+            val queued = dto.tmpId.takeIf { it.isNotEmpty() }?.let { repo.outbox(it) }
+            val local = dto.tmpId.takeIf { it.isNotEmpty() }?.let { repo.message(MessageRow.tmpMessageId(it)) }
+            val pictures = dto.mediaParts.size
+            if (local != null) {
+                val sentPicture = queued?.mediaLocalPath?.isNotEmpty() == true || local.media.isNotEmpty()
+                RelayLog.add(
+                    app,
+                    "Phone's copy of a sent ${if (sentPicture) "picture" else "message"} arrived: " +
+                        "$pictures picture part(s), text ${if (dto.text.isBlank()) "none" else "yes"}, " +
+                        "status ${dto.status.ifEmpty { "-" }}, ${dto.transport}" +
+                        if (sentPicture && pictures == 0) " - THE PICTURE IS MISSING" else "",
+                )
+                return
+            }
+            if (pictures == 0) return
+            val before = repo.message(dto.id)?.status
+            if (before != null && before != dto.status) {
+                RelayLog.add(app, "Sent picture: status ${before.ifEmpty { "-" }} -> ${dto.status.ifEmpty { "-" }}, ${dto.transport}")
+            }
+        } catch (e: RuntimeException) {
+            // Only a log line.
         }
     }
 

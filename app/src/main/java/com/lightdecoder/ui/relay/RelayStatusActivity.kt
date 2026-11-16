@@ -91,6 +91,12 @@ class RelayStatusActivity : AppCompatActivity() {
         binding.batterySettings.setOnClickListener { openBatterySettings() }
         binding.batteryExempt.setOnClickListener { askBatteryExemption() }
         binding.showLog.setOnClickListener { showLog() }
+        binding.reportProblem.setOnClickListener {
+            lifecycleScope.launch {
+                val report = withContext(Dispatchers.IO) { com.lightdecoder.ui.ProblemReport.build(this@RelayStatusActivity) }
+                com.lightdecoder.ui.ProblemReport.share(this@RelayStatusActivity, report)
+            }
+        }
 
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {

@@ -256,7 +256,7 @@ class ConversationsActivity : AppCompatActivity() {
 
     private fun setUpServiceTabs() {
         val tabs = binding.services
-        for (service in ChatService.entries) {
+        for (service in com.lightdecoder.chat.Features.shownServices()) {
             tabs.addTab(tabs.newTab().setText(ServiceUi.tabLabel(service)).setTag(service), service == backend.service)
         }
         tabs.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {

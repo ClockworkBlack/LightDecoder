@@ -153,10 +153,11 @@ class PictureGalleryTest {
             }
             scenario.waitFor("send to be possible") { it.findViewById<View>(R.id.send).isEnabled }
             scenario.onActivity { it.findViewById<View>(R.id.send).performClick() }
-            env.eventually(manager, what = "the picture to go out") { fake.sent.isNotEmpty() }
-            val sent = fake.sent.single()
+            env.eventually(manager, what = "the picture and its text to go out") { fake.sent.size == 2 }
+            val sent = fake.sent[0]
             assertEquals("c1", sent.conversationId)
-            assertEquals("look at this", sent.text)
+            assertEquals("the picture goes first, alone", "", sent.text)
+            assertEquals("then its text", "look at this", fake.sent[1].text)
             assertEquals("picked.png", sent.fileName)
             assertNotNull("handed over as a file", sent.path)
             val decoded = BitmapFactory.decodeByteArray(sent.media, 0, sent.media!!.size)
@@ -233,14 +234,14 @@ class PictureGalleryTest {
         val photo = bigPhoto()
         assertTrue("the test photo is big: ${photo.length()}", photo.length() > AttachmentPrep.MMS.maxBytes)
         manager.sendMedia("c1", Uri.fromFile(photo), "look", null)
-        env.eventually(manager, timeoutMs = 30_000, what = "the picture to go out") { fake.sent.isNotEmpty() }
-        val sent = fake.sent.single()
+        env.eventually(manager, timeoutMs = 30_000, what = "the picture to go out") { fake.sent.size == 2 }
+        val sent = fake.sent[0]
         assertTrue("small enough for MMS: ${sent.media!!.size}", sent.media!!.size <= AttachmentPrep.MMS.maxBytes)
         assertEquals("image/jpeg", sent.mime)
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(sent.media, 0, sent.media!!.size, bounds)
         assertTrue(maxOf(bounds.outWidth, bounds.outHeight) <= AttachmentPrep.MMS.maxSide)
-        assertEquals("the caption goes with it", "look", sent.text)
+        assertEquals("the caption follows as its own message", "look", fake.sent[1].text)
     }
 
     @Test

@@ -36,6 +36,9 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
     // --- pairing
     var challenge = PairingChallenge("🦊", "https://example.invalid/emoji.svg", "someone@example.com")
     var startPairingError: RelayException? = null
+
+    /** Errors the next startPairing calls throw, one each, before behaving normally. */
+    val startPairingFailsOnce = java.util.concurrent.ConcurrentLinkedQueue<RelayException>()
     /** What finishPairing returns: by default the phone status() reports, as in Go. */
     var finishPairing: () -> String = { phoneId }
     var sessionAfterPairing: ByteArray = SESSION
@@ -119,6 +122,7 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
 
     override fun startPairing(cookies: Map<String, String>): PairingChallenge {
         calls += "startPairing"
+        startPairingFailsOnce.poll()?.let { throw it }
         startPairingError?.let { throw it }
         return challenge
     }

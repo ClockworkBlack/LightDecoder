@@ -460,13 +460,16 @@ class OutboxTest {
 
         picture.delete() // the original can go away; the copy is sent
         fake.goOnline()
-        env.eventually(manager, what = "the send") { fake.sent.size == 1 }
-        val sent = fake.sent.single()
+        env.eventually(manager, what = "the sends") { fake.sent.size == 2 }
+        val sent = fake.sent[0]
         // Handed over by path (Go: SendMediaFile): the bytes never pass through the app.
         assertEquals(copy.path, sent.path)
         assertArrayEquals(ByteArray(2048) { it.toByte() }, sent.media)
-        assertEquals("look", sent.text)
+        assertEquals("the picture goes alone", "", sent.text)
         assertEquals("pick.png", sent.fileName)
+        // Its text follows as a message of its own.
+        assertEquals("look", fake.sent[1].text)
+        assertNull(fake.sent[1].media)
 
         // The echo retires the entry and its copy.
         env.eventually(manager, what = "sent") { env.repo.outbox(tmpId)?.status == OutboxStatus.SENT }

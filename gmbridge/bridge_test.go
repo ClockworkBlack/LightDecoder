@@ -602,3 +602,55 @@ type closeTracker struct {
 }
 
 func (c *closeTracker) Close() error { c.closed.Store(true); return nil }
+
+// Pairing again must revoke the pairing it replaces, so the phone does not
+// list LightDecoder twice; a first pairing has nothing to revoke.
+func TestANewPairingRevokesTheOneItReplaces(t *testing.T) {
+	revoked := make(chan *libgm.AuthData, 2)
+	orig := revokeReplaced
+	revokeReplaced = func(old *libgm.AuthData) { revoked <- old }
+	defer func() { revokeReplaced = orig }()
+
+	b, err := NewGMBridge(pairedSession(t), newRecorder())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	b.mu.Lock()
+	old := b.auth
+	b.mu.Unlock()
+	if old == nil || old.Mobile == nil {
+		t.Fatal("test session should be paired")
+	}
+
+	a := newPairingAttempt()
+	a.auth = pairedAuth()
+	if !b.adoptPairing(a, "phone/2") {
+		t.Fatal("adoptPairing refused")
+	}
+	select {
+	case got := <-revoked:
+		if got != old {
+			t.Error("revoked something other than the replaced pairing")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the replaced pairing was not revoked")
+	}
+
+	// An unpaired bridge pairing for the first time revokes nothing.
+	fresh, err := NewGMBridge(nil, newRecorder())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.Close()
+	first := newPairingAttempt()
+	first.auth = pairedAuth()
+	if !fresh.adoptPairing(first, "phone/3") {
+		t.Fatal("adoptPairing refused")
+	}
+	select {
+	case <-revoked:
+		t.Error("a first pairing revoked something")
+	case <-time.After(200 * time.Millisecond):
+	}
+}

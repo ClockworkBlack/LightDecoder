@@ -3,7 +3,9 @@ package com.lightdecoder.ui.relay
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lightdecoder.relay.RelayManager
+import com.lightdecoder.relay.RelayException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -81,11 +83,21 @@ class PairingModel : ViewModel() {
         job?.cancel()
         state.value = Ui(step = Step.CONFIRM, starting = true)
         job = viewModelScope.launch {
-            val challenge = relayAttempt { manager.startPairing(signedIn) }.getOrElse {
+            var challenge = relayAttempt { manager.startPairing(signedIn) }
+            // Google is sometimes slow to open the pairing, and an attempt just
+            // abandoned may still be closing: one automatic second try, so the
+            // user does not have to tap Retry for what usually works then.
+            val first = challenge.exceptionOrNull()?.let(RelayErrors::codeOf)
+            if (first != null && first in RETRIED_ONCE) {
+                if (first == RelayException.PAIRING_IN_PROGRESS) manager.cancelPairing()
+                delay(RETRY_PAUSE_MS)
+                challenge = relayAttempt { manager.startPairing(signedIn) }
+            }
+            val started = challenge.getOrElse {
                 fail(it)
                 return@launch
             }
-            state.value = state.value.copy(starting = false, emoji = challenge.emoji, account = challenge.account)
+            state.value = state.value.copy(starting = false, emoji = started.emoji, account = started.account)
             // Blocks until the user taps an emoji on their phone (or it times out).
             relayAttempt { manager.finishPairing() }
                 .onSuccess {
@@ -122,5 +134,14 @@ class PairingModel : ViewModel() {
     override fun onCleared() {
         stopAttempt()
         cookies = null
+    }
+
+    private companion object {
+        /** Start failures worth one automatic retry: slowness or a leftover attempt, not a refusal. */
+        val RETRIED_ONCE = setOf(
+            RelayException.PAIRING_INIT_TIMEOUT, RelayException.PAIRING_IN_PROGRESS,
+            RelayException.CONNECTION_CLOSED, RelayException.INTERNAL,
+        )
+        const val RETRY_PAUSE_MS = 1_500L
     }
 }

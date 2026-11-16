@@ -77,8 +77,8 @@ class MailScreensTest {
             waitFor(scenario, "the thread") { a -> hasText(a.findViewById(android.R.id.content), "Lunch") }
             scenario.onActivity { a ->
                 val tabs = a.findViewById<TabLayout>(R.id.services)
-                assertEquals("Messages, WhatsApp and Gmail", 3, tabs.tabCount)
-                assertEquals(a.getString(R.string.chat_service_gmail), tabs.getTabAt(tabs.selectedTabPosition)!!.text.toString())
+                // Paused by the user: the list still works when opened for Gmail, but has no Gmail tab.
+                assertEquals(com.lightdecoder.chat.Features.shownServices().size, tabs.tabCount)
                 a.findViewById<View>(R.id.fab).performClick()
                 val next = shadowOf(env.context as Application).nextStartedActivity
                 assertEquals(MailComposeActivity::class.java.name, next.component?.className)

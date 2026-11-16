@@ -376,6 +376,19 @@ class ArchiveRepository private constructor(
         arrayOf(OutboxStatus.PENDING, OutboxStatus.SENDING),
     ) { it.toOutbox() }
 
+    /** Every queued send whatever its status, oldest first (for the problem report). */
+    fun allOutbox(): List<OutboxRow> = query(
+        "SELECT * FROM outbox_queue ORDER BY created_at, rowid", emptyArray(),
+    ) { it.toOutbox() }
+
+    /** The newest outgoing messages of every conversation, newest first (for the problem report). */
+    fun recentOutgoing(limit: Int = 20): List<MessageRow> = withMedia(
+        query(
+            "SELECT * FROM messages WHERE is_outgoing = 1 ORDER BY timestamp_ms DESC, rowid DESC LIMIT ${limit.coerceAtLeast(0)}",
+            emptyArray(),
+        ) { it.toMessage() },
+    )
+
     /** Keys of sends Google accepted that still wait for the phone's echo (status SENT). */
     fun sentOutboxKeys(): List<String> =
         query("SELECT idempotency_key FROM outbox_queue WHERE status = ?", arrayOf(OutboxStatus.SENT)) { it.getString(0) }

@@ -45,7 +45,7 @@ internal object ScreenBackends {
         forTesting?.invoke(service) ?: ChatBackends.get(context, service)
 
     /** Every service's backend, in the order of [ChatService]. */
-    fun all(context: Context): List<ChatBackend> = ChatService.entries.map { get(context, it) }
+    fun all(context: Context): List<ChatBackend> = com.lightdecoder.chat.Features.shownServices().map { get(context, it) }
 }
 
 /** Which service tab the conversation list showed last, so it opens there again. */
@@ -56,7 +56,7 @@ internal object ChatUiPrefs {
     /** Null until a tab has been shown once. */
     fun lastService(context: Context): ChatService? =
         context.getSharedPreferences(FILE, Context.MODE_PRIVATE).getString(KEY_SERVICE, null)
-            ?.let { key -> ChatService.entries.firstOrNull { it.key == key } }
+            ?.let { key -> com.lightdecoder.chat.Features.shownServices().firstOrNull { it.key == key } }
 
     fun setLastService(context: Context, service: ChatService) =
         context.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit { putString(KEY_SERVICE, service.key) }

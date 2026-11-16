@@ -112,10 +112,18 @@ internal class Outbox(
             // HEIC becomes JPEG (or PNG), a huge photo is scaled down: what every phone can show.
             // An SMS/MMS conversation (anything not known to be RCS) takes only small pictures.
             val rcs = runCatching { repo.conversation(conversationId)?.isRcs }.getOrNull() == true
-            AttachmentPrep.prepare(file, mime, name, if (rcs) AttachmentPrep.LARGE else AttachmentPrep.MMS)?.let {
+            val before = file.length()
+            val prepared = AttachmentPrep.prepare(file, mime, name, if (rcs) AttachmentPrep.LARGE else AttachmentPrep.MMS)
+            prepared?.let {
                 mime = it.mime
                 name = it.name
             }
+            RelayLog.add(
+                context,
+                "Attachment queued: ${mime.ifEmpty { "unknown type" }}, ${before / 1024} KB" +
+                    (if (prepared != null) " -> ${file.length() / 1024} KB" else " (sent as it is)") +
+                    ", ${if (rcs) "RCS chat" else "SMS/MMS conversation"}",
+            )
         }
         val text = caption?.trim().orEmpty()
         repo.insertLocalOutgoing(tmpId, conversationId, text, file.path, mime, name, replyToId, nowMs)
@@ -368,8 +376,17 @@ internal class Outbox(
         var attempt = 0
         while (true) {
             repo.updateOutbox(key, OutboxStatus.SENDING, attemptsDelta = 1)
+            val startedAt = System.currentTimeMillis()
             when (val verdict = attempt(row)) {
                 Verdict.Sent -> {
+                    if (isMedia(row)) {
+                        RelayLog.add(
+                            context,
+                            "Google accepted an attachment (${row.mediaMime.ifEmpty { "unknown type" }}, " +
+                                "${File(row.mediaLocalPath).length() / 1024} KB) in ${(System.currentTimeMillis() - startedAt) / 1000} s; " +
+                                "waiting for the phone to send it",
+                        )
+                    }
                     if (markSent(row)) awaitEcho(key)
                     return true
                 }

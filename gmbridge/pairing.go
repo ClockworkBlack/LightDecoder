@@ -26,7 +26,7 @@ const (
 	configTimeout = 30 * time.Second
 	// startPairingWatchdog bounds StartGaiaPairing, which waits for its long
 	// poll to open without watching its context and can block forever.
-	startPairingWatchdog = 60 * time.Second
+	startPairingWatchdog = 35 * time.Second
 	// defaultFinishTimeout is used when FinishPairing gets 0.
 	defaultFinishTimeout = 180 * time.Second
 	// pairingIdleExpiry abandons an attempt whose emoji was never followed by
@@ -450,12 +450,21 @@ func (b *GMBridge) adoptPairing(a *pairingAttempt, phoneID string) bool {
 	defer b.lifecycle.Unlock()
 
 	b.mu.Lock()
-	oldGen, closed := b.gen, b.closed
+	oldGen, closed, oldAuth := b.gen, b.closed, b.auth
 	b.mu.Unlock()
 	if closed {
 		return false
 	}
 	b.teardownLocked(oldGen)
+	a.mu.Lock()
+	newAuth := a.auth
+	a.mu.Unlock()
+	// Pairing again (after the sign-in expired, say) must not leave the old
+	// pairing listed on the phone next to the new one: it is revoked with
+	// Google, in the background and best effort, with its own keys.
+	if oldAuth != nil && oldAuth != newAuth && oldAuth.Mobile != nil {
+		go revokeReplaced(oldAuth)
+	}
 
 	a.mu.Lock()
 	auth, account := a.auth, a.account
@@ -470,6 +479,28 @@ func (b *GMBridge) adoptPairing(a *pairingAttempt, phoneID string) bool {
 	b.cache.reset()
 	b.emitSession()
 	return true
+}
+
+// revokeReplaced unpairs a pairing that a new one replaced, on a temporary
+// client of its own that never delivers events and is disconnected after.
+// Failures are ignored: the pairing may be gone already (that is what
+// usually led to pairing again), and the user can remove it on the phone.
+var revokeReplaced = func(old *libgm.AuthData) {
+	defer func() { _ = recover() }()
+	cli := libgm.NewClient(old, nil, zerolog.Nop(), exhttp.SensibleClientSettings)
+	cli.SetEventHandler(func(any) {})
+	defer cli.Disconnect()
+	if tokenExpiresWithin(old, libgm.RefreshTachyonBuffer) {
+		if err := func() (e error) {
+			defer recoverInto(&e)
+			return refreshForUnpair(cli)
+		}(); err != nil {
+			return
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), unpairTimeout)
+	defer cancel()
+	_ = unpairGaia(ctx, cli)
 }
 
 // revokeQuietly unpairs an attempt that succeeded after it was cancelled.

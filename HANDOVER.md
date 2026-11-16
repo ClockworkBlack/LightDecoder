@@ -22,6 +22,23 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.1 (hotfix)
+- **Gmail paused** (user's request): `chat/Features.GMAIL = false` hides the tab and stops the
+  background check; the code and tests stay.
+- **Pictures:** a picture and its text are now sent as two messages (picture first). The phone's
+  echo of a picture+caption send had come back with the text only.
+- **Problem report** (home menu and Google Messages link settings > "Report a problem"): app and
+  phone versions, link states and settings, the send queue, the latest outgoing messages' states,
+  and the activity logs, shared as text. Content-free (tested). New log lines: attachment queued
+  (type, size before/after, RCS or SMS/MMS), Google accepted it, the phone's echo (with
+  "THE PICTURE IS MISSING" when it is), and outgoing picture status changes.
+- **Pairing:** the bridge is loaded when setup opens; the start of pairing is retried once by
+  itself on pairing_init_timeout / pairing_in_progress / connection_closed / internal; Go's start
+  watchdog is 35 s (was 60).
+- **Duplicate devices:** pairing again now revokes the pairing it replaces with Google (Go
+  `revokeReplaced`), so the phone lists LightDecoder once. Entries left by earlier installs (keys
+  gone with the uninstall) can only be removed on the phone.
+
 ## 0.5.0: the Gmail tab
 - A third service, `ChatService.GMAIL`: IMAP (imap.gmail.com:993) to read and SMTP
   (smtp.gmail.com:465) to send, with the user's Gmail address and an **app password** (the user's

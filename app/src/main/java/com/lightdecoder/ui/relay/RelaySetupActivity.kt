@@ -83,6 +83,8 @@ class RelaySetupActivity : AppCompatActivity() {
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
         manager = RelayManager.get(this)
+        // Ready by the time the user has signed in: pairing then starts at once.
+        manager.prepareForPairing()
 
         // A debug build's private storage (the archive, the session) is open to adb: say so up front.
         binding.introDebugWarning.visibility = if (isDebuggableBuild(this)) View.VISIBLE else View.GONE

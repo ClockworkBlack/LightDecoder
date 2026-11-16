@@ -265,6 +265,10 @@ class InboxActivity : AppCompatActivity() {
             R.id.action_log -> showLog()
             R.id.action_clear -> confirmClear()
             R.id.action_about -> showAbout()
+            R.id.action_report -> lifecycleScope.launch {
+                val report = withContext(Dispatchers.IO) { ProblemReport.build(this@InboxActivity) }
+                ProblemReport.share(this@InboxActivity, report)
+            }
             else -> return super.onOptionsItemSelected(item)
         }
         return true
