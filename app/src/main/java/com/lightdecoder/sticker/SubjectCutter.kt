@@ -30,6 +30,74 @@ class SubjectMask(val width: Int, val height: Int, val confidence: ByteArray) {
         return kept > 0 && kept >= confidence.size * share
     }
 
+    /**
+     * The mask tidied the way a careful hand would: small holes inside the
+     * subject are filled (a model unsure about a logo on a shirt), specks
+     * away from it are dropped, and the edge is drawn one pixel in, so that
+     * no thin fringe of background comes along with the subject.
+     */
+    fun cleaned(): SubjectMask {
+        val w = width
+        val h = height
+        val n = w * h
+        val out = confidence.copyOf()
+        val seen = BooleanArray(n)
+        val queue = IntArray(n)
+
+        /** Every connected piece above (or, with [above] false, not above) [level]: its size and whether it reaches the picture's border. */
+        fun pieces(level: Int, above: Boolean, each: (size: Int, atBorder: Boolean) -> Unit) {
+            seen.fill(false)
+            fun wanted(i: Int) = ((out[i].toInt() and 0xFF) > level) == above
+            for (start in 0 until n) {
+                if (seen[start] || !wanted(start)) continue
+                var head = 0
+                var tail = 0
+                var atBorder = false
+                seen[start] = true
+                queue[tail++] = start
+                while (head < tail) {
+                    val i = queue[head++]
+                    val x = i % w
+                    val y = i / w
+                    if (x == 0 || y == 0 || x == w - 1 || y == h - 1) atBorder = true
+                    fun visit(next: Int) {
+                        if (!seen[next] && wanted(next)) {
+                            seen[next] = true
+                            queue[tail++] = next
+                        }
+                    }
+                    if (x > 0) visit(i - 1)
+                    if (x < w - 1) visit(i + 1)
+                    if (y > 0) visit(i - w)
+                    if (y < h - 1) visit(i + w)
+                }
+                each(tail, atBorder)
+            }
+        }
+        // Holes: background enclosed by the subject.
+        pieces(SURE, above = false) { size, atBorder ->
+            if (!atBorder && size <= n * HOLE_SHARE) for (k in 0 until size) out[queue[k]] = 255.toByte()
+        }
+        // Specks, faint rim and all (so nothing of them is left to draw an outline around).
+        pieces(FAINT, above = true) { size, _ ->
+            if (size < n * SPECK_SHARE) for (k in 0 until size) out[queue[k]] = 0
+        }
+        // One pixel in: each pixel is as sure as the least sure of its neighbours.
+        val choked = ByteArray(n)
+        for (y in 0 until h) for (x in 0 until w) {
+            var least = 255
+            for (dy in -1..1) {
+                val yy = (y + dy).coerceIn(0, h - 1)
+                for (dx in -1..1) {
+                    val v = out[yy * w + (x + dx).coerceIn(0, w - 1)].toInt() and 0xFF
+                    if (v < least) least = v
+                }
+            }
+            choked[y * w + x] = least.toByte()
+        }
+        return SubjectMask(w, h, choked)
+    }
+
     /** True when the mask found something worth keeping (not an empty or all-background picture). */
     val hasSubject: Boolean get() = covers(0.005f)
 
@@ -37,6 +105,12 @@ class SubjectMask(val width: Int, val height: Int, val confidence: ByteArray) {
         /** A mask from a model's confidence per pixel (0..1). */
         fun fromConfidence(width: Int, height: Int, confidence: FloatArray): SubjectMask =
             SubjectMask(width, height, ByteArray(width * height) { (confidence[it].coerceIn(0f, 1f) * 255).roundToInt().toByte() })
+
+        /** A hole in the subject up to this much of the picture is filled; a piece smaller than the speck share is dropped. */
+        private const val HOLE_SHARE = 0.004f
+        private const val SPECK_SHARE = 0.0008f
+        private const val SURE = 127
+        private const val FAINT = 70
     }
 }
 
@@ -71,7 +145,8 @@ class Subjects(val people: SubjectMask?, val objects: SubjectMask?) {
         val h = p.height
         val n = w * h
         fun person(i: Int) = (p.confidence[i].toInt() and 0xFF) > 127
-        fun thing(i: Int) = (o.confidence[i].toInt() and 0xFF) > 127
+        // Only what the objects model is sure of: its doubts are mostly background.
+        fun thing(i: Int) = (o.confidence[i].toInt() and 0xFF) > HELD_SURE
         var peopleArea = 0
         for (i in 0 until n) if (person(i)) peopleArea++
         val seen = BooleanArray(n)
@@ -130,6 +205,7 @@ class Subjects(val people: SubjectMask?, val objects: SubjectMask?) {
 
         /** A piece beyond the people is theirs if it is at most this much of their own size. */
         const val HELD_SHARE = 0.5f
+        const val HELD_SURE = 190
     }
 }
 
@@ -175,8 +251,8 @@ object SubjectCutter {
 
     private fun findWithModels(context: Context, picture: Bitmap): Result = synchronized(lock) {
         // One failing (too little memory for it, say) still leaves the other.
-        val people = attempt { people(context, picture) }
-        val objects = attempt { objects(context, picture) }
+        val people = attempt { people(context, picture)?.cleaned() }
+        val objects = attempt { objects(context, picture)?.cleaned() }
         if (people == null && objects == null) Result.Unavailable else Result.Found(Subjects(people, objects))
     }
 

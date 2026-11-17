@@ -62,4 +62,5 @@
         <item quantity="other">Send %1$d stickers</item>
     </plurals>
     <string name="sticker_send_limit">At most %1$d stickers are sent at once.</string>
+    <string name="sticker_sharpen">Sharpen the picture: off to strong</string>
 </resources>

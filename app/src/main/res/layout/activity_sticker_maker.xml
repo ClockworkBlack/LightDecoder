@@ -511,6 +511,24 @@
                 android:valueFrom="2"
                 android:valueTo="40" />
 
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:labelFor="@+id/sharpen"
+                android:text="@string/sticker_sharpen"
+                android:textAppearance="?attr/textAppearanceBodySmall"
+                android:textColor="?attr/colorOnSurfaceVariant" />
+
+            <com.google.android.material.slider.Slider
+                android:id="@+id/sharpen"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:contentDescription="@string/sticker_sharpen"
+                android:stepSize="5"
+                android:value="0"
+                android:valueFrom="0"
+                android:valueTo="100" />
+
             <com.google.android.material.materialswitch.MaterialSwitch
                 android:id="@+id/solid"
                 android:layout_width="match_parent"

@@ -154,6 +154,7 @@ class StickerMakerActivity : AppCompatActivity() {
         // While the slider moves the preview follows; only the newest request is shown.
         binding.outlineWidth.addOnChangeListener { _, _, fromUser -> if (fromUser) render(refreshBrushedPicture = false) }
         binding.solid.setOnCheckedChangeListener { _, _ -> render() }
+        binding.sharpen.addOnChangeListener { _, _, fromUser -> if (fromUser) render(refreshBrushedPicture = false) }
         binding.shape.addOnButtonCheckedListener { _, _, isChecked -> if (isChecked) render() }
         binding.tolerance.addOnChangeListener { _, _, fromUser -> if (fromUser) render() }
         binding.save.setOnClickListener { save(asNew = false) }
@@ -281,6 +282,7 @@ class StickerMakerActivity : AppCompatActivity() {
         binding.outline.isChecked = o.outline
         binding.outlineWidth.value = o.outlineWidth.toFloat().coerceIn(binding.outlineWidth.valueFrom, binding.outlineWidth.valueTo)
         binding.solid.isChecked = o.solidBackground
+        binding.sharpen.value = o.sharpen.toFloat().coerceIn(binding.sharpen.valueFrom, binding.sharpen.valueTo)
         binding.refine.setStrokes(edits.strokes)
         taps.clear()
         for (i in 0 until edits.keepTaps.size / 2) taps += Triple(edits.keepTaps[2 * i], edits.keepTaps[2 * i + 1], true)
@@ -513,6 +515,7 @@ class StickerMakerActivity : AppCompatActivity() {
         outline = binding.outline.isChecked,
         outlineWidth = binding.outlineWidth.value.toInt(),
         solidBackground = binding.solid.isChecked,
+        sharpen = binding.sharpen.value.toInt(),
         smart = binding.smartCut.isChecked,
         smartKind = smartKind(),
         smartKeep = binding.smartKeep.value.toInt(),

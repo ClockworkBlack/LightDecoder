@@ -159,6 +159,49 @@ class SmartCutOutTest {
     }
 
     @Test
+    fun theMaskIsTidied() {
+        // A subject (20..79 square) with a small hole and a large one in it, and a speck in the corner.
+        fun level(x: Int, y: Int): Int = when {
+            x in 40..42 && y in 40..42 -> 0 // a small hole
+            x in 50..69 && y in 50..69 -> 0 // a large one: a real gap
+            x in 20..79 && y in 20..79 -> 255
+            x in 3..4 && y == 3 -> 255 // a speck
+            else -> 0
+        }
+        val tidy = SubjectMask(100, 100, ByteArray(100 * 100) { level(it % 100, it / 100).toByte() }).cleaned()
+        fun at(x: Int, y: Int) = tidy.confidence[y * 100 + x].toInt() and 0xFF
+        assertEquals("the small hole is filled", 255, at(41, 41))
+        assertEquals("the real gap stays", 0, at(60, 60))
+        assertEquals("the speck is gone", 0, at(3, 3))
+        assertEquals("the edge is one pixel in", 0, at(20, 30))
+        assertEquals(255, at(21, 30))
+        assertEquals(0, at(79, 30))
+        assertEquals(255, at(30, 30))
+    }
+
+    @Test
+    fun sharpeningBringsOutDetailWithoutTouchingTheCutEdge() {
+        // A soft step from dark to light, inside a picture with a transparent margin.
+        val picture = Bitmap.createBitmap(40, 20, Bitmap.Config.ARGB_8888)
+        for (y in 4..15) for (x in 4..35) {
+            val v = when { x < 19 -> 80; x == 19 -> 110; x == 20 -> 150; else -> 180 }
+            picture.setPixel(x, y, Color.rgb(v, v, v))
+        }
+        val sharp = StickerMaker.sharpened(picture, 100)
+        assertTrue("darker on the dark side of the step", Color.red(sharp.getPixel(19, 10)) < 110)
+        assertTrue("lighter on the light side", Color.red(sharp.getPixel(20, 10)) > 150)
+        assertEquals("flat areas are left alone", 80, Color.red(sharp.getPixel(10, 10)))
+        assertEquals("no halo at the cut edge", 80, Color.red(sharp.getPixel(4, 10)))
+        assertEquals(0, Color.alpha(sharp.getPixel(2, 10)))
+        assertEquals(255, Color.alpha(sharp.getPixel(4, 10)))
+        // In a sticker: off by default, and it changes the picture when asked for.
+        val plain = StickerMaker.make(picture, StickerMaker.Options(outline = false))
+        val crisp = StickerMaker.make(picture, StickerMaker.Options(outline = false, sharpen = 80))
+        assertFalse(plain.sameAs(crisp))
+        assertEquals(60, StickerProject.fromJson(StickerProject.toJson(StickerProject.Edits(StickerMaker.Options(sharpen = 60), null, emptyList()))).options.sharpen)
+    }
+
+    @Test
     fun aPictureWithNoSubjectSaysSo() {
         assertFalse(SubjectMask(10, 10, ByteArray(100)).hasSubject)
         assertTrue(SubjectMask(10, 10, ByteArray(100) { 255.toByte() }).hasSubject)

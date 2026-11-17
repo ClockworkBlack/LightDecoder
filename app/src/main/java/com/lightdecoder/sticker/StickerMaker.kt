@@ -55,6 +55,8 @@ object StickerMaker {
         val smartKind: SmartKind = SmartKind.AUTO,
         /** 0..100: how readily the smart cut keeps what it is unsure of (50 is the model's own judgement). */
         val smartKeep: Int = 50,
+        /** 0..100: how much the picture's detail is sharpened (for soft pictures such as video frames); 0 leaves it. */
+        val sharpen: Int = 0,
         /** A short title in white letters beneath the picture; blank for none. */
         val caption: String = "",
     )
@@ -164,6 +166,52 @@ object StickerMaker {
         target.setPixels(pixels, 0, w, 0, 0, w, h)
     }
 
+    /**
+     * [bitmap] with its detail brought out (an unsharp mask): each pixel is
+     * pushed away from the average of its neighbours. Transparent neighbours
+     * are left out of the average, so the cut edge gets no halo, and the
+     * transparency itself is untouched.
+     */
+    internal fun sharpened(bitmap: Bitmap, amount: Int): Bitmap {
+        val w = bitmap.width
+        val h = bitmap.height
+        val src = IntArray(w * h)
+        bitmap.getPixels(src, 0, w, 0, 0, w, h)
+        val out = IntArray(w * h)
+        val k = amount.coerceIn(0, 100) / 100f * SHARPEN_MAX
+        for (y in 0 until h) for (x in 0 until w) {
+            val i = y * w + x
+            val c = src[i]
+            if ((c ushr 24) < 8) {
+                out[i] = c
+                continue
+            }
+            var r = 0
+            var g = 0
+            var b = 0
+            var weight = 0
+            for (dy in -1..1) {
+                val yy = y + dy
+                if (yy < 0 || yy >= h) continue
+                for (dx in -1..1) {
+                    val xx = x + dx
+                    if (xx < 0 || xx >= w) continue
+                    val p = src[yy * w + xx]
+                    if ((p ushr 24) < 8) continue
+                    val wt = (2 - kotlin.math.abs(dx)) * (2 - kotlin.math.abs(dy))
+                    r += ((p shr 16) and 0xFF) * wt
+                    g += ((p shr 8) and 0xFF) * wt
+                    b += (p and 0xFF) * wt
+                    weight += wt
+                }
+            }
+            fun push(own: Int, sum: Int): Int = (own + k * (own - sum.toFloat() / weight)).roundToInt().coerceIn(0, 255)
+            out[i] = (c and 0xFF000000.toInt()) or
+                (push((c shr 16) and 0xFF, r) shl 16) or (push((c shr 8) and 0xFF, g) shl 8) or push(c and 0xFF, b)
+        }
+        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(out, 0, w, 0, 0, w, h) }
+    }
+
     /** The title as it is drawn: one line, trimmed, at most [MAX_CAPTION] characters. */
     fun captionOf(text: String): String = text.replace('\n', ' ').trim().take(MAX_CAPTION)
 
@@ -180,7 +228,8 @@ object StickerMaker {
         val scale = min(inner.toFloat() / work.width, (inner - band).toFloat() / work.height)
         val w = max(1, (work.width * scale).roundToInt())
         val h = max(1, (work.height * scale).roundToInt())
-        val fitted = if (w == work.width && h == work.height) work else Bitmap.createScaledBitmap(work, w, h, true)
+        var fitted = if (w == work.width && h == work.height) work else Bitmap.createScaledBitmap(work, w, h, true)
+        if (options.sharpen > 0) fitted = sharpened(fitted, options.sharpen)
         val out = Bitmap.createBitmap(SIZE, SIZE, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(out)
         if (options.solidBackground) canvas.drawColor(Color.WHITE)
@@ -376,6 +425,7 @@ object StickerMaker {
     private const val MARGIN = 4
     private const val OUTLINE_STEPS = 32
     private const val EDGE_HALF = 0.15f
+    private const val SHARPEN_MAX = 2.5f
 
     /** The longest title, and the room it takes beneath the picture (pixels of the 512 px sticker). */
     const val MAX_CAPTION = 40

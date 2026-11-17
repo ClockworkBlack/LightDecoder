@@ -75,6 +75,7 @@ object StickerProject {
         put("smartKind", e.options.smartKind.name)
         put("smartKeep", e.options.smartKeep)
         put("caption", e.options.caption)
+        put("sharpen", e.options.sharpen)
         e.trace?.let { put("trace", floats(it)) }
         if (e.keepTaps.isNotEmpty()) put("keepTaps", floats(e.keepTaps))
         if (e.removeTaps.isNotEmpty()) put("removeTaps", floats(e.removeTaps))
@@ -97,6 +98,7 @@ object StickerProject {
             smartKind = runCatching { StickerMaker.SmartKind.valueOf(o.optString("smartKind")) }.getOrDefault(StickerMaker.SmartKind.AUTO),
             smartKeep = o.optInt("smartKeep", 50),
             caption = o.optString("caption"),
+            sharpen = o.optInt("sharpen", 0),
         ),
         trace = o.optJSONArray("trace")?.let(::floats),
         strokes = o.optJSONArray("strokes")?.let { a ->

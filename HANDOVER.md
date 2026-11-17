@@ -33,6 +33,12 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
   mask that touches the people mask is added to it, unless the part beyond the people is more
   than half their area (then it is taken for furniture or the room). Only as good as the small
   objects model: what U-2-Net-p does not see (a clear glass, say) is not added.
+- **Smart cut tuning** (tried on the user's picture and samples): two working sizes, a mirrored
+  second pass and a contrast boost made the masks no better or worse, so the models run once
+  as before. What helped: `SubjectMask.cleaned()` (small holes filled, specks dropped with their
+  faint rim, edge one pixel in against background fringe), the held-object rule only trusting
+  objects confidence above 190, and a **Sharpen** slider (`Options.sharpen`, unsharp mask that
+  ignores transparent neighbours) for soft sources such as video frames.
 - **Send several stickers**: "Send several" in the sticker panel marks tapped stickers (up to
   10) and sends them one after the other in the order tapped (`ThreadActivity.sendStickers`),
   stopping at the first failure.
