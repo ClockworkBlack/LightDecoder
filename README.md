@@ -326,7 +326,7 @@ APK's assets.
 ## Building
 
 Requirements: Android SDK with NDK r28 (`28.2.13676358`) and SDK platform 36,
-CMake 3.31+, JDK 17, and Go.
+CMake 3.31+, JDK 21 (the unit tests run Robolectric on Android 16, which needs it), and Go.
 
 - **Go.** `gmbridge/go.mod` pins `toolchain go1.26.11`, and the build uses
   exactly that toolchain: any Go 1.21 or newer on `PATH` downloads it by
