@@ -24,6 +24,14 @@ Branch: `ios` (from `main` at 0.5.22). Everything iOS is in `ios/` and
 - Expect compile errors on the first real build. Fix them from the build log;
   the code was reviewed by reading only.
 
+## Codemagic (2026-11-17)
+The user made a Codemagic account. `codemagic.yaml` (repository root, ios
+branch only) has the workflow "iOS: build and test" (`ios-build`): core tests,
+XcodeGen, simulator build, launch test, unsigned `.ipa`; the build, test and
+device logs are artifacts. Not yet run. Signing and TestFlight are not set up:
+that needs an App Store Connect API key added in Codemagic's own settings
+(Teams > integrations), never in the repository.
+
 ## To get a build
 Any one of:
 1. Start the "Build iOS" workflow again later, in case the queue clears or the

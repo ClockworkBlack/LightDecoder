@@ -1,0 +1,76 @@
+# Codemagic builds the iPhone app (ios/) on a Mac. Only the ios branch has this
+# file, so nothing here runs for the Android app.
+#
+# Start a build in Codemagic: the LightDecoder app > Start new build >
+# branch "ios" > workflow "iOS: build and test".
+workflows:
+  ios-build:
+    name: "iOS: build and test"
+    instance_type: mac_mini_m2
+    max_build_duration: 45
+    environment:
+      xcode: latest
+    scripts:
+      - name: Xcode and simulators
+        script: |
+          xcodebuild -version
+          swift --version
+          xcrun simctl list devices available | grep -E "iPhone" | head -5
+
+      - name: Core tests (Matrix client and chat state)
+        script: |
+          cd ios/LightDecoderCore
+          swift test 2>&1 | tail -40
+
+      - name: Generate the Xcode project
+        script: |
+          which xcodegen >/dev/null 2>&1 || brew install xcodegen
+          cd ios
+          xcodegen generate
+
+      - name: Build the app for the simulator
+        script: |
+          cd ios
+          STATUS=0
+          xcodebuild build-for-testing \
+            -project LightDecoder.xcodeproj -scheme LightDecoder \
+            -destination "generic/platform=iOS Simulator" -derivedDataPath build \
+            > build.log 2>&1 || STATUS=$?
+          # Every error, each once, with its file and line: what has to be fixed.
+          grep -E "error:" build.log | sort -u | head -150 || true
+          grep -E "\*\* " build.log | tail -5 || true
+          exit $STATUS
+
+      - name: Launch test in a simulator (the app opens on its sign-in screen)
+        script: |
+          cd ios
+          DEVICE=$(xcrun simctl list devices available | grep -E "^\s+iPhone" | head -1 | sed -E 's/.*\(([0-9A-F-]{36})\).*/\1/')
+          echo "Simulator: $DEVICE"
+          STATUS=0
+          xcodebuild test-without-building \
+            -project LightDecoder.xcodeproj -scheme LightDecoder \
+            -destination "id=$DEVICE" -derivedDataPath build \
+            -resultBundlePath build/results.xcresult > test.log 2>&1 || STATUS=$?
+          grep -E "error:|\*\* |Test Case|Test Suite .* (passed|failed)|Executed|XCTAssert|failed -" test.log | tail -80 || true
+          exit $STATUS
+
+      - name: Build for iPhone (unsigned) and package an .ipa
+        script: |
+          cd ios
+          STATUS=0
+          xcodebuild build \
+            -project LightDecoder.xcodeproj -scheme LightDecoder -configuration Release \
+            -sdk iphoneos -destination "generic/platform=iOS" -derivedDataPath build-device \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" > device.log 2>&1 || STATUS=$?
+          grep -E "error:" device.log | sort -u | head -60 || true
+          grep -E "\*\* " device.log | tail -3 || true
+          if [ $STATUS -ne 0 ]; then exit $STATUS; fi
+          mkdir -p Payload
+          cp -R build-device/Build/Products/Release-iphoneos/LightDecoder.app Payload/
+          zip -qry LightDecoder-unsigned.ipa Payload
+          ls -la LightDecoder-unsigned.ipa
+    artifacts:
+      - ios/LightDecoder-unsigned.ipa
+      - ios/build.log
+      - ios/test.log
+      - ios/device.log
