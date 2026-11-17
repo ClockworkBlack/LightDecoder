@@ -202,13 +202,34 @@ func (s *SessionHandler) sendMessageWithParams(ctx context.Context, params SendM
 	if err != nil {
 		return nil, err
 	}
+	return s.waitForResponse(ctx, ch, requestID, params.UserInitiated)
+}
 
+// sendUserMessageAsync posts a user-initiated request and returns once Google
+// has accepted it, with a function that waits for the phone's response (with
+// the same timeouts as sendUserMessage). LightDecoder patch g.
+func (s *SessionHandler) sendUserMessageAsync(ctx context.Context, actionType gmproto.ActionType, encryptedData proto.Message) (func(context.Context) (*IncomingRPCMessage, error), error) {
+	ch, requestID, err := s.sendAsyncMessageWithID(ctx, SendMessageParams{
+		Action:        actionType,
+		Data:          encryptedData,
+		UserInitiated: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return func(waitCtx context.Context) (*IncomingRPCMessage, error) {
+		return s.waitForResponse(waitCtx, ch, requestID, true)
+	}, nil
+}
+
+// waitForResponse waits for the phone's response to an accepted request.
+func (s *SessionHandler) waitForResponse(ctx context.Context, ch chan *IncomingRPCMessage, requestID string, userInitiated bool) (*IncomingRPCMessage, error) {
 	hardTimer := time.NewTimer(responseHardTimeout)
 	defer hardTimer.Stop()
 
 	// Only short-circuit requests made by the user, no need to timeout faster for background reqs
 	var shortCircuit <-chan time.Time
-	if params.UserInitiated {
+	if userInitiated {
 		shortCircuitTimer := time.NewTimer(pingShortCircuitTimeout)
 		defer shortCircuitTimer.Stop()
 		shortCircuit = shortCircuitTimer.C

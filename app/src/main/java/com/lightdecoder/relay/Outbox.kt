@@ -11,6 +11,10 @@ import com.lightdecoder.archive.MediaCache
 import com.lightdecoder.archive.MessageRow
 import com.lightdecoder.archive.OutboxRow
 import com.lightdecoder.archive.OutboxStatus
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import java.io.File
 import java.io.FileOutputStream
@@ -26,11 +30,18 @@ import java.io.FileOutputStream
  *
  * Intake ([enqueueText], [enqueueMedia], [retry], [discard]) runs on one
  * thread so sends keep the order they were made in; [drain] runs on one
- * coroutine and sends one message at a time, in queue order.
+ * coroutine and starts sends in queue order. A text is started as soon as
+ * Google has accepted the one before it, and the phone's answers (which take
+ * seconds each) are waited for alongside, at most [MAX_TEXTS_IN_FLIGHT] at a
+ * time: a burst of messages no longer goes out one phone round trip apart.
+ * An attachment goes out alone, after what is already on its way, and what
+ * follows waits for it (its caption is the next entry).
  *
- * Sends whose outcome is unknown are looked up on the phone before anything
- * else goes out ([reconcile]): an entry a previous run left SENDING (the app
- * died mid-send) is never sent again blindly, a send Google accepted whose
+ * An entry a previous run left SENDING (the app died mid-send) is looked up
+ * on the phone before anything else goes out and is never sent again
+ * blindly ([reconcile]). Other sends whose outcome is unknown are looked up
+ * after the queue has gone out, so they never hold up new messages: a send
+ * Google accepted whose
  * echo never came stops showing "sending" after [unconfirmedGiveUpMs], and a
  * send that failed with phone_not_responding, or that an unpair held while
  * it went out, is looked up too, so an echo the phone has settles it.
@@ -215,20 +226,87 @@ internal class Outbox(
 
     // --- sending (one coroutine) --------------------------------------------------
 
-    /** Sends queued messages in order for as long as the link can send. */
-    suspend fun drain() {
-        if (!canSend()) return
+    /** How a text's start went: on its way to the phone, or already settled. */
+    private sealed class Start {
+        class Posted(val row: OutboxRow, val pending: RelayBridge.PendingSend) : Start()
+
+        /** Nothing to wait for; [keepGoing] is false when the link went down. */
+        class Settled(val keepGoing: Boolean) : Start()
+    }
+
+    /**
+     * Sends queued messages in queue order for as long as the link can send:
+     * each text as soon as Google accepted the one before it, the phone's
+     * answers collected alongside; an attachment alone.
+     */
+    suspend fun drain(): Unit = coroutineScope {
+        if (!canSend()) return@coroutineScope
         // Found SENDING before this drain sent anything: a previous run was interrupted mid-send.
         val interrupted = repo.pendingOutbox()
             .filter { it.status == OutboxStatus.SENDING }
             .mapTo(HashSet()) { it.idempotencyKey }
-        if (!reconcile(interrupted)) return
+        // Those are looked up before anything goes out: sending one again blindly could deliver it twice.
+        if (interrupted.isNotEmpty() && !reconcile(interrupted, others = false)) return@coroutineScope
         val tried = HashSet<String>()
-        while (canSend()) {
-            val row = repo.pendingOutbox().firstOrNull { it.idempotencyKey !in tried } ?: return
-            tried.add(row.idempotencyKey)
-            if (!sendOne(row, row.idempotencyKey in interrupted)) return
+        val inFlight = ArrayDeque<Deferred<Boolean>>()
+        var online = true
+        suspend fun collect(all: Boolean) {
+            while (inFlight.isNotEmpty() && (all || inFlight.first().isCompleted)) {
+                if (!inFlight.removeFirst().await()) online = false
+            }
         }
+        while (online && canSend()) {
+            collect(all = false)
+            if (!online) break
+            if (inFlight.size >= MAX_TEXTS_IN_FLIGHT) {
+                if (!inFlight.removeFirst().await()) online = false
+                continue
+            }
+            val row = repo.pendingOutbox().firstOrNull { it.idempotencyKey !in tried } ?: break
+            val key = row.idempotencyKey
+            tried.add(key)
+            if (isMedia(row) || key in interrupted) {
+                // Alone, after what is already on its way.
+                collect(all = true)
+                if (!online || !canSend()) break
+                if (!sendOne(row, key in interrupted)) online = false
+                continue
+            }
+            when (val started = startText(row)) {
+                is Start.Posted -> inFlight.addLast(async(Dispatchers.IO) { finishText(started) })
+                is Start.Settled -> if (!started.keepGoing) online = false
+            }
+        }
+        collect(all = true)
+        // Sends whose outcome is still unknown, now that nothing new waits behind them.
+        if (online && canSend()) reconcile(emptySet(), others = true)
+    }
+
+    /**
+     * Claims a text and starts it: returns once Google accepted it (the
+     * phone's answer comes in [finishText]), or settled when it did not get
+     * that far.
+     */
+    private suspend fun startText(queued: OutboxRow): Start {
+        val key = queued.idempotencyKey
+        val row = claim(key, interrupted = false) ?: return Start.Settled(keepGoing = true)
+        repo.updateOutbox(key, OutboxStatus.SENDING, attemptsDelta = 1)
+        val pending = try {
+            bridge().startText(row.conversationId, key, row.textBody, row.replyToId.ifEmpty { null })
+        } catch (e: RelayException) {
+            return Start.Settled(settle(row, verdictFor(e.code), System.currentTimeMillis()))
+        }
+        return Start.Posted(row, pending)
+    }
+
+    /** Waits for the phone's answer to a started text and acts on it. False if the link went down. */
+    private suspend fun finishText(started: Start.Posted): Boolean {
+        val verdict = try {
+            verdictOf(started.pending.await())
+        } catch (e: RelayException) {
+            verdictFor(e.code)
+        }
+        return settle(started.row, verdict, System.currentTimeMillis())
     }
 
     /**
@@ -243,15 +321,16 @@ internal class Outbox(
      * about them. A late echo still clears them. Returns false if the link
      * went down.
      */
-    private suspend fun reconcile(interrupted: Set<String>): Boolean {
+    private suspend fun reconcile(interrupted: Set<String>, others: Boolean): Boolean {
         val now = System.currentTimeMillis()
         val unconfirmed = pruneUnconfirmed()
-        val giveUp = unconfirmed.filterValues { now - it >= unconfirmedGiveUpMs }.keys
+        // [others] false: only the interrupted entries are looked up (before the queue goes out).
+        val giveUp = if (others) unconfirmed.filterValues { now - it >= unconfirmedGiveUpMs }.keys else emptySet()
         // Failed with an unknown outcome: asked until the phone answers once.
-        val lookups = pruneLookups().filterValues { now - it >= unconfirmedCheckMs }.keys
-        val ask = unconfirmed.filter { (key, sentAt) ->
+        val lookups = if (others) pruneLookups().filterValues { now - it >= unconfirmedCheckMs }.keys else emptySet()
+        val ask = (if (others) unconfirmed.filter { (key, sentAt) ->
             key in giveUp || (now - sentAt >= unconfirmedCheckMs && key !in lookedUp)
-        }.keys + interrupted + lookups
+        }.keys else emptySet()) + interrupted + lookups
         val byConversation = LinkedHashMap<String, MutableMap<String, Long>>()
         for (key in ask) {
             val row = repo.outbox(key) ?: continue
@@ -364,7 +443,7 @@ internal class Outbox(
         drainLater(unconfirmedGiveUpMs + RECHECK_SLACK_MS)
     }
 
-    /** Returns false when the link went down and draining should stop. */
+    /** Sends one entry whole (waiting for the phone). Returns false when the link went down and draining should stop. */
     private suspend fun sendOne(queued: OutboxRow, interrupted: Boolean): Boolean {
         val key = queued.idempotencyKey
         val row = claim(key, interrupted) ?: return true
@@ -373,11 +452,23 @@ internal class Outbox(
             fail(row, problem)
             return true
         }
+        repo.updateOutbox(key, OutboxStatus.SENDING, attemptsDelta = 1)
+        val startedAt = System.currentTimeMillis()
+        return settle(row, attempt(row), startedAt)
+    }
+
+    /**
+     * Acts on a send's [first] verdict. A retry sends it again whole, after
+     * the pause, as long as it takes (up to [retryDelaysMs]). Returns false
+     * when the link went down and draining should stop.
+     */
+    private suspend fun settle(row: OutboxRow, first: Verdict, firstStartedAt: Long): Boolean {
+        val key = row.idempotencyKey
+        var verdict = first
+        var startedAt = firstStartedAt
         var attempt = 0
         while (true) {
-            repo.updateOutbox(key, OutboxStatus.SENDING, attemptsDelta = 1)
-            val startedAt = System.currentTimeMillis()
-            when (val verdict = attempt(row)) {
+            when (verdict) {
                 Verdict.Sent -> {
                     if (isMedia(row)) {
                         RelayLog.add(
@@ -409,6 +500,9 @@ internal class Outbox(
                         requeue(row, verdict.reason)
                         return false
                     }
+                    repo.updateOutbox(key, OutboxStatus.SENDING, attemptsDelta = 1)
+                    startedAt = System.currentTimeMillis()
+                    verdict = attempt(row)
                 }
                 is Verdict.Offline -> {
                     requeue(row, verdict.reason)
@@ -522,6 +616,10 @@ internal class Outbox(
         } catch (e: OutOfMemoryError) {
             return Verdict.Failed(RelayException.TOO_LARGE)
         }
+        return verdictOf(result)
+    }
+
+    private fun verdictOf(result: SendResult): Verdict {
         return when {
             result.ok -> Verdict.Sent
             // The connector's transient statuses: the phone asks to try again.
@@ -688,5 +786,8 @@ internal class Outbox(
         private const val RECHECK_SLACK_MS = 1_000L
 
         private val TRANSIENT_STATUSES = setOf("FAILURE_2", "FAILURE_3")
+
+        /** Texts Google has accepted whose phone answer is still awaited, at most. */
+        internal const val MAX_TEXTS_IN_FLIGHT = 6
     }
 }
