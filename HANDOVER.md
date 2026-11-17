@@ -23,6 +23,15 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.20
+- **Tab order: Messages, Discord, WhatsApp** (Discord is added after the first service, in the
+  conversation list and on the Discord screen).
+- **Discord tab made "firmer"** (`ui/discord/DiscordPage.kt`): the page view is kept alive in
+  the Discord process between visits (paused, timers stopped) instead of reloading each time;
+  `FirmWebView` has no overscroll, no zoom, no sideways drag of the whole page; surface-colour
+  background (no white flash); `onRenderProcessGone` recreates the page instead of crashing.
+  Tests: `DiscordPageTest`. Not tried on a phone.
+
 ## 0.5.19
 - The user signed in to Discord in the tab on their phone (Galaxy Z Fold 7); the web view works.
 - **Discord tab fit** (`discord/DiscordFit`, `DiscordActivity.applyPageWidth`): the page is laid

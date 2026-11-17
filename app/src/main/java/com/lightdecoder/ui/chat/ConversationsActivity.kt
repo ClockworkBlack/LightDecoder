@@ -259,13 +259,13 @@ class ConversationsActivity : AppCompatActivity() {
 
     private fun setUpServiceTabs() {
         val tabs = binding.services
-        for (service in com.lightdecoder.chat.Features.shownServices()) {
+        com.lightdecoder.chat.Features.shownServices().forEachIndexed { index, service ->
             tabs.addTab(tabs.newTab().setText(ServiceUi.tabLabel(service)).setTag(service), service == backend.service)
-        }
-        // Discord is not a service of this screen: it has no archive or link
-        // here, and its tab opens its own screen in its own process.
-        if (Features.DISCORD && DiscordProcess.supported) {
-            tabs.addTab(tabs.newTab().setText(R.string.chat_service_discord).setTag(DISCORD_TAB), false)
+            // Discord's tab comes right after Messages. It is not a service of this screen: it
+            // has no archive or link here, and its tab opens its own screen in its own process.
+            if (index == 0 && Features.DISCORD && DiscordProcess.supported) {
+                tabs.addTab(tabs.newTab().setText(R.string.chat_service_discord).setTag(DISCORD_TAB), false)
+            }
         }
         ServiceTabStrip.attachDropDown(tabs, binding.servicesMenu)
         tabs.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {

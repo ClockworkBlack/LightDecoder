@@ -100,12 +100,10 @@
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
+        android:background="?attr/colorSurface"
         android:clipChildren="true">
 
-        <WebView
-            android:id="@+id/discordWebView"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent" />
+        <!-- The page view (DiscordPage) is put here, beneath the panels below; it outlives this screen. -->
 
         <LinearLayout
             android:id="@+id/errorPanel"

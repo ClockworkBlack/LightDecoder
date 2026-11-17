@@ -108,12 +108,23 @@ class DiscordActivity : AppCompatActivity() {
             webView?.reload()
         }
 
-        val web = binding.discordWebView
+        // The page view is kept between visits (DiscordPage): the same page, where it was left.
+        val (web, fresh) = DiscordPage.obtain(this)
         webView = web
+        web.scaleX = 1f
+        web.scaleY = 1f
+        binding.pageFrame.addView(
+            web, 0,
+            android.widget.FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
+        )
         configure(web)
         binding.pageFrame.post { applyPageWidth() }
-        val restored = savedInstanceState?.let { web.restoreState(it) }
-        if (restored == null) web.loadUrl(DiscordSession.START_URL)
+        if (fresh) {
+            val restored = savedInstanceState?.let { web.restoreState(it) }
+            if (restored == null) web.loadUrl(DiscordSession.START_URL)
+        } else {
+            render(web.url)
+        }
 
         // Back walks Discord's own history first; the toolbar arrow always leaves.
         onBackPressedDispatcher.addCallback(
@@ -134,13 +145,13 @@ class DiscordActivity : AppCompatActivity() {
      */
     private fun setUpServiceTabs() {
         val tabs = binding.services
-        for (service in Features.shownServices()) {
+        // The same order as the conversation list: Messages, Discord, then the other services.
+        Features.shownServices().forEachIndexed { index, service ->
             tabs.addTab(tabs.newTab().setText(ServiceUi.tabLabel(service)).setTag(service), false)
+            if (index == 0) tabs.addTab(tabs.newTab().setText(R.string.chat_service_discord), true)
         }
-        tabs.addTab(tabs.newTab().setText(R.string.chat_service_discord), true)
+        if (tabs.tabCount == 0) tabs.addTab(tabs.newTab().setText(R.string.chat_service_discord), true)
         com.lightdecoder.ui.chat.ServiceTabStrip.attachDropDown(tabs, binding.servicesMenu)
-        // Discord is the last tab: keep it in view.
-        tabs.post { tabs.setScrollPosition(tabs.tabCount - 1, 0f, true) }
         tabs.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
             override fun onTabSelected(tab: TabLayout.Tab) {
                 val service = tab.tag as? ChatService ?: return
@@ -155,6 +166,8 @@ class DiscordActivity : AppCompatActivity() {
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun configure(web: WebView) {
+        // The app's own dark or light surface behind the page: no white flash while it loads.
+        web.setBackgroundColor(com.google.android.material.color.MaterialColors.getColor(web, com.google.android.material.R.attr.colorSurface))
         web.settings.apply {
             // Discord's web app is a JavaScript app that keeps its state in DOM storage.
             javaScriptEnabled = true
@@ -208,6 +221,17 @@ class DiscordActivity : AppCompatActivity() {
         // Discord is a single-page app: most navigation never fires onPageFinished.
         override fun doUpdateVisitedHistory(view: WebView, url: String?, isReload: Boolean) {
             render(url)
+        }
+
+        // The page's renderer died (Android took its memory back, or it crashed). Left
+        // unhandled that ends the whole Discord process; instead the page is made anew.
+        override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
+            if (view === webView) {
+                webView = null
+                DiscordPage.discard(view)
+                recreate()
+            }
+            return true
         }
 
         override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
@@ -462,8 +486,12 @@ class DiscordActivity : AppCompatActivity() {
         fileCallback?.onReceiveValue(null)
         fileCallback = null
         webView?.let { web ->
-            (web.parent as? ViewGroup)?.removeView(web)
-            web.destroy()
+            // The page stays loaded for the next visit; this screen's hooks into it are taken off.
+            if (web.parent === binding.pageFrame) {
+                web.webViewClient = WebViewClient()
+                web.webChromeClient = null
+                DiscordPage.release(web, binding.pageFrame, applicationContext)
+            }
         }
         webView = null
         super.onDestroy()

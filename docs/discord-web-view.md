@@ -106,6 +106,26 @@ is fitted again without being reloaded.
 The top bar is one 48 dp row: back, the tab strip, the tab list arrow, the
 menu. It shows no title and no address line; only discord.com loads here.
 
+## Staying put ("firm")
+
+`ui/discord/DiscordPage.kt`. None of this changes the page; they are the
+view's own settings and lifetime, as a browser's are.
+
+- **The page stays loaded between visits.** The page view belongs to the
+  Discord process (`DiscordPage`, a `MutableContextWrapper` view), not to one
+  showing of the screen. Leaving the tab takes it off the screen, pauses it
+  (`onPause` and `pauseTimers`, so Discord's scripts do nothing in the
+  background and the account does not sit "online"), and coming back shows the
+  same view again. If Android has ended the process meanwhile, the page loads
+  afresh; the sign-in is on disk either way.
+- **It sits still.** `FirmWebView`: no overscroll stretch or bounce, no pinch
+  or double-tap zoom ("Page size" sets the size), and the page as a whole
+  cannot be dragged sideways. What scrolls inside the page is untouched.
+- **No white flash.** The view and its frame are the app's surface colour
+  while the page loads.
+- **A dead renderer is survived.** `onRenderProcessGone` makes a new page view
+  instead of letting the Discord process crash.
+
 ## Signing in with a QR code (and why not a passkey)
 
 **Passkeys cannot work inside the tab.** Android lets a `WebView` use passkeys
