@@ -243,7 +243,7 @@ public enum SyncReducer {
     }
 
     /// Removes a message's content, or takes a reaction back.
-    static func redact(_ target: String, in room: inout ChatRoom) {
+    public static func redact(_ target: String, in room: inout ChatRoom) {
         if let index = room.timeline.firstIndex(where: { $0.id == target }) {
             room.timeline[index].kind = .redacted
             room.timeline[index].body = ""

@@ -1,0 +1,84 @@
+name: Build iOS
+
+# The iPhone app (ios/). Runs only for the ios branch and its own files, so
+# the Android app's workflow and branches are left alone.
+on:
+  push:
+    branches: [ios]
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Xcode and simulators
+        run: |
+          xcodebuild -version
+          xcrun simctl list devices available | grep -E "iPhone" | head -5
+
+      - name: Core tests (Matrix client and chat state)
+        working-directory: ios/LightDecoderCore
+        run: swift test 2>&1 | tail -40
+
+      - name: Generate the Xcode project
+        working-directory: ios
+        run: |
+          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+          xcodegen generate
+
+      - name: Build the app and run the launch test in a simulator
+        working-directory: ios
+        run: |
+          DEVICE=$(xcrun simctl list devices available | grep -E "^\s+iPhone" | head -1 | sed -E 's/.*\(([0-9A-F-]{36})\).*/\1/')
+          echo "Simulator: $DEVICE"
+          STATUS=0
+          xcodebuild test \
+            -project LightDecoder.xcodeproj -scheme LightDecoder \
+            -destination "id=$DEVICE" -derivedDataPath build \
+            -resultBundlePath build/results.xcresult > build.log 2>&1 || STATUS=$?
+          grep -E "error:|\*\* |Test Case|Test Suite .* (passed|failed)|Executed|XCTAssert|failed -" build.log | tail -150 || true
+          exit $STATUS
+
+      - name: Build for iPhone (unsigned) and package an .ipa
+        working-directory: ios
+        run: |
+          STATUS=0
+          xcodebuild build \
+            -project LightDecoder.xcodeproj -scheme LightDecoder -configuration Release \
+            -sdk iphoneos -destination "generic/platform=iOS" -derivedDataPath build-device \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" > device.log 2>&1 || STATUS=$?
+          grep -E "error:|\*\* " device.log | tail -60 || true
+          if [ $STATUS -ne 0 ]; then exit $STATUS; fi
+          mkdir -p Payload
+          cp -R build-device/Build/Products/Release-iphoneos/LightDecoder.app Payload/
+          zip -qry LightDecoder-unsigned.ipa Payload
+          ls -la LightDecoder-unsigned.ipa
+
+      - name: Upload the unsigned .ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: LightDecoder-unsigned-ipa
+          path: ios/LightDecoder-unsigned.ipa
+          if-no-files-found: error
+
+      - name: Upload the test results (with the sign-in screenshot)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: ios/build/results.xcresult
+          if-no-files-found: ignore
