@@ -117,6 +117,10 @@ type GMBridge struct {
 	// clientRetired is the network switch of client (see retirableSettings).
 	clientRetired *atomic.Bool
 
+	// pending holds text sends Google accepted whose phone answer is still
+	// to be collected by FinishSend (see sendpipe.go). Its own lock.
+	pending pendingSends
+
 	// Per-connection flags, written from the dispatcher and helper goroutines.
 	// Connect resets them (resetConnectionFlags).
 	browserActive     atomic.Bool

@@ -75,7 +75,11 @@ internal class RelayTestEnv {
         while (true) {
             manager.awaitIdleForTesting()
             if (condition()) return
-            if (System.currentTimeMillis() > deadline) fail("timed out waiting for $what")
+            if (System.currentTimeMillis() > deadline) {
+                // The link's own log (kinds and outcomes only, never content) says what it did instead.
+                val log = runCatching { RelayLog.read(context).takeLast(8) }.getOrDefault(emptyList())
+                fail("timed out waiting for $what; the link's log ends: $log")
+            }
             Thread.sleep(20)
         }
     }

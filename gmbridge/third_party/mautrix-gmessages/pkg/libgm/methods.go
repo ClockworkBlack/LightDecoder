@@ -88,6 +88,22 @@ func (c *Client) SendMessage(ctx context.Context, payload *gmproto.SendMessageRe
 	return typedResponse[*gmproto.SendMessageResponse](c.getSessionHandler().sendUserMessage(ctx, actionType, payload))
 }
 
+// SendMessageAsync posts a message and returns once Google has accepted it,
+// with a function that waits for the phone's response (what SendMessage
+// returns). The next message can be posted before the phone has answered the
+// previous one, so a burst goes out without waiting a phone round trip per
+// message, still reaching Google in the order it was posted. LightDecoder
+// patch g.
+func (c *Client) SendMessageAsync(ctx context.Context, payload *gmproto.SendMessageRequest) (func(context.Context) (*gmproto.SendMessageResponse, error), error) {
+	wait, err := c.getSessionHandler().sendUserMessageAsync(ctx, gmproto.ActionType_SEND_MESSAGE, payload)
+	if err != nil {
+		return nil, err
+	}
+	return func(waitCtx context.Context) (*gmproto.SendMessageResponse, error) {
+		return typedResponse[*gmproto.SendMessageResponse](wait(waitCtx))
+	}, nil
+}
+
 func (c *Client) GetParticipantThumbnail(ctx context.Context, participantIDs ...string) (*gmproto.GetThumbnailResponse, error) {
 	payload := &gmproto.GetThumbnailRequest{Identifiers: participantIDs}
 	actionType := gmproto.ActionType_GET_PARTICIPANTS_THUMBNAIL

@@ -19,6 +19,8 @@
     <string name="sticker_outline_width">Outline thickness: thin to thick</string>
     <string name="sticker_edit_title">Edit sticker</string>
     <string name="sticker_reset_original">Back to original picture</string>
+    <string name="sticker_turn">Turn</string>
+    <string name="sticker_turn_description">Turn the picture a quarter turn clockwise</string>
     <string name="sticker_edit">Edit</string>
     <string name="sticker_delete">Delete</string>
     <string name="sticker_old_no_original">This sticker was made before LightDecoder kept original pictures, so it is edited as it is: its outline and cut-out are part of the picture.</string>

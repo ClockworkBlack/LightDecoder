@@ -273,6 +273,34 @@ class MessengerScreensTest {
     }
 
     @Test
+    fun aPhotoOrVideoLineLeadsToTheRealThing() {
+        grantAccess()
+        store.record(
+            CapturedConversation(
+                "diner", "Gwen's all nite diner", true,
+                listOf(
+                    CapturedMessage("David", false, "There we go", MessengerCapture.KIND_TEXT, 1_000),
+                    CapturedMessage("David", false, "Sent a video.", MessengerCapture.KIND_TEXT, 2_000),
+                ),
+            )
+        )
+        ActivityScenario.launch<MessengerThreadActivity>(MessengerThreadActivity.intent(context, "diner")).use { scenario ->
+            scenario.waitFor("the conversation") { bubbles(it) == listOf("There we go", "Sent a video.") }
+            scenario.onActivity { activity ->
+                val list = activity.findViewById<RecyclerView>(R.id.list)
+                val text = list.getChildAt(0)
+                val video = list.getChildAt(1)
+                assertFalse("a message is not a link", text.findViewById<View>(R.id.bubble).hasOnClickListeners())
+                assertTrue(video.findViewById<TextView>(R.id.meta).text.toString().endsWith("Tap to see it in Messenger"))
+                assertTrue(video.findViewById<View>(R.id.bubble).hasOnClickListeners())
+                // No Messenger app on the test phone: the tap opens Facebook's page instead.
+                video.findViewById<View>(R.id.bubble).performClick()
+                assertEquals(MessengerWebActivity::class.java.name, shadowOf(activity).nextStartedActivity.component?.className)
+            }
+        }
+    }
+
+    @Test
     fun aConversationThatIsNotThereClosesTheScreen() {
         ActivityScenario.launch<MessengerThreadActivity>(MessengerThreadActivity.intent(context, "nobody")).use { scenario ->
             scenario.waitFor("the screen to close") { it.isFinishing }

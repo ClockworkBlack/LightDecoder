@@ -1593,6 +1593,7 @@ class WaManager private constructor(
     /** Deletes the archive (messages, media, queued sends) between two writes of what the bridge sent, and what was kept about it. */
     private fun wipeArchive() {
         gate.wipe { repo.clearAll() }
+        runCatching { com.lightdecoder.reactions.ReadTimes.get(appContext).clear(ChatService.WHATSAPP) }
         WaPrefs.setArchiveOwner(appContext, "")
         synchronized(deletedChats) {
             deletedChats.clear()
@@ -2213,6 +2214,11 @@ class WaManager private constructor(
         }
         val found = repo.advanceMessageStatus(receipt.messageIds, status, STATUS_CODES.getValue(status), ::statusRank)
         if (newlyRead.isNotEmpty()) {
+            val now = System.currentTimeMillis()
+            runCatching {
+                val times = com.lightdecoder.reactions.ReadTimes.get(appContext)
+                newlyRead.forEach { times.note(ChatService.WHATSAPP, it.id, now, live = true) }
+            }
             ReadNotifier.onRead(appContext, repo, newlyRead.mapNotNull { repo.message(it.id) }.filter { ReadNotifier.isRead(it.status) })
         }
         val early = receipt.messageIds.filter { it !in found }

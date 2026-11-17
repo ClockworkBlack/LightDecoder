@@ -6,6 +6,18 @@
     android:orientation="vertical"
     android:paddingBottom="16dp">
 
+    <!-- For one of the user's own messages that was read: when. -->
+    <TextView
+        android:id="@+id/readInfo"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingHorizontal="24dp"
+        android:paddingTop="16dp"
+        android:paddingBottom="4dp"
+        android:textAppearance="?attr/textAppearanceBodyMedium"
+        android:textColor="?attr/colorOnSurfaceVariant"
+        android:visibility="gone" />
+
     <LinearLayout
         android:id="@+id/reactionRow"
         android:layout_width="match_parent"

@@ -1412,6 +1412,17 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             sheet.dismiss()
             if (mine != null && isShown(row)) react(row, mine, remove = true)
         }
+        // One of the user's messages that was read: when, as far as the link saw it.
+        if (MessageStatus.tickFor(row) == Tick.READ && manager.service != ChatService.GMAIL) {
+            val service = manager.service
+            lifecycleScope.launch {
+                val time = withContext(Dispatchers.IO) {
+                    runCatching { com.lightdecoder.reactions.ReadTimes.get(this@ThreadActivity).timeFor(service, row.id) }.getOrNull()
+                }
+                b.readInfo.text = ReadInfo.text(this@ThreadActivity, time)
+                b.readInfo.visibility = View.VISIBLE
+            }
+        }
         b.actionReply.visibility = if (canReplyTo(row)) View.VISIBLE else View.GONE
         b.actionReply.setOnClickListener {
             sheet.dismiss()

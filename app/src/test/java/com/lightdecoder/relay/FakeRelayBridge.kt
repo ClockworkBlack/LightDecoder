@@ -279,6 +279,36 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
     override fun sendText(conversationId: String, tmpId: String, text: String, replyToId: String?): SendResult =
         send(Sent(conversationId, tmpId, text))
 
+    /**
+     * When set, [startText] works as Go's StartText: it returns as soon as the
+     * text is "accepted by Google", and the phone's answer ([sendAnswers] or
+     * SUCCESS) waits until this latch is released. Null: the whole send
+     * happens in [startText], as the interface's default does.
+     */
+    @Volatile
+    var holdPhoneAnswers: java.util.concurrent.CountDownLatch? = null
+
+    /** How many started texts are waiting for their phone answer now. */
+    val awaitingPhone = java.util.concurrent.atomic.AtomicInteger()
+
+    override fun startText(conversationId: String, tmpId: String, text: String, replyToId: String?): RelayBridge.PendingSend {
+        val hold = holdPhoneAnswers ?: return super.startText(conversationId, tmpId, text, replyToId)
+        requireConnected()
+        val what = Sent(conversationId, tmpId, text)
+        sent += what
+        duringSend?.invoke(what)
+        val answer = sendAnswers.poll()
+        awaitingPhone.incrementAndGet()
+        return RelayBridge.PendingSend {
+            try {
+                hold.await(10, java.util.concurrent.TimeUnit.SECONDS)
+            } finally {
+                awaitingPhone.decrementAndGet()
+            }
+            answer?.invoke(tmpId) ?: SendResult(tmpId, ok = true, status = "SUCCESS")
+        }
+    }
+
     override fun sendMedia(
         conversationId: String,
         tmpId: String,

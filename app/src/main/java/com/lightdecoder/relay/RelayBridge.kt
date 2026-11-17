@@ -76,6 +76,25 @@ interface RelayBridge : java.io.Closeable {
     fun requestFullSizeImage(messageId: String, partId: String)
 
     fun sendText(conversationId: String, tmpId: String, text: String, replyToId: String?): SendResult
+
+    /**
+     * Starts sending a text and returns once Google has accepted it, before
+     * the phone has answered (Go: StartText), so the next message can go out
+     * without waiting a phone round trip. [PendingSend.await] then blocks
+     * for the phone's answer and returns what [sendText] would have. Throws
+     * as [sendText] does when the message did not get to Google.
+     *
+     * The default does the whole [sendText] here (fakes and older bridges).
+     */
+    fun startText(conversationId: String, tmpId: String, text: String, replyToId: String?): PendingSend {
+        val result = sendText(conversationId, tmpId, text, replyToId)
+        return PendingSend { result }
+    }
+
+    /** A text Google has accepted; [await] blocks until the phone answers (throws as [sendText]). */
+    fun interface PendingSend {
+        fun await(): SendResult
+    }
     fun sendMedia(
         conversationId: String,
         tmpId: String,

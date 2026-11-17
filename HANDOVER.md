@@ -23,6 +23,66 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.27 (versionCode 35) - when a message was read
+- Holding one of the user's own messages that shows the read tick now says when it was read, at
+  the top of the actions sheet (`sheet_message_actions.readInfo`, `ui/chat/ReadInfo`).
+- Google Messages gives no time with "read", so `reactions/ReadTimes` (read_times.db, cleared with
+  the archive, not created until needed) notes when the link sees a message turn to read:
+  `RelayManager.onMessage` (where `wasUnread` is worked out) and `WaManager.onReceipt`. Same
+  three wordings as reaction times: seen live, "at or before" when caught up, not known when it
+  was already read on first load. Test: `ReadTimesTest`. Next version: 0.5.28 / 36.
+
+## 0.5.26 (versionCode 34) - Turn button; a calmer archive wipe
+- **Sticker maker "Turn"** (beside "Back to original picture"): the picture a quarter turn
+  clockwise per tap, for one that still comes in sideways (a file without its camera's rotation
+  note, or a sticker whose original was kept sideways before 0.5.25). It starts over like a new
+  picture (no cut, brushing or taps); a sticker being edited keeps the turn when saved
+  (`StickerMakerActivity.turnPicture/usePicture`, test in `StickerEditTest`).
+- **`ReactionTimes` no longer creates its database just to clear or read it.** `clear` runs inside
+  `RelayManager.wipeArchive`, which a test gives only 200 ms when another phone's archive goes;
+  CI failed once there (`RelayManagerTest.anotherPhonesArchive...NotDeletedLate`, "timed out
+  waiting for the connect", run 44143117327). Not reproduced locally (22 passes, also under load
+  and with a 50 ms budget), so this removes the work my reaction feature added to that step
+  rather than proving the cause. `RelayTestEnv.eventually` now prints the end of the link's log
+  when it times out, so a repeat says what the link did instead.
+- `OutboxTest.aSentMessageWhoseEchoWasLostIsSettledByLookingItUp` waited for the outbox entry to
+  go and then asserted at once that the unconfirmed list was empty, which is written a moment
+  later; it failed once on an overloaded machine. It now waits for that too.
+- **Smart cut, not changed yet:** tried on the owner's statue photo, BiRefNet-lite (MIT, 224 MB,
+  1024 px, 7 s on the build machine) cuts far cleaner than U-2-Net-p; full U-2-Net (Apache-2.0,
+  176 MB, 0.3 s) is in between. Waiting for the owner's choice (APK size, speed on the phone).
+
+## 0.5.25 (versionCode 33) - hotfix: camera photos sideways
+- BitmapFactory ignores a JPEG's EXIF orientation, so portrait camera photos came out sideways
+  in the sticker maker (and library import), the viewer, the conversations, and when a photo was
+  shrunk before sending (re-encoded without the note, so it was *sent* sideways too).
+- `heif/ExifOrientation` (androidx.exifinterface) turns non-HEIF decodes upright in
+  `Media.decode`, `Media.decodeFirstFrame` and `MediaLoader.decodePreview` (AttachmentPrep goes
+  through the latter). HEIF is left alone: libheif / ImageDecoder apply its rotation already.
+- Stickers made before this keep a sideways original (saved without the note): pick the
+  picture again (or use Turn, 0.5.26). Test: `ExifOrientationTest`.
+
+## 0.5.24 (versionCode 32) - hotfix: messages in a row went out slowly
+- **Cause:** each Google Messages send returned only when the phone had answered (seconds), and
+  the outbox sends one at a time to keep order, so a burst went out one phone round trip apart.
+- **Fix:** libgm patch g (`Client.SendMessageAsync`, see third_party/.../PATCHES.md); bridge
+  `StartText` / `FinishSend` (gmbridge/sendpipe.go); `RelayBridge.startText` returning a
+  `PendingSend`. `Outbox.drain` starts each text once Google accepted the previous one and
+  collects the phone's answers alongside, at most `MAX_TEXTS_IN_FLIGHT` (6). Attachments still
+  go alone, after the texts ahead of them. Lookups of unconfirmed sends now run after the queue
+  (interrupted entries still before it), so they never hold up new messages.
+- Trade-off: a text the phone answers with a transient failure (FAILURE_2/3) is retried after
+  the ones behind it went out, so it can land after them. Tests: `OutboxPipelineTest`,
+  gmbridge `sendpipe_test.go`. WhatsApp was not changed (its sends wait only for WhatsApp's
+  server).
+
+## 0.5.23 (versionCode 31)
+- Messenger tab: "Sent a photo / video" lines get an icon and open the conversation in the
+  Messenger app (or Facebook's page without it); `messenger/MessengerMedia`. The notification
+  never carries the file itself.
+- Facebook sign-in on the Messenger page: password-manager tip, and when Facebook asks for a
+  code, "Approve in the Facebook app" (`MessengerWebState.CHECK`).
+
 ## 0.5.22 (versionCode 30, on main)
 - **Everything merged into main** (PR #1): this branch line up to 0.5.21, plus from session
   `ccr-4fee5e9f-jrrlhu`: the **Messenger tab** (inbox from Messenger's notifications, replies
@@ -32,7 +92,6 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **CI fixes on main:** setup-android installs `platform-tools` only (Google dropped the `tools`
   package it asked for by default), and both jobs use **JDK 21** (Robolectric on sdk=36 refuses
   Java 17). Merge main into a branch before its next PR, or its CI fails the same two ways.
-- Next version after this one is 0.5.23 / versionCode 31.
 
 ## 0.5.21
 - **App switcher replaces the tab row** (`view_app_switcher.xml`, `ServiceTabStrip.attachSwitcher`):

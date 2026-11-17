@@ -20,7 +20,9 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.lightdecoder.R
 import com.lightdecoder.databinding.ActivityMessengerThreadBinding
 import com.lightdecoder.databinding.ItemMessengerMessageBinding
+import com.lightdecoder.messenger.MessengerCapture
 import com.lightdecoder.messenger.MessengerEvents
+import com.lightdecoder.messenger.MessengerMedia
 import com.lightdecoder.messenger.MessengerMessage
 import com.lightdecoder.messenger.MessengerReplies
 import com.lightdecoder.messenger.MessengerStore
@@ -119,6 +121,17 @@ class MessengerThreadActivity : AppCompatActivity() {
         val canReply = MessengerReplies.canReply(key)
         binding.composer.visibility = if (canReply) View.VISIBLE else View.GONE
         binding.noReplyPanel.visibility = if (canReply) View.GONE else View.VISIBLE
+    }
+
+    /**
+     * A photo or video bubble was tapped. The Messenger app, at this
+     * conversation while Messenger's notification for it still offers that,
+     * else at its start; Facebook's page only when the app is not installed.
+     */
+    private fun openMedia() {
+        if (com.lightdecoder.messenger.MessengerLinks.openMessengerApp(this, key)) return
+        Toast.makeText(this, R.string.messenger_media_on_web, Toast.LENGTH_SHORT).show()
+        MessengerActivity.openWeb(this)
     }
 
     private fun send() {
@@ -220,10 +233,38 @@ class MessengerThreadActivity : AppCompatActivity() {
             row.bubble.backgroundTintList = ColorStateList.valueOf(background)
             row.bubble.setTextColor(foreground)
             val time = TimeFormat.clock(context, message.timestampMs)
-            row.meta.text = if (message.state == MessengerStore.STATE_SENT_UNCONFIRMED) {
+            val sent = if (message.state == MessengerStore.STATE_SENT_UNCONFIRMED) {
                 context.getString(R.string.messenger_sent_unconfirmed) + " · " + time
             } else {
                 time
+            }
+            // A photo or video arrives only as words: the bubble leads to the real thing.
+            val media = if (message.kind == MessengerCapture.KIND_PICTURE) MessengerMedia.Kind.PHOTO
+            else MessengerMedia.kindOf(message.text)
+            if (media == null) {
+                row.meta.text = sent
+                row.bubble.setCompoundDrawablesRelative(null, null, null, null)
+                row.bubble.setOnClickListener(null)
+                row.bubble.isClickable = false
+                // Clickable off would also turn off selecting text; keep that for messages.
+                row.bubble.setTextIsSelectable(true)
+                row.bubble.contentDescription = null
+            } else {
+                row.meta.text = context.getString(R.string.messenger_media_meta, sent)
+                val icon = androidx.core.content.ContextCompat.getDrawable(
+                    context, if (media == MessengerMedia.Kind.VIDEO) R.drawable.ic_play else R.drawable.ic_image_placeholder,
+                )?.mutate()?.apply {
+                    val size = (20 * context.resources.displayMetrics.density).toInt()
+                    setBounds(0, 0, size, size)
+                    setTint(foreground)
+                }
+                row.bubble.compoundDrawablePadding = (8 * context.resources.displayMetrics.density).toInt()
+                row.bubble.setCompoundDrawablesRelative(icon, null, null, null)
+                row.bubble.setTextIsSelectable(false)
+                row.bubble.contentDescription = context.getString(
+                    R.string.messenger_media_description, row.bubble.text, context.getString(R.string.messenger_media_meta, sent),
+                )
+                row.bubble.setOnClickListener { openMedia() }
             }
         }
     }

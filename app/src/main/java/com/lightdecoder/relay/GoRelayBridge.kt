@@ -109,6 +109,11 @@ class GoRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) : R
         SendResult.fromJson(obj(go.sendText(conversationId, tmpId, text, replyToId.orEmpty())))
     }
 
+    override fun startText(conversationId: String, tmpId: String, text: String, replyToId: String?): RelayBridge.PendingSend {
+        call { go.startText(conversationId, tmpId, text, replyToId.orEmpty()) }
+        return RelayBridge.PendingSend { call { SendResult.fromJson(obj(go.finishSend(tmpId))) } }
+    }
+
     override fun sendMedia(
         conversationId: String,
         tmpId: String,

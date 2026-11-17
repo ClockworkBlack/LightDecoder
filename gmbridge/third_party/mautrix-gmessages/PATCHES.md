@@ -127,6 +127,19 @@ for each:
   app encodes `AuthData` (under `CookiesLock.RLock`) to save the session: a
   data race that could save a half-updated token.
 
+## g. A message can be posted without waiting for the phone's answer
+
+`session_handler.go`, `methods.go`
+
+- `sendMessageWithParams` is split: the wait for the phone's response is
+  `waitForResponse`, unchanged. New `sendUserMessageAsync` posts a
+  user-initiated request and returns a function that does that wait, and the
+  exported `Client.SendMessageAsync` does the same for `SendMessage`.
+  *Why:* `SendMessage` returns only when the phone has answered, which takes
+  seconds, so several messages typed in a row went out one phone round trip
+  apart. The bridge now posts each one as soon as Google accepted the one
+  before it (keeping their order) and waits for the phone's answers alongside.
+
 ## Not changed
 
 Everything else, including the protocol buffers (`gmproto`), the crypto and

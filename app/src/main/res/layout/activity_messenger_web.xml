@@ -18,18 +18,40 @@
         android:max="100"
         android:visibility="gone" />
 
-    <!-- Shown while Facebook is on its own sign-in or security-check page. -->
-    <TextView
+    <!--
+        Shown while Facebook is on its own sign-in page (how to sign in here), or
+        asking for a login code (approve it in the Facebook app instead).
+    -->
+    <LinearLayout
         android:id="@+id/signInBanner"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:background="?attr/colorTertiaryContainer"
+        android:orientation="vertical"
         android:paddingHorizontal="16dp"
-        android:paddingVertical="12dp"
-        android:text="@string/messenger_web_sign_in_banner"
-        android:textAppearance="?attr/textAppearanceBodyMedium"
-        android:textColor="?attr/colorOnTertiaryContainer"
-        android:visibility="gone" />
+        android:paddingTop="12dp"
+        android:paddingBottom="12dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/signInText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:accessibilityLiveRegion="polite"
+            android:text="@string/messenger_web_sign_in_banner"
+            android:textAppearance="?attr/textAppearanceBodyMedium"
+            android:textColor="?attr/colorOnTertiaryContainer" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/approveInFacebook"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:minHeight="48dp"
+            android:text="@string/messenger_web_open_facebook"
+            android:visibility="gone" />
+    </LinearLayout>
 
     <FrameLayout
         android:layout_width="match_parent"

@@ -1466,6 +1466,7 @@ class RelayManager private constructor(
     private fun wipeArchive() {
         gate.wipe { repo.clearAll() }
         runCatching { com.lightdecoder.reactions.ReactionTimes.get(app).clear(service) }
+        runCatching { com.lightdecoder.reactions.ReadTimes.get(app).clear(service) }
         RelayPrefs.setArchiveOwner(app, "", "")
         RelayPrefs.setUnconfirmedSends(app, emptyMap())
         fetchedConversations.clear()
@@ -2194,7 +2195,13 @@ class RelayManager private constructor(
         } catch (e: RuntimeException) {
             // Only the reaction's time is lost.
         }
-        if (wasUnread) repo.message(dto.id)?.let { ReadNotifier.onRead(app, repo, listOf(it)) }
+        if (wasUnread) {
+            // Google Messages gives no time with "read": it is noted as seen now.
+            runCatching {
+                com.lightdecoder.reactions.ReadTimes.get(app).note(service, dto.id, System.currentTimeMillis(), live = !dto.isOld)
+            }
+            repo.message(dto.id)?.let { ReadNotifier.onRead(app, repo, listOf(it)) }
+        }
         requestFullSizes(dto, result.newMediaParts)
         if (result.newMediaParts.isNotEmpty() && RelayPrefs.catchStickers(app)) {
             for (part in result.newMediaParts) {

@@ -134,6 +134,37 @@ class StickerEditTest {
     }
 
     @Test
+    fun aSidewaysStickerIsTurnedUprightAndKeepsTheTurn() {
+        // A sticker made before LightDecoder read camera rotation notes: its picture was kept sideways.
+        val sideways = Bitmap.createBitmap(200, 100, Bitmap.Config.ARGB_8888).apply {
+            val c = Canvas(this)
+            c.drawColor(Color.rgb(20, 200, 30))
+            c.drawRect(0f, 0f, 20f, 100f, Paint().apply { color = Color.RED }) // red along its left edge
+        }
+        val options = StickerMaker.Options(outline = false)
+        val file = StickerLibrary.save(context, StickerMaker.make(sideways, options))
+        StickerProject.save(context, file, sideways, StickerProject.Edits(options, null, emptyList()))
+
+        ActivityScenario.launch<StickerMakerActivity>(StickerMakerActivity.editIntent(context, file)).use { scenario ->
+            waitFor(scenario, "the sticker") { it.findViewById<View>(R.id.save).isEnabled }
+            scenario.onActivity { a ->
+                val turn = a.findViewById<View>(R.id.turn)
+                assertTrue("offered with the picture", turn.isShown)
+                turn.performClick()
+            }
+            settle()
+            scenario.onActivity { it.findViewById<View>(R.id.save).performClick() }
+            waitFor(scenario, "the save") { it.isFinishing }
+        }
+        val kept = StickerProject.load(context, file)!!.original
+        assertEquals("upright now: taller than wide", 100, kept.width)
+        assertEquals(200, kept.height)
+        // A quarter turn clockwise brings the left edge to the top.
+        assertEquals(Color.RED, kept.getPixel(50, 5))
+        assertEquals(Color.rgb(20, 200, 30), kept.getPixel(50, 190))
+    }
+
+    @Test
     fun aNewStickerHasNoSaveAsNew() {
         ActivityScenario.launch(StickerMakerActivity::class.java).use { scenario ->
             scenario.onActivity { assertFalse(it.findViewById<View>(R.id.saveAsNew).isShown) }

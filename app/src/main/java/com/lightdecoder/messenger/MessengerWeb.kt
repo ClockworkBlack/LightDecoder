@@ -10,6 +10,13 @@ enum class MessengerWebState {
     /** Facebook is showing its own sign-in, recovery or security-check page. */
     SIGNED_OUT,
 
+    /**
+     * Facebook is checking that it is really the person: a login code, an
+     * approval from another device, or a security check. The code can be
+     * skipped by approving the sign-in in the Facebook app.
+     */
+    CHECK,
+
     /** Facebook's messaging page: the conversation list or one conversation. */
     MESSAGES,
 
@@ -52,6 +59,7 @@ object MessengerWeb {
         val path = uri.path.orEmpty().trimEnd('/')
         val onMessenger = uri.host.orEmpty().lowercase().let { it == "messenger.com" || it.endsWith(".messenger.com") }
         return when {
+            CHECK_PATHS.any { path == it || path.startsWith("$it/") } -> MessengerWebState.CHECK
             SIGN_IN_PATHS.any { path == it || path.startsWith("$it/") } -> MessengerWebState.SIGNED_OUT
             path == "/messages" || path.startsWith("/messages/") -> MessengerWebState.MESSAGES
             // What is left of messenger.com before it redirects.
@@ -100,8 +108,11 @@ object MessengerWeb {
 
     private val MOBILE_WORD = Regex(" Mobile(?= |$)")
 
-    private val SIGN_IN_PATHS = listOf(
-        "/login", "/login.php", "/recover", "/checkpoint", "/two_step_verification", "/two_factor",
+    private val SIGN_IN_PATHS = listOf("/login", "/login.php", "/recover")
+
+    /** Where Facebook asks for a login code or an approval (two-factor, checkpoint). */
+    private val CHECK_PATHS = listOf(
+        "/checkpoint", "/two_step_verification", "/two_factor", "/login/checkpoint", "/auth_platform",
     )
 
     private fun parse(url: String?): URI? =

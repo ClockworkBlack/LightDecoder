@@ -36,8 +36,11 @@ class MessengerWebTest {
         assertEquals(MessengerWebState.LOADING, MessengerWeb.classify("about:blank"))
         assertEquals(MessengerWebState.SIGNED_OUT, MessengerWeb.classify("https://www.facebook.com/login.php?next=https%3A%2F%2Fwww.facebook.com%2Fmessages%2F"))
         assertEquals(MessengerWebState.SIGNED_OUT, MessengerWeb.classify("https://www.facebook.com/login/?next=x"))
-        assertEquals(MessengerWebState.SIGNED_OUT, MessengerWeb.classify("https://www.facebook.com/checkpoint/1501092823525282/"))
-        assertEquals(MessengerWebState.SIGNED_OUT, MessengerWeb.classify("https://www.facebook.com/two_step_verification/two_factor/"))
+        // A login code or approval: the page where "approve in the Facebook app" helps.
+        assertEquals(MessengerWebState.CHECK, MessengerWeb.classify("https://www.facebook.com/checkpoint/1501092823525282/"))
+        assertEquals(MessengerWebState.CHECK, MessengerWeb.classify("https://www.facebook.com/two_step_verification/two_factor/"))
+        assertEquals(MessengerWebState.CHECK, MessengerWeb.classify("https://www.facebook.com/two_step_verification/authentication/?encrypted_context=x"))
+        assertEquals(MessengerWebState.CHECK, MessengerWeb.classify("https://www.facebook.com/auth_platform/afad/?apc=x"))
         assertEquals(MessengerWebState.MESSAGES, MessengerWeb.classify("https://www.facebook.com/messages"))
         assertEquals(MessengerWebState.MESSAGES, MessengerWeb.classify("https://www.facebook.com/messages/t/100012345"))
         assertEquals(MessengerWebState.MESSAGES, MessengerWeb.classify("https://www.facebook.com/messages/e2ee/t/7654321"))
