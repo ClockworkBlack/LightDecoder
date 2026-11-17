@@ -7,7 +7,18 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+env:
+  # The build-tools whose aapt2, apksigner and zipalign check and sign the APK:
+  # AGP 8.11.1's default. Its apksigner pages native libraries at 16 KB.
+  BUILD_TOOLS_VERSION: "35.0.0"
+
 jobs:
+  # Builds, tests and checks everything, for every event. It never sees the
+  # release key: it is in no environment and names no secret, and its APK is
+  # signed with the runner's throwaway debug key (the APK check enforces it).
   build:
     runs-on: ubuntu-latest
     steps:
@@ -16,28 +27,297 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          # 21, not 17: the unit tests run under Robolectric on Android 16
+          # (robolectric.properties sdk=36), which needs Java 21. The app's own
+          # bytecode still targets Java 17 (app/build.gradle.kts).
+          java-version: "21"
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        # Its default also asks for the old "tools" package, which Google's SDK
+        # repository no longer has: sdkmanager then fails the step. The
+        # packages the build needs are installed by name further down.
+        with:
+          packages: platform-tools
 
-      - name: Install NDK and CMake
+      # The Go that builds libgojni.so is the toolchain line of gmbridge/go.mod
+      # (a patched go1.26), read here and installed as is. setup-go exports
+      # GOTOOLCHAIN=local, so no step quietly switches to another Go; the
+      # Gradle tasks pin GOTOOLCHAIN to the same version.
+      - name: Read the pinned Go toolchain
+        id: go-pin
         run: |
-          sdkmanager "ndk;28.2.13676358" "cmake;3.31.6"
+          v=$(sed -n 's/^toolchain go//p' gmbridge/go.mod)
+          test -n "$v" || { echo "gmbridge/go.mod has no toolchain line" >&2; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
 
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ steps.go-pin.outputs.version }}
+          cache-dependency-path: gmbridge/go.sum
+
+      # The platform is needed by gomobile's javac step (android.jar >= 26).
+      - name: Install NDK, CMake, SDK platform and build-tools
+        run: |
+          sdkmanager "ndk;28.2.13676358" "cmake;3.31.6" "platforms;android-36" "build-tools;$BUILD_TOOLS_VERSION"
+
+      - name: Go bridge checks (version, vet, tests, Android cross-build)
+        working-directory: gmbridge
+        run: |
+          go version
+          want=go${{ steps.go-pin.outputs.version }}
+          have=$(go env GOVERSION)
+          test "$have" = "$want" || { echo "Go is $have, gmbridge/go.mod pins $want" >&2; exit 1; }
+          go vet ./...
+          go test -count=1 -race -timeout 5m ./...
+          CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build ./...
+
+      # gomobile silently drops methods whose types it cannot bind and only
+      # leaves a "// skipped ..." comment in the generated Java; fail if so.
+      # The jar is checked on its own first: in an `if` pipeline a failed
+      # unzip would only look like "no match".
+      - name: Build Go bridge (gomobile) and check nothing was skipped
+        run: |
+          ./gradlew :app:buildGoBridge --no-daemon --stacktrace
+          jar=app/libs/gmbridge-sources.jar
+          test -s "$jar" || { echo "gomobile produced no $jar" >&2; exit 1; }
+          srcs=$(unzip -p "$jar" '*.java')   # under bash -e a failed unzip fails the step here
+          test -n "$srcs" || { echo "no Java sources in $jar" >&2; exit 1; }
+          if printf '%s\n' "$srcs" | grep -nE '^[[:space:]]*// skipped (constructor|field|method|variable|const|function) '; then
+            echo "gomobile skipped part of the gmbridge API" >&2
+            exit 1
+          fi
+
+      # The pinned Go and 16 KB pages, checked on the binary itself.
+      - name: Check libgojni.so (Go version, 16 KB alignment)
+        run: |
+          want=$(sed -n 's/^toolchain //p' gmbridge/go.mod)
+          readelf="$ANDROID_HOME/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          dir="$RUNNER_TEMP/gojni"
+          rm -rf "$dir" && mkdir -p "$dir"
+          unzip -q app/libs/gmbridge.aar 'jni/*/libgojni.so' -d "$dir"
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            so="$dir/jni/$abi/libgojni.so"
+            go version "$so" | grep -q ": $want\$" || { echo "$abi libgojni.so not built with $want" >&2; go version "$so" >&2; exit 1; }
+          done
+          for abi in arm64-v8a x86_64; do
+            aligns=$("$readelf" -lW "$dir/jni/$abi/libgojni.so" | awk '$1 == "LOAD" { print $NF }')
+            test -n "$aligns" || { echo "$abi libgojni.so: no LOAD segments" >&2; exit 1; }
+            for a in $aligns; do
+              (( 16#${a#0x} >= 16384 )) || { echo "$abi libgojni.so: LOAD segment aligned to $a, not 16 KB" >&2; exit 1; }
+            done
+          done
+
+      # bundleLicenses first runs here, with gmbridge.aar already up to date.
+      # An empty module cache checks that it fetches the Go modules whose
+      # licences it needs instead of failing (`go list -m` only reports the
+      # directories of modules already extracted).
       - name: Unit tests (decode real HEIC through the Bitmap path)
+        env:
+          GOMODCACHE: ${{ runner.temp }}/empty-gomodcache
         run: ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace
 
-      - name: Build debug APK
-        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
+      # gmbridge.go may name a Go that is not called `go` (a golang.org/dl
+      # wrapper such as go1.26.11); gomobile must then still run that exact
+      # toolchain, not the `go` on PATH (here one that only fails). Same Go,
+      # same sources: the same aar. (After the unit tests, so that
+      # bundleLicenses above ran against the aar of the first build.)
+      - name: Go bridge again through a Go wrapper, not the go on PATH
+        run: |
+          wrapper="$RUNNER_TEMP/godl/go${{ steps.go-pin.outputs.version }}"
+          shim="$RUNNER_TEMP/notgo"
+          mkdir -p "$(dirname "$wrapper")" "$shim"
+          printf '#!/bin/sh\nexec "%s" "$@"\n' "$(command -v go)" > "$wrapper"
+          printf '#!/bin/sh\necho "the go on PATH ran instead of gmbridge.go" >&2\nexit 1\n' > "$shim/go"
+          chmod +x "$wrapper" "$shim/go"
+          before=$(sha256sum < app/libs/gmbridge.aar)
+          PATH="$shim:$PATH" ./gradlew :app:buildGoBridge --rerun --no-daemon --stacktrace -Pgmbridge.go="$wrapper"
+          test "$(sha256sum < app/libs/gmbridge.aar)" = "$before" || { echo "the wrapper build differs" >&2; exit 1; }
 
-      - name: Upload APK
+      # The release build is not debuggable: adb cannot read its archive or
+      # session or attach a debugger. Debug builds are for development only
+      # and are not published. No LIGHTDECODER_* variable is set in this job,
+      # so Gradle signs the APK with the runner's throwaway debug key.
+      - name: Build release APK
+        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Check the release APK (not debuggable, debug key, 16 KB pages, licences)
+        run: |
+          apk=app/build/outputs/apk/release/app-release.apk
+          bt="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION"
+          badging=$("$bt/aapt2" dump badging "$apk")
+          printf '%s\n' "$badging" | grep -E "^package: name='com\.lightdecoder' " || { echo "unexpected package name" >&2; exit 1; }
+          if printf '%s\n' "$badging" | grep -q '^application-debuggable'; then
+            echo "release APK is debuggable" >&2
+            exit 1
+          fi
+          certs=$("$bt/apksigner" verify --print-certs "$apk")
+          printf '%s\n' "$certs" | grep -E '^Signer #1 certificate (DN|SHA-256)'
+          if printf '%s\n' "$certs" | grep -q '^Signer #2 '; then echo "more than one signer" >&2; exit 1; fi
+          # Only the sign job below may use the release key.
+          if ! printf '%s\n' "$certs" | grep -qxF 'Signer #1 certificate DN: C=US, O=Android, CN=Android Debug'; then
+            echo "the build job's APK is signed with a key other than the runner's debug key" >&2
+            exit 1
+          fi
+          "$bt/zipalign" -c -P 16 -v 4 "$apk" > /dev/null || { echo "APK is not 16 KB zip-aligned" >&2; exit 1; }
+          files=$(unzip -Z1 "$apk")
+          for f in assets/NOTICE assets/licenses/00-lightdecoder.txt assets/licenses/10-libheif.txt \
+                   assets/licenses/11-libde265.txt assets/licenses/20-go-go.mau.fi_mautrix-gmessages.txt \
+                   assets/licenses/30-go.txt assets/licenses/40-android-libraries.txt \
+                   lib/arm64-v8a/libgojni.so lib/arm64-v8a/liblightdecoder.so; do
+            printf '%s\n' "$files" | grep -qxF "$f" || { echo "release APK lacks $f" >&2; exit 1; }
+          done
+          apache=$(unzip -p "$apk" assets/licenses/40-android-libraries.txt)
+          for want in 'Apache License' 'androidx.core:core:' 'org.jetbrains.kotlin:kotlin-stdlib:'; do
+            printf '%s\n' "$apache" | grep -qF "$want" || { echo "40-android-libraries.txt lacks $want" >&2; exit 1; }
+          done
+
+      # Every run's APK, main's included. Signed with the runner's debug key, it
+      # cannot update an installed release.
+      - name: Upload APK (debug-signed preview)
         uses: actions/upload-artifact@v4
         with:
-          name: lightdecoder-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: lightdecoder-preview
+          path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+
+  # Re-signs the build job's APK with the release key, for pushes to main only:
+  # pull requests (from forks or from branches of this repository) and manual
+  # runs never start it. It is the only job that enters the `release`
+  # environment and reads the release key's secrets. Keep them there, with a
+  # deployment branch policy that allows only main, so that a workflow edited
+  # on another branch cannot read them either:
+  #   LIGHTDECODER_KEYSTORE_BASE64   base64 of the keystore file (PKCS12 or JKS)
+  #   LIGHTDECODER_KEYSTORE_PASSWORD
+  #   LIGHTDECODER_KEY_ALIAS
+  #   LIGHTDECODER_KEY_PASSWORD      optional, default: the keystore password
+  sign:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      # Without a keystore, main is not release-signed: a warning, not a
+      # failure. A keystore without its password or alias fails, as it does in
+      # Gradle. This step learns only whether each secret is set.
+      - name: Check the release key secrets
+        id: key
+        env:
+          HAVE_KEYSTORE: ${{ secrets.LIGHTDECODER_KEYSTORE_BASE64 != '' }}
+          HAVE_PASSWORD: ${{ secrets.LIGHTDECODER_KEYSTORE_PASSWORD != '' }}
+          HAVE_ALIAS: ${{ secrets.LIGHTDECODER_KEY_ALIAS != '' }}
+        run: |
+          if [ "$HAVE_KEYSTORE" != true ]; then
+            echo "::warning::No release keystore secret: this build of main is not release-signed. Only lightdecoder-preview, signed with the runner's debug key, was uploaded; it will not update an installed copy."
+            echo "sign=false" >> "$GITHUB_OUTPUT"
+          elif [ "$HAVE_PASSWORD" != true ] || [ "$HAVE_ALIAS" != true ]; then
+            echo "::error::LIGHTDECODER_KEYSTORE_BASE64 is set but LIGHTDECODER_KEYSTORE_PASSWORD or LIGHTDECODER_KEY_ALIAS is not."
+            exit 1
+          else
+            echo "sign=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up JDK 21
+        if: steps.key.outputs.sign == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          # 21, not 17: the unit tests run under Robolectric on Android 16
+          # (robolectric.properties sdk=36), which needs Java 21. The app's own
+          # bytecode still targets Java 17 (app/build.gradle.kts).
+          java-version: "21"
+
+      - name: Set up Android SDK
+        if: steps.key.outputs.sign == 'true'
+        uses: android-actions/setup-android@v3
+        # Its default also asks for the old "tools" package, which Google's SDK
+        # repository no longer has: sdkmanager then fails the step. The
+        # packages the build needs are installed by name further down.
+        with:
+          packages: platform-tools
+
+      - name: Install build-tools
+        if: steps.key.outputs.sign == 'true'
+        run: sdkmanager "build-tools;$BUILD_TOOLS_VERSION"
+
+      - name: Download the debug-signed APK
+        if: steps.key.outputs.sign == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: lightdecoder-preview
+          path: ${{ runner.temp }}/preview
+
+      # The keystore is written to $RUNNER_TEMP and deleted by the next step,
+      # whatever happens here. apksigner reads the passwords from the
+      # environment, not from its command line, and nothing here prints them.
+      # The build job checked the 16 KB alignment already; it is checked again
+      # here so that a misaligned input fails before the key is decoded. Native
+      # libraries keep 16 KB pages through signing (--lib-page-alignment).
+      - name: Sign with the release key
+        if: steps.key.outputs.sign == 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.LIGHTDECODER_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.LIGHTDECODER_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.LIGHTDECODER_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.LIGHTDECODER_KEY_PASSWORD }}
+        run: |
+          bt="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION"
+          in="$RUNNER_TEMP/preview/app-release.apk"
+          out="$RUNNER_TEMP/release/app-release.apk"
+          ks="$RUNNER_TEMP/release.keystore"
+          "$bt/zipalign" -c -P 16 -v 4 "$in" > /dev/null || { echo "the APK to sign is not 16 KB zip-aligned" >&2; exit 1; }
+          (umask 077 && printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$ks")
+          test -s "$ks" || { echo "LIGHTDECODER_KEYSTORE_BASE64 decodes to nothing" >&2; exit 1; }
+          export KEY_PASSWORD="${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
+          mkdir -p "$(dirname "$out")"
+          "$bt/apksigner" sign --ks "$ks" --ks-pass env:KEYSTORE_PASSWORD \
+            --ks-key-alias "$KEY_ALIAS" --key-pass env:KEY_PASSWORD \
+            --lib-page-alignment 16384 --v4-signing-enabled false \
+            --out "$out" "$in"
+
+      - name: Delete the keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.keystore"
+
+      # The build job's checks, again on the file that is published: one signer,
+      # and not the debug key; not debuggable; 16 KB pages; and the same entries
+      # as the APK the build job checked (data, sizes, CRCs), apart from v1
+      # signature files.
+      - name: Check the signed APK (release key, not debuggable, 16 KB pages, contents)
+        if: steps.key.outputs.sign == 'true'
+        run: |
+          bt="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION"
+          in="$RUNNER_TEMP/preview/app-release.apk"
+          apk="$RUNNER_TEMP/release/app-release.apk"
+          badging=$("$bt/aapt2" dump badging "$apk")
+          printf '%s\n' "$badging" | grep -E "^package: name='com\.lightdecoder' " || { echo "unexpected package name" >&2; exit 1; }
+          if printf '%s\n' "$badging" | grep -q '^application-debuggable'; then
+            echo "release APK is debuggable" >&2
+            exit 1
+          fi
+          certs=$("$bt/apksigner" verify --print-certs "$apk")
+          printf '%s\n' "$certs" | grep -E '^Signer #1 certificate (DN|SHA-256)'
+          if printf '%s\n' "$certs" | grep -q '^Signer #2 '; then echo "more than one signer" >&2; exit 1; fi
+          if printf '%s\n' "$certs" | grep -qxF 'Signer #1 certificate DN: C=US, O=Android, CN=Android Debug'; then
+            echo "the release key is an Android debug key" >&2
+            exit 1
+          fi
+          "$bt/zipalign" -c -P 16 -v 4 "$apk" > /dev/null || { echo "signed APK is not 16 KB zip-aligned" >&2; exit 1; }
+          entries() { unzip -lv "$1" | awk '$7 ~ /^[0-9a-f]{8}$/' | grep -vE ' META-INF/([^/]+\.(SF|RSA|DSA|EC)|MANIFEST\.MF)$'; }
+          before=$(entries "$in")
+          after=$(entries "$apk")
+          test -n "$before" || { echo "no entries listed in $in" >&2; exit 1; }
+          test "$before" = "$after" || { echo "signing changed the APK's entries" >&2; exit 1; }
+
+      - name: Upload APK (release-signed)
+        if: steps.key.outputs.sign == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lightdecoder
+          path: ${{ runner.temp }}/release/app-release.apk
           if-no-files-found: error

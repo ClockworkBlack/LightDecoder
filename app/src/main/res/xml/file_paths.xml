@@ -2,4 +2,17 @@
 <paths>
     <!-- Decoded PNGs we hand to other apps live in cache/shared/. -->
     <cache-path name="shared" path="shared/" />
+    <!--
+        Google Messages media (downloads, and attachments waiting to be sent),
+        for the viewer and for "open with" on files it cannot show. The
+        provider is not exported: a uri only works where the app granted it.
+    -->
+    <files-path name="relay-media" path="relay-media/" />
+    <files-path name="relay-outbox" path="relay-outbox/" />
+    <!-- The same for WhatsApp media, which is kept in directories of its own. -->
+    <files-path name="whatsapp-media" path="whatsapp-media/" />
+    <files-path name="whatsapp-outbox" path="whatsapp-outbox/" />
+    <!-- And Gmail attachments. -->
+    <files-path name="gmail-media" path="gmail-media/" />
+    <files-path name="gmail-outbox" path="gmail-outbox/" />
 </paths>

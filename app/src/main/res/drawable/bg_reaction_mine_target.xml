@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The user's own reaction chip: the pill is drawn smaller than the 48dp touch target. -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@drawable/bg_reaction_mine"
+    android:insetTop="10dp"
+    android:insetBottom="10dp" />

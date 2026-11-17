@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Strings of the WhatsApp link: its notification channels, and its setup and settings screens. -->
+<resources>
+    <!-- Notification channels -->
+    <string name="wa_channel_status">WhatsApp link</string>
+    <string name="wa_channel_status_description">Shown while LightDecoder is connected to WhatsApp, with a button to disconnect.</string>
+    <string name="wa_channel_messages">WhatsApp messages</string>
+    <string name="wa_channel_messages_description">New messages that arrive through the WhatsApp link.</string>
+
+    <!-- Setup: what this is -->
+    <string name="wa_setup_title">Link WhatsApp</string>
+    <string name="wa_intro_title">Use WhatsApp in LightDecoder</string>
+    <string name="wa_intro_what">LightDecoder can join your WhatsApp account as a linked device, the way WhatsApp Web does, so your chats show up here next to your other messages and you can answer them.</string>
+    <string name="wa_intro_debug">On a debug build, anyone who connects this phone to a computer with USB debugging (adb) can read LightDecoder\'s WhatsApp archive and the keys of the link. Use it with a test account only, never your own.</string>
+    <string name="wa_intro_terms_title">This is not an official WhatsApp client</string>
+    <string name="wa_intro_terms">LightDecoder is not made or approved by WhatsApp. It talks to WhatsApp the way WhatsApp Web does, which WhatsApp\'s terms do not allow for other apps. WhatsApp can end the link at any time, and it can restrict or ban an account that uses unofficial apps. Only link an account you are prepared to take that risk with.</string>
+    <string name="wa_intro_data_title">What is stored on this phone</string>
+    <string name="wa_intro_data">The keys of the link, your chats, messages and the pictures and files you open are kept in LightDecoder\'s private storage on this phone. Nothing is uploaded anywhere, and nothing is included in backups. Unlinking deletes the keys; you choose whether the messages go too.</string>
+    <string name="wa_intro_confirm_title">You confirm on your own phone</string>
+    <string name="wa_intro_confirm">Linking only happens when you type a code into WhatsApp on your phone, or scan a QR code with it, yourself. LightDecoder cannot do that step for you and never tries to.</string>
+    <string name="wa_intro_stop_title">How to stop</string>
+    <string name="wa_intro_stop">While connected, LightDecoder always shows a notification with a Disconnect button. You can unlink in the link\'s settings here, or in WhatsApp on your phone under Linked devices, at any time.</string>
+    <string name="wa_intro_agree">I understand, and I want to link my own WhatsApp account</string>
+    <string name="wa_intro_continue">Continue</string>
+
+    <!-- Setup: the number -->
+    <string name="wa_number_title">Your WhatsApp number</string>
+    <string name="wa_number_body">Enter the phone number of your own WhatsApp account, with its country code. WhatsApp then gives a one-time code that you type into WhatsApp on that phone.</string>
+    <string name="wa_number_hint">Phone number, e.g. +1 555 010 0100</string>
+    <string name="wa_number_get_code">Get pairing code</string>
+    <string name="wa_number_use_qr">Use a QR code instead</string>
+    <string name="wa_number_invalid">Enter the full number with its country code, for example +1 555 010 0100.</string>
+
+    <!-- Setup: the pairing code -->
+    <string name="wa_code_title">Enter this code on your phone</string>
+    <string name="wa_code_steps">1. Open WhatsApp on your phone.\n2. Go to Settings, then Linked devices.\n3. Tap Link a device.\n4. Tap \"Link with phone number instead\".\n5. Enter the code above.</string>
+    <string name="wa_code_copy">Copy code</string>
+    <string name="wa_code_copied">Code copied</string>
+    <string name="wa_code_clip_label">WhatsApp pairing code</string>
+    <string name="wa_code_spoken">Pairing code: %1$s</string>
+    <string name="wa_waiting">Waiting for you to confirm in WhatsApp on your phone…</string>
+
+    <!-- Setup: the QR code -->
+    <string name="wa_qr_title">Scan this code with your phone</string>
+    <string name="wa_qr_steps">1. Open WhatsApp on your other phone.\n2. Go to Settings, then Linked devices.\n3. Tap Link a device.\n4. Point that phone at this code.</string>
+    <string name="wa_qr_description">QR code for linking WhatsApp</string>
+    <string name="wa_qr_use_code">Use a pairing code instead</string>
+
+    <!-- Setup: done -->
+    <string name="wa_done_title">Linked</string>
+    <string name="wa_done_body">LightDecoder is now a linked device of your WhatsApp account, shown on your phone as \"LightDecoder\". Your recent chats are arriving. A notification shows while it is connected; tap Disconnect there to stop.</string>
+    <string name="wa_done_already_title">Already linked</string>
+    <string name="wa_done_already_body">This phone is already linked to a WhatsApp account. To link a different one, unlink first in the link\'s settings.</string>
+    <string name="wa_done_open">Open chats</string>
+    <string name="wa_done_status">Link settings</string>
+
+    <!-- Linking failures that only happen on the setup screen -->
+    <string name="wa_error_pair_failed">WhatsApp did not accept the link. Check the number and try again.</string>
+    <string name="wa_error_pairing_timeout">The code ran out before it was used. Get a new one and try again.</string>
+    <string name="wa_error_pairing_cancelled">Linking was cancelled.</string>
+    <string name="wa_error_already_paired">This phone is already linked to a WhatsApp account. Unlink it first.</string>
+
+    <!-- Status and settings -->
+    <string name="wa_status_title">WhatsApp link</string>
+    <string name="wa_status_link">Link WhatsApp</string>
+    <string name="wa_status_account">WhatsApp account: %1$s</string>
+    <string name="wa_status_device">Shown on your phone as: %1$s</string>
+    <string name="wa_status_last_event">Last heard from WhatsApp: %1$s</string>
+    <string name="wa_body_disconnected">Not connected. Turn on \"Stay connected\" to receive and send WhatsApp messages here.</string>
+    <string name="wa_body_connected">Connected. New WhatsApp messages arrive here, and you can send from here.</string>
+    <string name="wa_body_reconnecting">The connection dropped. LightDecoder is reconnecting by itself.</string>
+    <string name="wa_body_error">WhatsApp could not be reached. LightDecoder tries again by itself; the reason is below.</string>
+    <string name="wa_switch_live_help">Keeps a connection to WhatsApp open in the background, with a notification you can disconnect from.</string>
+    <string name="wa_switch_auto_start">Start automatically</string>
+    <string name="wa_switch_auto_start_help">Reconnects after the phone restarts, and when you open LightDecoder.</string>
+    <string name="wa_switch_notify_help">A notification for each new message, with Reply and Mark as read. Turn it off if WhatsApp on your phone already notifies you.</string>
+    <string name="wa_unlink">Unlink</string>
+    <string name="wa_unlink_title">Unlink from WhatsApp?</string>
+    <string name="wa_unlink_body">LightDecoder is removed from the linked devices of your WhatsApp account, and the keys of the link on this phone are deleted. To use it again, you link it from the start. A kept archive is deleted if you later link a different account.</string>
+    <string name="wa_unlinked">Unlinked.</string>
+    <string name="wa_unlink_remote_failed_title">Remove LightDecoder on your phone</string>
+    <string name="wa_delete_archive_help">Chats and pictures kept on this device from the earlier WhatsApp link. Your other messages and the sticker inbox are not affected.</string>
+    <string name="wa_log_empty">Nothing yet. Lines appear here when the link connects, syncs or fails. They never contain message text, names, numbers or codes.</string>
+</resources>

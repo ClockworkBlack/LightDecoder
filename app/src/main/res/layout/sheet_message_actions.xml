@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Long press on a message: quick reactions, then the actions that apply. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingBottom="16dp">
+
+    <LinearLayout
+        android:id="@+id/reactionRow"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingHorizontal="12dp"
+        android:paddingVertical="8dp" />
+
+    <TextView
+        android:id="@+id/actionRemoveReaction"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?attr/selectableItemBackground"
+        android:clickable="true"
+        android:drawablePadding="20dp"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:minHeight="52dp"
+        android:paddingHorizontal="24dp"
+        android:textAppearance="?attr/textAppearanceBodyLarge"
+        android:drawableStart="@drawable/ic_reaction_remove"
+        android:text="@string/chat_action_remove_reaction" />
+
+    <TextView
+        android:id="@+id/actionReply"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?attr/selectableItemBackground"
+        android:clickable="true"
+        android:drawablePadding="20dp"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:minHeight="52dp"
+        android:paddingHorizontal="24dp"
+        android:textAppearance="?attr/textAppearanceBodyLarge"
+        android:drawableStart="@drawable/ic_reply"
+        android:text="@string/chat_action_reply" />
+
+    <TextView
+        android:id="@+id/actionCopy"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?attr/selectableItemBackground"
+        android:clickable="true"
+        android:drawablePadding="20dp"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:minHeight="52dp"
+        android:paddingHorizontal="24dp"
+        android:textAppearance="?attr/textAppearanceBodyLarge"
+        android:drawableStart="@drawable/ic_copy"
+        android:text="@string/chat_action_copy" />
+
+    <!-- A picture or sticker someone sent: kept among the user's own stickers. -->
+    <TextView
+        android:id="@+id/actionSaveSticker"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?attr/selectableItemBackground"
+        android:clickable="true"
+        android:drawablePadding="20dp"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:minHeight="52dp"
+        android:paddingHorizontal="24dp"
+        android:textAppearance="?attr/textAppearanceBodyLarge"
+        android:drawableStart="@drawable/ic_sticker"
+        android:text="@string/sticker_add_to_mine" />
+
+    <TextView
+        android:id="@+id/actionReadAloud"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?attr/selectableItemBackground"
+        android:clickable="true"
+        android:drawablePadding="20dp"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:minHeight="52dp"
+        android:paddingHorizontal="24dp"
+        android:textAppearance="?attr/textAppearanceBodyLarge"
+        android:drawableStart="@drawable/ic_read_aloud"
+        android:text="@string/chat_action_read_aloud"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/actionRetry"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?attr/selectableItemBackground"
+        android:clickable="true"
+        android:drawablePadding="20dp"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:minHeight="52dp"
+        android:paddingHorizontal="24dp"
+        android:textAppearance="?attr/textAppearanceBodyLarge"
+        android:drawableStart="@drawable/ic_retry"
+        android:text="@string/chat_action_retry" />
+
+    <TextView
+        android:id="@+id/actionDiscard"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?attr/selectableItemBackground"
+        android:clickable="true"
+        android:drawablePadding="20dp"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:minHeight="52dp"
+        android:paddingHorizontal="24dp"
+        android:textAppearance="?attr/textAppearanceBodyLarge"
+        android:drawableStart="@drawable/ic_delete"
+        android:text="@string/chat_action_discard" />
+
+    <TextView
+        android:id="@+id/actionDelete"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?attr/selectableItemBackground"
+        android:clickable="true"
+        android:drawablePadding="20dp"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:minHeight="52dp"
+        android:paddingHorizontal="24dp"
+        android:textAppearance="?attr/textAppearanceBodyLarge"
+        android:drawableStart="@drawable/ic_delete"
+        android:text="@string/chat_action_delete" />
+</LinearLayout>

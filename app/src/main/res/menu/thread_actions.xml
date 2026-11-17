@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+    <!-- One-to-one conversations with a phone number: opens the phone's dialer with it. -->
+    <item
+        android:id="@+id/action_call"
+        android:icon="@drawable/ic_call"
+        android:title="@string/chat_call"
+        android:visible="false"
+        app:showAsAction="always" />
+    <!-- Only while something is being read aloud. -->
+    <item
+        android:id="@+id/action_stop_reading"
+        android:icon="@drawable/ic_stop_reading"
+        android:title="@string/chat_stop_reading"
+        android:visible="false"
+        app:showAsAction="ifRoom" />
+    <item
+        android:id="@+id/action_archive"
+        android:title="@string/chat_action_archive"
+        app:showAsAction="never" />
+    <!-- Only in Spam. -->
+    <item
+        android:id="@+id/action_not_spam"
+        android:title="@string/chat_action_not_spam"
+        android:visible="false"
+        app:showAsAction="never" />
+    <!-- Only in the local Deleted folder (the phone already deleted it). -->
+    <item
+        android:id="@+id/action_restore"
+        android:title="@string/chat_action_restore"
+        android:visible="false"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_delete_forever"
+        android:title="@string/chat_action_delete_forever"
+        android:visible="false"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_mute"
+        android:title="@string/chat_action_mute"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_delete_conversation"
+        android:title="@string/chat_action_delete_conversation"
+        app:showAsAction="never" />
+    <!-- Hidden for Gmail, and while read notifications are off altogether. -->
+    <item
+        android:id="@+id/action_notify_read"
+        android:checkable="true"
+        android:title="@string/read_notify_person"
+        android:visible="false"
+        app:showAsAction="never" />
+    <!-- Hidden when there is no text-to-speech engine. -->
+    <item
+        android:id="@+id/action_read_new_aloud"
+        android:checkable="true"
+        android:title="@string/chat_read_new_aloud"
+        android:visible="false"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_link_status"
+        android:title="@string/chat_link_status"
+        app:showAsAction="never" />
+</menu>

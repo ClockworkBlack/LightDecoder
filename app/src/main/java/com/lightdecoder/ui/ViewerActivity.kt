@@ -1,8 +1,10 @@
 package com.lightdecoder.ui
 
+import android.content.ContentResolver
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.media.MediaScannerConnection
 import android.net.Uri
@@ -26,10 +28,13 @@ import com.lightdecoder.heif.ImageSniffer
 import com.lightdecoder.heif.Media
 import com.lightdecoder.heif.StickerEffect
 import com.lightdecoder.inbox.InboxStore
+import com.lightdecoder.ui.relay.SignInWebData
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
+import java.security.MessageDigest
+import java.util.UUID
 import java.util.concurrent.Executors
 
 /**
@@ -57,11 +62,16 @@ class ViewerActivity : AppCompatActivity() {
     private var loaded: Loaded? = null
     private var showEffect = true
 
+    /** The current intent came from [intentForFile] (this app), not from another app. */
+    private var internalIntent = false
+
     private val openDocument = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) load(queryName(uri)) { readCapped(uri) }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Sign-in cookies a killed setup screen left behind (once per process; see SignInWebData).
+        SignInWebData.wipeIfDirty(this)
         super.onCreate(savedInstanceState)
         binding = ActivityViewerBinding.inflate(layoutInflater)
         setContentView(binding.root)
@@ -76,19 +86,27 @@ class ViewerActivity : AppCompatActivity() {
                 R.id.action_save -> saveToGallery()
                 R.id.action_share -> chooseShare()
                 R.id.action_info -> showDetails()
+                R.id.action_add_sticker -> addToStickers()
                 else -> return@setOnMenuItemClickListener false
             }
             true
         }
 
         if (!HeifCodec.isAvailable) toast(getString(R.string.not_available))
-        handleIntent(intent)
+        // Recreated (rotation, or after the process was stopped): the intent was
+        // already judged; its per-process token may no longer match.
+        handleIntent(intent, trustedBefore = savedInstanceState?.getBoolean(STATE_INTERNAL) == true)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        handleIntent(intent)
+        handleIntent(intent, trustedBefore = false)
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean(STATE_INTERNAL, internalIntent)
     }
 
     override fun onDestroy() {
@@ -96,7 +114,17 @@ class ViewerActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
-    private fun handleIntent(intent: Intent?) {
+    /**
+     * The viewer is exported: any app can send it a uri. Those are read
+     * with this app's own identity, so a uri from another app must be a
+     * content uri of another app's provider, never a file path or one of this
+     * app's own (private) providers; otherwise it could be used to copy this
+     * app's private files (message pictures) out through Save and Share. Only
+     * [intentForFile], which carries a token no other app can know, may open
+     * this app's own files and set the title.
+     */
+    private fun handleIntent(intent: Intent?, trustedBefore: Boolean) {
+        internalIntent = trustedBefore || isInternal(intent)
         val inboxId = intent?.getStringExtra(EXTRA_INBOX_ID)
         if (inboxId != null) {
             loadInboxItem(inboxId)
@@ -112,7 +140,51 @@ class ViewerActivity : AppCompatActivity() {
                 }
             else -> null
         }
-        if (uri != null) load(queryName(uri)) { readCapped(uri) } else showEmpty()
+        if (uri != null && !internalIntent && !isSafeExternal(uri)) {
+            showEmpty()
+            toast(getString(R.string.cannot_open))
+            return
+        }
+        // A title comes only with intentForFile (a picture from a message).
+        val title = if (internalIntent) intent?.getStringExtra(EXTRA_TITLE)?.takeIf { it.isNotBlank() } else null
+        if (uri != null) load(queryName(uri), title) { readCapped(uri) } else showEmpty()
+    }
+
+    private fun isInternal(intent: Intent?): Boolean {
+        val token = intent?.getStringExtra(EXTRA_INTERNAL_TOKEN) ?: return false
+        return MessageDigest.isEqual(token.toByteArray(), internalToken.toByteArray())
+    }
+
+    /**
+     * A uri another app may hand over: a content uri whose provider is not
+     * this app's. Matched on this app's own authorities exactly, not on a
+     * "$packageName." prefix: the debug build's provider
+     * (com.lightdecoder.debug.fileprovider) is another app's to the release build.
+     */
+    private fun isSafeExternal(uri: Uri): Boolean {
+        if (!uri.scheme.equals(ContentResolver.SCHEME_CONTENT, ignoreCase = true)) return false
+        // getHost drops a "userId@" prefix, as the content resolver does.
+        val authority = uri.host?.takeIf { it.isNotEmpty() } ?: return false
+        val owner = runCatching { packageManager.resolveContentProvider(authority, 0)?.packageName }.getOrNull()
+        return owner != packageName && authority !in ownAuthorities()
+    }
+
+    /**
+     * Every authority this app's own providers answer to: those its package
+     * declares (the FileProvider and the ones libraries merge in), and the
+     * FileProvider's by name in case the package manager does not list it.
+     */
+    private fun ownAuthorities(): Set<String> {
+        val declared = runCatching {
+            val flags = PackageManager.GET_PROVIDERS or PackageManager.MATCH_DISABLED_COMPONENTS
+            val info = if (Build.VERSION.SDK_INT >= 33) {
+                packageManager.getPackageInfo(packageName, PackageManager.PackageInfoFlags.of(flags.toLong()))
+            } else {
+                @Suppress("DEPRECATION") packageManager.getPackageInfo(packageName, flags)
+            }
+            info.providers.orEmpty().flatMap { it.authority.orEmpty().split(';') }
+        }.getOrDefault(emptyList())
+        return (declared + "$packageName.fileprovider").map { it.trim() }.filter { it.isNotEmpty() }.toSet()
     }
 
     private fun loadInboxItem(id: String) {
@@ -263,6 +335,17 @@ class ViewerActivity : AppCompatActivity() {
 
     private fun sharedDir() = File(cacheDir, "shared").apply { mkdirs() }
 
+    /** The picture on screen (a sticker someone sent, say) into the user's own stickers. */
+    private fun addToStickers() {
+        val l = loaded ?: return
+        io.execute {
+            val file = runCatching { com.lightdecoder.sticker.StickerLibrary.addPicture(applicationContext, l.bytes) }.getOrNull()
+            main.post {
+                toast(getString(if (file != null) R.string.sticker_added_to_mine else R.string.sticker_add_failed))
+            }
+        }
+    }
+
     private fun saveToGallery() {
         val l = loaded ?: return
         val bitmap = binding.stickerView.currentBitmap ?: return
@@ -377,7 +460,17 @@ class ViewerActivity : AppCompatActivity() {
 
     companion object {
         private const val EXTRA_INBOX_ID = "com.lightdecoder.extra.INBOX_ID"
+        private const val EXTRA_TITLE = "com.lightdecoder.extra.TITLE"
+        private const val EXTRA_INTERNAL_TOKEN = "com.lightdecoder.extra.INTERNAL_TOKEN"
+        private const val STATE_INTERNAL = "internal"
         private const val MAX_FILE_BYTES = 64 * 1024 * 1024
+
+        /**
+         * Proves an intent was built by [intentForFile] in this process: random,
+         * held only in memory, and only ever sent to this activity directly, so
+         * no other app can know it.
+         */
+        private val internalToken: String = UUID.randomUUID().toString()
 
         /** Opens a sticker that the inbox has stored. */
         fun intentForInboxItem(context: Context, id: String): Intent =
@@ -386,5 +479,26 @@ class ViewerActivity : AppCompatActivity() {
                 // Distinct data per item, so pending intents for two stickers are not merged.
                 .setData(Uri.parse("lightdecoder://inbox/$id"))
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+
+        /**
+         * Opens a picture from the app's own storage (media of a Google
+         * Messages conversation), as a content:// uri of the app's
+         * FileProvider. The viewer is exported, so it opens the app's own
+         * files only for intents carrying [internalToken], which this adds;
+         * for any other caller such uris and file paths are refused. Pass it
+         * to startActivity only, never into a PendingIntent: the token lasts
+         * one process. [title] is shown in the toolbar.
+         *
+         * @throws IllegalArgumentException if [file] is outside the folders in res/xml/file_paths.xml
+         */
+        fun intentForFile(context: Context, file: File, mime: String, title: String): Intent {
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+            return Intent(context, ViewerActivity::class.java)
+                .setAction(Intent.ACTION_VIEW)
+                .setDataAndType(uri, mime.ifBlank { "image/*" })
+                .putExtra(EXTRA_TITLE, title)
+                .putExtra(EXTRA_INTERNAL_TOKEN, internalToken)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
     }
 }

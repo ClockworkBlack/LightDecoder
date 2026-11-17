@@ -1,0 +1,73 @@
+LightDecoder
+Copyright (C) the LightDecoder contributors.
+Licensed under the GNU Affero General Public License v3.0 or later (see LICENSE).
+
+This app includes the following third-party software. Each is used
+unmodified, as published by its authors, and remains under its own licence.
+
+Native picture decoder (app/src/main/cpp, linked into liblightdecoder.so)
+  libde265        LGPL-3.0     https://github.com/strukturag/libde265
+  libheif         LGPL-3.0     https://github.com/strukturag/libheif
+
+Google Messages link (gmbridge/, compiled into libgojni.so with gomobile)
+  go.mau.fi/mautrix-gmessages (pkg/libgm)
+                  AGPL-3.0     https://github.com/mautrix/gmessages
+                  Copyright (C) Tulir Asokan and the mautrix-gmessages contributors
+  go.mau.fi/util  MPL-2.0      https://github.com/mautrix/go-util
+  github.com/rs/zerolog          MIT           Copyright (c) 2017 Olivier Poitrey
+  github.com/mattn/go-colorable  MIT           Copyright (c) 2016 Yasuhiro Matsumoto
+  github.com/mattn/go-isatty     MIT           Copyright (c) Yasuhiro Matsumoto
+  github.com/google/uuid         BSD-3-Clause  Copyright (c) 2009,2014 Google Inc.
+  google.golang.org/protobuf     BSD-3-Clause  Copyright (c) 2018 The Go Authors
+  golang.org/x/crypto, x/exp, x/net, x/sync, x/sys, x/text
+                                 BSD-3-Clause  Copyright 2009 The Go Authors
+  golang.org/x/mobile (gomobile runtime glue)
+                                 BSD-3-Clause  Copyright 2009 The Go Authors
+  The Go runtime and standard library
+                                 BSD-3-Clause  Copyright 2009 The Go Authors
+
+WhatsApp link (gmbridge/wa, compiled into the same libgojni.so)
+  go.mau.fi/whatsmeow           MPL-2.0       https://github.com/tulir/whatsmeow
+                                Copyright (c) Tulir Asokan
+  go.mau.fi/libsignal           GPL-3.0       https://github.com/tulir/libsignal-protocol-go
+  github.com/mattn/go-sqlite3   MIT           Copyright (c) 2014 Yasuhiro Matsumoto
+  SQLite (C library, the amalgamation go-sqlite3 ships)
+                                Public domain https://sqlite.org/copyright.html
+  filippo.io/edwards25519       BSD-3-Clause  Copyright (c) 2009 The Go Authors
+  github.com/coder/websocket    ISC           Copyright (c) 2025 Coder
+  github.com/beeper/argo-go     MIT           Copyright 2025 Automattic Inc.
+  github.com/vektah/gqlparser   MIT           Copyright (c) 2018 Adam Scarr
+  github.com/elliotchance/orderedmap
+                                MIT           Copyright (c) 2020 Elliot Chance
+  github.com/petermattis/goid   Apache-2.0
+
+Exact versions are pinned in gmbridge/go.mod and gmbridge/go.sum.
+
+The full licence texts also ship inside the app: About > Licences shows this
+NOTICE and the licence texts the build collects into the APK's assets
+(assets/NOTICE and assets/licenses/: this app; the native decoder libraries;
+each Go module, with its exact version, and the Go runtime linked into
+libgojni.so; and, in 40-android-libraries.txt, the Android libraries in
+classes.dex with their exact versions and the Apache License 2.0). They also
+come with each module's source (go mod download) and with the pinned
+submodules under third_party/.
+
+Android libraries (AndroidX, Material Components, Kotlin, kotlinx.coroutines and
+ZXing core, which draws the WhatsApp setup screen's QR code) are Apache-2.0.
+Jakarta Mail for Android (com.sun.mail:android-mail and android-activation
+1.6.7), which the Gmail tab uses for IMAP and SMTP, is under the Eclipse Public
+License 2.0 or the GNU GPL 2.0 with the Classpath Exception; About > Licences lists them with the licence text.
+
+Sticker maker, smart cut-out
+  ONNX Runtime (com.microsoft.onnxruntime:onnxruntime-android)
+                  MIT          Copyright (c) Microsoft Corporation
+  U-2-Net model (app/src/main/assets/models/u2netp.onnx, unmodified)
+                  Apache-2.0   https://github.com/xuebinqin/U-2-Net
+                  Copyright (c) Xuebin Qin and the U-2-Net authors
+  Robust Video Matting model (app/src/main/assets/models/rvm_mobilenetv3.onnx, unmodified)
+                  GPL-3.0      https://github.com/PeterL1n/RobustVideoMatting
+                  Copyright (c) Peter Lin and the Robust Video Matting authors
+  EfficientSAM model (app/src/main/assets/models/efficient_sam_vitt_encoder.onnx and
+  efficient_sam_vitt_decoder.onnx, unmodified)
+                  Apache-2.0   https://github.com/yformer/EfficientSAM
+                  Copyright (c) the EfficientSAM authors

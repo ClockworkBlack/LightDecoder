@@ -1,0 +1,460 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Text of the Google Messages link's screens (setup, link status) and of
+    the messaging screens (conversations, threads), which show Google
+    Messages and WhatsApp alike. The links' runtimes and notifications use
+    strings_relay.xml and strings_wa*.xml.
+    Names start with link_ (the link screens) or chat_ (the messaging
+    screens); chat_wa_ is the wording for WhatsApp where it differs.
+-->
+<resources>
+
+    <!-- Setup, step 1: what this is -->
+    <string name="link_setup_title">Link Google Messages</string>
+    <string name="link_intro_title">Read and send your texts here</string>
+    <string name="link_intro_what">LightDecoder can connect to Google Messages on your phone the same way \"Messages for web\" does in a browser. You can then read your conversations here, reply, see reactions, and HEIC stickers that arrive are decoded into the sticker inbox automatically, without notification access.</string>
+    <string name="link_intro_terms_title">Not an official Google feature</string>
+    <string name="link_intro_terms">LightDecoder emulates Messages for web using Google\'s private, undocumented protocol (through the open-source libgm library). Google does not offer this to other apps, and using it this way is against Google\'s Terms of Service. Google could stop it from working at any time, and could take action on the Google account used. Only continue if you accept that risk.</string>
+    <string name="link_intro_data_title">Your data stays on this device</string>
+    <string name="link_intro_data">Messages are stored only on this phone, in LightDecoder\'s private storage, and are never backed up to the cloud. The sign-in session is encrypted with a key kept in Android\'s keystore. LightDecoder has no servers and no analytics: it only talks to Google, exactly like Messages for web does.</string>
+    <string name="link_intro_confirm_title">You confirm it on your phone</string>
+    <string name="link_intro_confirm">You sign in to the Google account that Google Messages on your phone uses. LightDecoder then shows an emoji, and nothing is linked until you tap the same emoji in Google Messages on your phone. LightDecoder cannot do that step for you.</string>
+    <string name="link_intro_stop_title">How to stop it</string>
+    <string name="link_intro_stop">While connected, a notification is always shown, with a Disconnect button. Disconnect stops the connection and keeps the link for later. Unpair, in the link\'s settings here, removes the link from your phone too and deletes the session; you can also remove \"LightDecoder\" under Device pairing in Google Messages on your phone at any time.</string>
+    <string name="link_intro_agree">I understand, and I want to link my own Google Messages</string>
+    <string name="link_intro_continue">Continue</string>
+    <string name="link_intro_debug_title">This is a debug build</string>
+    <string name="link_intro_debug">On a debug build, anyone who connects this phone to a computer with USB debugging (adb) can read LightDecoder\'s message archive and its Google sign-in session. Use it with a test Google account only, never your own.</string>
+
+    <!-- Setup, step 2: sign-in -->
+    <string name="link_sign_in_hint">Sign in to the Google account that Google Messages on your phone uses. Only the sign-in cookies Messages for web needs are kept; this browser is wiped right after. If Google says this browser may not be secure, use \"Paste cookies\" instead.</string>
+    <string name="link_sign_in_load_failed">Google\'s sign-in page could not be loaded. Check the internet connection and try again.</string>
+    <string name="link_sign_in_blocked">Only Google\'s sign-in pages open here.</string>
+    <string name="link_sign_in_paste">Paste cookies</string>
+    <string name="link_paste_title">Paste your cookies</string>
+    <string name="link_paste_body">Advanced: on a computer, sign in to messages.google.com, open the browser\'s developer tools, and copy the cookies for google.com and messages.google.com. LightDecoder reads a cookie export (JSON), a Cookie header, or \"Copy as cURL\". Only paste your own cookies: they give full access to that Google account.</string>
+    <string name="link_paste_hint">Cookies</string>
+    <string name="link_paste_use">Use these</string>
+    <string name="link_paste_unreadable">No Google cookies found in that text.</string>
+    <string name="link_paste_missing">These cookies are missing: %1$s</string>
+    <string name="link_paste_clipboard_cleared">The cookies were removed from the clipboard. If your keyboard keeps a clipboard history, delete them there too: LightDecoder cannot reach it.</string>
+    <string name="link_paste_clipboard_history">If your keyboard keeps a clipboard history, delete the cookies there: LightDecoder cannot reach it.</string>
+    <string name="link_sign_in_no_webview">This phone\'s web component (Android System WebView) is not available right now, so Google\'s sign-in page cannot open. Try again later, or use \"Paste cookies\".</string>
+
+    <!-- Setup, step 3: the emoji -->
+    <string name="link_confirm_title">Confirm on your phone</string>
+    <string name="link_confirm_account">Google account: %1$s</string>
+    <string name="link_confirm_starting">Contacting Google and your phone…</string>
+    <string name="link_confirm_instructions">Google Messages on your phone now asks to link a device and shows a few emoji. Tap the one shown here. If Google Messages is on this same phone, remember the emoji, then switch to Google Messages.</string>
+    <string name="link_confirm_waiting">Waiting for you to tap it on your phone. Nothing is linked until you do.</string>
+    <string name="link_confirm_emoji_description">Emoji to tap on your phone: %1$s</string>
+    <string name="link_confirm_failed">Not linked.</string>
+    <string name="link_confirm_retry">Try again</string>
+    <string name="link_confirm_sign_in_again">Sign in again</string>
+
+    <!-- Setup, step 4 -->
+    <string name="link_done_title">Linked</string>
+    <string name="link_done_body">LightDecoder is now connected to Google Messages on your phone. Your recent conversations are being imported. A notification shows while it is connected; tap Disconnect there to stop.</string>
+    <string name="link_done_already_title">Already linked</string>
+    <string name="link_done_already_body">This phone is already linked to Google Messages. To link a different account, unpair first in the link\'s settings.</string>
+    <string name="link_done_open">Open messages</string>
+    <string name="link_done_status">Link settings</string>
+
+    <!-- What the link is doing -->
+    <string name="link_phase_unpaired">Not linked</string>
+    <string name="link_phase_pairing">Linking…</string>
+    <string name="link_phase_disconnected">Disconnected</string>
+    <string name="link_phase_connecting">Connecting…</string>
+    <string name="link_phase_connected">Connected</string>
+    <string name="link_phase_active_elsewhere">In use in another browser</string>
+    <string name="link_phase_reconnecting">Reconnecting…</string>
+    <string name="link_phase_phone_offline">Your phone is not responding</string>
+    <string name="link_phase_logged_out">Link removed</string>
+    <string name="link_phase_cookies_invalid">Google sign-in expired</string>
+    <string name="link_phase_error">Connection problem</string>
+    <string name="link_phase_notifications_off">Notifications are off</string>
+
+    <string name="link_body_unpaired">Set up the link to read and send messages here.</string>
+    <string name="link_body_pairing">Waiting for you to confirm on your phone.</string>
+    <string name="link_body_disconnected">Messages already imported can still be read. New messages and sending need a connection.</string>
+    <string name="link_body_connecting">Connecting to Google Messages on your phone.</string>
+    <string name="link_body_connected">New messages arrive here as they come in.</string>
+    <string name="link_body_active_elsewhere">Google Messages is open in another browser or app, so it is paused here. Tap \"Use here\" to switch it back.</string>
+    <string name="link_body_reconnecting">The connection dropped; trying again.</string>
+    <string name="link_body_phone_offline">Google cannot reach your phone. Check that it is on and online. Messages are sent once it answers.</string>
+    <string name="link_body_logged_out">The link was removed on your phone, or the Google account signed out. Set it up again to reconnect. Imported messages are kept.</string>
+    <string name="link_body_cookies_invalid">Google no longer accepts this sign-in. Set the link up again with a fresh sign-in. Imported messages are kept.</string>
+    <string name="link_body_error">The connection stopped because of an error. The activity log in the link\'s settings has details.</string>
+    <string name="link_body_notifications_off">The link only connects while its notification, with its Disconnect button, can be shown. Turn on LightDecoder\'s notifications to connect.</string>
+
+    <string name="link_fix_set_up">Set up</string>
+    <string name="link_fix_connect">Connect</string>
+    <string name="link_fix_use_here">Use here</string>
+    <string name="link_fix_status">Details</string>
+    <string name="link_fix_notifications">Turn on</string>
+
+    <!-- The link never runs without its notification -->
+    <string name="link_notifications_needed_title">Notifications needed</string>
+    <string name="link_notifications_needed_body">While the link is connected, LightDecoder always shows a notification with a Disconnect button, so you can see it is running and stop it at any time. It cannot connect without it. Turn on LightDecoder\'s notifications (at least \"Google Messages link\") in system settings.</string>
+    <string name="link_notifications_needed_body_whatsapp">While the link is connected, LightDecoder always shows a notification with a Disconnect button, so you can see it is running and stop it at any time. It cannot connect without it. Turn on LightDecoder\'s notifications (at least \"WhatsApp link\") in system settings.</string>
+    <string name="link_notifications_open_settings">Open settings</string>
+
+    <!-- Error codes from the link, in plain words -->
+    <string name="link_error_not_paired">This phone is not linked to Google Messages yet. Set up the link first.</string>
+    <string name="link_error_not_connected">Not connected to your phone right now. Turn on \"Stay connected\" and try again.</string>
+    <string name="link_error_no_cookies">The sign-in did not give the cookies Messages for web needs. Sign in again, or paste your cookies.</string>
+    <string name="link_error_cookies_invalid">Google did not accept this sign-in. It may have expired, or the account is signed out. Sign in again.</string>
+    <string name="link_error_no_devices">No phone with Google Messages was found for this Google account. On your phone, open Google Messages, make sure it is signed in to the same account (Device pairing in its settings), and try again.</string>
+    <string name="link_error_pairing_init_timeout">Your phone did not answer the link request. Make sure it is on and online and that Google Messages is up to date, then try again. If this account has several phones, pairing may not work.</string>
+    <string name="link_error_incorrect_emoji">You tapped a different emoji on your phone, so nothing was linked. Try again and tap the emoji shown here.</string>
+    <string name="link_error_pairing_cancelled">Linking was cancelled, on your phone or here. Nothing was linked.</string>
+    <string name="link_error_pairing_timeout">Your phone did not confirm in time. Try again, and tap the emoji on your phone within three minutes.</string>
+    <string name="link_error_pairing_in_progress">A link attempt is still running. Wait a moment, then try again.</string>
+    <string name="link_error_no_pairing">That link attempt expired. Start again.</string>
+    <string name="link_error_phone_not_responding">Your phone is not responding. Check that it is on and online. It may still finish what was asked once it answers.</string>
+    <string name="link_error_connection_closed">The connection closed before your phone answered. Try again.</string>
+    <string name="link_error_not_found">Google could not find that. It may have been deleted on your phone.</string>
+    <string name="link_error_invalid_argument">That request could not be sent as it is.</string>
+    <string name="link_error_too_large">That file is too large to send or download.</string>
+    <string name="link_error_send_failed">Your phone could not send this message.</string>
+    <string name="link_error_logged_out">The link was removed on your phone, or the Google account signed out. Set it up again to reconnect.</string>
+    <string name="link_error_notifications_off">LightDecoder\'s notifications are turned off, so the link cannot connect: it always shows a notification with a Disconnect button while connected.</string>
+    <string name="link_error_internal">Something went wrong in the link. Try again; if it keeps happening, the activity log in the link\'s settings may help.</string>
+    <!-- Not a bridge code: an unpair that could not tell Google (RelayState.UNPAIR_REMOTE_FAILED). -->
+    <string name="link_error_unpair_remote_failed">LightDecoder could not reach Google to remove the link from your phone. To finish, open Google Messages on your phone, go to Device pairing (in its menu), and remove \"LightDecoder\" there.</string>
+
+    <!-- Link settings -->
+    <string name="link_status_title">Google Messages link</string>
+    <string name="link_status_account">Google account: %1$s</string>
+    <string name="link_status_phone">Paired device id: %1$s</string>
+    <string name="link_status_last_event">Last heard from Google: %1$s</string>
+    <string name="link_status_token_refresh">Last session refresh: %1$s</string>
+    <string name="link_status_last_error">Last error: %1$s</string>
+    <string name="link_status_never">never</string>
+    <string name="link_status_unknown">–</string>
+    <string name="link_status_log">Activity log</string>
+    <string name="link_log_empty">Nothing yet. Lines appear here when the link connects, syncs or fails. They never contain message text, names, numbers or keys.</string>
+    <string name="link_log_clear">Clear log</string>
+
+    <string name="link_switch_live">Stay connected</string>
+    <string name="link_switch_live_help">Keeps a connection to your phone open in the background, with a notification you can disconnect from.</string>
+    <string name="link_switch_auto_start">Reconnect after the phone restarts</string>
+    <string name="link_switch_notify">Notify about new messages</string>
+    <string name="link_switch_notify_help">A notification for each new message, with Reply and Mark as read. Turn it off if Google Messages on your phone already notifies you.</string>
+    <string name="link_switch_stickers">Decode stickers into the sticker inbox</string>
+    <string name="link_battery_optimized">Android may pause the connection to save battery. Exempting LightDecoder from battery optimization keeps it connected.</string>
+    <string name="link_battery_exempt">LightDecoder is exempt from battery optimization.</string>
+    <string name="link_battery_settings">Battery settings</string>
+    <string name="link_settings_unavailable">This phone did not open that settings screen.</string>
+    <string name="link_disconnect">Disconnect</string>
+    <string name="link_unpair">Unpair</string>
+    <string name="link_unpair_title">Unpair from Google Messages?</string>
+    <string name="link_unpair_body">LightDecoder is removed from the paired devices on your phone, and the sign-in session on this device is deleted. To use it again, you set it up from the start. A kept archive is deleted if you later link a different phone or Google account.</string>
+    <string name="link_unpair_delete_archive">Also delete the local message archive</string>
+    <string name="link_unpair_confirm">Unpair</string>
+    <string name="link_unpaired">Unpaired.</string>
+    <string name="link_unpairing">Unpairing…</string>
+    <string name="link_unpair_remote_failed_title">Remove LightDecoder on your phone</string>
+    <string name="link_unpair_remote_failed_body">The link is gone from this device, but LightDecoder could not reach Google to remove it from your phone too. To finish, open Google Messages on your phone, go to Device pairing (in its menu), and remove \"LightDecoder\" there.</string>
+    <string name="link_delete_archive">Delete local message archive</string>
+    <string name="link_delete_archive_help">Messages and pictures kept on this device from the earlier link. The sticker inbox is not affected.</string>
+    <string name="link_delete_archive_title">Delete the local message archive?</string>
+    <string name="link_delete_archive_body">All conversations, messages and media stored on this device are deleted. Your phone is not linked, so nothing changes there. The sticker inbox is kept.</string>
+    <string name="link_delete_archive_confirm">Delete</string>
+    <string name="link_archive_deleted">Local message archive deleted.</string>
+    <string name="link_archive_delete_failed">The archive could not be deleted.</string>
+
+    <string name="link_import_title">Message history</string>
+    <string name="link_import_body">How much past history to copy to this device after linking. Older messages also load when you scroll up in a conversation.</string>
+    <string name="link_depth_off">Don\'t import (new messages only)</string>
+    <string name="link_depth_recent">Recent: 25 conversations, 50 messages each</string>
+    <string name="link_depth_deep">Deep: 200 conversations, 1,000 messages each (slow)</string>
+    <string name="link_import_now">Import history now</string>
+    <string name="link_import_pick_depth">Pick how much history to import first.</string>
+    <string name="link_import_running">Importing: %1$d of %2$d conversations, %3$d messages</string>
+    <string name="link_import_failed">Import stopped: %1$s</string>
+    <string name="link_import_done_at">Last import finished %1$s.</string>
+    <string name="link_import_never">No history imported yet.</string>
+
+    <!-- Conversation list -->
+    <string name="chat_title">Messages</string>
+    <!-- The two service tabs above the folders. -->
+    <string name="chat_service_messages">Messages</string>
+    <string name="chat_service_whatsapp">WhatsApp</string>
+    <!-- What TalkBack adds to a service tab that has unread conversations. -->
+    <plurals name="chat_unread_conversations">
+        <item quantity="one">%1$d unread conversation</item>
+        <item quantity="other">%1$d unread conversations</item>
+    </plurals>
+    <!-- The card a service that is not linked shows in place of its conversations (Google Messages uses link_setup_title and link_card_not_set_up). -->
+    <string name="chat_wa_link_title">Link WhatsApp</string>
+    <string name="chat_wa_link_body">Not set up. Link LightDecoder to your WhatsApp account as a linked device to read and send your WhatsApp chats here.</string>
+    <string name="chat_wa_empty_inbox">No chats yet. They arrive from your phone after linking; pull down to check again.</string>
+    <!-- The banner, where WhatsApp needs other words than link_body_*. -->
+    <string name="chat_wa_body_unpaired">Link WhatsApp to read and send your chats here.</string>
+    <string name="chat_wa_body_pairing">Waiting for you to confirm in WhatsApp on your phone.</string>
+    <string name="chat_wa_body_connecting">Connecting to WhatsApp.</string>
+    <string name="chat_wa_body_logged_out">This device was removed from the linked devices in WhatsApp on your phone. Link it again to reconnect. Messages already here are kept.</string>
+    <string name="chat_wa_delete_conversation_body">It is removed from this device, with all its messages. It stays in WhatsApp on your phone, and a new message in it brings it back here.</string>
+    <!-- The home screen's WhatsApp link block. -->
+    <string name="chat_wa_card_title">WhatsApp link</string>
+    <string name="chat_wa_card_open">Open chats</string>
+    <string name="chat_folder_inbox">Inbox</string>
+    <string name="chat_folder_archive">Archived</string>
+    <string name="chat_folder_spam">Spam</string>
+    <!-- Local-only folder: conversations the phone deleted or trashed, kept here until the user restores or removes them. -->
+    <string name="chat_folder_deleted">Deleted</string>
+    <string name="chat_empty_inbox">No conversations yet. Pull down to load them from your phone.</string>
+    <string name="chat_empty_unpaired">Not linked. Imported conversations show up here.</string>
+    <string name="chat_empty_archive">No archived conversations.</string>
+    <string name="chat_empty_spam">No spam.</string>
+    <string name="chat_empty_deleted">Nothing here. Conversations deleted on your phone are kept here until you restore them or delete them for good.</string>
+    <string name="chat_untitled">Conversation</string>
+    <string name="chat_unread">unread</string>
+    <string name="chat_pinned">pinned</string>
+    <string name="chat_muted">muted</string>
+    <string name="chat_snippet_you">You: %1$s</string>
+    <string name="chat_snippet_sender">%1$s: %2$s</string>
+    <string name="chat_snippet_attachment">Attachment</string>
+    <string name="chat_snippet_none">No messages yet</string>
+    <string name="chat_importing">Importing message history…</string>
+    <string name="chat_importing_count">Importing message history: %1$d of %2$d conversations</string>
+    <string name="chat_search">Search</string>
+    <string name="chat_search_hint">Search messages</string>
+    <string name="chat_search_empty">No messages match.</string>
+    <string name="chat_refresh">Refresh from phone</string>
+    <string name="chat_link_status">Link settings</string>
+    <string name="chat_new_conversation">New conversation</string>
+    <string name="chat_new_conversation_short">Start chat</string>
+    <string name="chat_action_archive">Archive</string>
+    <string name="chat_action_unarchive">Unarchive</string>
+    <string name="chat_action_mute">Mute</string>
+    <string name="chat_action_unmute">Unmute</string>
+    <string name="chat_action_delete">Delete</string>
+    <string name="chat_action_delete_conversation">Delete conversation</string>
+    <string name="chat_archived">Archived</string>
+    <string name="chat_unarchived">Moved to inbox</string>
+    <string name="chat_muted_done">Muted</string>
+    <string name="chat_unmuted_done">Unmuted</string>
+    <string name="chat_deleted">Conversation deleted</string>
+    <string name="chat_delete_conversation_title">Delete this conversation?</string>
+    <string name="chat_delete_conversation_body">It is deleted on your phone too, with all its messages.</string>
+    <string name="chat_delete_conversation_body_local">It is removed from this device only, with all its messages. Your phone is not linked, so nothing changes there.</string>
+    <string name="chat_action_not_spam">Not spam</string>
+    <string name="chat_not_spam_done">Moved to inbox</string>
+    <string name="chat_action_restore">Restore</string>
+    <string name="chat_restored">Restored to inbox on this device</string>
+    <string name="chat_action_delete_forever">Delete forever</string>
+    <string name="chat_delete_forever_title">Delete forever?</string>
+    <string name="chat_delete_forever_body">This conversation and its messages are removed from this device for good. Your phone already deleted it.</string>
+    <string name="chat_deleted_forever">Deleted for good</string>
+    <string name="chat_empty_deleted_folder">Empty Deleted</string>
+    <string name="chat_empty_deleted_title">Empty Deleted?</string>
+    <string name="chat_empty_deleted_body">Every conversation in Deleted is removed from this device for good, with its messages. Your phone already deleted them.</string>
+    <string name="chat_empty_deleted_action">Empty</string>
+    <string name="chat_emptied_deleted">Deleted is empty</string>
+    <string name="chat_deleted_banner">Your phone deleted this conversation. It is kept on this device only.</string>
+
+    <!-- Thread -->
+    <string name="chat_day_today">Today</string>
+    <string name="chat_day_yesterday">Yesterday</string>
+    <string name="chat_thread_empty">No messages here yet.</string>
+    <string name="chat_loading_older">Loading earlier messages…</string>
+    <string name="chat_history_start">Start of the conversation</string>
+    <string name="chat_system_message">Conversation updated</string>
+    <string name="chat_you">You</string>
+    <string name="chat_unknown_sender">Unknown</string>
+    <string name="chat_replying_to">Replying to %1$s</string>
+    <string name="chat_reply_unavailable">Reply to an earlier message</string>
+    <string name="chat_reply_cancel">Cancel reply</string>
+    <string name="chat_status_sending">Sending</string>
+    <string name="chat_status_sent">Sent</string>
+    <string name="chat_status_delivered">Delivered</string>
+    <string name="chat_status_read">Read</string>
+    <string name="chat_status_failed">Not sent</string>
+    <string name="chat_failed_retry">Not sent. Tap to try again.</string>
+    <string name="chat_failed_phone">Not sent</string>
+    <string name="chat_failed_phone_detail">Your phone could not send this message. Open Google Messages on your phone to retry it there.</string>
+    <!-- A send whose outcome is unknown (the app stopped mid-send, or the phone never confirmed it).
+         Shown under the bubble and read by TalkBack as the bubble's status. -->
+    <string name="chat_failed_unconfirmed">Not confirmed. It may have been sent.</string>
+    <string name="chat_failed_unconfirmed_action">Send again or discard</string>
+    <string name="chat_resend_title">Send again?</string>
+    <string name="chat_resend_body">Your phone did not confirm this message, so it may already have been sent. Sending it again could deliver it twice. To check, look for it in Google Messages on your phone.</string>
+    <string name="chat_resend_send">Send again</string>
+    <string name="chat_media_picture">Picture</string>
+    <string name="chat_media_video">Video</string>
+    <string name="chat_media_file">Attachment</string>
+    <string name="chat_media_downloading">Downloading…</string>
+    <string name="chat_media_unavailable">This attachment is not available.</string>
+    <string name="chat_media_connect_to_load">Connect to load</string>
+    <string name="chat_media_needs_connection">Connect to your phone to load this attachment.</string>
+    <string name="chat_load_full_size">Load full size</string>
+    <string name="chat_full_size_requested">Asked your phone for the full-size picture.</string>
+    <string name="chat_open_with">Open with</string>
+    <string name="chat_no_app">No app on this phone can open this file.</string>
+    <string name="chat_message_actions">Message options</string>
+    <string name="chat_react_with">React with %1$s</string>
+    <string name="chat_action_remove_reaction">Remove my reaction</string>
+    <string name="chat_action_reply">Reply</string>
+    <!-- TalkBack action on a bubble for each link in its text; %1$s is the link as shown. -->
+    <string name="chat_open_link">Open link: %1$s</string>
+    <string name="chat_action_copy">Copy text</string>
+    <string name="chat_action_retry">Try sending again</string>
+    <string name="chat_action_discard">Discard</string>
+    <string name="chat_delete_message_question">Delete this message? It is deleted on your phone too.</string>
+    <string name="chat_delete_message_question_local">Delete this message? It is removed from this device only: your phone is not linked.</string>
+    <string name="chat_clip_label">Message</string>
+    <string name="chat_copied">Copied</string>
+    <string name="chat_typing_someone">Typing…</string>
+    <string name="chat_typing_one">%1$s is typing…</string>
+    <string name="chat_typing_two">%1$s and %2$s are typing…</string>
+    <string name="chat_typing_many">Several people are typing…</string>
+    <string name="chat_read_only">You can\'t reply in this conversation.</string>
+    <!-- Under a one-to-one conversation's title, where the service tells (WhatsApp). Lower case, as a status line. -->
+    <string name="chat_presence_online">online</string>
+    <string name="chat_presence_typing">typing…</string>
+    <string name="chat_presence_last_seen_today">last seen today at %1$s</string>
+    <string name="chat_presence_last_seen_yesterday">last seen yesterday at %1$s</string>
+    <!-- %1$s is a weekday or a date. -->
+    <string name="chat_presence_last_seen">last seen %1$s</string>
+    <!-- Deleting a message where it can also be taken back from everyone (WhatsApp). -->
+    <string name="chat_delete_message_choice">Delete this message? \"Delete for everyone\" also removes it for the other people in the conversation. \"Delete for me\" removes it from your own devices only.</string>
+    <string name="chat_delete_message_for_me_question">Delete this message for you? It is removed from your own devices; the other people in the conversation keep it.</string>
+    <string name="chat_delete_for_everyone">Delete for everyone</string>
+    <string name="chat_delete_for_me">Delete for me</string>
+    <string name="chat_wa_compose_hint">Message</string>
+    <string name="chat_wa_failed_phone_detail">WhatsApp could not send this message.</string>
+    <string name="chat_wa_resend_body">WhatsApp did not confirm this message, so it may already have been sent. Sending it again could deliver it twice. To check, look for it in WhatsApp on your phone.</string>
+    <string name="chat_wa_media_needs_connection">Connect to WhatsApp to load this attachment.</string>
+
+    <!-- WhatsApp's error codes in plain words (Google Messages' are link_error_*) -->
+    <string name="chat_wa_error_not_paired">LightDecoder is not linked to WhatsApp. Link it first.</string>
+    <string name="chat_wa_error_not_connected">Not connected to WhatsApp right now. Turn on \"Stay connected\" in the WhatsApp link\'s settings and try again.</string>
+    <string name="chat_wa_error_connection_closed">The connection closed before WhatsApp answered. Try again.</string>
+    <string name="chat_wa_error_not_found">WhatsApp could not find that. It may have been deleted.</string>
+    <string name="chat_wa_error_invalid_argument">WhatsApp cannot use that as it is. A phone number needs its country code.</string>
+    <string name="chat_wa_error_send_failed">WhatsApp could not send this message.</string>
+    <string name="chat_wa_error_logged_out">This device was removed from the linked devices in WhatsApp on your phone. Link it again to reconnect.</string>
+    <string name="chat_wa_error_timeout">WhatsApp did not answer in time. Try again.</string>
+    <string name="chat_wa_error_rate_limited">WhatsApp is asking to slow down. Wait a little, then try again.</string>
+    <string name="chat_wa_error_not_on_whatsapp">That number is not on WhatsApp. Check that it includes the country code.</string>
+    <string name="chat_wa_error_not_allowed">WhatsApp did not allow that. You may not have permission for it in this chat.</string>
+    <string name="chat_wa_error_unsupported">LightDecoder cannot do that with WhatsApp.</string>
+    <string name="chat_wa_error_not_ready">WhatsApp is still syncing. Try again in a moment.</string>
+    <string name="chat_wa_error_stream_replaced">WhatsApp closed this connection because the same link connected somewhere else.</string>
+    <string name="chat_wa_error_temp_banned">WhatsApp has temporarily blocked this account. WhatsApp on your phone says why, and for how long.</string>
+    <string name="chat_wa_error_client_outdated">WhatsApp no longer accepts this version of LightDecoder. Update the app to connect again.</string>
+    <string name="chat_wa_error_connect_failure">WhatsApp refused the connection. Try again later.</string>
+    <string name="chat_wa_error_connection_lost">The connection to WhatsApp dropped. LightDecoder is reconnecting.</string>
+    <string name="chat_wa_error_unpair_remote_failed">LightDecoder could not reach WhatsApp to remove this device from your account. To finish, open WhatsApp on your phone, go to Settings, then Linked devices, and log out \"LightDecoder\" there.</string>
+    <string name="chat_wa_error_internal">Something went wrong in the WhatsApp link. Try again; if it keeps happening, the activity log in the link\'s settings may help.</string>
+    <string name="chat_compose_hint">Text message</string>
+    <string name="chat_compose_unpaired">Not linked</string>
+    <string name="chat_attach">Attach a picture or video</string>
+    <string name="chat_attachment_ready">Attachment</string>
+    <string name="chat_attachment_remove">Remove attachment</string>
+    <string name="chat_send">Send</string>
+
+    <plurals name="chat_people">
+        <item quantity="one">%1$d person</item>
+        <item quantity="other">%1$d people</item>
+    </plurals>
+    <plurals name="chat_attachments">
+        <item quantity="one">%1$d attachment</item>
+        <item quantity="other">%1$d attachments</item>
+    </plurals>
+    <plurals name="chat_reaction">
+        <item quantity="one">Reaction %1$s</item>
+        <item quantity="other">Reaction %1$s, %2$d people</item>
+    </plurals>
+    <plurals name="chat_reaction_mine">
+        <item quantity="one">Your reaction %1$s, tap to remove</item>
+        <item quantity="other">Reaction %1$s, %2$d people including you, tap to remove</item>
+    </plurals>
+
+    <!-- New conversation -->
+    <string name="chat_to_hint">Name or phone number</string>
+    <string name="chat_use_number">Send to %1$s</string>
+    <string name="chat_contacts_empty">No contacts yet. They load from your phone when the link is connected.</string>
+    <string name="chat_contacts_no_match">No contact matches. Type a phone number to text it.</string>
+    <string name="chat_wa_contacts_no_match">No contact matches. Type a phone number with its country code to message it.</string>
+    <string name="chat_contacts_offline">Not connected: showing the contacts saved earlier.</string>
+    <string name="chat_contact_selected">selected</string>
+    <string name="chat_contact_not_selected">not selected</string>
+    <string name="chat_remove_recipient">Remove %1$s</string>
+    <string name="chat_start">Start conversation</string>
+    <string name="chat_start_group">Start group</string>
+    <string name="chat_group_title">New group</string>
+    <string name="chat_group_body">Group name (optional; only RCS groups show a name).</string>
+    <string name="chat_group_name_hint">Group name</string>
+    <!-- Sticker maker -->
+    <string name="chat_stickers">Stickers</string>
+    <string name="sticker_maker_title">Make a sticker</string>
+    <string name="sticker_preview">Sticker preview</string>
+    <string name="sticker_pick">Choose a picture</string>
+    <string name="sticker_pick_hint">Choose a picture to turn into a sticker.</string>
+    <string name="sticker_remove_background">Cut away a plain background</string>
+    <string name="sticker_tolerance">How much counts as background</string>
+    <string name="sticker_shape">Shape</string>
+    <string name="sticker_shape_original">As it is</string>
+    <string name="sticker_shape_rounded">Rounded</string>
+    <string name="sticker_shape_circle">Circle</string>
+    <string name="sticker_outline">White outline</string>
+    <string name="sticker_solid">White background</string>
+    <string name="sticker_solid_hint">Stickers are sent as PNG pictures, which iPhones show in the conversation. Turn on the white background if the other phone shows a black box around the sticker (some carriers convert pictures sent as MMS).</string>
+    <string name="sticker_save">Save sticker</string>
+    <string name="sticker_failed">That picture could not be read.</string>
+    <string name="sticker_sheet_title">Your stickers</string>
+    <string name="sticker_sheet_empty">No stickers yet. Make one from any picture. Tap a sticker to send it; touch and hold to delete it.</string>
+    <string name="sticker_new">Make a sticker</string>
+    <string name="sticker_tile">Sticker. Tap to send, touch and hold to delete.</string>
+    <string name="sticker_delete_title">Delete this sticker?</string>
+    <string name="sticker_delete_confirm">Delete</string>
+
+    <!-- Voice: dictation in the composer, reading messages aloud -->
+    <string name="chat_voice_input">Dictate a message</string>
+    <string name="chat_voice_prompt">Say your message</string>
+    <string name="chat_voice_unavailable">Speech recognition is not available.</string>
+    <string name="chat_action_read_aloud">Read aloud</string>
+    <string name="chat_read_new_aloud">Read new messages aloud</string>
+    <string name="chat_stop_reading">Stop reading</string>
+    <!-- Spoken: "Alice said: See you at eight". -->
+    <string name="chat_read_aloud_said">%1$s said: %2$s</string>
+    <!-- Spoken in place of the text of a message that is only a picture. -->
+    <string name="chat_read_aloud_picture">a picture</string>
+    <!-- Spoken in place of the text of a message that is only a video or a file. -->
+    <string name="chat_read_aloud_attachment">an attachment</string>
+    <string name="chat_read_aloud_unavailable">Reading aloud needs a text-to-speech engine, and none is available on this phone.</string>
+    <!-- The picture viewer of a conversation -->
+    <string name="gallery_picture">Picture</string>
+    <string name="gallery_counter">%1$d of %2$d</string>
+    <string name="gallery_details">Save, details and effects</string>
+    <string name="gallery_loading_failed">This picture could not be loaded.</string>
+    <string name="chat_call">Call</string>
+    <string name="chat_call_no_app">No phone app on this device can make the call.</string>
+    <!-- "Read" notifications -->
+    <string name="read_channel">Read receipts</string>
+    <string name="read_channel_description">When someone reads a message you sent</string>
+    <string name="read_notify_title">%1$s read your message</string>
+    <string name="read_notify_text">“%1$s”</string>
+    <string name="read_notify_picture">Your picture</string>
+    <string name="read_notify_attachment">Your attachment</string>
+    <string name="read_notify_message">Your message</string>
+    <plurals name="read_notify_several">
+        <item quantity="one">%2$s</item>
+        <item quantity="other">%1$d messages, the latest: %2$s</item>
+    </plurals>
+    <string name="read_switch">Notify me when my messages are read</string>
+    <string name="read_switch_help">For everyone unless you turn it off for someone here or in their conversation\'s menu. Only while LightDecoder is not open, unless you turn on the next switch.</string>
+    <string name="read_switch_while_looking">Also while LightDecoder is open</string>
+    <string name="read_choose_people">Choose who to be notified about</string>
+    <string name="read_choose_people_done">Done</string>
+    <string name="read_choose_people_none">There are no conversations here yet.</string>
+    <string name="read_notify_person">Notify me when they read my messages</string>
+    <string name="read_notify_person_on">You will be notified when they read your messages</string>
+    <string name="read_notify_person_off">No more read notifications for this conversation</string>
+    <string name="chat_services_menu">Choose a tab</string>
+    <string name="chat_switcher_description">%1$s. Choose another app</string>
+    <string name="chat_switcher_item_count">%1$s · %2$d</string>
+</resources>

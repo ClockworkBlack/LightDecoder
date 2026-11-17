@@ -36,16 +36,25 @@ class InboxStore private constructor(private val dir: File) {
         id in seen || readIndex().any { it.id == id }
     }
 
+    /** True if a picture with these exact bytes is stored (see [InboxItem.digest]). */
+    fun containsDigest(digest: String): Boolean = synchronized(lock) {
+        digest.isNotEmpty() && readIndex().any { it.digest == digest }
+    }
+
     /**
      * Marks a message as handled without storing it (for media we chose to
      * skip), so a notification that is posted again is not read again.
      */
     fun markSeen(id: String) = synchronized(lock) { remember(id) }
 
-    /** Stores an item with its bytes. Returns false if it was already there or could not be written. */
+    /**
+     * Stores an item with its bytes. Returns false if it was already there (same
+     * id, or the same picture caught another way: same non-empty digest) or
+     * could not be written.
+     */
     fun add(item: InboxItem, originalBytes: ByteArray, preview: Bitmap): Boolean = synchronized(lock) {
         val items = readIndex().toMutableList()
-        if (items.any { it.id == item.id }) {
+        if (items.any { it.id == item.id || (item.digest.isNotEmpty() && it.digest == item.digest) }) {
             remember(item.id)
             return false
         }
@@ -120,11 +129,19 @@ class InboxStore private constructor(private val dir: File) {
         @Volatile
         private var instance: InboxStore? = null
 
-        fun get(context: Context): InboxStore =
-            instance ?: synchronized(this) {
-                instance ?: InboxStore(File(context.applicationContext.filesDir, "inbox").apply { mkdirs() })
-                    .also { instance = it }
+        /** The store for this app's files directory (tests get a fresh one per test). */
+        fun get(context: Context): InboxStore {
+            val dir = File(context.applicationContext.filesDir, "inbox")
+            instance?.let { if (it.dir == dir) return it }
+            return synchronized(this) {
+                instance?.takeIf { it.dir == dir }
+                    ?: InboxStore(dir.apply { mkdirs() }).also { instance = it }
             }
+        }
+
+        /** SHA-256 of a picture's bytes, as stored in [InboxItem.digest]. */
+        fun digestOf(bytes: ByteArray): String =
+            MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }.take(32)
 
         /**
          * A stable id for one message attachment: the same message posted again
@@ -135,5 +152,16 @@ class InboxStore private constructor(private val dir: File) {
                 .digest("$appPackage\u0000$conversation\u0000$sender\u0000$timestampMs\u0000$uri".toByteArray())
             return digest.take(12).joinToString("") { "%02x".format(it) }
         }
+
+        /**
+         * The id for one part of a message that came over the Google Messages
+         * link. Conversation, message and part ids are only unique on the phone
+         * they came from, so the phone's id ([phoneId], the archive's owner;
+         * empty if not known) is part of it: a message of another phone with
+         * the same ids is not taken for one already seen. The same picture is
+         * still kept once, by its digest.
+         */
+        fun relayIdFor(phoneId: String, conversationId: String, messageId: String, partId: String): String =
+            idFor("${InboxItem.SOURCE_RELAY}\u0000$phoneId", conversationId, messageId, 0, partId)
     }
 }

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    One reaction under a bubble ("👍 2"); the background is set in code (mine
+    or others'). Tapping it adds or removes the user's reaction, so the chip
+    is a full 48dp touch target; its inset background keeps the visible pill
+    about 28dp tall.
+-->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:layout_marginEnd="4dp"
+    android:gravity="center"
+    android:minWidth="48dp"
+    android:minHeight="48dp"
+    android:paddingHorizontal="8dp"
+    android:paddingVertical="2dp"
+    android:textAppearance="?attr/textAppearanceLabelLarge" />

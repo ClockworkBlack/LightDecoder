@@ -68,11 +68,28 @@
     <string name="action_log">Activity log</string>
     <string name="action_clear">Clear inbox</string>
     <string name="action_about">About</string>
-    <string name="about_body">LightDecoder opens HEIC stickers and pictures with its own built-in decoder (libheif and libde265), so it does not depend on what the phone supports.\n\nEverything stays on this phone.\n\nSource code: github.com/ClockworkBlack/LightDecoder (AGPL-3.0)</string>
+    <string name="action_report">Report a problem</string>
+    <string name="report_subject">LightDecoder problem report</string>
+    <string name="report_share">Send problem report</string>
+    <string name="about_body">LightDecoder opens HEIC stickers and pictures with its own built-in decoder (libheif and libde265, LGPL-3.0), so it does not depend on what the phone supports.\n\nThe Google Messages link uses libgm from mautrix-gmessages (AGPL-3.0, github.com/mautrix/gmessages) and other open-source Go modules (MIT, BSD-3-Clause, MPL-2.0).\n\nWhat LightDecoder keeps stays on this phone. It has no servers and no analytics; the Google Messages link, if you set it up, talks only to Google.\n\nSource code: github.com/ClockworkBlack/LightDecoder (AGPL-3.0)\n\nThe full licence texts are under Licences.</string>
+    <string name="action_licenses">Licences</string>
+    <string name="licenses_title">Licences</string>
+    <string name="licenses_failed">The licence texts could not be read. They are also in the NOTICE file of LightDecoder\'s source code.</string>
     <string name="log_access_on">Notification access: on</string>
     <string name="log_access_off">Notification access: off</string>
     <string name="log_empty">Nothing yet. Lines appear here when a message notification with an attachment arrives.</string>
     <string name="log_clear">Clear log</string>
+
+    <!-- Inbox: the Google Messages link card -->
+    <string name="action_messages">Messages</string>
+    <string name="link_card_title">Google Messages link</string>
+    <string name="link_card_not_set_up">Not set up. Link LightDecoder to Google Messages on your phone to read and send your texts here, and to catch stickers without notification access.</string>
+    <string name="link_card_connected">Connected.</string>
+    <string name="link_card_connected_unread">Connected · %1$d unread</string>
+    <string name="link_card_set_up">Set up</string>
+    <string name="link_card_open">Open messages</string>
+    <string name="link_card_fix">Fix</string>
+    <string name="link_card_settings">Settings</string>
 
     <!-- Notifications LightDecoder posts -->
     <string name="alert_channel">Decoded stickers</string>

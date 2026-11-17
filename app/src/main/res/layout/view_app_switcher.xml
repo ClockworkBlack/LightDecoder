@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The app switcher in the top bar: the app showing (Messages, Discord, WhatsApp), the
+    white triangle, and how many conversations are unread in the other apps. A tap lists
+    them all, with their counts.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/servicesMenu"
+    android:layout_width="wrap_content"
+    android:layout_height="match_parent"
+    android:background="?attr/selectableItemBackground"
+    android:contentDescription="@string/chat_services_menu"
+    android:focusable="true"
+    android:gravity="center_vertical"
+    android:minHeight="40dp"
+    android:orientation="horizontal"
+    android:paddingStart="4dp"
+    android:paddingEnd="8dp">
+
+    <TextView
+        android:id="@+id/switcherLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:maxLines="1"
+        android:textAppearance="?attr/textAppearanceTitleLarge"
+        android:textColor="?attr/colorOnSurface" />
+
+    <ImageView
+        android:layout_width="24dp"
+        android:layout_height="24dp"
+        android:layout_marginStart="2dp"
+        android:importantForAccessibility="no"
+        android:src="@drawable/ic_arrow_drop_down"
+        app:tint="?attr/colorOnSurface" />
+
+    <TextView
+        android:id="@+id/switcherBadge"
+        android:layout_width="wrap_content"
+        android:layout_height="18dp"
+        android:layout_marginStart="2dp"
+        android:background="@drawable/bg_switcher_badge"
+        android:gravity="center"
+        android:minWidth="18dp"
+        android:paddingHorizontal="5dp"
+        android:textColor="?attr/colorOnError"
+        android:textSize="11sp"
+        android:textStyle="bold"
+        android:visibility="gone" />
+</LinearLayout>

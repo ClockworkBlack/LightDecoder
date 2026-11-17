@@ -1,17 +1,70 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Only to show a caught sticker as a notification. Asked for at the moment it is needed. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!--
-        allowBackup is off because the inbox holds pictures from private
-        conversations, which should not be copied to a cloud backup.
+        The Google Messages link (off until the user pairs): it talks to
+        Google's Messages for web servers, runs as a visible foreground
+        service while connected, and can reconnect after a restart if the
+        user chose to stay connected. The WhatsApp link (off until the user
+        links it) needs the same permissions for the same reasons, with
+        WhatsApp's servers.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!--
+        Only for the "Let it run in the background" button on the link's
+        status screen, shown while the app is not exempt: it opens the
+        system's own allow / deny question. The link is a messaging
+        connection the user turned on and must stay up while the screen is
+        off; nothing asks without the user tapping that button.
+    -->
+    <uses-permission
+        android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
+        tools:ignore="BatteryLife" />
+
+    <!--
+        Voice: the system's speech recogniser (the composer's dictation
+        button is shown only when there is one) and text-to-speech engines
+        (for reading messages aloud). Android 11+ hides both from apps that
+        do not declare them here. Recognition runs in the recogniser's own
+        app, so no microphone permission is needed here.
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+        <!-- So "Open Discord app" on the Discord tab can hand a conversation to the official app. -->
+        <package android:name="com.discord" />
+        <!-- So the Messenger tab can open the official Messenger app, and say when it is not installed. -->
+        <package android:name="com.facebook.orca" />
+    </queries>
+
+    <!--
+        Backup is off because the inbox holds pictures from private
+        conversations and the archive holds messages, neither of which should
+        be copied to a cloud backup or another device. dataExtractionRules
+        covers Android 12+, fullBackupContent older versions.
     -->
     <application
+        android:name=".LightDecoderApp"
         android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.LightDecoder">
@@ -26,7 +79,17 @@
             </intent-filter>
         </activity>
 
-        <!-- Shows one picture: opened, shared in, or from the inbox. -->
+        <!-- About > Licences: NOTICE and the licence texts in the app's assets. -->
+        <activity
+            android:name=".ui.LicensesActivity"
+            android:exported="false" />
+
+        <!--
+            Shows one picture: opened, shared in, or from the inbox. Only
+            content uris: the viewer refuses file paths from other apps (they
+            would be read with this app's identity), so it does not offer to
+            open them either.
+        -->
         <activity
             android:name=".ui.ViewerActivity"
             android:exported="true"
@@ -38,7 +101,6 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="content" />
-                <data android:scheme="file" />
                 <data android:mimeType="image/heic" />
                 <data android:mimeType="image/heif" />
                 <data android:mimeType="image/heic-sequence" />
@@ -59,7 +121,6 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="content" />
-                <data android:scheme="file" />
                 <data android:host="*" />
                 <data android:mimeType="application/octet-stream" />
                 <data android:pathPattern=".*\\.heic" />
@@ -70,16 +131,92 @@
         </activity>
 
         <!--
-            Catches picture attachments from message notifications. Android
-            starts this only after the user turns on notification access for
-            LightDecoder in system settings, and only the system can bind to it.
-            Ongoing notifications (music players, navigation and the like) are
-            declared as not wanted.
+            Catching stickers from other apps' notifications is switched off:
+            the notification listener (inbox.StickerNotificationListener) is
+            not declared, so Android does not offer, or keep, notification
+            access for LightDecoder.
+        -->
+
+        <!--
+            Google Messages link: setup, status and the conversations. The
+            screens that take typing (the sign-in page, the composer, the
+            contact picker) pad themselves for the keyboard; adjustResize is
+            what makes Android report the keyboard's size to them before
+            Android 11.
+        -->
+        <activity
+            android:name=".ui.relay.RelaySetupActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".ui.relay.RelayStatusActivity"
+            android:exported="false" />
+        <activity
+            android:name=".ui.chat.ConversationsActivity"
+            android:exported="false" />
+        <!--
+            The Discord tab: Discord's website in a web view. It runs in a
+            process of its own (":discord", the name DiscordContainer holds),
+            where the app gives the WebView its own data folder and sets up
+            none of the other tabs' links or archives, so Discord's cookies
+            and the other tabs' data cannot meet. Not exported: nothing
+            outside the app can start it or hand it a URL. Rotation is handled
+            in place so the page is not reloaded.
+        -->
+        <!-- Readies the Discord tab's process and web engine (no page, no network) so the tab opens quickly. -->
+        <service
+            android:name=".discord.DiscordWarmup"
+            android:exported="false"
+            android:process=":discord" />
+        <activity
+            android:name=".ui.discord.DiscordActivity"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|keyboard|keyboardHidden|navigation|uiMode"
+            android:exported="false"
+            android:process=":discord"
+            android:windowSoftInputMode="adjustResize" />
+        <!--
+            The Messenger tab. Two halves that do not touch
+            (docs/messenger-hybrid.md):
+
+            The inbox and one conversation, in the main process: what the
+            Messenger app's own notifications showed, kept on the phone, and
+            replies sent through that notification's Reply button.
+
+            Facebook's web messaging page ("Full history / New chat"), in a
+            process of its own (":messenger", the name MessengerContainer
+            holds) with its own WebView data folder, where none of the app's
+            other code runs. Not exported: nothing outside the app can start
+            it or hand it a URL. Rotation is handled in place so the page is
+            not reloaded.
+        -->
+        <activity
+            android:name=".ui.messenger.MessengerActivity"
+            android:exported="false" />
+        <activity
+            android:name=".ui.messenger.MessengerThreadActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.messenger.MessengerActivity"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".ui.messenger.MessengerWebActivity"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|uiMode"
+            android:exported="false"
+            android:process=":messenger"
+            android:windowSoftInputMode="adjustResize" />
+
+        <!--
+            Reads the Messenger app's notifications for the Messenger tab.
+            Android starts it only after the user turns on notification
+            access for LightDecoder in system settings, and only the system
+            can bind to it. It looks at nothing but Messenger's notifications
+            (the sticker catcher that read other apps' is still switched off
+            and not declared). Ongoing notifications (calls, music, navigation)
+            are declared as not wanted.
         -->
         <service
-            android:name=".inbox.StickerNotificationListener"
+            android:name=".messenger.MessengerNotificationListener"
             android:exported="true"
-            android:label="@string/listener_label"
+            android:label="@string/messenger_listener_label"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService" />
@@ -88,6 +225,114 @@
                 android:name="android.service.notification.disabled_filter_types"
                 android:value="ongoing" />
         </service>
+
+        <!--
+            The conversation list is the thread's parent. ThreadActivity
+            handles Up (and Back from a notification-started task) itself,
+            always to that list; this only declares the hierarchy.
+        -->
+        <activity
+            android:name=".ui.chat.ThreadActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.chat.ConversationsActivity"
+            android:windowSoftInputMode="adjustResize" />
+        <!-- Gmail: adding the account and its settings (an app password is typed here), and a new email. -->
+        <activity
+            android:name=".ui.mail.MailSetupActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".ui.mail.MailComposeActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
+        <!-- Checks Gmail for new email about every 15 minutes (JobScheduler; only the system binds it). -->
+        <service
+            android:name=".mail.MailCheckJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+
+        <!-- A conversation's pictures, full screen: swipe between them, pinch or double-tap to zoom. -->
+        <activity
+            android:name=".ui.chat.PictureGalleryActivity"
+            android:exported="false" />
+        <activity
+            android:name=".ui.sticker.StickerMakerActivity"
+            android:exported="false" />
+        <activity
+            android:name=".ui.chat.NewConversationActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
+        <!--
+            WhatsApp link: linking (the user's number, then the pairing code
+            they type into WhatsApp on their phone, or a QR code) and status.
+            Its conversations are shown by the conversation screens above.
+            The setup screen takes typing, hence adjustResize.
+        -->
+        <activity
+            android:name=".ui.wa.WaSetupActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".ui.wa.WaStatusActivity"
+            android:exported="false" />
+
+        <!--
+            Keeps the link connected, always with its notification and a
+            Disconnect button showing. remoteMessaging on Android 14+, dataSync
+            before that.
+        -->
+        <service
+            android:name=".relay.RelayService"
+            android:exported="false"
+            android:foregroundServiceType="remoteMessaging|dataSync" />
+
+        <!--
+            The same for the WhatsApp link, with a notification and a
+            Disconnect button of its own: each link is connected, shown and
+            stopped by itself.
+        -->
+        <service
+            android:name=".wa.WaService"
+            android:exported="false"
+            android:foregroundServiceType="remoteMessaging|dataSync" />
+
+        <!-- Reconnects after a restart or an app update, only if paired and "stay connected" is on. -->
+        <receiver
+            android:name=".relay.BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- The wake-up alarm behind a reconnect backoff. Only the app's own alarm reaches it. -->
+        <receiver
+            android:name=".relay.ReconnectReceiver"
+            android:exported="false" />
+
+        <!--
+            The link never runs without its notification: when the user turns
+            the app's notifications (or the link's channel) off, it goes down.
+            Both actions are protected broadcasts only the system can send.
+        -->
+        <receiver
+            android:name=".relay.NotificationBlockReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.app.action.APP_BLOCK_STATE_CHANGED" />
+                <action android:name="android.app.action.NOTIFICATION_CHANNEL_BLOCK_STATE_CHANGED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Reply and Mark as read on message notifications. Only this app's notifications reach it. -->
+        <receiver
+            android:name=".relay.ReplyReceiver"
+            android:exported="false" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

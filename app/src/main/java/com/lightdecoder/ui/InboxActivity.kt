@@ -11,23 +11,45 @@ import android.provider.Settings
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
+import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.recyclerview.widget.GridLayoutManager
 import com.lightdecoder.R
+import com.lightdecoder.archive.ArchiveChange
+import com.lightdecoder.archive.ArchiveEvents
+import com.lightdecoder.chat.ChatBackend
+import com.lightdecoder.chat.ChatService
 import com.lightdecoder.databinding.ActivityInboxBinding
 import com.lightdecoder.inbox.InboxEvents
 import com.lightdecoder.inbox.InboxItem
 import com.lightdecoder.inbox.InboxLog
 import com.lightdecoder.inbox.InboxPrefs
 import com.lightdecoder.inbox.InboxStore
+import com.lightdecoder.relay.RelayIntents
+import com.lightdecoder.relay.RelayState
+import com.lightdecoder.ui.chat.ChatErrors
+import com.lightdecoder.ui.chat.ConversationsActivity
+import com.lightdecoder.ui.chat.ScreenBackends
+import com.lightdecoder.ui.chat.ServiceUi
+import com.lightdecoder.ui.relay.RelayUi
+import com.lightdecoder.ui.relay.SignInWebData
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
- * The home screen: stickers caught from message notifications, and the switch
- * that turns catching on. Nothing is read until the user turns on notification
- * access for LightDecoder in Android's settings.
+ * The home screen: the sticker inbox (stickers opened, shared or decoded from
+ * the links). Catching stickers from other apps' notifications is switched
+ * off: the notification listener is not declared, so Android never offers
+ * notification access for LightDecoder. A card leads to the
+ * two links, Google Messages and WhatsApp: for each, set it up, open its
+ * messages, or fix it.
  */
 class InboxActivity : AppCompatActivity() {
 
@@ -35,6 +57,10 @@ class InboxActivity : AppCompatActivity() {
     private lateinit var store: InboxStore
     private lateinit var adapter: InboxAdapter
     private val refresh = Runnable { refreshItems() }
+    private lateinit var links: List<LinkBlock>
+    private val onArchiveChange: (ArchiveChange) -> Unit = { change ->
+        if (change.kind == ArchiveChange.Kind.CONVERSATIONS) links.firstOrNull { it.service == change.service }?.render()
+    }
 
     private val openDocument = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
@@ -48,10 +74,9 @@ class InboxActivity : AppCompatActivity() {
     }
 
     /** Asked once, just before sending the user to the notification-access screen. */
-    private val askToPostNotifications =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { openNotificationAccessSettings() }
-
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Sign-in cookies a killed setup screen left behind (once per process; see SignInWebData).
+        SignInWebData.wipeIfDirty(this)
         super.onCreate(savedInstanceState)
         binding = ActivityInboxBinding.inflate(layoutInflater)
         setContentView(binding.root)
@@ -68,14 +93,38 @@ class InboxActivity : AppCompatActivity() {
         binding.grid.layoutManager = GridLayoutManager(this, columns)
         binding.grid.adapter = adapter
 
-        binding.statusAction.setOnClickListener { onStatusAction() }
-        binding.statusHelp.setOnClickListener { showGreyedOutHelp() }
+
+        links = listOf(
+            LinkBlock(ChatService.MESSAGES, binding.relayBody, binding.relayAction, binding.relaySettings),
+            LinkBlock(ChatService.WHATSAPP, binding.waBody, binding.waAction, binding.waSettings),
+        )
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                for (link in links) {
+                    launch {
+                        link.backend.state.collect {
+                            link.state = it
+                            link.render()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        ArchiveEvents.register(onArchiveChange)
+    }
+
+    override fun onStop() {
+        ArchiveEvents.unregister(onArchiveChange)
+        super.onStop()
     }
 
     override fun onResume() {
         super.onResume()
         InboxEvents.register(refresh)
-        refreshStatus()
         refreshItems()
     }
 
@@ -89,91 +138,93 @@ class InboxActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
-    // --- status card ---------------------------------------------------------
+    // --- the links' card -------------------------------------------------------
 
-    private fun refreshStatus() {
-        val granted = InboxPrefs.hasNotificationAccess(this)
-        val paused = InboxPrefs.isPaused(this)
-        when {
-            !granted -> {
-                binding.statusTitle.setText(R.string.status_off_title)
-                binding.statusBody.setText(R.string.status_off_body)
-                binding.statusAction.setText(R.string.status_turn_on)
-                binding.statusHelp.visibility = View.VISIBLE
-            }
-            paused -> {
-                binding.statusTitle.setText(R.string.status_paused_title)
-                binding.statusBody.setText(R.string.status_paused_body)
-                binding.statusAction.setText(R.string.status_resume)
-                binding.statusHelp.visibility = View.GONE
-            }
-            else -> {
-                binding.statusTitle.setText(R.string.status_on_title)
-                binding.statusBody.setText(
-                    if (InboxPrefs.catchAllImages(this)) R.string.status_on_body_all else R.string.status_on_body
-                )
-                binding.statusAction.setText(R.string.status_pause)
-                binding.statusHelp.visibility = View.GONE
-            }
+    /**
+     * One link's part of the card: what state it is in, the one thing to do
+     * about it (set it up, fix it, or open its messages), and its settings
+     * once there is something to set.
+     */
+    private inner class LinkBlock(
+        val service: ChatService,
+        private val body: TextView,
+        private val action: TextView,
+        private val settings: View,
+    ) {
+        val backend: ChatBackend = ScreenBackends.get(this@InboxActivity, service)
+        var state: RelayState? = null
+        private var paired = false
+
+        init {
+            action.setOnClickListener { act() }
+            settings.setOnClickListener { startActivity(ServiceUi.status(this@InboxActivity, service)) }
         }
-    }
 
-    private fun onStatusAction() {
-        when {
-            !InboxPrefs.hasNotificationAccess(this) -> {
-                val needsAsk = Build.VERSION.SDK_INT >= 33 &&
-                    ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
-                    PackageManager.PERMISSION_GRANTED
-                if (needsAsk) {
-                    askToPostNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
-                } else {
-                    openNotificationAccessSettings()
+        fun render() {
+            val state = state ?: return
+            lifecycleScope.launch {
+                val (isPaired, unread) = withContext(Dispatchers.IO) { backend.isPaired() to backend.repo.unreadCount() }
+                paired = isPaired
+                val problem = RelayUi.isProblem(state.phase)
+                when {
+                    !paired && !problem -> {
+                        // Right after an unpair that could not reach the service, say how
+                        // to remove LightDecoder on the phone instead of "not set up".
+                        if (state.code == RelayState.UNPAIR_REMOTE_FAILED) {
+                            body.text = ChatErrors.message(this@InboxActivity, service, state.code)
+                        } else {
+                            body.setText(ServiceUi.linkCardBody(service))
+                        }
+                        action.setText(R.string.link_card_set_up)
+                    }
+                    problem -> {
+                        val reason = if (state.code.isNotEmpty()) ChatErrors.message(this@InboxActivity, service, state.code)
+                        else getString(ServiceUi.phaseBody(service, state.phase, RelayUi.Fix.NONE))
+                        body.text = getString(RelayUi.title(state.phase)) + "\n" + reason
+                        action.setText(R.string.link_card_fix)
+                    }
+                    state.isOnline -> {
+                        body.text = if (unread > 0) getString(R.string.link_card_connected_unread, unread)
+                        else getString(R.string.link_card_connected)
+                        action.setText(openLabel())
+                    }
+                    else -> {
+                        // "Notifications are off" rather than just "Disconnected": the link
+                        // never runs without its notification (the conversations' banner
+                        // then offers the settings).
+                        val fix = RelayUi.fix(state, paired, RelayUi.notificationsOn(this@InboxActivity, service))
+                        body.setText(RelayUi.title(state.phase, fix))
+                        action.setText(openLabel())
+                    }
                 }
-            }
-            else -> {
-                InboxPrefs.setPaused(this, !InboxPrefs.isPaused(this))
-                refreshStatus()
+                settings.visibility = if (paired || problem) View.VISIBLE else View.GONE
             }
         }
-    }
 
-    private fun openNotificationAccessSettings() {
-        val detail = if (Build.VERSION.SDK_INT >= 30) {
-            Intent(Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS).putExtra(
-                Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME,
-                InboxPrefs.listenerComponent(this).flattenToString(),
+        private fun openLabel(): Int = when (service) {
+            ChatService.MESSAGES -> R.string.link_card_open
+            ChatService.WHATSAPP -> R.string.chat_wa_card_open
+            ChatService.GMAIL -> R.string.mail_card_open
+        }
+
+        private fun act() {
+            val state = state
+            val context = this@InboxActivity
+            startActivity(
+                when {
+                    state != null && RelayUi.isProblem(state.phase) ->
+                        if (RelayUi.fix(state, paired) == RelayUi.Fix.SET_UP) ServiceUi.setup(context, service)
+                        else ServiceUi.status(context, service)
+                    !paired -> ServiceUi.setup(context, service)
+                    else -> conversations(service)
+                }
             )
-        } else {
-            null
-        }
-        try {
-            startActivity(detail ?: Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
-        } catch (e: ActivityNotFoundException) {
-            try {
-                startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
-            } catch (e2: ActivityNotFoundException) {
-                showMessage(getString(R.string.settings_unavailable))
-            }
         }
     }
 
-    /** Android blocks this switch for apps installed from a file until the user allows it. */
-    private fun showGreyedOutHelp() {
-        AlertDialog.Builder(this)
-            .setTitle(R.string.greyed_title)
-            .setMessage(R.string.greyed_body)
-            .setPositiveButton(R.string.greyed_open_app_info) { _, _ ->
-                try {
-                    startActivity(
-                        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
-                    )
-                } catch (e: ActivityNotFoundException) {
-                    showMessage(getString(R.string.settings_unavailable))
-                }
-            }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
-    }
+    /** The conversation list, on [service]'s tab. */
+    private fun conversations(service: ChatService): Intent =
+        Intent(this, ConversationsActivity::class.java).putExtra(RelayIntents.EXTRA_SERVICE, service.key)
 
     // --- list ----------------------------------------------------------------
 
@@ -203,22 +254,21 @@ class InboxActivity : AppCompatActivity() {
     }
 
     override fun onPrepareOptionsMenu(menu: Menu): Boolean {
-        menu.findItem(R.id.action_all_images).isChecked = InboxPrefs.catchAllImages(this)
-        menu.findItem(R.id.action_alerts).isChecked = InboxPrefs.alertsEnabled(this)
         return super.onPrepareOptionsMenu(menu)
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         when (item.itemId) {
+            // Wherever the list was last: it remembers its tab.
+            R.id.action_messages -> startActivity(Intent(this, ConversationsActivity::class.java))
             R.id.action_open -> openDocument.launch(arrayOf("image/*", "*/*"))
-            R.id.action_all_images -> {
-                InboxPrefs.setCatchAllImages(this, !InboxPrefs.catchAllImages(this))
-                refreshStatus()
-            }
-            R.id.action_alerts -> InboxPrefs.setAlertsEnabled(this, !InboxPrefs.alertsEnabled(this))
             R.id.action_log -> showLog()
             R.id.action_clear -> confirmClear()
-            R.id.action_about -> showMessage(getString(R.string.about_body))
+            R.id.action_about -> showAbout()
+            R.id.action_report -> lifecycleScope.launch {
+                val report = withContext(Dispatchers.IO) { ProblemReport.build(this@InboxActivity) }
+                ProblemReport.share(this@InboxActivity, report)
+            }
             else -> return super.onOptionsItemSelected(item)
         }
         return true
@@ -240,6 +290,17 @@ class InboxActivity : AppCompatActivity() {
             .setMessage(body)
             .setPositiveButton(android.R.string.ok, null)
             .setNeutralButton(R.string.log_clear) { _, _ -> InboxLog.clear(this) }
+            .show()
+    }
+
+    /** What the app is and what it is built from; Licences shows the full texts. */
+    private fun showAbout() {
+        AlertDialog.Builder(this)
+            .setMessage(R.string.about_body)
+            .setPositiveButton(android.R.string.ok, null)
+            .setNeutralButton(R.string.action_licenses) { _, _ ->
+                startActivity(Intent(this, LicensesActivity::class.java))
+            }
             .show()
     }
 

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+    <item
+        android:id="@+id/action_discord_open_app"
+        android:title="@string/discord_open_app"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_discord_qr"
+        android:title="@string/discord_qr_sign_in"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_discord_page_size"
+        android:title="@string/discord_page_size"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_discord_reload"
+        android:title="@string/discord_reload"
+        app:showAsAction="never" />
+</menu>
