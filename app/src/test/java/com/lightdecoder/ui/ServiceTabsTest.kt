@@ -64,6 +64,40 @@ class ServiceTabsTest {
     // --- the tabs, and what follows them ----------------------------------------------------
 
     @Test
+    fun theTabsScrollAndTheArrowListsThemAll() {
+        two.env.pairedManager()
+        two.seedConversation(messages, "c1", "Alice", lastTs = 2_000)
+        two.seedConversation(whatsApp, "111@s.whatsapp.net", "Carol")
+        launch().use { scenario ->
+            scenario.waitFor("the Messages inbox") { titles(it) == listOf("Alice") }
+            scenario.onActivity { activity ->
+                val tabs = activity.findViewById<TabLayout>(R.id.services)
+                assertEquals("sideways when they do not fit", TabLayout.MODE_SCROLLABLE, tabs.tabMode)
+                val arrow = activity.findViewById<android.view.View>(R.id.servicesMenu)
+                assertTrue(arrow.isShown)
+                arrow.performClick()
+                val popup = org.robolectric.shadows.ShadowPopupMenu.getLatestPopupMenu()!!
+                val items = (0 until popup.menu.size()).map { popup.menu.getItem(it) }
+                assertEquals(listOf("Messages", "WhatsApp", "Discord"), items.map { it.title.toString() })
+                assertTrue("the one showing is ticked", items[0].isChecked)
+                // Straight to WhatsApp.
+                org.robolectric.Shadows.shadowOf(popup).onMenuItemClickListener.onMenuItemClick(items[1])
+                assertEquals(1, tabs.selectedTabPosition)
+            }
+            scenario.waitFor("the WhatsApp inbox") { titles(it) == listOf("Carol") }
+            scenario.onActivity { activity ->
+                activity.findViewById<android.view.View>(R.id.servicesMenu).performClick()
+                val popup = org.robolectric.shadows.ShadowPopupMenu.getLatestPopupMenu()!!
+                assertTrue(popup.menu.getItem(1).isChecked)
+                // Discord opens its own screen.
+                org.robolectric.Shadows.shadowOf(popup).onMenuItemClickListener.onMenuItemClick(popup.menu.getItem(2))
+                val started = org.robolectric.Shadows.shadowOf(activity).nextStartedActivity
+                assertEquals(com.lightdecoder.ui.discord.DiscordActivity::class.java.name, started?.component?.className)
+            }
+        }
+    }
+
+    @Test
     fun eachServiceHasATabWithItsOwnConversationsAndFolders() {
         two.env.pairedManager()
         two.seedConversation(messages, "c1", "Alice", lastTs = 2_000)

@@ -123,6 +123,9 @@ class DiscordActivity : AppCompatActivity() {
             tabs.addTab(tabs.newTab().setText(ServiceUi.tabLabel(service)).setTag(service), false)
         }
         tabs.addTab(tabs.newTab().setText(R.string.chat_service_discord), true)
+        com.lightdecoder.ui.chat.ServiceTabStrip.attachDropDown(tabs, binding.servicesMenu)
+        // Discord is the last tab: keep it in view.
+        tabs.post { tabs.setScrollPosition(tabs.tabCount - 1, 0f, true) }
         tabs.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
             override fun onTabSelected(tab: TabLayout.Tab) {
                 val service = tab.tag as? ChatService ?: return

@@ -454,4 +454,5 @@
     <string name="read_notify_person">Notify me when they read my messages</string>
     <string name="read_notify_person_on">You will be notified when they read your messages</string>
     <string name="read_notify_person_off">No more read notifications for this conversation</string>
+    <string name="chat_services_menu">Choose a tab</string>
 </resources>

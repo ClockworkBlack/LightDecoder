@@ -23,6 +23,15 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.17
+- Merged `origin/discord-tab` (0.5.16, fast-forward) after reading it; first compiled and tested
+  here: full suite (510 then 511 tests) and lint pass. Its "not compiled" note below is resolved.
+- **Service tab strip** (conversation list and the Discord screen): `TabLayout` in scrollable mode
+  (scrolls sideways when the tabs do not fit) beside a ▾ button (`servicesMenu`, tinted
+  colorOnSurface: white in dark mode) that opens a list of every tab with the current one ticked
+  (`ui/chat/ServiceTabStrip`). Test: `ServiceTabsTest.theTabsScrollAndTheArrowListsThemAll`.
+- Discord tab still not tried on a phone (WebView sign-in, CAPTCHA, the ":discord" process).
+
 ## 0.5.16
 - **Discord tab** (`ui/discord/DiscordActivity`, `discord/`): a tab after WhatsApp in the
   conversation list (`Features.DISCORD`; not a `ChatService`, so no backend, archive, badge or

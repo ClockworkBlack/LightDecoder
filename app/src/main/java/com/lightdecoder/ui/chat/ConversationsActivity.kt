@@ -267,6 +267,7 @@ class ConversationsActivity : AppCompatActivity() {
         if (Features.DISCORD && DiscordProcess.supported) {
             tabs.addTab(tabs.newTab().setText(R.string.chat_service_discord).setTag(DISCORD_TAB), false)
         }
+        ServiceTabStrip.attachDropDown(tabs, binding.servicesMenu)
         tabs.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
             override fun onTabSelected(tab: TabLayout.Tab) {
                 val service = tab.tag as? ChatService
