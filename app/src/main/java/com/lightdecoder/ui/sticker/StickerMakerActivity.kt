@@ -58,8 +58,26 @@ class StickerMakerActivity : AppCompatActivity() {
     /** Where the picture's subject is, for the smart cut-out; found once per picture. */
     private var subjects: com.lightdecoder.sticker.Subjects? = null
 
-    /** The mask the cut is made with: what was found, of the kind chosen. */
-    private val subject: com.lightdecoder.sticker.SubjectMask? get() = subjects?.pick(smartKind())
+    /** Taps on the people or objects to keep (true) or drop (false), in [original]'s pixels, in the order made. */
+    private val taps = ArrayList<Triple<Float, Float, Boolean>>()
+    private var tapped: com.lightdecoder.sticker.SubjectMask? = null
+    private var tappedFrom: Any? = null
+
+    private fun tapPoints(keep: Boolean) = taps.filter { it.third == keep }.flatMap { listOf(it.first, it.second) }.toFloatArray()
+
+    /** The mask the cut is made with: what was found, of the kind chosen, narrowed to what was tapped. */
+    private val subject: com.lightdecoder.sticker.SubjectMask?
+        get() {
+            val found = subjects?.pick(smartKind()) ?: return null
+            val picture = original
+            if (taps.isEmpty() || picture == null) return found
+            val key = listOf(found, taps.toList())
+            if (tappedFrom != key) {
+                tapped = com.lightdecoder.sticker.SubjectPick.apply(found, picture, tapPoints(true), tapPoints(false))
+                tappedFrom = key
+            }
+            return tapped
+        }
     private var subjectState = Subject.NOT_ASKED
     private var subjectJob: Job? = null
 
@@ -91,6 +109,25 @@ class StickerMakerActivity : AppCompatActivity() {
         }
         binding.smartKind.addOnButtonCheckedListener { _, _, isChecked -> if (isChecked) render() }
         binding.smartKeep.addOnChangeListener { _, _, fromUser -> if (fromUser) render() }
+        binding.pickStart.setOnClickListener { startPicking() }
+        binding.pickDone.setOnClickListener { stopPicking() }
+        binding.pickUndo.setOnClickListener {
+            if (taps.isNotEmpty()) taps.removeAt(taps.size - 1)
+            tapsChanged()
+        }
+        binding.pickClear.setOnClickListener {
+            taps.clear()
+            tapsChanged()
+        }
+        binding.pickView.onTap = { x, y ->
+            // A tap on nothing the cut found would change nothing: it is not kept.
+            if (com.lightdecoder.sticker.SubjectPick.lands(subjects?.pick(smartKind()), original, x, y)) {
+                taps += Triple(x, y, binding.pickMode.checkedButtonId != R.id.pickRemove)
+                tapsChanged()
+            } else {
+                Toast.makeText(this, R.string.sticker_pick_missed, Toast.LENGTH_LONG).show()
+            }
+        }
         binding.caption.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
@@ -245,7 +282,11 @@ class StickerMakerActivity : AppCompatActivity() {
         binding.outlineWidth.value = o.outlineWidth.toFloat().coerceIn(binding.outlineWidth.valueFrom, binding.outlineWidth.valueTo)
         binding.solid.isChecked = o.solidBackground
         binding.refine.setStrokes(edits.strokes)
+        taps.clear()
+        for (i in 0 until edits.keepTaps.size / 2) taps += Triple(edits.keepTaps[2 * i], edits.keepTaps[2 * i + 1], true)
+        for (i in 0 until edits.removeTaps.size / 2) taps += Triple(edits.removeTaps[2 * i], edits.removeTaps[2 * i + 1], false)
         updateBrushButtons()
+        stopPicking()
         stopRefining()
         stopTracing()
     }
@@ -272,7 +313,9 @@ class StickerMakerActivity : AppCompatActivity() {
             undoneTrace = null
             binding.traceRedo.visibility = View.GONE
             binding.resetOriginal.visibility = View.VISIBLE
-            // A new picture: the brushing was for the old one.
+            // A new picture: the brushing and the taps were for the old one.
+            taps.clear()
+            stopPicking()
             binding.refine.clearStrokes()
             updateBrushButtons()
             stopRefining()
@@ -288,6 +331,7 @@ class StickerMakerActivity : AppCompatActivity() {
     /** The picture replaces the preview; a line drawn around its subject cuts it out. */
     private fun startTracing() {
         val picture = source ?: return
+        stopPicking()
         binding.lasso.setBitmap(picture)
         binding.lasso.visibility = View.VISIBLE
         // The page holds still while the finger draws, with the whole picture in view.
@@ -306,6 +350,7 @@ class StickerMakerActivity : AppCompatActivity() {
     private fun startRefining() {
         if (source == null) return
         stopTracing()
+        stopPicking()
         binding.refine.visibility = View.VISIBLE
         binding.page.locked = true
         binding.page.post { binding.page.smoothScrollTo(0, binding.refine.top) }
@@ -326,6 +371,69 @@ class StickerMakerActivity : AppCompatActivity() {
     }
 
     private val refining: Boolean get() = binding.refine.visibility == View.VISIBLE
+
+    private val picking: Boolean get() = binding.pickView.visibility == View.VISIBLE
+
+    /**
+     * The picture replaces the preview, with what the cut drops dimmed; the
+     * user taps the people or objects to keep (or, in Remove, to drop).
+     */
+    private fun startPicking() {
+        if (original == null || subjects == null) return
+        stopTracing()
+        stopRefining()
+        binding.pickView.visibility = View.VISIBLE
+        binding.pickPanel.visibility = View.VISIBLE
+        binding.preview.visibility = View.GONE
+        binding.hint.setText(R.string.sticker_choose_hint)
+        binding.hint.visibility = View.VISIBLE
+        binding.page.post { binding.page.smoothScrollTo(0, binding.pickView.top) }
+        refreshPickView()
+    }
+
+    private fun stopPicking() {
+        if (!picking) return
+        binding.pickView.visibility = View.GONE
+        binding.pickPanel.visibility = View.GONE
+        binding.preview.visibility = View.VISIBLE
+        binding.hint.visibility = View.GONE
+    }
+
+    private fun tapsChanged() {
+        binding.pickUndo.isEnabled = taps.isNotEmpty()
+        binding.pickClear.isEnabled = taps.isNotEmpty()
+        refreshPickView()
+        render()
+    }
+
+    private var pickJob: Job? = null
+
+    /** The picture as the cut stands: what stays as it is, what goes dimmed. */
+    private fun refreshPickView() {
+        if (!picking) return
+        val picture = original ?: return
+        val mask = subject
+        val marks = taps.toList()
+        val keep = binding.smartKeep.value.toInt()
+        pickJob?.cancel()
+        pickJob = lifecycleScope.launch {
+            val shown = withContext(Dispatchers.Default) {
+                try {
+                    val kept = picture.copy(Bitmap.Config.ARGB_8888, true)
+                    if (mask != null) StickerMaker.keepSubject(kept, mask, keep)
+                    val out = Bitmap.createBitmap(picture.width, picture.height, Bitmap.Config.ARGB_8888)
+                    val canvas = android.graphics.Canvas(out)
+                    canvas.drawBitmap(picture, 0f, 0f, null)
+                    canvas.drawColor(DIM)
+                    canvas.drawBitmap(kept, 0f, 0f, null)
+                    out
+                } catch (e: OutOfMemoryError) {
+                    null
+                }
+            } ?: return@launch
+            binding.pickView.show(shown, marks)
+        }
+    }
 
     private fun updateBrushButtons() {
         val any = binding.refine.strokes.isNotEmpty()
@@ -466,6 +574,11 @@ class StickerMakerActivity : AppCompatActivity() {
         val keeping = if (smartWorks && subjectState == Subject.FOUND) View.VISIBLE else View.GONE
         binding.smartKeep.visibility = keeping
         binding.smartKeepLabel.visibility = keeping
+        val choosable = wantsSubject && subjectState == Subject.FOUND && subjects?.pick(smartKind()) != null
+        binding.pickStart.visibility = if (choosable) View.VISIBLE else View.GONE
+        binding.pickStart.text =
+            if (taps.isEmpty()) getString(R.string.sticker_pick_start) else getString(R.string.sticker_pick_start_some, taps.size)
+        if (!choosable) stopPicking()
         val plain = binding.removeBackground.isChecked || (wantsSubject && !smartWorks)
         val shown = if (plain) View.VISIBLE else View.GONE
         binding.tolerance.visibility = shown
@@ -481,6 +594,7 @@ class StickerMakerActivity : AppCompatActivity() {
         val picture = source ?: return
         if (findingSubject()) return
         updateToleranceVisible()
+        refreshPickView()
         val options = options()
         val subject = subject
         // The options changed what the brushes paint on (a stroke alone does not).
@@ -507,7 +621,7 @@ class StickerMakerActivity : AppCompatActivity() {
     private fun save(asNew: Boolean) {
         val made = sticker ?: return
         val from = original
-        val edits = StickerProject.Edits(options(), trace, binding.refine.strokes.toList())
+        val edits = StickerProject.Edits(options(), trace, binding.refine.strokes.toList(), tapPoints(true), tapPoints(false))
         val target = editing.takeUnless { asNew }
         binding.save.isEnabled = false
         binding.saveAsNew.isEnabled = false
@@ -539,6 +653,9 @@ class StickerMakerActivity : AppCompatActivity() {
         const val EXTRA_EDIT = "com.lightdecoder.extra.EDIT_STICKER"
         private const val STATE_URI = "uri"
         private const val MAX_SOURCE_BYTES = 40 * 1024 * 1024
+
+        /** Over what the cut drops, while choosing who or what to keep. */
+        private const val DIM = 0xB3000000.toInt()
 
         fun intent(context: Context) = Intent(context, StickerMakerActivity::class.java)
 

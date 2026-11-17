@@ -24,6 +24,9 @@ object StickerProject {
         /** The traced outline as x,y pairs in the original's pixels; null when nothing was traced. */
         val trace: FloatArray?,
         val strokes: List<StickerMaker.Stroke>,
+        /** Taps on the people or objects the smart cut should keep, and those it should drop (x,y pairs, original's pixels). */
+        val keepTaps: FloatArray = FloatArray(0),
+        val removeTaps: FloatArray = FloatArray(0),
     )
 
     class Project(val original: Bitmap, val edits: Edits)
@@ -73,6 +76,8 @@ object StickerProject {
         put("smartKeep", e.options.smartKeep)
         put("caption", e.options.caption)
         e.trace?.let { put("trace", floats(it)) }
+        if (e.keepTaps.isNotEmpty()) put("keepTaps", floats(e.keepTaps))
+        if (e.removeTaps.isNotEmpty()) put("removeTaps", floats(e.removeTaps))
         put("strokes", JSONArray().apply {
             e.strokes.filter { it.points.isNotEmpty() }.forEach { s ->
                 put(JSONObject().put("w", s.width.toDouble()).put("k", s.keep).put("p", floats(s.points)))
@@ -101,6 +106,8 @@ object StickerProject {
                 StickerMaker.Stroke.of(points, s.optDouble("w", 10.0).toFloat(), s.optBoolean("k"))
             }
         }.orEmpty(),
+        keepTaps = o.optJSONArray("keepTaps")?.let(::floats) ?: FloatArray(0),
+        removeTaps = o.optJSONArray("removeTaps")?.let(::floats) ?: FloatArray(0),
     )
 
     private fun floats(a: FloatArray) = JSONArray().apply { a.forEach { put(it.toDouble()) } }

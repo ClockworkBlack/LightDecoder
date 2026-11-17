@@ -38,8 +38,8 @@ android {
         applicationId = "com.lightdecoder"
         minSdk = 26
         targetSdk = 36
-        versionCode = 17
-        versionName = "0.5.9"
+        versionCode = 18
+        versionName = "0.5.10"
 
         // The decoder is plain software, so it runs on every ABI. These cover
         // phones (64- and 32-bit ARM) and the emulator.

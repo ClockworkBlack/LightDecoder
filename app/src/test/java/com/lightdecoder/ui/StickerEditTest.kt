@@ -215,6 +215,87 @@ class StickerEditTest {
     }
 
     @Test
+    fun oneOfTwoThingsIsChosenByTappingIt() {
+        // Two red squares on green, apart from each other.
+        val original = Bitmap.createBitmap(200, 200, Bitmap.Config.ARGB_8888).apply {
+            val c = Canvas(this)
+            c.drawColor(Color.rgb(20, 200, 30))
+            c.drawRect(20f, 60f, 80f, 140f, Paint().apply { color = Color.RED })
+            c.drawRect(120f, 60f, 180f, 140f, Paint().apply { color = Color.BLUE })
+        }
+        val options = StickerMaker.Options(outline = false)
+        val file = StickerLibrary.save(context, StickerMaker.make(original, options))
+        StickerProject.save(context, file, original, StickerProject.Edits(options, null, emptyList()))
+        val real = com.lightdecoder.sticker.SubjectCutter.engine
+        com.lightdecoder.sticker.SubjectCutter.engine = com.lightdecoder.sticker.SubjectCutter.Engine { _, p ->
+            com.lightdecoder.sticker.SubjectCutter.Result.Found(
+                com.lightdecoder.sticker.Subjects(
+                    people = null,
+                    objects = com.lightdecoder.sticker.SubjectMask(
+                        p.width, p.height,
+                        ByteArray(p.width * p.height) {
+                            val x = it % p.width
+                            val y = it / p.width
+                            if (y in 60..139 && (x in 20..79 || x in 120..179)) 255.toByte() else 0
+                        },
+                    ),
+                )
+            )
+        }
+        fun tap(view: View, x: Float, y: Float) {
+            // The picture is fitted, centred, into the view.
+            val scale = minOf(view.width / 200f, view.height / 200f)
+            val vx = (view.width - 200 * scale) / 2 + x * scale
+            val vy = (view.height - 200 * scale) / 2 + y * scale
+            val down = android.view.MotionEvent.obtain(0, 0, android.view.MotionEvent.ACTION_DOWN, vx, vy, 0)
+            val up = android.view.MotionEvent.obtain(0, 20, android.view.MotionEvent.ACTION_UP, vx, vy, 0)
+            view.dispatchTouchEvent(down)
+            view.dispatchTouchEvent(up)
+            down.recycle()
+            up.recycle()
+        }
+        try {
+            ActivityScenario.launch<StickerMakerActivity>(StickerMakerActivity.editIntent(context, file)).use { scenario ->
+                waitFor(scenario, "the sticker") { it.findViewById<View>(R.id.save).isEnabled }
+                scenario.onActivity { a ->
+                    assertFalse("offered with the smart cut", a.findViewById<View>(R.id.pickStart).isShown)
+                    a.findViewById<View>(R.id.smartCut).performClick()
+                }
+                waitFor(scenario, "the subject") { it.findViewById<View>(R.id.pickStart).isShown }
+                scenario.onActivity { it.findViewById<View>(R.id.pickStart).performClick() }
+                waitFor(scenario, "the picture to tap on") { it.findViewById<View>(R.id.pickView).isShown }
+                settle()
+                scenario.onActivity { a ->
+                    val view = a.findViewById<View>(R.id.pickView)
+                    assertFalse(a.findViewById<View>(R.id.pickUndo).isEnabled)
+                    // A tap on the background is not a choice.
+                    tap(view, 100f, 20f)
+                    assertFalse(a.findViewById<View>(R.id.pickUndo).isEnabled)
+                    // The blue one.
+                    tap(view, 150f, 100f)
+                    assertTrue(a.findViewById<View>(R.id.pickUndo).isEnabled)
+                    a.findViewById<View>(R.id.pickDone).performClick()
+                    assertFalse(view.isShown)
+                    assertTrue("says one is chosen", a.findViewById<android.widget.TextView>(R.id.pickStart).text.contains("1"))
+                }
+                settle()
+                scenario.onActivity { it.findViewById<View>(R.id.save).performClick() }
+                waitFor(scenario, "the save") { it.isFinishing }
+            }
+        } finally {
+            com.lightdecoder.sticker.SubjectCutter.engine = real
+        }
+        val saved = BitmapFactory.decodeFile(file.path)
+        val pixels = IntArray(saved.width * saved.height).also { saved.getPixels(it, 0, saved.width, 0, 0, saved.width, saved.height) }
+        assertTrue("the blue one is the sticker", pixels.any { Color.alpha(it) > 200 && Color.blue(it) > 200 && Color.red(it) < 60 })
+        assertFalse("the red one is not in it", pixels.any { Color.alpha(it) > 200 && Color.red(it) > 200 && Color.blue(it) < 60 })
+        val edits = StickerProject.load(context, file)!!.edits
+        assertEquals("remembered for editing it again", 2, edits.keepTaps.size)
+        assertEquals(150f, edits.keepTaps[0], 3f)
+        assertTrue(edits.removeTaps.isEmpty())
+    }
+
+    @Test
     fun anOlderStickerWithoutItsPictureCanStillBeEdited() {
         val file = StickerLibrary.save(context, picture())
         ActivityScenario.launch<StickerMakerActivity>(StickerMakerActivity.editIntent(context, file)).use { scenario ->

@@ -41,7 +41,12 @@ class SmartCutOutTest {
         val people = subjects.people!!
         assertEquals(picture.width, people.width)
         assertEquals(picture.height, people.height)
-        assertTrue("people are what Auto cuts by when there are any", subjects.pick(StickerMaker.SmartKind.AUTO) === people)
+        // Auto cuts by the people when there are any, with whatever they hold.
+        val auto = subjects.pick(StickerMaker.SmartKind.AUTO)!!
+        for (i in people.confidence.indices step 7) {
+            assertTrue("nobody is lost", (auto.confidence[i].toInt() and 0xFF) >= (people.confidence[i].toInt() and 0xFF))
+        }
+        assertTrue("flag, still not", alphaAt(auto, picture.width * 3 / 100, picture.height * 10 / 100) < 40)
         val w = picture.width
         val h = picture.height
         // Her face, and her body below it, down to the bottom of the picture ...
@@ -131,6 +136,26 @@ class SmartCutOutTest {
         assertEquals(null, none.pick(StickerMaker.SmartKind.PEOPLE))
         // One model could not run: the other still serves.
         assertTrue(Subjects(null, objects).pick(StickerMaker.SmartKind.BOTH) === objects)
+    }
+
+    @Test
+    fun whatAPersonHoldsComesWithThem() {
+        // A person (columns 20..59) holding something (60..69) the people model left out, which the
+        // objects model found together with part of the person; and a thing across the room (85..94).
+        fun mask(inside: (Int) -> Boolean) = SubjectMask(100, 20, ByteArray(100 * 20) { if (inside(it % 100)) 255.toByte() else 0 })
+        val people = mask { it in 20..59 }
+        val objects = mask { it in 40..69 || it in 85..94 }
+        val auto = Subjects(people, objects).pick(StickerMaker.SmartKind.AUTO)!!
+        fun at(x: Int) = auto.confidence[10 * 100 + x].toInt() and 0xFF
+        assertEquals("the person", 255, at(30))
+        assertEquals("what they hold", 255, at(65))
+        assertEquals("not the thing across the room", 0, at(90))
+        assertEquals(0, at(75))
+        assertEquals("People alone leaves it out", 0, Subjects(people, objects).pick(StickerMaker.SmartKind.PEOPLE)!!.confidence[10 * 100 + 65].toInt())
+        // Something far larger than the person, touching them, is the room: it stays out.
+        val room = mask { it in 55..99 || it in 0..10 }
+        val small = mask { it in 50..59 }
+        assertTrue(Subjects(small, room).pick(StickerMaker.SmartKind.AUTO) === small)
     }
 
     @Test

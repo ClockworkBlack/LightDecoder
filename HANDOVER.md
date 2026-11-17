@@ -22,6 +22,21 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.10
+- **Choose who or what to keep** (sticker maker, under Smart cut): `PickView` shows the picture
+  with what the cut drops dimmed; taps are Keep or Remove marks (`StickerProject.Edits.keepTaps /
+  removeTaps`, original's pixels). `sticker/SubjectPick.apply` narrows the mask on a 256 px grid:
+  keep taps keep their pieces and drop untapped ones, remove taps drop theirs, and a piece with
+  both (people touching) is divided by cheapest path with a colour-change cost, so the line
+  falls on the edge between them. Touching people in similar colours may need a second tap.
+- **Auto keeps what people hold** (`Subjects.peopleHolding`): each connected piece of the objects
+  mask that touches the people mask is added to it, unless the part beyond the people is more
+  than half their area (then it is taken for furniture or the room). Only as good as the small
+  objects model: what U-2-Net-p does not see (a clear glass, say) is not added.
+- **Send several stickers**: "Send several" in the sticker panel marks tapped stickers (up to
+  10) and sends them one after the other in the order tapped (`ThreadActivity.sendStickers`),
+  stopping at the first failure.
+
 ## 0.5.9
 - **Smart cut keeps whole people.** U-2-Net-p alone lost bodies (dark clothes, dim rooms), and so
   did bigger general models (silueta, isnet-general-use; tried on the user's picture). Added a

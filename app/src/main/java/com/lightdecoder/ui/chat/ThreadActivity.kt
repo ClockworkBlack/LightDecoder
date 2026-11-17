@@ -1085,13 +1085,42 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val title = view.findViewById<TextView>(R.id.stickersTitle)
         val editMode = view.findViewById<com.google.android.material.button.MaterialButton>(R.id.stickersEditMode)
         var editing = false
+        // "Send several": while on, tapped stickers are marked, and sent together in the order tapped.
+        val several = view.findViewById<com.google.android.material.button.MaterialButton>(R.id.stickersSeveral)
+        val sendChosen = view.findViewById<com.google.android.material.button.MaterialButton>(R.id.stickersSendChosen)
+        var choosing = false
+        val chosen = ArrayList<File>()
         fun renderEditMode() {
-            title.setText(if (editing) R.string.sticker_edit_mode_title else R.string.sticker_sheet_title)
+            title.setText(
+                when {
+                    editing -> R.string.sticker_edit_mode_title
+                    choosing -> R.string.sticker_send_several_title
+                    else -> R.string.sticker_sheet_title
+                }
+            )
             editMode.setText(if (editing) R.string.sticker_edit_mode_done else R.string.sticker_edit_mode)
+            several.setText(if (choosing) R.string.sticker_send_several_cancel else R.string.sticker_send_several)
+            sendChosen.visibility = if (choosing) View.VISIBLE else View.GONE
+            sendChosen.isEnabled = chosen.isNotEmpty()
+            sendChosen.text = resources.getQuantityString(R.plurals.sticker_send_count, maxOf(1, chosen.size), maxOf(1, chosen.size))
+            grid.adapter?.notifyDataSetChanged()
         }
         editMode.setOnClickListener {
             editing = !editing
+            choosing = false
+            chosen.clear()
             renderEditMode()
+        }
+        several.setOnClickListener {
+            choosing = !choosing
+            editing = false
+            chosen.clear()
+            renderEditMode()
+        }
+        sendChosen.setOnClickListener {
+            val files = chosen.toList()
+            sheet.dismiss()
+            sendStickers(files)
         }
         fun edit(file: File) {
             sheet.dismiss()
@@ -1121,12 +1150,21 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 }
                 empty.visibility = if (tiles.isEmpty()) View.VISIBLE else View.GONE
                 editMode.visibility = if (tiles.isEmpty()) View.GONE else View.VISIBLE
+                several.visibility = if (tiles.size < 2) View.GONE else View.VISIBLE
+                chosen.retainAll(tiles.map { it.first }.toSet())
                 view.findViewById<View>(R.id.stickersHint).visibility = if (tiles.isEmpty()) View.GONE else View.VISIBLE
                 grid.adapter = StickerTiles(
                     tiles,
+                    isChosen = { it in chosen },
                     onTap = { file ->
                         if (editing) {
                             edit(file)
+                        } else if (choosing) {
+                            if (!chosen.remove(file)) {
+                                if (chosen.size < MAX_STICKERS_AT_ONCE) chosen += file
+                                else toast(getString(R.string.sticker_send_limit, MAX_STICKERS_AT_ONCE))
+                            }
+                            renderEditMode()
                         } else {
                             sheet.dismiss()
                             sendSticker(file)
@@ -1191,18 +1229,29 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             .show()
     }
 
-    private fun sendSticker(file: File) {
+    private fun sendSticker(file: File) = sendStickers(listOf(file))
+
+    /** Sends [files] to this conversation one after the other, in order; stops at the first that fails. */
+    private fun sendStickers(files: List<File>) {
+        if (files.isEmpty()) return
         val id = conversationId
         val link = manager
         scrollToBottomNext = true
         lifecycleScope.launch {
-            withContext(Dispatchers.IO) { relayAttempt { link.sendMedia(id, Uri.fromFile(file), null, null) } }
-                .onFailure { toast(errorText(link, it)) }
+            for (file in files) {
+                val sent = withContext(Dispatchers.IO) { relayAttempt { link.sendMedia(id, Uri.fromFile(file), null, null) } }
+                if (sent.isFailure) {
+                    sent.onFailure { toast(errorText(link, it)) }
+                    break
+                }
+                scrollToBottomNext = true
+            }
         }
     }
 
     private class StickerTiles(
         private val tiles: List<Pair<File, Bitmap>>,
+        private val isChosen: (File) -> Boolean,
         private val onTap: (File) -> Unit,
         private val onHold: (File) -> Unit,
     ) : RecyclerView.Adapter<StickerTiles.Holder>() {
@@ -1219,6 +1268,16 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             val (file, bitmap) = tiles[position]
             holder.image.setImageBitmap(bitmap)
             holder.image.contentDescription = holder.image.context.getString(R.string.sticker_tile)
+            // Marked for "Send several".
+            val chosen = isChosen(file)
+            holder.image.isSelected = chosen
+            if (chosen) {
+                holder.image.setBackgroundResource(R.drawable.bg_sticker_selected)
+            } else {
+                val plain = android.util.TypedValue()
+                holder.image.context.theme.resolveAttribute(android.R.attr.selectableItemBackground, plain, true)
+                holder.image.setBackgroundResource(plain.resourceId)
+            }
             holder.image.setOnClickListener { onTap(file) }
             holder.image.setOnLongClickListener {
                 onHold(file)
@@ -1810,6 +1869,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
         /** At most this many pictures are taken in at once as stickers. */
         private const val MAX_STICKER_IMPORT = 50
+
+        /** At most this many stickers go out in one "Send several". */
+        private const val MAX_STICKERS_AT_ONCE = 10
 
         /** A picture larger than this is not made into a sticker. */
         private const val MAX_STICKER_SOURCE_BYTES = 20L * 1024 * 1024

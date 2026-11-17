@@ -56,17 +56,80 @@ class Subjects(val people: SubjectMask?, val objects: SubjectMask?) {
         })
     }
 
+    /**
+     * The people, with what they are holding or wearing that their own model
+     * left out (a glass, a phone, a bag, a hat): every piece the objects
+     * model found that touches a person comes along, unless it is so large
+     * next to the people that it is more likely the furniture or the room.
+     * The people's own mask when nothing is added.
+     */
+    private val peopleHolding: SubjectMask? by lazy {
+        val p = people ?: return@lazy null
+        val o = objects
+        if (o == null || o.width != p.width || o.height != p.height) return@lazy p
+        val w = p.width
+        val h = p.height
+        val n = w * h
+        fun person(i: Int) = (p.confidence[i].toInt() and 0xFF) > 127
+        fun thing(i: Int) = (o.confidence[i].toInt() and 0xFF) > 127
+        var peopleArea = 0
+        for (i in 0 until n) if (person(i)) peopleArea++
+        val seen = BooleanArray(n)
+        val queue = IntArray(n)
+        var added: ByteArray? = null
+        for (start in 0 until n) {
+            if (seen[start] || !thing(start)) continue
+            // One piece of what the objects model found.
+            var head = 0
+            var tail = 0
+            seen[start] = true
+            queue[tail++] = start
+            var beyond = 0
+            var touches = false
+            while (head < tail) {
+                val i = queue[head++]
+                if (person(i)) touches = true else beyond++
+                val x = i % w
+                fun visit(next: Int) {
+                    if (seen[next]) return
+                    if (thing(next)) {
+                        seen[next] = true
+                        queue[tail++] = next
+                    } else if (person(next)) {
+                        touches = true
+                    }
+                }
+                if (x > 0) visit(i - 1)
+                if (x < w - 1) visit(i + 1)
+                if (i >= w) visit(i - w)
+                if (i < n - w) visit(i + w)
+            }
+            if (touches && beyond > 0 && beyond <= peopleArea * HELD_SHARE) {
+                val out = added ?: p.confidence.copyOf().also { added = it }
+                for (k in 0 until tail) {
+                    val i = queue[k]
+                    out[i] = max(out[i].toInt() and 0xFF, o.confidence[i].toInt() and 0xFF).toByte()
+                }
+            }
+        }
+        added?.let { SubjectMask(w, h, it) } ?: p
+    }
+
     /** The mask to cut with for [kind], or null when there is nothing of that kind in the picture. */
     fun pick(kind: StickerMaker.SmartKind): SubjectMask? = when (kind) {
         StickerMaker.SmartKind.PEOPLE -> people
         StickerMaker.SmartKind.OBJECTS -> objects
         StickerMaker.SmartKind.BOTH -> both
-        // People are cut whole by their own model; without any, whatever stands out.
-        StickerMaker.SmartKind.AUTO -> people?.takeIf { it.covers(PEOPLE_SHARE) } ?: objects
+        // People are cut whole by their own model, with what they hold; without any people,
+        // whatever stands out.
+        StickerMaker.SmartKind.AUTO -> if (people?.covers(PEOPLE_SHARE) == true) peopleHolding else objects
     }?.takeIf { it.hasSubject }
 
     private companion object {
         const val PEOPLE_SHARE = 0.02f
+
+        /** A piece beyond the people is theirs if it is at most this much of their own size. */
+        const val HELD_SHARE = 0.5f
     }
 }
 

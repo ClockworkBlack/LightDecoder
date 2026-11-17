@@ -85,4 +85,52 @@ class StickerPanelTest {
             assertTrue("nothing was sent", env.fake!!.sent.isEmpty())
         }
     }
+
+    @Test
+    fun sendSeveralSendsTheTappedStickersTogetherInOrder() {
+        env.fake!!.goOnline()
+        val colours = listOf(0xFFFF0000.toInt(), 0xFF00FF00.toInt(), 0xFF0000FF.toInt())
+        colours.forEach { c ->
+            StickerLibrary.save(app, Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888).apply { eraseColor(c) })
+            Thread.sleep(5)
+        }
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(app, "c1").setFlags(0)).use { scenario ->
+            settle()
+            scenario.onActivity { it.findViewById<View>(R.id.stickers).performClick() }
+            settle()
+            val sheet = ShadowDialog.getLatestDialog() as BottomSheetDialog
+            val several = sheet.findViewById<View>(R.id.stickersSeveral)!!
+            val send = sheet.findViewById<TextView>(R.id.stickersSendChosen)!!
+            assertTrue("offered when there is more than one sticker", several.isShown)
+            assertTrue("only while choosing", !send.isShown)
+            several.performClick()
+            assertEquals(app.getString(R.string.sticker_send_several_title), sheet.findViewById<TextView>(R.id.stickersTitle)!!.text.toString())
+            assertTrue(send.isShown && !send.isEnabled)
+            val grid = sheet.findViewById<RecyclerView>(R.id.stickersGrid)!!
+            fun tile(i: Int): View {
+                grid.measure(View.MeasureSpec.makeMeasureSpec(1000, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(1000, View.MeasureSpec.AT_MOST))
+                grid.layout(0, 0, 1000, grid.measuredHeight)
+                return grid.getChildAt(i)
+            }
+            val files = StickerLibrary.list(app)
+            // The third, then the first; the second is tapped and untapped.
+            tile(2).performClick()
+            tile(1).performClick()
+            tile(1).performClick()
+            tile(0).performClick()
+            assertTrue("marked", tile(2).isSelected && tile(0).isSelected && !tile(1).isSelected)
+            assertTrue("nothing goes out while choosing", env.fake!!.sent.isEmpty())
+            assertEquals(app.resources.getQuantityString(R.plurals.sticker_send_count, 2, 2), send.text.toString())
+            send.performClick()
+            val deadline = System.currentTimeMillis() + 20_000
+            while (env.fake!!.sent.size < 2 && System.currentTimeMillis() < deadline) settle()
+            settle()
+            val sent = env.fake!!.sent
+            assertEquals("both, and only those", 2, sent.size)
+            fun colour(bytes: ByteArray) = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size).let { it.getPixel(it.width / 2, it.height / 2) }
+            assertEquals("in the order tapped: the third first", colour(files[2].readBytes()), colour(sent[0].media!!))
+            assertEquals("then the first", colour(files[0].readBytes()), colour(sent[1].media!!))
+            assertTrue(sent.all { it.conversationId == "c1" })
+        }
+    }
 }
