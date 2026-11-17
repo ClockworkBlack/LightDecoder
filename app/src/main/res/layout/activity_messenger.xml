@@ -5,36 +5,23 @@
     android:layout_height="match_parent"
     android:orientation="vertical">
 
+    <!-- The title is the app switcher, as on the conversation list: "Messenger ▾". -->
     <com.google.android.material.appbar.MaterialToolbar
         android:id="@+id/toolbar"
         android:layout_width="match_parent"
         android:layout_height="?attr/actionBarSize"
-        app:title="@string/chat_title" />
+        app:contentInsetStartWithNavigation="0dp">
 
-    <!-- The same strip as the conversation list, with Messenger chosen. -->
-    <LinearLayout
+        <include layout="@layout/view_app_switcher" />
+    </com.google.android.material.appbar.MaterialToolbar>
+
+    <!-- The apps, as tabs that are not shown (ServiceTabStrip); Messenger chosen. -->
+    <com.google.android.material.tabs.TabLayout
+        android:id="@+id/services"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:gravity="center_vertical"
-        android:orientation="horizontal">
-
-        <com.google.android.material.tabs.TabLayout
-            android:id="@+id/services"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            app:tabGravity="start"
-            app:tabMode="scrollable" />
-
-        <ImageButton
-            android:id="@+id/servicesMenu"
-            android:layout_width="48dp"
-            android:layout_height="48dp"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="@string/chat_services_menu"
-            android:src="@drawable/ic_arrow_drop_down"
-            app:tint="?attr/colorOnSurface" />
-    </LinearLayout>
+        android:visibility="gone"
+        app:tabMode="scrollable" />
 
     <!-- Shown until notification access is on. -->
     <com.google.android.material.card.MaterialCardView

@@ -120,6 +120,8 @@ class ConversationsActivity : AppCompatActivity() {
         applySystemBarPadding(binding.root)
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
+        // The title is the app switcher.
+        supportActionBar?.setDisplayShowTitleEnabled(false)
 
         val asked = intent.hasExtra(RelayIntents.EXTRA_SERVICE)
         val service = savedInstanceState?.getString(STATE_SERVICE)?.let(ChatService::fromKey)
@@ -184,6 +186,8 @@ class ConversationsActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
+        // The Discord tab opens quicker with its process and web engine ready (nothing is loaded).
+        if (Features.DISCORD) com.lightdecoder.discord.DiscordWarmup.request(this)
         started = true
         ChatVisibility.enter(backend)
         ArchiveEvents.register(onArchiveChange)
@@ -269,19 +273,22 @@ class ConversationsActivity : AppCompatActivity() {
         }
         // Messenger's tab is last. Like Discord's it is not a service of this screen and opens its own.
         com.lightdecoder.ui.messenger.MessengerTab.add(tabs)
-        ServiceTabStrip.attachDropDown(tabs, binding.servicesMenu)
+        switcher = ServiceTabStrip.attachSwitcher(tabs, binding.root.findViewById(R.id.servicesMenu)) {
+            getString(ServiceUi.tabLabel(backend.service))
+        }
         tabs.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
             override fun onTabSelected(tab: TabLayout.Tab) {
                 val service = tab.tag as? ChatService
                 if (service != null) {
                     showService(service)
                 } else {
-                    startActivity(
+                    ServiceTabStrip.open(
+                        this@ConversationsActivity,
                         if (com.lightdecoder.ui.messenger.MessengerTab.isTab(tab)) {
                             com.lightdecoder.ui.messenger.MessengerTab.intent(this@ConversationsActivity)
                         } else {
                             Intent(this@ConversationsActivity, DiscordActivity::class.java)
-                        }
+                        },
                     )
                     // This screen keeps showing the service it showed; its tab is chosen again.
                     tabs.post { selectServiceTab(backend.service) }
@@ -294,6 +301,9 @@ class ConversationsActivity : AppCompatActivity() {
             }
         })
     }
+
+    /** The app switcher in the top bar; refreshed when the unread counts change. */
+    private var switcher: ServiceTabStrip.Refresh? = null
 
     private fun selectServiceTab(service: ChatService) {
         val tabs = binding.services
@@ -353,6 +363,7 @@ class ConversationsActivity : AppCompatActivity() {
                     tab.removeBadge()
                 }
             }
+            switcher?.refresh()
         }
     }
 
@@ -374,7 +385,6 @@ class ConversationsActivity : AppCompatActivity() {
     private fun renderLinkState() {
         val searching = searchQuery != null
         val card = !searching && !paired && archiveEmpty
-        binding.services.visibility = if (searching) View.GONE else View.VISIBLE
         binding.folders.visibility = if (searching || card) View.GONE else View.VISIBLE
         binding.swipe.visibility = if (searching || card) View.GONE else View.VISIBLE
         binding.searchResults.visibility = if (searching) View.VISIBLE else View.GONE

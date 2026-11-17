@@ -83,11 +83,12 @@ class DiscordActivity : AppCompatActivity() {
         setContentView(binding.root)
         applySystemBarAndImePadding(binding.root)
         setSupportActionBar(binding.toolbar)
-        supportActionBar?.setDisplayHomeAsUpEnabled(true)
+        // No back arrow: the switcher and the system's Back are the ways out.
+        supportActionBar?.setDisplayHomeAsUpEnabled(false)
         // The tab strip is the bar's content: no title or address line takes the page's room.
         supportActionBar?.setDisplayShowTitleEnabled(false)
-        binding.toolbar.setNavigationOnClickListener { finish() }
         setUpServiceTabs()
+        com.lightdecoder.discord.DiscordWarmup.markUsed(this)
 
         binding.signInOpenApp.setOnClickListener { openInApp() }
         binding.signInQr.setOnClickListener { startQr() }
@@ -132,7 +133,12 @@ class DiscordActivity : AppCompatActivity() {
             object : OnBackPressedCallback(true) {
                 override fun handleOnBackPressed() {
                     val current = webView
-                    if (current != null && current.canGoBack()) current.goBack() else finish()
+                    if (current != null && current.canGoBack()) {
+                        current.goBack()
+                    } else {
+                        finish()
+                        com.lightdecoder.ui.chat.ServiceTabStrip.fadeOnClose(this@DiscordActivity)
+                    }
                 }
             },
         )
@@ -152,17 +158,27 @@ class DiscordActivity : AppCompatActivity() {
         }
         if (tabs.tabCount == 0) tabs.addTab(tabs.newTab().setText(R.string.chat_service_discord), true)
         com.lightdecoder.ui.messenger.MessengerTab.add(tabs)
-        com.lightdecoder.ui.chat.ServiceTabStrip.attachDropDown(tabs, binding.servicesMenu)
+        val discord = getString(R.string.chat_service_discord)
+        com.lightdecoder.ui.chat.ServiceTabStrip.attachSwitcher(tabs, binding.root.findViewById(R.id.servicesMenu)) { discord }
         tabs.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
             override fun onTabSelected(tab: TabLayout.Tab) {
                 if (com.lightdecoder.ui.messenger.MessengerTab.isTab(tab)) {
-                    startActivity(com.lightdecoder.ui.messenger.MessengerTab.intent(this@DiscordActivity))
+                    com.lightdecoder.ui.chat.ServiceTabStrip.open(
+                        this@DiscordActivity, com.lightdecoder.ui.messenger.MessengerTab.intent(this@DiscordActivity),
+                    )
                     finish()
+                    com.lightdecoder.ui.chat.ServiceTabStrip.fadeOnClose(this@DiscordActivity)
                     return
                 }
                 val service = tab.tag as? ChatService ?: return
-                startActivity(RelayIntents.conversations(this@DiscordActivity, service))
+                // Back to the conversation list underneath (single top: it switches to the app
+                // asked for in place, instead of being made again), with a quick fade.
+                com.lightdecoder.ui.chat.ServiceTabStrip.open(
+                    this@DiscordActivity,
+                    RelayIntents.conversations(this@DiscordActivity, service).addFlags(android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                )
                 finish()
+                com.lightdecoder.ui.chat.ServiceTabStrip.fadeOnClose(this@DiscordActivity)
             }
 
             override fun onTabUnselected(tab: TabLayout.Tab) = Unit
@@ -184,6 +200,11 @@ class DiscordActivity : AppCompatActivity() {
             setSupportMultipleWindows(false)
             javaScriptCanOpenWindowsAutomatically = false
             mediaPlaybackRequiresUserGesture = true
+            // Draws the parts of the page just off screen ahead of time: lists scroll and
+            // channels appear without blank patches (costs some memory, which the Fold has).
+            offscreenPreRaster = true
+            // Keep the cache Discord's files are served from (the default, said for clarity).
+            cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
 
             // userAgentString is intentionally left at the WebView default.
             // See docs/discord-web-view.md, "User agent".
@@ -197,6 +218,8 @@ class DiscordActivity : AppCompatActivity() {
             setAcceptThirdPartyCookies(web, true)
         }
 
+        // The page's renderer gets the phone's attention while the tab is on screen.
+        web.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true)
         web.webViewClient = pageClient
         web.webChromeClient = chromeClient
     }

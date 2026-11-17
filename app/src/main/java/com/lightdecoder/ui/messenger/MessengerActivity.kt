@@ -64,9 +64,16 @@ class MessengerActivity : AppCompatActivity() {
         setContentView(binding.root)
         applySystemBarPadding(binding.root)
         setSupportActionBar(binding.toolbar)
-        supportActionBar?.setDisplayHomeAsUpEnabled(true)
-        binding.toolbar.setNavigationOnClickListener { finish() }
+        // No back arrow and no title: the title is the app switcher, as on Discord's screen.
+        supportActionBar?.setDisplayHomeAsUpEnabled(false)
+        supportActionBar?.setDisplayShowTitleEnabled(false)
         setUpServiceTabs()
+        onBackPressedDispatcher.addCallback(this, object : androidx.activity.OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                finish()
+                ServiceTabStrip.fadeOnClose(this@MessengerActivity)
+            }
+        })
 
         binding.list.layoutManager = LinearLayoutManager(this)
         binding.list.adapter = adapter
@@ -96,8 +103,8 @@ class MessengerActivity : AppCompatActivity() {
     }
 
     /**
-     * The same strip the conversation list shows, with Messenger chosen.
-     * Choosing another tab goes to that tab's own screen.
+     * The same app switcher the conversation list shows, with Messenger
+     * chosen. Choosing another app goes to that app's own screen.
      */
     private fun setUpServiceTabs() {
         val tabs = binding.services
@@ -109,17 +116,21 @@ class MessengerActivity : AppCompatActivity() {
             }
         }
         MessengerTab.add(tabs, selected = true)
-        ServiceTabStrip.attachDropDown(tabs, binding.servicesMenu)
-        tabs.post { tabs.setScrollPosition(tabs.selectedTabPosition, 0f, true) }
+        val messenger = getString(R.string.chat_service_messenger)
+        ServiceTabStrip.attachSwitcher(tabs, binding.root.findViewById(R.id.servicesMenu)) { messenger }
         tabs.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
             override fun onTabSelected(tab: TabLayout.Tab) {
                 val service = tab.tag as? ChatService
-                when {
-                    service != null -> startActivity(RelayIntents.conversations(this@MessengerActivity, service))
-                    tab.tag === DISCORD_TAB -> startActivity(Intent(this@MessengerActivity, DiscordActivity::class.java))
+                val next = when {
+                    // Back to the conversation list underneath, switched to that app in place.
+                    service != null -> RelayIntents.conversations(this@MessengerActivity, service)
+                        .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    tab.tag === DISCORD_TAB -> Intent(this@MessengerActivity, DiscordActivity::class.java)
                     else -> return
                 }
+                ServiceTabStrip.open(this@MessengerActivity, next)
                 finish()
+                ServiceTabStrip.fadeOnClose(this@MessengerActivity)
             }
 
             override fun onTabUnselected(tab: TabLayout.Tab) = Unit

@@ -455,4 +455,6 @@
     <string name="read_notify_person_on">You will be notified when they read your messages</string>
     <string name="read_notify_person_off">No more read notifications for this conversation</string>
     <string name="chat_services_menu">Choose a tab</string>
+    <string name="chat_switcher_description">%1$s. Choose another app</string>
+    <string name="chat_switcher_item_count">%1$s · %2$d</string>
 </resources>

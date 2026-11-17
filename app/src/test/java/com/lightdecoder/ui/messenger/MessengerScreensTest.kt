@@ -148,16 +148,22 @@ class MessengerScreensTest {
     }
 
     @Test
-    fun theStripIsTheConversationListsWithMessengerLastAndChosen() {
+    fun theTitleIsTheSwitcherWithMessengerLastAndChosen() {
         ActivityScenario.launch(MessengerActivity::class.java).use { scenario ->
             scenario.onActivity { activity ->
                 val tabs = activity.findViewById<TabLayout>(R.id.services)
-                val texts = (0 until tabs.tabCount).map { tabs.getTabAt(it)!!.text.toString() }
-                assertEquals(listOf("Messages", "Discord", "WhatsApp", "Messenger"), texts)
-                assertEquals("Messenger", tabs.getTabAt(tabs.selectedTabPosition)!!.text.toString())
-                // Another tab's screen takes over.
-                tabs.getTabAt(2)!!.select()
-                assertEquals(ConversationsActivity::class.java.name, shadowOf(activity).nextStartedActivity.component?.className)
+                assertFalse("no tab row: the title is the switcher", tabs.isShown)
+                assertEquals("Messenger", activity.findViewById<TextView>(R.id.switcherLabel).text.toString())
+                activity.findViewById<View>(R.id.servicesMenu).performClick()
+                val popup = org.robolectric.shadows.ShadowPopupMenu.getLatestPopupMenu()!!
+                val items = (0 until popup.menu.size()).map { popup.menu.getItem(it) }
+                assertEquals(listOf("Messages", "Discord", "WhatsApp", "Messenger"), items.map { it.title.toString() })
+                assertTrue("Messenger is ticked", items[3].isChecked)
+                // Another app's screen takes over: the conversation list, switched in place.
+                shadowOf(popup).onMenuItemClickListener.onMenuItemClick(items[2])
+                val started = shadowOf(activity).nextStartedActivity
+                assertEquals(ConversationsActivity::class.java.name, started.component?.className)
+                assertTrue("in place, not made again", started.flags and Intent.FLAG_ACTIVITY_SINGLE_TOP != 0)
                 assertTrue(activity.isFinishing)
             }
         }
