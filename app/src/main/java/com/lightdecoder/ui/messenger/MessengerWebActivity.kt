@@ -92,6 +92,12 @@ class MessengerWebActivity : AppCompatActivity() {
         binding.toolbar.setNavigationOnClickListener { finish() }
 
         binding.errorOpenApp.setOnClickListener { openApp() }
+        binding.approveInFacebook.setOnClickListener {
+            if (!MessengerLinks.openFacebookApp(this)) {
+                Toast.makeText(this, R.string.messenger_web_facebook_missing, Toast.LENGTH_LONG).show()
+                render(webView?.url)
+            }
+        }
         binding.errorRetry.setOnClickListener {
             binding.errorPanel.visibility = View.GONE
             webView?.reload()
@@ -246,8 +252,10 @@ class MessengerWebActivity : AppCompatActivity() {
 
     private fun render(url: String?) {
         supportActionBar?.subtitle = MessengerWeb.displayAddress(url)
-        val signedOut = MessengerWeb.classify(url) == MessengerWebState.SIGNED_OUT
-        binding.signInBanner.visibility = if (signedOut) View.VISIBLE else View.GONE
+        val shown = banner(MessengerWeb.classify(url), MessengerLinks.facebookInstalled(this))
+        binding.signInBanner.visibility = if (shown == null) View.GONE else View.VISIBLE
+        if (shown != null) binding.signInText.setText(shown.text)
+        binding.approveInFacebook.visibility = if (shown?.approveButton == true) View.VISIBLE else View.GONE
     }
 
     private fun openApp() {
@@ -291,6 +299,25 @@ class MessengerWebActivity : AppCompatActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         webView?.saveState(outState)
+    }
+
+    /** The note above the page: its text, and whether it offers "Approve in the Facebook app". */
+    internal data class Banner(@androidx.annotation.StringRes val text: Int, val approveButton: Boolean)
+
+    internal companion object {
+        /**
+         * What to say on Facebook's own pages: how to sign in here, or, when
+         * Facebook asks for a login code, that the sign-in can be approved in
+         * the Facebook app instead (Meta's own alternative to the code).
+         * Null on every other page.
+         */
+        fun banner(state: MessengerWebState, facebookInstalled: Boolean): Banner? = when (state) {
+            MessengerWebState.SIGNED_OUT -> Banner(R.string.messenger_web_sign_in_banner, approveButton = false)
+            MessengerWebState.CHECK ->
+                if (facebookInstalled) Banner(R.string.messenger_web_check_banner, approveButton = true)
+                else Banner(R.string.messenger_web_check_banner_no_app, approveButton = false)
+            else -> null
+        }
     }
 
     override fun onDestroy() {

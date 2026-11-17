@@ -23,6 +23,13 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.23 (versionCode 31)
+- Messenger tab: "Sent a photo / video" lines get an icon and open the conversation in the
+  Messenger app (or Facebook's page without it); `messenger/MessengerMedia`. The notification
+  never carries the file itself.
+- Facebook sign-in on the Messenger page: password-manager tip, and when Facebook asks for a
+  code, "Approve in the Facebook app" (`MessengerWebState.CHECK`). Next version: 0.5.24 / 32.
+
 ## 0.5.22 (versionCode 30, on main)
 - **Everything merged into main** (PR #1): this branch line up to 0.5.21, plus from session
   `ccr-4fee5e9f-jrrlhu`: the **Messenger tab** (inbox from Messenger's notifications, replies
@@ -32,7 +39,6 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **CI fixes on main:** setup-android installs `platform-tools` only (Google dropped the `tools`
   package it asked for by default), and both jobs use **JDK 21** (Robolectric on sdk=36 refuses
   Java 17). Merge main into a branch before its next PR, or its CI fails the same two ways.
-- Next version after this one is 0.5.23 / versionCode 31.
 
 ## 0.5.21
 - **App switcher replaces the tab row** (`view_app_switcher.xml`, `ServiceTabStrip.attachSwitcher`):

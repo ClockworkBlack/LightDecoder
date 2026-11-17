@@ -49,6 +49,8 @@
         <package android:name="com.discord" />
         <!-- So the Messenger tab can open the official Messenger app, and say when it is not installed. -->
         <package android:name="com.facebook.orca" />
+        <!-- So a Facebook sign-in on the Messenger tab's page can be approved in the Facebook app. -->
+        <package android:name="com.facebook.katana" />
     </queries>
 
     <!--

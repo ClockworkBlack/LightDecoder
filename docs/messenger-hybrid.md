@@ -118,6 +118,19 @@ says so.
 The app reads the page address, which `WebView` reports to every host app, to
 show the sign-in note, and never keeps or shows the query string.
 
+### Signing in
+
+The sign-in note says to sign in once (the session stays in the container),
+that a password manager can fill the form (Android's autofill works in the
+web view; nothing here turns it off), and that passkeys do not work in a web
+view. When Facebook asks for a login code or a security check
+(`MessengerWebState.CHECK`: /checkpoint, /two_step_verification,
+/two_factor, /auth_platform), the note says the sign-in can be approved in
+the Facebook app instead, which Meta's help offers as the way round the code,
+with an "Approve in the Facebook app" button that only opens that app
+(`MessengerLinks.openFacebookApp`; nothing is passed to it). Without the
+Facebook app installed it points to another signed-in device.
+
 ### Its container
 
 As for the Discord tab (docs/discord-web-view.md): the screen is declared with

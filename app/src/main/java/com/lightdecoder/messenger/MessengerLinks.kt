@@ -26,6 +26,28 @@ object MessengerLinks {
         }
     }
 
+    /** The Facebook app, where Facebook asks the person to approve a new sign-in. */
+    const val FACEBOOK_PACKAGE = "com.facebook.katana"
+
+    fun facebookInstalled(context: Context): Boolean =
+        context.packageManager.getLaunchIntentForPackage(FACEBOOK_PACKAGE) != null
+
+    /**
+     * Opens the Facebook app as it opens from the launcher, so the person can
+     * approve the sign-in from its notification. Nothing is passed to it.
+     *
+     * @return false if it is not installed (or could not be started).
+     */
+    fun openFacebookApp(context: Context): Boolean {
+        val launch = context.packageManager.getLaunchIntentForPackage(FACEBOOK_PACKAGE) ?: return false
+        return try {
+            context.startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            true
+        } catch (e: ActivityNotFoundException) {
+            false
+        }
+    }
+
     /** Opens a plain web link outside the app. Ignores anything that is not http or https. */
     fun openInBrowser(context: Context, uri: Uri): Boolean {
         val scheme = uri.scheme?.lowercase()

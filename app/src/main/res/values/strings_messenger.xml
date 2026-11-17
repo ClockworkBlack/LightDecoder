@@ -50,7 +50,11 @@
 
     <!-- Facebook's page -->
     <string name="messenger_web_title">Messenger on Facebook</string>
-    <string name="messenger_web_sign_in_banner">Sign in on Facebook\'s page below. This is Facebook\'s own website in its computer layout: pinch to zoom. Passkeys don\'t work in a web view, so use your password and code. To see end-to-end encrypted chats, Facebook will ask for your PIN or a code.</string>
+    <string name="messenger_web_sign_in_banner">Sign in on Facebook\'s page below; you only need to do it once. Tap the email box and your password manager can fill it in. Passkeys don\'t work here. If Facebook asks for a code, you can approve the sign-in in the Facebook app instead. Pinch to zoom.</string>
+    <string name="messenger_web_check_banner">Facebook wants to check it\'s you. Instead of typing a code: open the Facebook app on this phone, tap the notification about a new login, and approve it. This page then carries on by itself. For end-to-end encrypted chats, Facebook may also ask for your PIN.</string>
+    <string name="messenger_web_check_banner_no_app">Facebook wants to check it\'s you. Instead of typing a code, you can approve this sign-in in the Facebook app on another phone or tablet where you\'re signed in: open its notification about a new login and approve it.</string>
+    <string name="messenger_web_open_facebook">Approve in the Facebook app</string>
+    <string name="messenger_web_facebook_missing">The Facebook app isn\'t installed on this phone.</string>
     <string name="messenger_web_reload">Reload</string>
     <string name="messenger_web_error_title">Facebook didn\'t load here</string>
     <string name="messenger_web_error_body">Check your connection and try again, or open the Messenger app, which is more reliable.</string>
