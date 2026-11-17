@@ -268,6 +268,29 @@ blue means iMessage, which only Apple devices can send. If a carrier turns the
 picture into a JPEG (MMS), transparency is lost; the "White background" switch
 is for that.
 
+## Messenger tab
+
+The conversation list has a **Messenger** tab. It has two halves that do not
+touch each other:
+
+- **An inbox from Messenger's notifications.** After you turn on Notification
+  access, LightDecoder lists the messages the Messenger app notifies you about
+  and sends your replies through that notification's own Reply button, so the
+  Messenger app does the receiving and the sending. Only Messenger's
+  notifications are read, what they say stays on the phone, and it holds only
+  what arrived as a notification: no history, and pictures usually as a line
+  of text.
+- **"Full history / New chat"**: Facebook's own web messaging page
+  (`facebook.com/messages`; messenger.com was retired in April 2026) in a web
+  view with its own process and web data folder. Nothing is injected into the
+  page and nothing is read out of it. It is asked for its computer layout, the
+  way a browser's "Desktop site" switch does, because Facebook sends phone
+  browsers to the Play Store.
+
+There is no Messenger bridge in the app. `docs/messenger-hybrid.md` has the
+boundary, the fact-check of the plan it follows, and what has not yet been
+tried on a phone.
+
 ## Discord tab
 
 The conversation list has a **Discord** tab beside Messages and WhatsApp. It
@@ -387,6 +410,8 @@ app/src/main/java/
   .../ui/relay/          link setup (disclosure, sign-in, emoji) and status screens
   .../ui/chat/           conversations, thread, new conversation
   .../discord/           the Discord tab's container, address helpers, hand-off to the Discord app
+  .../messenger/         the Messenger tab: notification listener, on-device inbox, reply buttons, web container
+  .../ui/messenger/      the Messenger tab's screens (the web page in its own process)
   .../ui/discord/        the Discord tab's screen (its own process)
 app/src/test/            Robolectric unit tests: decoder, archive, link runtime (against a
                          fake bridge), screens
@@ -399,5 +424,6 @@ tools/make-test-media/   generator of the unit tests' synthetic HEIC files
 docs/rcs-integration.md  the five RCS access pathways, which two LightDecoder uses, and why
 docs/google-messages-link.md  how the Google Messages link is built, tested and maintained
 docs/discord-web-view.md what the Discord tab does and refuses to do, and how it is kept apart
+docs/messenger-hybrid.md what the Messenger tab does and refuses to do, and the fact-check behind it
 NOTICE                   third-party components and their licences
 ```

@@ -78,7 +78,7 @@ class ServiceTabsTest {
                 arrow.performClick()
                 val popup = org.robolectric.shadows.ShadowPopupMenu.getLatestPopupMenu()!!
                 val items = (0 until popup.menu.size()).map { popup.menu.getItem(it) }
-                assertEquals(listOf("Messages", "Discord", "WhatsApp"), items.map { it.title.toString() })
+                assertEquals(listOf("Messages", "Discord", "WhatsApp", "Messenger"), items.map { it.title.toString() })
                 assertTrue("the one showing is ticked", items[0].isChecked)
                 // Straight to WhatsApp.
                 org.robolectric.Shadows.shadowOf(popup).onMenuItemClickListener.onMenuItemClick(items[2])
@@ -93,6 +93,11 @@ class ServiceTabsTest {
                 org.robolectric.Shadows.shadowOf(popup).onMenuItemClickListener.onMenuItemClick(popup.menu.getItem(1))
                 val started = org.robolectric.Shadows.shadowOf(activity).nextStartedActivity
                 assertEquals(com.lightdecoder.ui.discord.DiscordActivity::class.java.name, started?.component?.className)
+                // And so does Messenger, the last tab.
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                org.robolectric.Shadows.shadowOf(popup).onMenuItemClickListener.onMenuItemClick(popup.menu.getItem(3))
+                val messenger = org.robolectric.Shadows.shadowOf(activity).nextStartedActivity
+                assertEquals(com.lightdecoder.ui.messenger.MessengerActivity::class.java.name, messenger?.component?.className)
             }
         }
     }
@@ -109,7 +114,8 @@ class ServiceTabsTest {
         launch().use { scenario ->
             scenario.onActivity { activity ->
                 // Discord's tab sits right of Messages; it is not a service (it opens its own screen).
-                assertEquals(listOf("Messages", "Discord", "WhatsApp"), tabTexts(activity.findViewById(R.id.services)))
+                // Messenger's tab is last; like Discord's it is not a service.
+                assertEquals(listOf("Messages", "Discord", "WhatsApp", "Messenger"), tabTexts(activity.findViewById(R.id.services)))
                 assertEquals("Google Messages first", 0, activity.findViewById<TabLayout>(R.id.services).selectedTabPosition)
             }
             scenario.waitFor("the Messages inbox") { titles(it) == listOf("Alice", "Bob") }

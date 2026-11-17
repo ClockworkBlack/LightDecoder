@@ -29,6 +29,8 @@ class LightDecoderApp : Application() {
         // nothing else. No link, archive or notification channel is set up
         // there, and the sign-in wipe below never runs on its data.
         if (DiscordProcess.enterIfDiscordProcess(this)) return
+        // The same for the process that shows Facebook's messaging page.
+        if (com.lightdecoder.messenger.MessengerProcess.enterIfMessengerProcess(this)) return
         // Also for processes that start with no screen (boot, the link's service):
         // sign-in cookies a killed sign-in left behind go before anything else runs.
         SignInWebData.wipeIfDirty(this)

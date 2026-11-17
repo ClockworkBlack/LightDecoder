@@ -151,9 +151,15 @@ class DiscordActivity : AppCompatActivity() {
             if (index == 0) tabs.addTab(tabs.newTab().setText(R.string.chat_service_discord), true)
         }
         if (tabs.tabCount == 0) tabs.addTab(tabs.newTab().setText(R.string.chat_service_discord), true)
+        com.lightdecoder.ui.messenger.MessengerTab.add(tabs)
         com.lightdecoder.ui.chat.ServiceTabStrip.attachDropDown(tabs, binding.servicesMenu)
         tabs.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
             override fun onTabSelected(tab: TabLayout.Tab) {
+                if (com.lightdecoder.ui.messenger.MessengerTab.isTab(tab)) {
+                    startActivity(com.lightdecoder.ui.messenger.MessengerTab.intent(this@DiscordActivity))
+                    finish()
+                    return
+                }
                 val service = tab.tag as? ChatService ?: return
                 startActivity(RelayIntents.conversations(this@DiscordActivity, service))
                 finish()

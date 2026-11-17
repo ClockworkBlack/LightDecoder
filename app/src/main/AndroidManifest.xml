@@ -47,6 +47,8 @@
         </intent>
         <!-- So "Open Discord app" on the Discord tab can hand a conversation to the official app. -->
         <package android:name="com.discord" />
+        <!-- So the Messenger tab can open the official Messenger app, and say when it is not installed. -->
+        <package android:name="com.facebook.orca" />
     </queries>
 
     <!--
@@ -167,6 +169,58 @@
             android:exported="false"
             android:process=":discord"
             android:windowSoftInputMode="adjustResize" />
+        <!--
+            The Messenger tab. Two halves that do not touch
+            (docs/messenger-hybrid.md):
+
+            The inbox and one conversation, in the main process: what the
+            Messenger app's own notifications showed, kept on the phone, and
+            replies sent through that notification's Reply button.
+
+            Facebook's web messaging page ("Full history / New chat"), in a
+            process of its own (":messenger", the name MessengerContainer
+            holds) with its own WebView data folder, where none of the app's
+            other code runs. Not exported: nothing outside the app can start
+            it or hand it a URL. Rotation is handled in place so the page is
+            not reloaded.
+        -->
+        <activity
+            android:name=".ui.messenger.MessengerActivity"
+            android:exported="false" />
+        <activity
+            android:name=".ui.messenger.MessengerThreadActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.messenger.MessengerActivity"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".ui.messenger.MessengerWebActivity"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|uiMode"
+            android:exported="false"
+            android:process=":messenger"
+            android:windowSoftInputMode="adjustResize" />
+
+        <!--
+            Reads the Messenger app's notifications for the Messenger tab.
+            Android starts it only after the user turns on notification
+            access for LightDecoder in system settings, and only the system
+            can bind to it. It looks at nothing but Messenger's notifications
+            (the sticker catcher that read other apps' is still switched off
+            and not declared). Ongoing notifications (calls, music, navigation)
+            are declared as not wanted.
+        -->
+        <service
+            android:name=".messenger.MessengerNotificationListener"
+            android:exported="true"
+            android:label="@string/messenger_listener_label"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.service.notification.disabled_filter_types"
+                android:value="ongoing" />
+        </service>
+
         <!--
             The conversation list is the thread's parent. ThreadActivity
             handles Up (and Back from a notification-started task) itself,

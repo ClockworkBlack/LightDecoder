@@ -1,0 +1,54 @@
+<resources>
+    <!-- The Messenger tab: an inbox from Messenger's notifications, and Facebook's page for everything else. -->
+    <string name="chat_service_messenger">Messenger</string>
+    <string name="messenger_listener_label">LightDecoder: Messenger inbox</string>
+
+    <!-- Inbox -->
+    <string name="messenger_setup_title">See Messenger messages here</string>
+    <string name="messenger_setup_body">LightDecoder can list the messages the Messenger app notifies you about, and send your replies through Messenger\'s own Reply button. It never signs in to Messenger or talks to Meta for this.\n\nIt needs notification access. Android then shows LightDecoder every app\'s notifications; only Messenger\'s are read, and what they say stays on this phone.</string>
+    <string name="messenger_setup_restricted">If Android says the setting is restricted: open LightDecoder\'s App info, tap ⋮, then \"Allow restricted settings\", and try again.</string>
+    <string name="messenger_setup_button">Turn on notification access</string>
+    <string name="messenger_setup_failed">Couldn\'t open the notification access setting. Look for it in Settings › Notifications.</string>
+    <string name="messenger_paused_banner">Catching Messenger messages is paused.</string>
+    <string name="messenger_resume">Resume</string>
+    <string name="messenger_empty">Nothing caught yet. New Messenger messages appear here when Messenger notifies you about them. Older ones are in the full history.</string>
+    <string name="messenger_empty_no_app">The Messenger app isn\'t installed on this phone, so there are no notifications to catch. The full history still works.</string>
+    <string name="messenger_footer">Only what arrived as a notification is listed. Older messages, pictures and new chats are on Facebook\'s page.</string>
+    <string name="messenger_open_web">Full history / New chat</string>
+    <string name="messenger_web_needs_android9">The full history needs Android 9 or later. Use the Messenger app instead.</string>
+    <string name="messenger_open_app">Open Messenger app</string>
+    <string name="messenger_no_app">The Messenger app isn\'t installed on this phone.</string>
+    <string name="messenger_pause">Pause catching messages</string>
+    <string name="messenger_clear">Clear caught messages</string>
+    <string name="messenger_clear_title">Clear caught messages?</string>
+    <string name="messenger_clear_body">This removes LightDecoder\'s copy of the Messenger messages it caught. Your conversations in Messenger are not touched.</string>
+    <string name="messenger_clear_confirm">Clear</string>
+    <string name="messenger_cancel">Cancel</string>
+    <string name="messenger_you_prefix">You: %1$s</string>
+    <string name="messenger_picture">Picture</string>
+    <string name="messenger_unread_description">%1$s, unread</string>
+
+    <!-- One conversation -->
+    <string name="messenger_thread_subtitle">From Messenger\'s notifications</string>
+    <string name="messenger_compose_hint">Reply through Messenger</string>
+    <string name="messenger_send">Send</string>
+    <string name="messenger_reply_note">Sent by the Messenger app, through its notification\'s Reply button.</string>
+    <string name="messenger_no_reply_body">Messenger isn\'t offering a Reply button for this conversation right now. It offers one when it notifies you of a new message here.</string>
+    <string name="messenger_open_in_app">Open in Messenger</string>
+    <string name="messenger_reply_withdrawn">Messenger has withdrawn its Reply button, so that wasn\'t sent. Your text is still here.</string>
+    <string name="messenger_sent_unconfirmed">Handed to Messenger</string>
+    <string name="messenger_delete_conversation">Remove from this phone</string>
+    <string name="messenger_delete_title">Remove this conversation?</string>
+    <string name="messenger_delete_body">This removes LightDecoder\'s copy only. The conversation in Messenger is not touched.</string>
+    <string name="messenger_delete_confirm">Remove</string>
+    <string name="messenger_gone">That conversation is no longer on this phone.</string>
+
+    <!-- Facebook's page -->
+    <string name="messenger_web_title">Messenger on Facebook</string>
+    <string name="messenger_web_sign_in_banner">Sign in on Facebook\'s page below. This is Facebook\'s own website in its computer layout: pinch to zoom. Passkeys don\'t work in a web view, so use your password and code. To see end-to-end encrypted chats, Facebook will ask for your PIN or a code.</string>
+    <string name="messenger_web_reload">Reload</string>
+    <string name="messenger_web_error_title">Facebook didn\'t load here</string>
+    <string name="messenger_web_error_body">Check your connection and try again, or open the Messenger app, which is more reliable.</string>
+    <string name="messenger_web_try_again">Try again here</string>
+    <string name="messenger_web_no_container">Facebook\'s page couldn\'t be kept apart from the other tabs on this phone, so it wasn\'t opened.</string>
+</resources>

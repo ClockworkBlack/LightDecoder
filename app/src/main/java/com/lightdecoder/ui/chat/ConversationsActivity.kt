@@ -267,6 +267,8 @@ class ConversationsActivity : AppCompatActivity() {
                 tabs.addTab(tabs.newTab().setText(R.string.chat_service_discord).setTag(DISCORD_TAB), false)
             }
         }
+        // Messenger's tab is last. Like Discord's it is not a service of this screen and opens its own.
+        com.lightdecoder.ui.messenger.MessengerTab.add(tabs)
         ServiceTabStrip.attachDropDown(tabs, binding.servicesMenu)
         tabs.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
             override fun onTabSelected(tab: TabLayout.Tab) {
@@ -274,7 +276,13 @@ class ConversationsActivity : AppCompatActivity() {
                 if (service != null) {
                     showService(service)
                 } else {
-                    startActivity(Intent(this@ConversationsActivity, DiscordActivity::class.java))
+                    startActivity(
+                        if (com.lightdecoder.ui.messenger.MessengerTab.isTab(tab)) {
+                            com.lightdecoder.ui.messenger.MessengerTab.intent(this@ConversationsActivity)
+                        } else {
+                            Intent(this@ConversationsActivity, DiscordActivity::class.java)
+                        }
+                    )
                     // This screen keeps showing the service it showed; its tab is chosen again.
                     tabs.post { selectServiceTab(backend.service) }
                 }

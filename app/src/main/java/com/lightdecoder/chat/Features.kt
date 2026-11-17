@@ -14,6 +14,14 @@ object Features {
      */
     const val DISCORD = true
 
+    /**
+     * The Messenger tab: an inbox built from the Messenger app's own
+     * notifications, with Facebook's web page (in its own container) for
+     * history and new chats. Like Discord it is not a [ChatService]: no
+     * bridge, no link, no archive. See docs/messenger-hybrid.md.
+     */
+    const val MESSENGER = true
+
     /** The services shown as tabs (and set up from the home screen). */
     fun shownServices(): List<ChatService> = ChatService.entries.filter { it != ChatService.GMAIL || GMAIL }
 }
