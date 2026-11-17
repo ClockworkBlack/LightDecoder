@@ -23,6 +23,16 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.25 (versionCode 33) - hotfix: camera photos sideways
+- BitmapFactory ignores a JPEG's EXIF orientation, so portrait camera photos came out sideways
+  in the sticker maker (and library import), the viewer, the conversations, and when a photo was
+  shrunk before sending (re-encoded without the note, so it was *sent* sideways too).
+- `heif/ExifOrientation` (androidx.exifinterface) turns non-HEIF decodes upright in
+  `Media.decode`, `Media.decodeFirstFrame` and `MediaLoader.decodePreview` (AttachmentPrep goes
+  through the latter). HEIF is left alone: libheif / ImageDecoder apply its rotation already.
+- Stickers made before this keep a sideways original (saved without the note): pick the
+  picture again. Test: `ExifOrientationTest`. Next version: 0.5.26 / 34.
+
 ## 0.5.24 (versionCode 32) - hotfix: messages in a row went out slowly
 - **Cause:** each Google Messages send returned only when the phone had answered (seconds), and
   the outbox sends one at a time to keep order, so a burst went out one phone round trip apart.
@@ -35,7 +45,7 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - Trade-off: a text the phone answers with a transient failure (FAILURE_2/3) is retried after
   the ones behind it went out, so it can land after them. Tests: `OutboxPipelineTest`,
   gmbridge `sendpipe_test.go`. WhatsApp was not changed (its sends wait only for WhatsApp's
-  server). Next version: 0.5.25 / 33.
+  server).
 
 ## 0.5.23 (versionCode 31)
 - Messenger tab: "Sent a photo / video" lines get an icon and open the conversation in the

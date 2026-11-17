@@ -38,8 +38,8 @@ android {
         applicationId = "com.lightdecoder"
         minSdk = 26
         targetSdk = 36
-        versionCode = 32
-        versionName = "0.5.24"
+        versionCode = 33
+        versionName = "0.5.25"
 
         // The decoder is plain software, so it runs on every ABI. These cover
         // phones (64- and 32-bit ARM) and the emulator.
@@ -592,6 +592,8 @@ dependencies {
     implementation("androidx.viewpager2:viewpager2:1.1.0")
     // The Messenger tab's web page: tells Facebook "computer layout" in the client hints too (Apache-2.0).
     implementation("androidx.webkit:webkit:1.12.1")
+    // Reads a photo's EXIF orientation, so camera pictures are not shown sideways (Apache-2.0).
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
     // The Gmail tab: IMAP to read, SMTP to send (Jakarta Mail 1.6 for Android; EPL-2.0 or GPL-2.0 + CPE).
     implementation("com.sun.mail:android-mail:1.6.7")
     implementation("com.sun.mail:android-activation:1.6.7")

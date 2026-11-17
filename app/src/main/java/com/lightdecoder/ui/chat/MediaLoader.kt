@@ -388,7 +388,8 @@ class MediaLoader(
                         bytes, 0, bytes.size,
                         BitmapFactory.Options().apply { inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight, maxSide) },
                     )
-                    decoded?.let { fit(it, maxSide) }
+                    // Upright as the camera's EXIF note says (BitmapFactory ignores it).
+                    decoded?.let { fit(com.lightdecoder.heif.ExifOrientation.upright(bytes, it), maxSide) }
                 }
             }
         } catch (e: HeifCodec.DecodeException) {

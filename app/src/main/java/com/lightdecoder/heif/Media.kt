@@ -40,6 +40,7 @@ object Media {
             return Decoded(frames, info, first.width, first.height, info.hasAlpha, extension, bytes.size)
         }
         val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            ?.let { ExifOrientation.upright(bytes, it) }
             ?: throw HeifCodec.DecodeException("This file is not a picture LightDecoder can read")
         return Decoded(
             listOf(HeifFrame(bitmap, 0)), null, bitmap.width, bitmap.height, bitmap.hasAlpha(),
@@ -53,6 +54,7 @@ object Media {
             HeifCodec.decodeStill(bytes)
         } else {
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                ?.let { ExifOrientation.upright(bytes, it) }
                 ?: throw HeifCodec.DecodeException("This file is not a picture LightDecoder can read")
         }
 
