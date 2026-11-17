@@ -72,6 +72,22 @@ class ReactionTimesTest {
     }
 
     @Test
+    fun clearingOrReadingBeforeAnythingWasTimedCreatesNoDatabase() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        ReactionTimes.resetForTesting()
+        context.deleteDatabase("reaction_times.db")
+        val fresh = ReactionTimes.get(context)
+        fresh.clear(messages)
+        assertTrue(fresh.timesFor(messages, "m1").isEmpty())
+        assertTrue("nothing to clear, nothing created", !context.getDatabasePath("reaction_times.db").exists())
+        // The first reaction creates it, and it then reads and clears as before.
+        fresh.note(messages, "m1", emptyList(), listOf(ReactionDto("❤️", listOf("p2"))), 5_000, live = true)
+        assertEquals(5_000L, fresh.timesFor(messages, "m1")[heart]!!.atMs)
+        fresh.clear(messages)
+        assertTrue(fresh.timesFor(messages, "m1").isEmpty())
+    }
+
+    @Test
     fun eachServiceIsClearedOnItsOwn() {
         times.note(messages, "m1", emptyList(), listOf(ReactionDto("❤️", listOf("p2"))), 5_000, live = true)
         times.note(ChatService.WHATSAPP, "m1", emptyList(), listOf(ReactionDto("❤️", listOf("p2"))), 6_000, live = true)

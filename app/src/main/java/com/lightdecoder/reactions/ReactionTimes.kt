@@ -42,6 +42,15 @@ data class ReactionTime(val atMs: Long, val kind: Kind) {
 class ReactionTimes private constructor(context: Context) :
     SQLiteOpenHelper(context.applicationContext, DB_NAME, null, DB_VERSION) {
 
+    private val databaseFile = context.applicationContext.getDatabasePath(DB_NAME)
+
+    /**
+     * False until a reaction has been timed. Reading and clearing then have
+     * nothing to do and must not create the database: [clear] runs inside the
+     * archive wipe, which is time-limited when another phone's archive goes.
+     */
+    private fun exists(): Boolean = databaseFile.exists()
+
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
             "CREATE TABLE times (service TEXT NOT NULL, message_id TEXT NOT NULL, emoji TEXT NOT NULL, " +
@@ -93,7 +102,7 @@ class ReactionTimes private constructor(context: Context) :
 
     /** The known times of the reactions on [messageId]. */
     fun timesFor(service: ChatService, messageId: String): Map<ReactionKey, ReactionTime> =
-        readableDatabase.rawQuery(
+        if (!exists()) emptyMap() else readableDatabase.rawQuery(
             "SELECT emoji, participant, at_ms, kind FROM times WHERE service = ? AND message_id = ?",
             arrayOf(service.key, messageId),
         ).use { c ->
@@ -108,6 +117,7 @@ class ReactionTimes private constructor(context: Context) :
     /** Forgets everything of [service] (its archive was deleted). */
     @Synchronized
     fun clear(service: ChatService) {
+        if (!exists()) return
         writableDatabase.delete("times", "service = ?", arrayOf(service.key))
     }
 

@@ -237,6 +237,7 @@ class StickerMakerActivity : AppCompatActivity() {
             render()
         }
         binding.resetOriginal.setOnClickListener { resetToOriginal() }
+        binding.turn.setOnClickListener { turnPicture() }
         binding.lasso.onTooSmall = {
             Toast.makeText(this, R.string.sticker_trace_too_small, Toast.LENGTH_SHORT).show()
         }
@@ -262,7 +263,7 @@ class StickerMakerActivity : AppCompatActivity() {
             binding.saveAsNew.visibility = View.VISIBLE
             loadForEdit(edit)
         } else {
-            savedInstanceState?.getString(STATE_URI)?.let { load(Uri.parse(it)) }
+            savedInstanceState?.getString(STATE_URI)?.let { load(Uri.parse(it), savedInstanceState.getInt(STATE_TURNS)) }
         }
     }
 
@@ -277,6 +278,7 @@ class StickerMakerActivity : AppCompatActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         sourceUri?.let { outState.putString(STATE_URI, it.toString()) }
+        outState.putInt(STATE_TURNS, quarterTurns)
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
@@ -310,6 +312,7 @@ class StickerMakerActivity : AppCompatActivity() {
             binding.refineStart.isEnabled = true
             binding.smartCut.isEnabled = true
             binding.resetOriginal.visibility = View.VISIBLE
+            binding.turn.visibility = View.VISIBLE
             render()
         }
     }
@@ -364,14 +367,53 @@ class StickerMakerActivity : AppCompatActivity() {
         render()
     }
 
-    private fun load(uri: Uri) {
+    private fun load(uri: Uri, turns: Int = 0) {
         lifecycleScope.launch {
-            val bitmap = withContext(Dispatchers.IO) { readPicture(uri) }
-            if (bitmap == null) {
+            val read = withContext(Dispatchers.IO) { readPicture(uri) }
+            if (read == null) {
                 Toast.makeText(this@StickerMakerActivity, R.string.sticker_failed, Toast.LENGTH_LONG).show()
                 return@launch
             }
             sourceUri = uri
+            quarterTurns = 0
+            usePicture(withContext(Dispatchers.Default) { turned(read, turns) })
+            quarterTurns = Math.floorMod(turns, 4)
+        }
+    }
+
+    /**
+     * Quarter turns clockwise made with "Turn" since the picture was chosen,
+     * so the same picture comes back turned after the screen is recreated.
+     */
+    private var quarterTurns = 0
+
+    /**
+     * "Turn": the picture a quarter turn clockwise, for a photo that still
+     * comes in sideways (one saved without its camera's rotation note, or a
+     * sticker made from it before LightDecoder read that note). Like a new
+     * picture, it starts again from no cut, no brushing and no taps; a
+     * sticker being edited keeps the turn when it is saved.
+     */
+    private fun turnPicture() {
+        val picture = original ?: return
+        lifecycleScope.launch {
+            val turnedPicture = withContext(Dispatchers.Default) { turned(picture, 1) }
+            usePicture(turnedPicture)
+            quarterTurns = Math.floorMod(quarterTurns + 1, 4)
+        }
+    }
+
+    /** [picture] turned [turns] quarter turns clockwise (a new bitmap; [picture] is left as it is). */
+    private fun turned(picture: Bitmap, turns: Int): Bitmap {
+        val quarter = Math.floorMod(turns, 4)
+        if (quarter == 0) return picture
+        val matrix = android.graphics.Matrix().apply { setRotate(90f * quarter) }
+        return Bitmap.createBitmap(picture, 0, 0, picture.width, picture.height, matrix, true)
+    }
+
+    /** Starts over with [bitmap] as the picture: nothing cut, brushed or tapped yet. */
+    private fun usePicture(bitmap: Bitmap) {
+        run {
             source = bitmap
             original = bitmap
             forgetSubject()
@@ -379,6 +421,7 @@ class StickerMakerActivity : AppCompatActivity() {
             undoneTrace = null
             binding.traceRedo.visibility = View.GONE
             binding.resetOriginal.visibility = View.VISIBLE
+            binding.turn.visibility = View.VISIBLE
             // A new picture: the brushing and the taps were for the old one.
             taps.clear()
             stopPicking()
@@ -734,6 +777,7 @@ class StickerMakerActivity : AppCompatActivity() {
         /** A sticker of the library to edit (its file path). */
         const val EXTRA_EDIT = "com.lightdecoder.extra.EDIT_STICKER"
         private const val STATE_URI = "uri"
+        private const val STATE_TURNS = "turns"
         private const val MAX_SOURCE_BYTES = 40 * 1024 * 1024
 
         /** Over what the cut drops, while choosing who or what to keep. */

@@ -294,15 +294,34 @@
                     android:visibility="gone" />
             </LinearLayout>
 
-            <!-- Every edit undone: the sticker goes back to the picture it was made from. -->
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/resetOriginal"
-                style="@style/Widget.Material3.Button.TextButton"
+            <!--
+                Every edit undone: the sticker goes back to the picture it was made from.
+                Turn: the picture a quarter turn clockwise, for one that still comes in sideways.
+            -->
+            <LinearLayout
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_gravity="center_horizontal"
-                android:text="@string/sticker_reset_original"
-                android:visibility="gone" />
+                android:orientation="horizontal">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/turn"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:contentDescription="@string/sticker_turn_description"
+                    android:text="@string/sticker_turn"
+                    android:visibility="gone"
+                    app:icon="@drawable/ic_rotate_right" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/resetOriginal"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/sticker_reset_original"
+                    android:visibility="gone" />
+            </LinearLayout>
 
             <LinearLayout
                 android:id="@+id/smartPanel"

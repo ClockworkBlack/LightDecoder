@@ -309,7 +309,8 @@ class OutboxTest {
         assertNull(env.repo.message(MessageRow.tmpMessageId(tmpId)))
         assertEquals("echo lost", env.repo.message("real-1")!!.text)
         assertEquals(1, fake.sent.size)
-        assertTrue(RelayPrefs.unconfirmedSends(env.context).isEmpty())
+        // The outbox forgets it a moment after the echo is stored (the end of the same lookup).
+        env.eventually(manager, what = "the send to be forgotten") { RelayPrefs.unconfirmedSends(env.context).isEmpty() }
     }
 
     @Test

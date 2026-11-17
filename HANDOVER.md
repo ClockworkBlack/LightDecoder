@@ -23,6 +23,27 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.26 (versionCode 34) - Turn button; a calmer archive wipe
+- **Sticker maker "Turn"** (beside "Back to original picture"): the picture a quarter turn
+  clockwise per tap, for one that still comes in sideways (a file without its camera's rotation
+  note, or a sticker whose original was kept sideways before 0.5.25). It starts over like a new
+  picture (no cut, brushing or taps); a sticker being edited keeps the turn when saved
+  (`StickerMakerActivity.turnPicture/usePicture`, test in `StickerEditTest`).
+- **`ReactionTimes` no longer creates its database just to clear or read it.** `clear` runs inside
+  `RelayManager.wipeArchive`, which a test gives only 200 ms when another phone's archive goes;
+  CI failed once there (`RelayManagerTest.anotherPhonesArchive...NotDeletedLate`, "timed out
+  waiting for the connect", run 44143117327). Not reproduced locally (22 passes, also under load
+  and with a 50 ms budget), so this removes the work my reaction feature added to that step
+  rather than proving the cause. `RelayTestEnv.eventually` now prints the end of the link's log
+  when it times out, so a repeat says what the link did instead.
+- `OutboxTest.aSentMessageWhoseEchoWasLostIsSettledByLookingItUp` waited for the outbox entry to
+  go and then asserted at once that the unconfirmed list was empty, which is written a moment
+  later; it failed once on an overloaded machine. It now waits for that too.
+- **Smart cut, not changed yet:** tried on the owner's statue photo, BiRefNet-lite (MIT, 224 MB,
+  1024 px, 7 s on the build machine) cuts far cleaner than U-2-Net-p; full U-2-Net (Apache-2.0,
+  176 MB, 0.3 s) is in between. Waiting for the owner's choice (APK size, speed on the phone).
+- Next version: 0.5.27 / 35.
+
 ## 0.5.25 (versionCode 33) - hotfix: camera photos sideways
 - BitmapFactory ignores a JPEG's EXIF orientation, so portrait camera photos came out sideways
   in the sticker maker (and library import), the viewer, the conversations, and when a photo was
@@ -31,7 +52,7 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
   `Media.decode`, `Media.decodeFirstFrame` and `MediaLoader.decodePreview` (AttachmentPrep goes
   through the latter). HEIF is left alone: libheif / ImageDecoder apply its rotation already.
 - Stickers made before this keep a sideways original (saved without the note): pick the
-  picture again. Test: `ExifOrientationTest`. Next version: 0.5.26 / 34.
+  picture again (or use Turn, 0.5.26). Test: `ExifOrientationTest`.
 
 ## 0.5.24 (versionCode 32) - hotfix: messages in a row went out slowly
 - **Cause:** each Google Messages send returned only when the phone had answered (seconds), and
