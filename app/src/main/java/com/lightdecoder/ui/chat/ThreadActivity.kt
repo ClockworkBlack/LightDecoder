@@ -616,7 +616,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val context = applicationContext
         val items = withContext(Dispatchers.Default) {
             ThreadItems.build(
-                messages = shown,
+                // An iPhone's reactions arrive as texts ("Loved an image"): shown on their message instead.
+                messages = Tapbacks.apply(shown),
                 isGroup = isGroup,
                 quotes = quotes,
                 header = header,

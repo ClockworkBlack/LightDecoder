@@ -1,5 +1,6 @@
 package com.lightdecoder.ui
 
+import org.robolectric.Robolectric
 import android.app.Activity
 import android.app.Application
 import android.app.Dialog
@@ -394,6 +395,50 @@ class LinkFollowUpTest {
             }
         } finally {
             info.flags = original
+        }
+    }
+
+    // --- an iPhone's reactions ------------------------------------------------------------
+
+    @Test
+    fun anIPhonesReactionsShowOnThePictureTheyAreAbout() {
+        val (manager, fake) = env.pairedManager()
+        fake.goOnline()
+        env.eventually(manager, what = "online") { manager.state.value.isOnline }
+        env.repo.upsertConversation(
+            ConversationDto(
+                id = "c1", name = "Alice", folder = "inbox", lastMessageTs = 4_000,
+                participants = listOf(ParticipantDto(id = "me", isMe = true), ParticipantDto(id = "p1", name = "Alice")),
+            )
+        )
+        env.repo.upsertMessage(
+            MessageDto(
+                id = "pic", conversationId = "c1", fromMe = true, direction = "out", status = "OUTGOING_DELIVERED",
+                timestampMs = 1_000L, isOld = true,
+                parts = listOf(PartDto(partId = "0", kind = "media", mediaId = "mpic", mime = "image/png", size = 100)),
+            )
+        )
+        for ((id, text) in listOf("t1" to "Liked an image", "t2" to "Loved an image")) {
+            env.repo.upsertMessage(
+                MessageDto(id = id, conversationId = "c1", senderId = "p1", senderName = "Alice", timestampMs = 2_000L + id.length, isOld = true, text = text)
+            )
+        }
+        val controller = Robolectric.buildActivity(ThreadActivity::class.java, RelayIntents.thread(app, "c1").setFlags(0)).setup()
+        try {
+            val activity = controller.get()
+            settle(10)
+            val list = activity.findViewById<RecyclerView>(R.id.messages)
+            list.measure(View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(4000, View.MeasureSpec.AT_MOST))
+            list.layout(0, 0, 1080, list.measuredHeight)
+            val holders = (0 until list.childCount).map { list.getChildViewHolder(list.getChildAt(it)) }
+                .filterIsInstance<MessagesAdapter.MessageHolder>()
+            assertEquals("only the picture: the texts became its reaction", 1, holders.size)
+            val chips = holders[0].binding.reactions
+            val shown = (0 until chips.childCount).map { (chips.getChildAt(it) as TextView).text.toString() }
+            assertEquals(listOf("❤️"), shown)
+            assertTrue(chips.isShown)
+        } finally {
+            controller.pause().stop().destroy()
         }
     }
 

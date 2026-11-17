@@ -22,6 +22,17 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.14
+- **iPhone tapbacks shown as reactions** (`ui/chat/Tapbacks`, applied in `ThreadActivity.submit`
+  before `ThreadItems.build`; display only, nothing stored changes). Reads the English texts an
+  iPhone sends to non-iPhones: Loved / Liked / Disliked / Laughed at / Emphasized / Questioned,
+  "Reacted <emoji> to", and "Removed a heart from" etc., on a quoted text (cut-short quotes
+  ending in "…" match by start) or on "an image / a photo / a sticker / a GIF / a video /
+  an audio message / an attachment". The latest earlier message that fits gets the emoji (as a
+  ReactionDto from the sender); one tapback per person per message, as on an iPhone; the text
+  is hidden. Unmatched texts (target not loaded) stay as text. Not yet applied to the inbox
+  preview or notifications, which still say "Loved an image".
+
 ## 0.5.13
 - Fix: tapping Remove on something and then Keep on it again left it removed (removes always
   beat keeps). `TapCutter.combine(found, steps)` now applies taps in the order made: start
