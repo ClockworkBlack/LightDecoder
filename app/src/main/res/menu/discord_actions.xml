@@ -6,6 +6,10 @@
         android:title="@string/discord_open_app"
         app:showAsAction="never" />
     <item
+        android:id="@+id/action_discord_qr"
+        android:title="@string/discord_qr_sign_in"
+        app:showAsAction="never" />
+    <item
         android:id="@+id/action_discord_reload"
         android:title="@string/discord_reload"
         app:showAsAction="never" />

@@ -63,19 +63,35 @@
             android:textAppearance="?attr/textAppearanceBodyMedium"
             android:textColor="?attr/colorOnTertiaryContainer" />
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/signInOpenApp"
-            style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="wrap_content"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:minHeight="48dp"
-            android:text="@string/discord_open_app" />
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/signInQr"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minHeight="48dp"
+                android:text="@string/discord_qr_sign_in" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/signInOpenApp"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minHeight="48dp"
+                android:text="@string/discord_open_app" />
+        </LinearLayout>
     </LinearLayout>
 
     <FrameLayout
+        android:id="@+id/pageFrame"
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_weight="1">
+        android:layout_weight="1"
+        android:clipChildren="true">
 
         <WebView
             android:id="@+id/discordWebView"
@@ -120,6 +136,55 @@
                 android:layout_marginTop="8dp"
                 android:text="@string/discord_try_again" />
         </LinearLayout>
+        <!-- Sign in with a QR code: the code Discord's page shows, and what to do with it. -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/qrPanel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
+            android:layout_margin="12dp"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:id="@+id/qrStatus"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:accessibilityLiveRegion="polite"
+                    android:text="@string/discord_qr_looking"
+                    android:textAppearance="?attr/textAppearanceBodyMedium" />
+
+                <ImageView
+                    android:id="@+id/qrImage"
+                    android:layout_width="200dp"
+                    android:layout_height="200dp"
+                    android:layout_gravity="center_horizontal"
+                    android:layout_marginTop="8dp"
+                    android:contentDescription="@string/discord_qr_image"
+                    android:visibility="gone" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/qrApprove"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:enabled="false"
+                    android:text="@string/discord_qr_approve" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/qrClose"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="end"
+                    android:text="@string/discord_qr_close" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
     </FrameLayout>
 
 </LinearLayout>

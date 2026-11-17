@@ -82,9 +82,38 @@ notifications behave as they do when the app is closed.
 - Camera and microphone requests from the page are denied. Calls belong in the
   Discord app.
 
-The only thing the app reads is the page address, which `WebView` reports to
-every host app. `DiscordSession` uses it to tell the sign-in page from a
-conversation, and never keeps or shows the query string.
+The app reads the page address, which `WebView` reports to every host app.
+`DiscordSession` uses it to tell the sign-in page from a conversation, and
+never keeps or shows the query string. The one other thing it reads is below.
+
+## Signing in with a QR code (and why not a passkey)
+
+**Passkeys cannot work inside the tab.** Android lets a `WebView` use passkeys
+for a site only if the app is tied to that site with Digital Asset Links
+(Discord's site, not ours), or if the app is a browser on Google's privileged
+list. LightDecoder is neither, so Discord's "Sign in with a passkey" fails here.
+The way round it is the QR code: sign in to the official Discord app with the
+passkey, and approve the tab from there.
+
+**"Sign in with QR code"** (sign-in banner and menu, `DiscordQr`):
+
+- Discord's sign-in page shows its QR code only when the page is wide, as on a
+  computer. The tab gives the page view a computer-size window
+  (`DiscordQr.DESKTOP_WIDTH_CSS`, 1100 CSS px) and scales the view down to fit
+  the screen (`View.scaleX/Y`; Android maps touches through the scale). The page
+  is not changed: no script, no user agent, no viewport override.
+- Every 1.5 s, `PixelCopy` copies what the page view shows on screen and zxing
+  looks for a QR code in it, as a camera pointed at the screen would. Only a
+  code whose content is exactly `https://discord.com/ra/<code>` is taken
+  (Discord's remote-auth link, valid two minutes; format per
+  docs.discord.food/remote-authentication and Discord's QR Code Login FAQ).
+- "Approve in the Discord app" opens that link with the official app
+  (`setPackage("com.discord")`), nothing else. The person taps Log in there. It
+  is not verified that the Discord app acts on the link when opened this way
+  rather than scanned; if it does not, the panel shows the code large for the
+  Discord app on another device (Settings > Scan QR Code).
+- When the page reaches a conversation (signed in), the tab goes back to the
+  phone-size window by itself.
 
 Nothing from Discord reaches the rest of the app: no messages are archived, no
 notifications are posted for it, and it has no unread badge.
@@ -114,7 +143,7 @@ If sign-in loops on a CAPTCHA with the real user agent, the answer is the
 | Tell signed-in from signed-out by the address, not the page | Sound; `doUpdateVisitedHistory` is needed because Discord is a single-page app | Yes |
 | Strip `; wv` from the user agent | Rejected, see above | No |
 | `databaseEnabled = true` is required | Outdated: it controls WebSQL and was deprecated in API 35 | No |
-| Turn on passkeys with `WebSettingsCompat` | Does not apply: app mode needs Digital Asset Links with a site you own, browser mode needs Google's privileged-app listing | No |
+| Turn on passkeys with `WebSettingsCompat` | Does not apply: app mode needs Digital Asset Links with a site you own, browser mode needs Google's privileged-app listing | No; QR sign-in instead |
 | Discord moves its token in and out of `localStorage` | Unverified, and irrelevant because storage is never touched | n/a |
 | "100% legal and compliant" | Not supportable; see "Where it sits" | n/a |
 

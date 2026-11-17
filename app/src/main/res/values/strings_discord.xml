@@ -8,4 +8,13 @@
     <string name="discord_error_title">Discord didn\'t load here</string>
     <string name="discord_error_body">Check your connection and try again, or open the Discord app, which is more reliable.</string>
     <string name="discord_no_container">The Discord tab couldn\'t be kept apart from the other tabs on this phone, so it wasn\'t opened.</string>
+    <string name="discord_qr_sign_in">Sign in with QR code</string>
+    <string name="discord_qr_looking">Showing Discord\'s computer-size sign-in page so its QR code appears. Looking for the code…</string>
+    <string name="discord_qr_found">Approve this sign-in with the Discord app on this phone (you can sign in to that app with your passkey), or scan this code with the Discord app on another device: Settings › Scan QR Code. The code changes every 2 minutes.</string>
+    <string name="discord_qr_approve">Approve in the Discord app</string>
+    <string name="discord_qr_close">Close</string>
+    <string name="discord_qr_image">Discord sign-in QR code</string>
+    <string name="discord_qr_no_app">The Discord app isn\'t installed on this phone. Scan the code with the Discord app on another device: Settings › Scan QR Code.</string>
+    <string name="discord_qr_after_app">Tap Log in in the Discord app. If it opened without asking, scan the code from another device instead.</string>
+    <string name="discord_qr_signed_in">Signed in to Discord</string>
 </resources>

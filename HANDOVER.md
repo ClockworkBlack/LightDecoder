@@ -23,6 +23,17 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.18
+- **Discord: sign in with a QR code** (`discord/DiscordQr`, `DiscordActivity` "Sign in with QR
+  code" in the sign-in banner and menu). Gives the page a computer-size window scaled to fit so
+  Discord's sign-in QR appears, reads it off the screen (PixelCopy + zxing, only
+  `https://discord.com/ra/<code>` accepted), and offers "Approve in the Discord app" (VIEW intent
+  to com.discord) or the code drawn large for another device. Back to phone width once signed in.
+  **Passkeys cannot work in the WebView** (see docs/discord-web-view.md); the QR route lets the
+  user sign in to the Discord app with a passkey and approve the tab there.
+  Unverified (discord.com is blocked from the build environment): that the QR shows at 1100 CSS
+  px in a WebView, and that the Discord app acts on an opened /ra/ link. Tests: `DiscordQrTest`.
+
 ## 0.5.17
 - Merged `origin/discord-tab` (0.5.16, fast-forward) after reading it; first compiled and tested
   here: full suite (510 then 511 tests) and lint pass. Its "not compiled" note below is resolved.
