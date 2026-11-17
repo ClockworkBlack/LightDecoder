@@ -3,6 +3,7 @@ package com.lightdecoder
 import android.app.Activity
 import android.app.Application
 import android.os.Bundle
+import com.lightdecoder.discord.DiscordProcess
 import com.lightdecoder.relay.RelayManager
 import com.lightdecoder.relay.RelayNotifications
 import com.lightdecoder.ui.relay.SignInWebData
@@ -15,11 +16,19 @@ import com.lightdecoder.wa.WaPrefs
  * the user has paired; for everyone else LightDecoder stays the sticker
  * decoder it was. The WhatsApp link's manager is not created here at all
  * unless the user linked WhatsApp and wants it connected.
+ *
+ * The Discord tab runs in a second process of its own
+ * ([com.lightdecoder.discord.DiscordContainer]); there this class sets up its
+ * WebView data folder and stops.
  */
 class LightDecoderApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // The Discord tab's process: it gets its own WebView data folder and
+        // nothing else. No link, archive or notification channel is set up
+        // there, and the sign-in wipe below never runs on its data.
+        if (DiscordProcess.enterIfDiscordProcess(this)) return
         // Also for processes that start with no screen (boot, the link's service):
         // sign-in cookies a killed sign-in left behind go before anything else runs.
         SignInWebData.wipeIfDirty(this)

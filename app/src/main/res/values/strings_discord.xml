@@ -1,0 +1,11 @@
+<resources>
+    <!-- The Discord tab: Discord's website in its own container. -->
+    <string name="chat_service_discord">Discord</string>
+    <string name="discord_open_app">Open Discord app</string>
+    <string name="discord_reload">Reload</string>
+    <string name="discord_try_again">Try again here</string>
+    <string name="discord_sign_in_banner">Sign in on Discord\'s page below. This is Discord\'s website, which isn\'t built for phones in a web view, so sign-in and CAPTCHA checks may not finish here.</string>
+    <string name="discord_error_title">Discord didn\'t load here</string>
+    <string name="discord_error_body">Check your connection and try again, or open the Discord app, which is more reliable.</string>
+    <string name="discord_no_container">The Discord tab couldn\'t be kept apart from the other tabs on this phone, so it wasn\'t opened.</string>
+</resources>

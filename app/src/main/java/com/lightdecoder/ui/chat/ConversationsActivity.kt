@@ -24,6 +24,9 @@ import com.lightdecoder.archive.SearchHit
 import com.lightdecoder.chat.Capability
 import com.lightdecoder.chat.ChatBackend
 import com.lightdecoder.chat.ChatService
+import com.lightdecoder.chat.Features
+import com.lightdecoder.discord.DiscordProcess
+import com.lightdecoder.ui.discord.DiscordActivity
 import com.lightdecoder.databinding.ActivityConversationsBinding
 import com.lightdecoder.relay.BackfillProgress
 import com.lightdecoder.relay.Folder
@@ -259,8 +262,23 @@ class ConversationsActivity : AppCompatActivity() {
         for (service in com.lightdecoder.chat.Features.shownServices()) {
             tabs.addTab(tabs.newTab().setText(ServiceUi.tabLabel(service)).setTag(service), service == backend.service)
         }
+        // Discord is not a service of this screen: it has no archive or link
+        // here, and its tab opens its own screen in its own process.
+        if (Features.DISCORD && DiscordProcess.supported) {
+            tabs.addTab(tabs.newTab().setText(R.string.chat_service_discord).setTag(DISCORD_TAB), false)
+        }
         tabs.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
-            override fun onTabSelected(tab: TabLayout.Tab) = showService(tab.tag as ChatService)
+            override fun onTabSelected(tab: TabLayout.Tab) {
+                val service = tab.tag as? ChatService
+                if (service != null) {
+                    showService(service)
+                } else {
+                    startActivity(Intent(this@ConversationsActivity, DiscordActivity::class.java))
+                    // This screen keeps showing the service it showed; its tab is chosen again.
+                    tabs.post { selectServiceTab(backend.service) }
+                }
+            }
+
             override fun onTabUnselected(tab: TabLayout.Tab) = Unit
             override fun onTabReselected(tab: TabLayout.Tab) {
                 binding.list.smoothScrollToPosition(0)
@@ -719,6 +737,9 @@ class ConversationsActivity : AppCompatActivity() {
         private const val STATE_QUERY = "query"
         private const val RELOAD_DEBOUNCE_MS = 200L
         private const val SEARCH_DEBOUNCE_MS = 250L
+
+        /** The tag of the Discord tab, which is no [ChatService]. */
+        private val DISCORD_TAB = Any()
 
         /** Every folder there is, in tab order; a service shows the ones it has. */
         private val FOLDERS = listOf(

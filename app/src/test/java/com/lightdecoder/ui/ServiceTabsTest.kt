@@ -74,7 +74,8 @@ class ServiceTabsTest {
 
         launch().use { scenario ->
             scenario.onActivity { activity ->
-                assertEquals(listOf("Messages", "WhatsApp"), tabTexts(activity.findViewById(R.id.services)))
+                // Discord's tab follows the services'; it is not one of them (it opens its own screen).
+                assertEquals(listOf("Messages", "WhatsApp", "Discord"), tabTexts(activity.findViewById(R.id.services)))
                 assertEquals("Google Messages first", 0, activity.findViewById<TabLayout>(R.id.services).selectedTabPosition)
             }
             scenario.waitFor("the Messages inbox") { titles(it) == listOf("Alice", "Bob") }

@@ -268,6 +268,25 @@ blue means iMessage, which only Apple devices can send. If a carrier turns the
 picture into a JPEG (MMS), transparency is lost; the "White background" switch
 is for that.
 
+## Discord tab
+
+The conversation list has a **Discord** tab beside Messages and WhatsApp. It
+shows Discord's own website in a web view, unmodified: no injected script, no
+reading of requests, cookies or the session token, no user-agent spoofing, and
+nothing typed for you. There is no Discord bridge in the app. "Open Discord
+app" is always one tap away, and is the more reliable route, because Discord
+does not support mobile browsers and sign-in or CAPTCHA may not finish in a web
+view.
+
+The tab runs in a process of its own with its own web data folder, so Discord's
+cookies and the other tabs' data cannot meet: the Google sign-in page of the
+Messages link never sees a Discord cookie, and clearing that sign-in does not
+sign Discord out. The tab needs Android 9 or later.
+
+Discord's terms neither authorize nor forbid embedding its website, so treat
+this as a grey area rather than an approved integration.
+`docs/discord-web-view.md` has the container, the boundary and the reasoning.
+
 ## Licence
 
 **GNU AGPL-3.0-or-later** (see [`LICENSE`](LICENSE)). The Google Messages link
@@ -367,6 +386,8 @@ app/src/main/java/
   .../ui/                inbox, viewer and licence screens
   .../ui/relay/          link setup (disclosure, sign-in, emoji) and status screens
   .../ui/chat/           conversations, thread, new conversation
+  .../discord/           the Discord tab's container, address helpers, hand-off to the Discord app
+  .../ui/discord/        the Discord tab's screen (its own process)
 app/src/test/            Robolectric unit tests: decoder, archive, link runtime (against a
                          fake bridge), screens
 gmbridge/                Go module wrapping libgm; gomobile binds it into app/libs/gmbridge.aar
@@ -377,5 +398,6 @@ tools/jni-smoke/         host-side decode/JNI verification harness
 tools/make-test-media/   generator of the unit tests' synthetic HEIC files
 docs/rcs-integration.md  the five RCS access pathways, which two LightDecoder uses, and why
 docs/google-messages-link.md  how the Google Messages link is built, tested and maintained
+docs/discord-web-view.md what the Discord tab does and refuses to do, and how it is kept apart
 NOTICE                   third-party components and their licences
 ```

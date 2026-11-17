@@ -45,6 +45,8 @@
         <intent>
             <action android:name="android.intent.action.TTS_SERVICE" />
         </intent>
+        <!-- So "Open Discord app" on the Discord tab can hand a conversation to the official app. -->
+        <package android:name="com.discord" />
     </queries>
 
     <!--
@@ -150,6 +152,21 @@
         <activity
             android:name=".ui.chat.ConversationsActivity"
             android:exported="false" />
+        <!--
+            The Discord tab: Discord's website in a web view. It runs in a
+            process of its own (":discord", the name DiscordContainer holds),
+            where the app gives the WebView its own data folder and sets up
+            none of the other tabs' links or archives, so Discord's cookies
+            and the other tabs' data cannot meet. Not exported: nothing
+            outside the app can start it or hand it a URL. Rotation is handled
+            in place so the page is not reloaded.
+        -->
+        <activity
+            android:name=".ui.discord.DiscordActivity"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|uiMode"
+            android:exported="false"
+            android:process=":discord"
+            android:windowSoftInputMode="adjustResize" />
         <!--
             The conversation list is the thread's parent. ThreadActivity
             handles Up (and Back from a notification-started task) itself,

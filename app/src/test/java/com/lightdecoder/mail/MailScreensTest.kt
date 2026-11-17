@@ -78,7 +78,9 @@ class MailScreensTest {
             scenario.onActivity { a ->
                 val tabs = a.findViewById<TabLayout>(R.id.services)
                 // Paused by the user: the list still works when opened for Gmail, but has no Gmail tab.
-                assertEquals(com.lightdecoder.chat.Features.shownServices().size, tabs.tabCount)
+                // (Discord's tab is counted apart: it is not a service.)
+                val serviceTabs = (0 until tabs.tabCount).count { tabs.getTabAt(it)?.tag is ChatService }
+                assertEquals(com.lightdecoder.chat.Features.shownServices().size, serviceTabs)
                 a.findViewById<View>(R.id.fab).performClick()
                 val next = shadowOf(env.context as Application).nextStartedActivity
                 assertEquals(MailComposeActivity::class.java.name, next.component?.className)

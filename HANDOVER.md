@@ -4,8 +4,9 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 
 ## Priorities (user's direction, latest first)
 1. App features first; **WhatsApp work is paused** (built and tested, untouched since); it comes next.
-2. **Gmail: done in 0.5.0** (see below). **Discord: paused** by the user (they chose "build with a
-   warning", then "pause on Discord"). **Instagram: skipped** (ban risk, like Messenger).
+2. **Gmail: done in 0.5.0** (see below). **Discord: a web-view tab since 0.5.16** (see below; the user
+   had earlier chosen "build with a warning", then "pause on Discord", and has now asked for
+   the web-view tab only, with no bridge). **Instagram: skipped** (ban risk, like Messenger).
 
 ## Releases and signing
 - Latest: **0.4.2** (versionCode 6), signed with the permanent release key (CN=LightDecoder,
@@ -21,6 +22,23 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
   `AttachmentPrep.LARGE` (4096 px / 8 MB). Not verified on a real phone.
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
+
+## 0.5.16
+- **Discord tab** (`ui/discord/DiscordActivity`, `discord/`): a tab after WhatsApp in the
+  conversation list (`Features.DISCORD`; not a `ChatService`, so no backend, archive, badge or
+  notifications). It opens Discord's website, unmodified, in a WebView. No bridge, no token, no
+  injected script, no user-agent override; "Open Discord app" hands the conversation on screen to
+  the official app. Rules and the fact-check behind them: `docs/discord-web-view.md`.
+- **Its own container:** `android:process=":discord"` plus `WebView.setDataDirectorySuffix`
+  (`DiscordProcess.enterIfDiscordProcess`, first line of `LightDecoderApp.onCreate`, which then
+  returns: none of the links' managers exist in that process). Needed because `SignInWebData`
+  deletes the main process's whole WebView folder after a Google sign-in. Android 9+ only; the
+  tab is hidden below that. Do not move the screen into the main process or add a WebView to it
+  before the suffix is set.
+- **Not compiled, not run on a phone:** this was written in a session with no Android SDK. Only
+  the plain JVM tests ran (`discord/Discord*Test`, 11 tests). `ServiceTabsTest` and
+  `MailScreensTest` were edited for the extra tab and have NOT been run. First thing next
+  session: `./gradlew :app:testDebugUnitTest :app:assembleDebug`.
 
 ## 0.5.15
 - **"Read" notifications** (`relay/ReadNotifier.kt`: `ReadNotifier`, `ReadNotifyPrefs`,

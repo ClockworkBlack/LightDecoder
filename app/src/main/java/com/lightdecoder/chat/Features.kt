@@ -8,6 +8,12 @@ object Features {
     /** The Gmail tab: paused while the app's own features come first. */
     const val GMAIL = false
 
+    /**
+     * The Discord tab: Discord's website in its own container, beside the
+     * services' tabs. It is not a [ChatService]: it has no backend or archive.
+     */
+    const val DISCORD = true
+
     /** The services shown as tabs (and set up from the home screen). */
     fun shownServices(): List<ChatService> = ChatService.entries.filter { it != ChatService.GMAIL || GMAIL }
 }
