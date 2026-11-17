@@ -22,6 +22,12 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.13
+- Fix: tapping Remove on something and then Keep on it again left it removed (removes always
+  beat keeps). `TapCutter.combine(found, steps)` now applies taps in the order made: start
+  empty if any tap is a Keep (else from what Smart cut found), then each Keep adds and each
+  Remove takes out, so a later tap on the same thing undoes an earlier one.
+
 ## 0.5.12
 - **A tap finds the thing under it** (`sticker/TapCutter`): EfficientSAM ViT-T
   (`assets/models/efficient_sam_vitt_encoder.onnx` 25 MB + `_decoder.onnx` 17 MB, Apache-2.0,

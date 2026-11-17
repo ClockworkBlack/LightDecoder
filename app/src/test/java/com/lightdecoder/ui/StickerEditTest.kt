@@ -301,6 +301,13 @@ class StickerEditTest {
                 settle()
                 scenario.onActivity { a ->
                     assertFalse(a.findViewById<View>(R.id.pickUndo).isEnabled)
+                    // Remove, then back to Keep: the switch goes both ways.
+                    val mode = a.findViewById<com.google.android.material.button.MaterialButtonToggleGroup>(R.id.pickMode)
+                    assertEquals(R.id.pickKeep, mode.checkedButtonId)
+                    a.findViewById<View>(R.id.pickRemove).performClick()
+                    assertEquals(R.id.pickRemove, mode.checkedButtonId)
+                    a.findViewById<View>(R.id.pickKeep).performClick()
+                    assertEquals("back on Keep", R.id.pickKeep, mode.checkedButtonId)
                     // The blue one.
                     tap(a.findViewById<View>(R.id.pickView), 150f, 100f)
                 }

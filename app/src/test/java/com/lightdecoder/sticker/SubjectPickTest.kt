@@ -99,6 +99,27 @@ class SubjectPickTest {
     }
 
     @Test
+    fun aLaterTapOnTheSameThingUndoesAnEarlierOne() {
+        val wide = { columns: IntRange -> SubjectMask(200, 1, ByteArray(200) { if (it in columns) 255.toByte() else 0 }) }
+        fun kept(m: SubjectMask?, x: Int) = (m!!.confidence[x].toInt() and 0xFF) > 127
+        val found = wide(0..199)
+        val person = wide(20..79)
+        val bottle = wide(140..179)
+        // Removed, then kept again: it is back.
+        val back = TapCutter.combine(found, listOf(person to true, bottle to false, bottle to true))
+        assertTrue(kept(back, 50))
+        assertTrue("kept again", kept(back, 160))
+        // Kept, then removed: it is gone.
+        val gone = TapCutter.combine(found, listOf(person to true, bottle to true, bottle to false))
+        assertTrue(kept(gone, 50))
+        assertFalse(kept(gone, 160))
+        // Only removed, then kept: the keep tap now says what the sticker is.
+        val only = TapCutter.combine(found, listOf(bottle to false, bottle to true))
+        assertTrue(kept(only, 160))
+        assertFalse(kept(only, 50))
+    }
+
+    @Test
     fun theTapModelFindsTheThingUnderATap() {
         val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
         // A person holding a helmet in her lap (NASA, public domain).

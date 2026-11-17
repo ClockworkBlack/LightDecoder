@@ -87,11 +87,8 @@ class StickerMakerActivity : AppCompatActivity() {
                     // Without the tap model: the taps choose among the pieces that were found.
                     found?.let { com.lightdecoder.sticker.SubjectPick.apply(it, picture, tapPoints(true), tapPoints(false)) }
                 } else {
-                    com.lightdecoder.sticker.TapCutter.combine(
-                        found,
-                        taps.filter { it.third }.mapNotNull { tapMasks[it] },
-                        taps.filter { !it.third }.mapNotNull { tapMasks[it] },
-                    )
+                    // In the order tapped: a later tap on the same thing undoes an earlier one.
+                    com.lightdecoder.sticker.TapCutter.combine(found, taps.mapNotNull { tap -> tapMasks[tap]?.let { it to tap.third } })
                 }
                 tappedFrom = key
             }

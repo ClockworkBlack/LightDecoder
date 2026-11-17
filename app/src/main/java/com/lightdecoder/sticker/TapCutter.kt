@@ -52,37 +52,52 @@ object TapCutter {
     }
 
     /**
-     * What the cut keeps once the user has tapped: everything under a keep
-     * tap (or, with no keep tap, what the smart cut found: [found]), less
-     * everything under a remove tap. Null when that leaves nothing to go by.
+     * What the cut keeps once the user has tapped, from [steps] in the order
+     * tapped (each the thing under a tap, and true for Keep, false for
+     * Remove). It starts from nothing if any tap is a Keep (the keep taps say
+     * what the sticker is), else from what the smart cut found ([found]);
+     * then each tap in turn adds its thing or takes it out, so a later tap
+     * on the same thing undoes an earlier one. Null when that leaves nothing
+     * to go by.
      */
-    fun combine(found: SubjectMask?, keep: List<SubjectMask>, remove: List<SubjectMask>): SubjectMask? {
-        val first = keep.firstOrNull() ?: found ?: return null
-        val out = if (keep.isEmpty()) first.confidence.copyOf() else ByteArray(first.confidence.size)
-        fun same(m: SubjectMask) = m.width == first.width && m.height == first.height
-        for (m in keep) if (same(m)) {
-            for (i in out.indices) {
-                val v = m.confidence[i].toInt() and 0xFF
-                if (v > (out[i].toInt() and 0xFF)) out[i] = v.toByte()
-            }
-        }
+    fun combine(found: SubjectMask?, steps: List<Pair<SubjectMask, Boolean>>): SubjectMask? {
+        val anyKeep = steps.any { it.second }
+        val first = steps.firstOrNull { it.second }?.first ?: found ?: return null
         val w = first.width
         val h = first.height
-        val removing = remove.filter(::same)
-        if (removing.isEmpty()) return SubjectMask(w, h, out)
-        // What is removed is taken a little wider than it was found, and slivers left along
-        // its edge go with it: two models never agree on an edge to the pixel.
-        val gone = BooleanArray(out.size)
-        for (m in removing) for (i in out.indices) if ((m.confidence[i].toInt() and 0xFF) > 127) gone[i] = true
-        val wider = spread(gone, w, h, max(w, h) / 60, grow = true)
-        for (i in out.indices) if (wider[i]) out[i] = 0
-        val thin = max(w, h) / 150
-        if (thin > 0) {
-            val solid = spread(spread(BooleanArray(out.size) { (out[it].toInt() and 0xFF) > 127 }, w, h, thin, grow = false), w, h, thin + 1, grow = true)
-            for (i in out.indices) if (!solid[i]) out[i] = 0
+        val out = if (anyKeep) ByteArray(w * h) else first.confidence.copyOf()
+        var removed = false
+        for ((m, keep) in steps) {
+            if (m.width != w || m.height != h) continue
+            if (keep) {
+                for (i in out.indices) {
+                    val v = m.confidence[i].toInt() and 0xFF
+                    if (v > (out[i].toInt() and 0xFF)) out[i] = v.toByte()
+                }
+            } else {
+                removed = true
+                // What is removed is taken a little wider than it was found, and slivers left
+                // along its edge go with it: two models never agree on an edge to the pixel.
+                val gone = BooleanArray(out.size) { (m.confidence[it].toInt() and 0xFF) > 127 }
+                val wider = spread(gone, w, h, max(w, h) / 60, grow = true)
+                for (i in out.indices) if (wider[i]) out[i] = 0
+                val thin = max(w, h) / 150
+                if (thin > 0) {
+                    val solid = spread(
+                        spread(BooleanArray(out.size) { (out[it].toInt() and 0xFF) > 127 }, w, h, thin, grow = false),
+                        w, h, thin + 1, grow = true,
+                    )
+                    for (i in out.indices) if (!solid[i]) out[i] = 0
+                }
+            }
         }
-        return SubjectMask(w, h, out).cleaned(choke = false)
+        val mask = SubjectMask(w, h, out)
+        return if (removed) mask.cleaned(choke = false) else mask
     }
+
+    /** As [combine], with every keep tap before every remove tap. */
+    fun combine(found: SubjectMask?, keep: List<SubjectMask>, remove: List<SubjectMask>): SubjectMask? =
+        combine(found, keep.map { it to true } + remove.map { it to false })
 
     /** [cells] grown (or, with [grow] false, shrunk) by [radius] pixels in every direction. */
     private fun spread(cells: BooleanArray, w: Int, h: Int, radius: Int, grow: Boolean): BooleanArray {
