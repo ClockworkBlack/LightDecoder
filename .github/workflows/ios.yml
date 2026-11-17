@@ -3,8 +3,11 @@ name: Build iOS
 # The iPhone app (ios/), on the ios branch. Nothing here runs for the Android
 # app's branches.
 #
-# Run by hand for now (Actions > Build iOS > Run workflow, branch "ios"):
-# on 2026-11-17 GitHub's macOS runners never picked up a job for this
+# Run by hand for now. GitHub's website only shows "Run workflow" for a
+# workflow file that is on the default branch, so while this lives on the
+# ios branch it is started through the API (Claude can: run_workflow,
+# workflow ios.yml, ref ios), or with `gh workflow run ios.yml --ref ios`.
+# On 2026-11-17 GitHub's macOS runners never picked up a job for this
 # repository (queued 15 minutes, then failed with no logs), so running on
 # every push only produced failure emails. Once a run goes through, put
 # the push trigger back:

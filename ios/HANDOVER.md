@@ -26,8 +26,11 @@ Branch: `ios` (from `main` at 0.5.22). Everything iOS is in `ios/` and
 
 ## To get a build
 Any one of:
-1. Re-run the "Build iOS" workflow later (Actions tab > Build iOS > Run
-   workflow, branch `ios`), in case the queue clears or the account's limit lifts.
+1. Start the "Build iOS" workflow again later, in case the queue clears or the
+   account's limit lifts. It is manual (`workflow_dispatch`), and GitHub's
+   website shows no "Run workflow" button for a workflow file that is not on
+   `main`: start it through the API (`run_workflow`, `ios.yml`, ref `ios`;
+   that worked on 2026-11-17) or `gh workflow run ios.yml --ref ios`.
 2. A Mac with Xcode 16 or later: `brew install xcodegen && cd ios && xcodegen generate`,
    open `LightDecoder.xcodeproj`, build.
 3. A CI service with Macs that needs no Mac of one's own (Codemagic, Bitrise,

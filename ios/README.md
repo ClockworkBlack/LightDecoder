@@ -41,9 +41,10 @@ talks over **Matrix**, an open messaging network, on the free public server
 - `App/` is the SwiftUI app (iOS 17 and later). `project.yml` is the project:
   `brew install xcodegen && cd ios && xcodegen generate` makes
   `LightDecoder.xcodeproj`, which is not committed.
-- `.github/workflows/ios.yml` builds on GitHub's Macs for pushes to `ios` that
-  touch `ios/`: core tests, a simulator build with a launch test, and an
-  unsigned `.ipa` as an artifact.
+- `.github/workflows/ios.yml` builds on GitHub's Macs when started by hand
+  (see `HANDOVER.md`): core tests, a simulator build with a launch test, and an
+  unsigned `.ipa` as an artifact. **It has not yet completed a run**: the app's
+  screens have not been compiled.
 
 ## Installing on an iPhone with a paid Apple developer account
 
