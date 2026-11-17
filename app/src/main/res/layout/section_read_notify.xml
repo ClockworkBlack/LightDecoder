@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- "Read" notifications: on/off, also while the app is on screen, and who for. Shared by the links' settings. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginTop="8dp"
+    android:orientation="vertical">
+
+    <com.google.android.material.materialswitch.MaterialSwitch
+        android:id="@+id/switchReadNotify"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:minHeight="48dp"
+        android:text="@string/read_switch" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/read_switch_help"
+        android:textAppearance="?attr/textAppearanceBodySmall" />
+
+    <com.google.android.material.materialswitch.MaterialSwitch
+        android:id="@+id/switchReadWhileLooking"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:minHeight="48dp"
+        android:text="@string/read_switch_while_looking" />
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/readNotifyPeople"
+        style="@style/Widget.Material3.Button.TextButton"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/read_choose_people" />
+</LinearLayout>

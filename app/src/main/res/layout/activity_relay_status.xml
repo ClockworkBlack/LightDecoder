@@ -169,6 +169,10 @@
                         android:text="@string/link_switch_notify_help"
                         android:textAppearance="?attr/textAppearanceBodySmall" />
 
+                    <include
+                        android:id="@+id/readNotify"
+                        layout="@layout/section_read_notify" />
+
                     <com.google.android.material.materialswitch.MaterialSwitch
                         android:id="@+id/switchStickers"
                         android:layout_width="match_parent"

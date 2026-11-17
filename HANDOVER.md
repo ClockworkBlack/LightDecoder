@@ -22,6 +22,21 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.15
+- **"Read" notifications** (`relay/ReadNotifier.kt`: `ReadNotifier`, `ReadNotifyPrefs`,
+  `AppVisibility`). When one of the user's messages turns OUTGOING_DISPLAYED (Google Messages:
+  `RelayManager.onMessage` compares with the stored row before the upsert; WhatsApp:
+  `WaManager.onReceipt` on READ/PLAYED receipts), a notification "<name> read your message"
+  with the message's start goes on its own channel "Read receipts" (IMPORTANCE_DEFAULT), one per
+  conversation (tag "read:" + the messages notification's tag, so no WhatsApp ids), replaced by
+  the next, cancelled when the conversation is opened. Rules: on for everyone by default; only
+  while no LightDecoder screen is started unless "Also while LightDecoder is open"; off per
+  conversation (Settings > "Choose who to be notified about", or the conversation's menu "Notify
+  me when they read my messages"); never for a message read over 3 days after it was sent.
+  Settings section `section_read_notify.xml` / `ui/relay/ReadNotifySection` sits under
+  "Message notifications" in both the Google Messages and WhatsApp link settings (the prefs are
+  shared; the people list shows that service's conversations). Not for Gmail.
+
 ## 0.5.14
 - **iPhone tapbacks shown as reactions** (`ui/chat/Tapbacks`, applied in `ThreadActivity.submit`
   before `ThreadItems.build`; display only, nothing stored changes). Reads the English texts an

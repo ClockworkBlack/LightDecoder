@@ -162,6 +162,10 @@
                         android:text="@string/wa_switch_notify_help"
                         android:textAppearance="?attr/textAppearanceBodySmall" />
 
+                    <include
+                        android:id="@+id/readNotify"
+                        layout="@layout/section_read_notify" />
+
                     <TextView
                         android:id="@+id/batteryText"
                         android:layout_width="match_parent"

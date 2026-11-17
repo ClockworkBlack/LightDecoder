@@ -245,6 +245,7 @@ class RelayStatusActivity : AppCompatActivity() {
             if (on) notifications.requestIfNeeded()
         }
         binding.switchStickers.setOnClickListener { RelayPrefs.setCatchStickers(this, binding.switchStickers.isChecked) }
+        ReadNotifySection.bind(this, binding.readNotify.root, com.lightdecoder.chat.ChatService.MESSAGES) { notifications.requestIfNeeded() }
     }
 
     /** From the saved preferences; the switches only change on a tap (click listeners, not change listeners). */

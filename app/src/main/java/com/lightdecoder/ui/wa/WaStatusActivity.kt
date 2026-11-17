@@ -245,6 +245,9 @@ class WaStatusActivity : AppCompatActivity() {
             // Only asks; message notifications are optional, so a refusal changes nothing here.
             if (on) notifications.requestIfNeeded()
         }
+        com.lightdecoder.ui.relay.ReadNotifySection.bind(this, binding.readNotify.root, com.lightdecoder.chat.ChatService.WHATSAPP) {
+            notifications.requestIfNeeded()
+        }
     }
 
     /** From the saved preferences; the switches only change on a tap (click listeners, not change listeners). */

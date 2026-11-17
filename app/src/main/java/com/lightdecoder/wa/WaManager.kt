@@ -1,5 +1,6 @@
 package com.lightdecoder.wa
 
+import com.lightdecoder.relay.ReadNotifier
 import android.app.AlarmManager
 import android.app.PendingIntent
 import android.content.Context
@@ -2206,7 +2207,14 @@ class WaManager private constructor(
             else -> return
         }
         if (receipt.messageIds.isEmpty()) return
+        // The user's messages this receipt is the first to say were read.
+        val newlyRead = if (status != STATUS_READ) emptyList() else receipt.messageIds.distinct().mapNotNull { id ->
+            repo.message(id)?.takeIf { it.isOutgoing && !ReadNotifier.isRead(it.status) }
+        }
         val found = repo.advanceMessageStatus(receipt.messageIds, status, STATUS_CODES.getValue(status), ::statusRank)
+        if (newlyRead.isNotEmpty()) {
+            ReadNotifier.onRead(appContext, repo, newlyRead.mapNotNull { repo.message(it.id) }.filter { ReadNotifier.isRead(it.status) })
+        }
         val early = receipt.messageIds.filter { it !in found }
         if (early.isEmpty()) return
         // The message is not stored yet (its send is still returning): applied when it is.

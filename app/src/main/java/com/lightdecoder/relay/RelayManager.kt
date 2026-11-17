@@ -2178,8 +2178,12 @@ class RelayManager private constructor(
         // Read before the upsert moves it: the conversation's newest message so far.
         val previousLatest = if (dto.isDeleted) 0L else repo.conversation(dto.conversationId)?.lastMessageTs ?: 0L
         if (dto.fromMe && !dto.isDeleted) logOutgoing(dto)
+        // One of the user's messages the phone now says was read, and did not before.
+        val wasUnread = dto.fromMe && !dto.isDeleted && dto.id.isNotEmpty() && ReadNotifier.isRead(dto.status) &&
+            repo.message(dto.id)?.let { it.isOutgoing && !ReadNotifier.isRead(it.status) } == true
         val result = repo.upsertMessage(dto)
         if (dto.isDeleted || dto.id.isEmpty()) return
+        if (wasUnread) repo.message(dto.id)?.let { ReadNotifier.onRead(app, repo, listOf(it)) }
         requestFullSizes(dto, result.newMediaParts)
         if (result.newMediaParts.isNotEmpty() && RelayPrefs.catchStickers(app)) {
             for (part in result.newMediaParts) {

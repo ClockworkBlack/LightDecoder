@@ -24,6 +24,7 @@ class LightDecoderApp : Application() {
         // sign-in cookies a killed sign-in left behind go before anything else runs.
         SignInWebData.wipeIfDirty(this)
         RelayNotifications.ensureChannels(this)
+        com.lightdecoder.relay.ReadNotifier.ensureChannel(this)
         RelayManager.get(this)
         // With a Gmail account added, its background check is scheduled (survives updates).
         // While the Gmail tab is paused, nothing checks the mailbox in the background.
@@ -44,12 +45,14 @@ class LightDecoderApp : Application() {
 
             override fun onActivityStarted(activity: Activity) {
                 started++
+                com.lightdecoder.relay.AppVisibility.started = started
                 RelayManager.get(activity).onAppVisible()
                 if (WaPrefs.liveEnabled(activity)) WaManager.get(activity).onAppVisible()
             }
 
             override fun onActivityStopped(activity: Activity) {
                 started = (started - 1).coerceAtLeast(0)
+                com.lightdecoder.relay.AppVisibility.started = started
                 // A rotation stops and starts the same screen: that is not leaving.
                 if (started == 0 && !activity.isChangingConfigurations && WaPrefs.liveEnabled(activity)) {
                     WaManager.get(activity).onAppBackground()

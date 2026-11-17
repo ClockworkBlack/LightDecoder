@@ -433,4 +433,25 @@
     <string name="gallery_loading_failed">This picture could not be loaded.</string>
     <string name="chat_call">Call</string>
     <string name="chat_call_no_app">No phone app on this device can make the call.</string>
+    <!-- "Read" notifications -->
+    <string name="read_channel">Read receipts</string>
+    <string name="read_channel_description">When someone reads a message you sent</string>
+    <string name="read_notify_title">%1$s read your message</string>
+    <string name="read_notify_text">“%1$s”</string>
+    <string name="read_notify_picture">Your picture</string>
+    <string name="read_notify_attachment">Your attachment</string>
+    <string name="read_notify_message">Your message</string>
+    <plurals name="read_notify_several">
+        <item quantity="one">%2$s</item>
+        <item quantity="other">%1$d messages, the latest: %2$s</item>
+    </plurals>
+    <string name="read_switch">Notify me when my messages are read</string>
+    <string name="read_switch_help">For everyone unless you turn it off for someone here or in their conversation\'s menu. Only while LightDecoder is not open, unless you turn on the next switch.</string>
+    <string name="read_switch_while_looking">Also while LightDecoder is open</string>
+    <string name="read_choose_people">Choose who to be notified about</string>
+    <string name="read_choose_people_done">Done</string>
+    <string name="read_choose_people_none">There are no conversations here yet.</string>
+    <string name="read_notify_person">Notify me when they read my messages</string>
+    <string name="read_notify_person_on">You will be notified when they read your messages</string>
+    <string name="read_notify_person_off">No more read notifications for this conversation</string>
 </resources>

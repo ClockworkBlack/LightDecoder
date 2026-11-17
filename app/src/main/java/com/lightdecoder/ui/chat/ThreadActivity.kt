@@ -375,6 +375,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         super.onResume()
         MessageNotifier.setVisibleConversationId(manager.service, conversationId)
         MessageNotifier.cancel(this, conversationId, manager.service)
+        com.lightdecoder.relay.ReadNotifier.cancel(this, manager.service, conversationId)
     }
 
     override fun onPause() {
@@ -1724,6 +1725,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             setTitle(if (conv?.muted == true) R.string.chat_action_unmute else R.string.chat_action_mute)
         }
         menu.findItem(R.id.action_delete_conversation)?.isVisible = conv != null && !deleted
+        menu.findItem(R.id.action_notify_read)?.apply {
+            // Where the service says when a message is read, and read notifications are on at all.
+            isVisible = conv != null && !deleted && manager.service != ChatService.GMAIL &&
+                com.lightdecoder.relay.ReadNotifyPrefs.enabled(this@ThreadActivity)
+            isChecked = com.lightdecoder.relay.ReadNotifyPrefs.forConversation(this@ThreadActivity, manager.service, conversationId)
+        }
         menu.findItem(R.id.action_read_new_aloud)?.apply {
             isVisible = reader.isAvailable
             isChecked = VoicePrefs.readNewAloud(this@ThreadActivity)
@@ -1767,6 +1774,13 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             R.id.action_delete_forever -> confirmDeleteForever()
             R.id.action_delete_conversation -> confirmDeleteConversation()
             R.id.action_link_status -> startActivity(ServiceUi.status(this, manager.service))
+            R.id.action_notify_read -> {
+                val on = !com.lightdecoder.relay.ReadNotifyPrefs.forConversation(this, manager.service, conversationId)
+                com.lightdecoder.relay.ReadNotifyPrefs.setForConversation(this, manager.service, conversationId, on)
+                item.isChecked = on
+                toast(getString(if (on) R.string.read_notify_person_on else R.string.read_notify_person_off))
+                invalidateOptionsMenu()
+            }
             R.id.action_read_new_aloud -> {
                 val on = !VoicePrefs.readNewAloud(this)
                 VoicePrefs.setReadNewAloud(this, on)
