@@ -1,13 +1,17 @@
 name: Build iOS
 
-# The iPhone app (ios/). Runs only for the ios branch and its own files, so
-# the Android app's workflow and branches are left alone.
+# The iPhone app (ios/), on the ios branch. Nothing here runs for the Android
+# app's branches.
+#
+# Run by hand for now (Actions > Build iOS > Run workflow, branch "ios"):
+# on 2026-11-17 GitHub's macOS runners never picked up a job for this
+# repository (queued 15 minutes, then failed with no logs), so running on
+# every push only produced failure emails. Once a run goes through, put
+# the push trigger back:
+#   push:
+#     branches: [ios]
+#     paths: ["ios/**", ".github/workflows/ios.yml"]
 on:
-  push:
-    branches: [ios]
-    paths:
-      - "ios/**"
-      - ".github/workflows/ios.yml"
   workflow_dispatch:
 
 permissions:
@@ -19,7 +23,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-26
+    runs-on: macos-15
     timeout-minutes: 45
     steps:
       - name: Check out
