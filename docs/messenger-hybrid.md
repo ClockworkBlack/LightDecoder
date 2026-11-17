@@ -1,7 +1,7 @@
 # The Messenger tab
 
-The conversation list has a Messenger tab, the last one, after Messages,
-Discord and WhatsApp. It is two things that do not touch each other:
+The app switcher lists Messenger after Messages and Discord, right before
+WhatsApp. It is two things that do not touch each other:
 
 1. **An inbox built from the Messenger app's own notifications**, with replies
    sent through that notification's Reply button.

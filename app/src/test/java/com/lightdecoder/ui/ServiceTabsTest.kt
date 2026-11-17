@@ -79,24 +79,24 @@ class ServiceTabsTest {
                 arrow.performClick()
                 val popup = org.robolectric.shadows.ShadowPopupMenu.getLatestPopupMenu()!!
                 val items = (0 until popup.menu.size()).map { popup.menu.getItem(it) }
-                assertEquals(listOf("Messages", "Discord", "WhatsApp", "Messenger"), items.map { it.title.toString() })
+                assertEquals(listOf("Messages", "Discord", "Messenger", "WhatsApp"), items.map { it.title.toString() })
                 assertTrue("the one showing is ticked", items[0].isChecked)
                 // Straight to WhatsApp.
-                org.robolectric.Shadows.shadowOf(popup).onMenuItemClickListener.onMenuItemClick(items[2])
-                assertEquals(2, tabs.selectedTabPosition)
+                org.robolectric.Shadows.shadowOf(popup).onMenuItemClickListener.onMenuItemClick(items[3])
+                assertEquals(3, tabs.selectedTabPosition)
             }
             scenario.waitFor("the WhatsApp inbox") { titles(it) == listOf("Carol") }
             scenario.onActivity { activity ->
                 activity.findViewById<android.view.View>(R.id.servicesMenu).performClick()
                 val popup = org.robolectric.shadows.ShadowPopupMenu.getLatestPopupMenu()!!
-                assertTrue(popup.menu.getItem(2).isChecked)
+                assertTrue(popup.menu.getItem(3).isChecked)
                 // Discord opens its own screen.
                 org.robolectric.Shadows.shadowOf(popup).onMenuItemClickListener.onMenuItemClick(popup.menu.getItem(1))
                 val started = org.robolectric.Shadows.shadowOf(activity).nextStartedActivity
                 assertEquals(com.lightdecoder.ui.discord.DiscordActivity::class.java.name, started?.component?.className)
-                // And so does Messenger, the last tab.
+                // And so does Messenger, right before WhatsApp.
                 org.robolectric.shadows.ShadowLooper.idleMainLooper()
-                org.robolectric.Shadows.shadowOf(popup).onMenuItemClickListener.onMenuItemClick(popup.menu.getItem(3))
+                org.robolectric.Shadows.shadowOf(popup).onMenuItemClickListener.onMenuItemClick(popup.menu.getItem(2))
                 val messenger = org.robolectric.Shadows.shadowOf(activity).nextStartedActivity
                 assertEquals(com.lightdecoder.ui.messenger.MessengerActivity::class.java.name, messenger?.component?.className)
             }
@@ -115,8 +115,8 @@ class ServiceTabsTest {
         launch().use { scenario ->
             scenario.onActivity { activity ->
                 // Discord's tab sits right of Messages; it is not a service (it opens its own screen).
-                // Messenger's tab is last; like Discord's it is not a service.
-                assertEquals(listOf("Messages", "Discord", "WhatsApp", "Messenger"), tabTexts(activity.findViewById(R.id.services)))
+                // Messenger's tab sits before WhatsApp's; like Discord's it is not a service.
+                assertEquals(listOf("Messages", "Discord", "Messenger", "WhatsApp"), tabTexts(activity.findViewById(R.id.services)))
                 assertEquals("Google Messages first", 0, activity.findViewById<TabLayout>(R.id.services).selectedTabPosition)
             }
             scenario.waitFor("the Messages inbox") { titles(it) == listOf("Alice", "Bob") }
@@ -159,7 +159,7 @@ class ServiceTabsTest {
             scenario.waitFor("WhatsApp") { titles(it) == listOf("Carol") }
         }
         launch().use { scenario ->
-            scenario.onActivity { assertEquals("opens where it was", 2, it.findViewById<TabLayout>(R.id.services).selectedTabPosition) }
+            scenario.onActivity { assertEquals("opens where it was", 3, it.findViewById<TabLayout>(R.id.services).selectedTabPosition) }
             scenario.waitFor("WhatsApp again") { titles(it) == listOf("Carol") }
         }
         // An intent that names a service gets that tab, and it is then the one to come back to.
@@ -179,7 +179,7 @@ class ServiceTabsTest {
         launch().use { scenario ->
             scenario.waitFor("WhatsApp's conversations") { titles(it) == listOf("Carol") }
             scenario.onActivity { activity ->
-                assertEquals(2, activity.findViewById<TabLayout>(R.id.services).selectedTabPosition)
+                assertEquals(3, activity.findViewById<TabLayout>(R.id.services).selectedTabPosition)
                 assertFalse("something is linked: no setup takes over", activity.isFinishing)
                 assertNull(shadowOf(activity).nextStartedActivity)
             }
@@ -199,7 +199,7 @@ class ServiceTabsTest {
             // Up from a WhatsApp thread (opened from its notification) lands on this list.
             val up = Intent(activity, ConversationsActivity::class.java).putExtra(RelayIntents.EXTRA_SERVICE, whatsApp.key)
             controller.newIntent(up)
-            assertEquals(2, activity.findViewById<TabLayout>(R.id.services).selectedTabPosition)
+            assertEquals(3, activity.findViewById<TabLayout>(R.id.services).selectedTabPosition)
             two.waitUntil("WhatsApp") { titles(activity) == listOf("Carol") }
         } finally {
             controller.pause().stop().destroy()
@@ -217,21 +217,21 @@ class ServiceTabsTest {
         two.seedConversation(whatsApp, "111@s.whatsapp.net", "Carol", unread = true)
 
         launch().use { scenario ->
-            scenario.waitFor("both badges") { badge(it, 0) == 2 && badge(it, 2) == 1 }
+            scenario.waitFor("both badges") { badge(it, 0) == 2 && badge(it, 3) == 1 }
             scenario.waitFor("the Messages inbox") { titles(it).size == 3 }
 
             // WhatsApp's conversation is read (on the phone, say) while Messages is shown.
             two.waRepo.markConversationRead("111@s.whatsapp.net")
-            scenario.waitFor("WhatsApp's badge gone") { badge(it, 2) == null }
+            scenario.waitFor("WhatsApp's badge gone") { badge(it, 3) == null }
             scenario.onActivity { assertEquals("Messages' count is its own", 2, badge(it, 0)) }
 
             // And a new WhatsApp conversation only shows as a count: the list is still Messages'.
             two.seedConversation(whatsApp, "333@s.whatsapp.net", "Frank", unread = true, lastTs = 9_000)
-            scenario.waitFor("WhatsApp's badge back") { badge(it, 2) == 1 }
+            scenario.waitFor("WhatsApp's badge back") { badge(it, 3) == 1 }
             two.settle()
             scenario.onActivity { activity ->
                 assertEquals(setOf("Alice", "Bob", "Read Rita"), titles(activity).toSet())
-                val description = activity.findViewById<TabLayout>(R.id.services).getTabAt(2)!!.badge!!.contentDescription
+                val description = activity.findViewById<TabLayout>(R.id.services).getTabAt(3)!!.badge!!.contentDescription
                 assertEquals("1 unread conversation", description.toString())
             }
         }
@@ -249,7 +249,7 @@ class ServiceTabsTest {
         launch(RelayIntents.conversations(two.app, whatsApp).setFlags(0)).use { scenario ->
             scenario.waitFor("the card") { it.findViewById<View>(R.id.linkCard).isShown }
             scenario.onActivity { activity ->
-                assertEquals(2, activity.findViewById<TabLayout>(R.id.services).selectedTabPosition)
+                assertEquals(3, activity.findViewById<TabLayout>(R.id.services).selectedTabPosition)
                 assertEquals(activity.getString(R.string.chat_wa_link_title), text(activity, R.id.linkCardTitle))
                 assertEquals(activity.getString(R.string.chat_wa_link_body), text(activity, R.id.linkCardBody))
                 assertEquals("no folders of nothing", View.GONE, activity.findViewById<View>(R.id.folders).visibility)

@@ -148,7 +148,7 @@ class MessengerScreensTest {
     }
 
     @Test
-    fun theTitleIsTheSwitcherWithMessengerLastAndChosen() {
+    fun theTitleIsTheSwitcherWithMessengerBeforeWhatsAppAndChosen() {
         ActivityScenario.launch(MessengerActivity::class.java).use { scenario ->
             scenario.onActivity { activity ->
                 val tabs = activity.findViewById<TabLayout>(R.id.services)
@@ -157,10 +157,10 @@ class MessengerScreensTest {
                 activity.findViewById<View>(R.id.servicesMenu).performClick()
                 val popup = org.robolectric.shadows.ShadowPopupMenu.getLatestPopupMenu()!!
                 val items = (0 until popup.menu.size()).map { popup.menu.getItem(it) }
-                assertEquals(listOf("Messages", "Discord", "WhatsApp", "Messenger"), items.map { it.title.toString() })
-                assertTrue("Messenger is ticked", items[3].isChecked)
+                assertEquals(listOf("Messages", "Discord", "Messenger", "WhatsApp"), items.map { it.title.toString() })
+                assertTrue("Messenger is ticked", items[2].isChecked)
                 // Another app's screen takes over: the conversation list, switched in place.
-                shadowOf(popup).onMenuItemClickListener.onMenuItemClick(items[2])
+                shadowOf(popup).onMenuItemClickListener.onMenuItemClick(items[3])
                 val started = shadowOf(activity).nextStartedActivity
                 assertEquals(ConversationsActivity::class.java.name, started.component?.className)
                 assertTrue("in place, not made again", started.flags and Intent.FLAG_ACTIVITY_SINGLE_TOP != 0)

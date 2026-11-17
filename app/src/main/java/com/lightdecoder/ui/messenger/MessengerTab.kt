@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import com.google.android.material.tabs.TabLayout
 import com.lightdecoder.R
+import com.lightdecoder.chat.ChatService
 import com.lightdecoder.chat.Features
 
 /**
@@ -17,10 +18,16 @@ object MessengerTab {
 
     private val TAG = Any()
 
-    /** Adds the tab after the tabs already there, if the Messenger tab is switched on. */
+    /**
+     * Adds the tab, if the Messenger tab is switched on: right before
+     * WhatsApp's, or last when there is no WhatsApp tab. Call it after the
+     * other tabs are in.
+     */
     fun add(tabs: TabLayout, selected: Boolean = false) {
         if (!Features.MESSENGER) return
-        tabs.addTab(tabs.newTab().setText(R.string.chat_service_messenger).setTag(TAG), selected)
+        val tab = tabs.newTab().setText(R.string.chat_service_messenger).setTag(TAG)
+        val whatsApp = (0 until tabs.tabCount).firstOrNull { tabs.getTabAt(it)?.tag == ChatService.WHATSAPP }
+        if (whatsApp != null) tabs.addTab(tab, whatsApp, selected) else tabs.addTab(tab, selected)
     }
 
     fun isTab(tab: TabLayout.Tab): Boolean = tab.tag === TAG

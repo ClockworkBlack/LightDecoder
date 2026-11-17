@@ -108,7 +108,7 @@ class MessengerActivity : AppCompatActivity() {
      */
     private fun setUpServiceTabs() {
         val tabs = binding.services
-        // The same order as the conversation list: Messages, Discord, the other services, Messenger.
+        // The same order as the conversation list: Messages, Discord, Messenger, then WhatsApp.
         Features.shownServices().forEachIndexed { index, service ->
             tabs.addTab(tabs.newTab().setText(ServiceUi.tabLabel(service)).setTag(service), false)
             if (index == 0 && Features.DISCORD && DiscordProcess.supported) {

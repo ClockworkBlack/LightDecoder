@@ -271,7 +271,8 @@ class ConversationsActivity : AppCompatActivity() {
                 tabs.addTab(tabs.newTab().setText(R.string.chat_service_discord).setTag(DISCORD_TAB), false)
             }
         }
-        // Messenger's tab is last. Like Discord's it is not a service of this screen and opens its own.
+        // Messenger's tab goes right before WhatsApp's. Like Discord's it is not a service of this
+        // screen and opens its own.
         com.lightdecoder.ui.messenger.MessengerTab.add(tabs)
         switcher = ServiceTabStrip.attachSwitcher(tabs, binding.root.findViewById(R.id.servicesMenu)) {
             getString(ServiceUi.tabLabel(backend.service))
