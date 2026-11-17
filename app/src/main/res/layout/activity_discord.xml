@@ -5,37 +5,46 @@
     android:layout_height="match_parent"
     android:orientation="vertical">
 
+    <!--
+        One row: back, the same tab strip as the conversation list (Discord chosen; it
+        scrolls sideways, and the arrow lists every tab), and the menu. No title or address
+        line, so the page gets the room.
+    -->
     <com.google.android.material.appbar.MaterialToolbar
         android:id="@+id/toolbar"
         android:layout_width="match_parent"
-        android:layout_height="?attr/actionBarSize"
-        app:title="@string/chat_title" />
+        android:layout_height="48dp"
+        android:minHeight="48dp"
+        app:contentInsetStartWithNavigation="0dp">
 
-    <!-- The same strip as the conversation list, with Discord chosen. -->
-    <!-- Scrolls sideways when the tabs do not all fit; the arrow lists them all. -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:gravity="center_vertical"
-        android:orientation="horizontal">
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
 
-        <com.google.android.material.tabs.TabLayout
-            android:id="@+id/services"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            app:tabGravity="start"
-            app:tabMode="scrollable" />
+            <com.google.android.material.tabs.TabLayout
+                android:id="@+id/services"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:background="@android:color/transparent"
+                app:tabGravity="start"
+                app:tabMinWidth="0dp"
+                app:tabMode="scrollable"
+                app:tabPaddingEnd="10dp"
+                app:tabPaddingStart="10dp" />
 
-        <ImageButton
-            android:id="@+id/servicesMenu"
-            android:layout_width="48dp"
-            android:layout_height="48dp"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="@string/chat_services_menu"
-            android:src="@drawable/ic_arrow_drop_down"
-            app:tint="?attr/colorOnSurface" />
-    </LinearLayout>
+            <ImageButton
+                android:id="@+id/servicesMenu"
+                android:layout_width="40dp"
+                android:layout_height="match_parent"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/chat_services_menu"
+                android:src="@drawable/ic_arrow_drop_down"
+                app:tint="?attr/colorOnSurface" />
+        </LinearLayout>
+    </com.google.android.material.appbar.MaterialToolbar>
 
     <com.google.android.material.progressindicator.LinearProgressIndicator
         android:id="@+id/progress"

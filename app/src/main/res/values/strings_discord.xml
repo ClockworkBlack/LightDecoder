@@ -17,4 +17,12 @@
     <string name="discord_qr_no_app">The Discord app isn\'t installed on this phone. Scan the code with the Discord app on another device: Settings › Scan QR Code.</string>
     <string name="discord_qr_after_app">Tap Log in in the Discord app. If it opened without asking, scan the code from another device instead.</string>
     <string name="discord_qr_signed_in">Signed in to Discord</string>
+    <string name="discord_page_size">Page size</string>
+    <string name="discord_page_size_narrow">Page size on this narrow screen (phone folded)</string>
+    <string name="discord_page_size_wide">Page size on this wide screen (phone unfolded, or a tablet)</string>
+    <string name="discord_size_auto_narrow">Automatic (normal size)</string>
+    <string name="discord_size_auto_wide">Automatic (servers, channels and chat side by side)</string>
+    <string name="discord_size_text">Larger text, %1$d%%</string>
+    <string name="discord_size_normal">Normal, 100%</string>
+    <string name="discord_size_smaller">Smaller, %1$d%% (more fits)</string>
 </resources>

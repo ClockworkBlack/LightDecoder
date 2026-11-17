@@ -84,6 +84,8 @@ class DiscordActivity : AppCompatActivity() {
         applySystemBarAndImePadding(binding.root)
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
+        // The tab strip is the bar's content: no title or address line takes the page's room.
+        supportActionBar?.setDisplayShowTitleEnabled(false)
         binding.toolbar.setNavigationOnClickListener { finish() }
         setUpServiceTabs()
 
@@ -109,6 +111,7 @@ class DiscordActivity : AppCompatActivity() {
         val web = binding.discordWebView
         webView = web
         configure(web)
+        binding.pageFrame.post { applyPageWidth() }
         val restored = savedInstanceState?.let { web.restoreState(it) }
         if (restored == null) web.loadUrl(DiscordSession.START_URL)
 
@@ -245,7 +248,6 @@ class DiscordActivity : AppCompatActivity() {
     }
 
     private fun render(url: String?) {
-        supportActionBar?.subtitle = DiscordSession.displayAddress(url)
         val state = DiscordSession.classify(url)
         signedOut = state == DiscordSessionState.SIGNED_OUT
         binding.signInBanner.visibility = if (signedOut && !qrMode) View.VISIBLE else View.GONE
@@ -304,8 +306,17 @@ class DiscordActivity : AppCompatActivity() {
         val frame = binding.pageFrame
         if (frame.width == 0 || frame.height == 0) return
         val params = web.layoutParams
-        if (qrMode) {
-            val wide = com.lightdecoder.discord.DiscordQr.wide(frame.width, frame.height, resources.displayMetrics.density)
+        val density = resources.displayMetrics.density
+        val widthDp = (frame.width / density).toInt()
+        // The size chosen for this kind of screen (folded or unfolded); a computer's for the QR code.
+        val fit = com.lightdecoder.discord.DiscordFit.fit(
+            widthDp, com.lightdecoder.discord.DiscordFit.pageSize(this, com.lightdecoder.discord.DiscordFit.isWide(widthDp)),
+        )
+        val cssWidth = if (qrMode) com.lightdecoder.discord.DiscordQr.DESKTOP_WIDTH_CSS else fit.cssWidth
+        val textZoom = if (qrMode) 100 else fit.textZoom
+        if (web.settings.textZoom != textZoom) web.settings.textZoom = textZoom
+        if (cssWidth > widthDp) {
+            val wide = com.lightdecoder.discord.DiscordQr.wide(frame.width, frame.height, density, cssWidth)
             params.width = wide.width
             params.height = wide.height
             web.pivotX = 0f
@@ -319,6 +330,38 @@ class DiscordActivity : AppCompatActivity() {
             web.scaleY = 1f
         }
         web.layoutParams = params
+    }
+
+    /** The sizes to choose from for the screen as it is now (folded or unfolded), the current one marked. */
+    private fun choosePageSize() {
+        val widthDp = (binding.pageFrame.width / resources.displayMetrics.density).toInt()
+        val wide = com.lightdecoder.discord.DiscordFit.isWide(widthDp)
+        val sizes = com.lightdecoder.discord.DiscordFit.PageSize.entries
+        val labels = sizes.map { size ->
+            when {
+                size == com.lightdecoder.discord.DiscordFit.PageSize.AUTO ->
+                    getString(if (wide) R.string.discord_size_auto_wide else R.string.discord_size_auto_narrow)
+                size.percent > 100 -> getString(R.string.discord_size_text, size.percent)
+                size.percent == 100 -> getString(R.string.discord_size_normal)
+                else -> getString(R.string.discord_size_smaller, size.percent)
+            }
+        }.toTypedArray()
+        val current = sizes.indexOf(com.lightdecoder.discord.DiscordFit.pageSize(this, wide))
+        com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+            .setTitle(if (wide) R.string.discord_page_size_wide else R.string.discord_page_size_narrow)
+            .setSingleChoiceItems(labels, current) { dialog, which ->
+                com.lightdecoder.discord.DiscordFit.setPageSize(this, wide, sizes[which])
+                applyPageWidth()
+                dialog.dismiss()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /** Folded or unfolded, turned, or split with another app: the page is fitted again, in place. */
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        binding.pageFrame.post { applyPageWidth() }
     }
 
     /** Copies what the page view shows on screen and looks for Discord's QR code in it. */
@@ -377,6 +420,7 @@ class DiscordActivity : AppCompatActivity() {
             R.id.action_discord_open_app -> openInApp()
             R.id.action_discord_reload -> webView?.reload()
             R.id.action_discord_qr -> if (qrMode) stopQr() else startQr()
+            R.id.action_discord_page_size -> choosePageSize()
             else -> return super.onOptionsItemSelected(item)
         }
         return true

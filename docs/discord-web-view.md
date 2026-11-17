@@ -86,6 +86,26 @@ The app reads the page address, which `WebView` reports to every host app.
 `DiscordSession` uses it to tell the sign-in page from a conversation, and
 never keeps or shows the query string. The one other thing it reads is below.
 
+## Page size, and folding phones
+
+`DiscordFit` decides how wide the page is laid out (CSS pixels); the page view
+is given that width and scaled to fill the screen (`DiscordQr.wide`), as a
+browser's zoom does. Larger sizes use `WebSettings.textZoom` instead. Nothing
+in the page is changed. The choice ("Page size" in the menu) is kept
+separately for narrow screens (under 600 dp: a phone, a folded Fold) and wide
+ones (an unfolded Fold, a tablet). On Automatic a narrow screen shows the
+page at its natural size, and a wide one lays it out at 940 px or more, where
+Discord shows servers, channels and the conversation side by side (940 is
+Discord's desktop app's minimum window; that its website switches layout
+there is not verified on a device).
+
+Folding and unfolding are handled in place (`configChanges` includes
+`screenSize`, `smallestScreenSize`, `screenLayout` and `density`), so the page
+is fitted again without being reloaded.
+
+The top bar is one 48 dp row: back, the tab strip, the tab list arrow, the
+menu. It shows no title and no address line; only discord.com loads here.
+
 ## Signing in with a QR code (and why not a passkey)
 
 **Passkeys cannot work inside the tab.** Android lets a `WebView` use passkeys

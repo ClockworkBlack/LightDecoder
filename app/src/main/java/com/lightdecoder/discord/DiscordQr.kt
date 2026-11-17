@@ -48,8 +48,9 @@ object DiscordQr {
      */
     data class Wide(val width: Int, val height: Int, val scale: Float)
 
-    fun wide(parentWidth: Int, parentHeight: Int, density: Float): Wide {
-        val width = (DESKTOP_WIDTH_CSS * density).roundToInt().coerceAtLeast(parentWidth)
+    fun wide(parentWidth: Int, parentHeight: Int, density: Float, cssWidth: Int = DESKTOP_WIDTH_CSS): Wide {
+        // Never narrower than the screen: a page is not stretched larger this way (text size does that).
+        val width = (cssWidth * density).roundToInt().coerceAtLeast(parentWidth)
         val scale = parentWidth.toFloat() / width
         return Wide(width, (parentHeight / scale).roundToInt(), scale)
     }

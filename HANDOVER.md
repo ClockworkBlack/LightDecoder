@@ -23,6 +23,18 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.19
+- The user signed in to Discord in the tab on their phone (Galaxy Z Fold 7); the web view works.
+- **Discord tab fit** (`discord/DiscordFit`, `DiscordActivity.applyPageWidth`): the page is laid
+  out at a CSS width and the view scaled to fill the screen. "Page size" menu, remembered
+  separately for narrow (< 600 dp, folded) and wide (unfolded) screens; Automatic = natural size
+  when narrow, at least 940 CSS px when wide (Discord's side-by-side layout). Larger sizes use
+  textZoom. Fold/unfold handled in place (`density` added to configChanges).
+- **Discord top bar is one row**: the tab strip and arrow sit inside the toolbar; no title or
+  address subtitle. Tests: `DiscordFitTest`.
+- Not verified on the Fold: how the scaled page looks unfolded, and whether Discord's website
+  goes side-by-side at 940 px.
+
 ## 0.5.18
 - **Discord: sign in with a QR code** (`discord/DiscordQr`, `DiscordActivity` "Sign in with QR
   code" in the sign-in banner and menu). Gives the page a computer-size window scaled to fit so
