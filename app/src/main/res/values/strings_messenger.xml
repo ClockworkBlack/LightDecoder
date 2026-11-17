@@ -41,6 +41,11 @@
     <string name="messenger_delete_title">Remove this conversation?</string>
     <string name="messenger_delete_body">This removes LightDecoder\'s copy only. The conversation in Messenger is not touched.</string>
     <string name="messenger_delete_confirm">Remove</string>
+    <!-- %1$s the time (and "Handed to Messenger"), under a photo or video bubble -->
+    <string name="messenger_media_meta">%1$s · Tap to see it in Messenger</string>
+    <!-- %1$s "Sent a photo.", %2$s the line under it -->
+    <string name="messenger_media_description">%1$s %2$s</string>
+    <string name="messenger_media_on_web">The Messenger app isn\'t installed, so this opens the full history.</string>
     <string name="messenger_gone">That conversation is no longer on this phone.</string>
 
     <!-- Facebook's page -->
