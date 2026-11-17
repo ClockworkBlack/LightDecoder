@@ -65,19 +65,78 @@ class StickerMakerActivity : AppCompatActivity() {
 
     private fun tapPoints(keep: Boolean) = taps.filter { it.third == keep }.flatMap { listOf(it.first, it.second) }.toFloatArray()
 
-    /** The mask the cut is made with: what was found, of the kind chosen, narrowed to what was tapped. */
+    /** The picture as studied for taps, what each tap turned out to be on, and whether taps can be told apart at all. */
+    private var tapper: com.lightdecoder.sticker.TapCutter.Taps? = null
+    private val tapMasks = HashMap<Triple<Float, Float, Boolean>, com.lightdecoder.sticker.SubjectMask>()
+    private var tapsUnavailable = false
+    private var tapJob: Job? = null
+
+    /**
+     * The mask the cut is made with: what was found, of the kind chosen, or,
+     * once the user has tapped, what they tapped to keep less what they
+     * tapped to remove.
+     */
     private val subject: com.lightdecoder.sticker.SubjectMask?
         get() {
-            val found = subjects?.pick(smartKind()) ?: return null
+            val found = subjects?.pick(smartKind())
             val picture = original
             if (taps.isEmpty() || picture == null) return found
-            val key = listOf(found, taps.toList())
+            val key = listOf(found, taps.toList(), tapsUnavailable, tapMasks.size)
             if (tappedFrom != key) {
-                tapped = com.lightdecoder.sticker.SubjectPick.apply(found, picture, tapPoints(true), tapPoints(false))
+                tapped = if (tapsUnavailable) {
+                    // Without the tap model: the taps choose among the pieces that were found.
+                    found?.let { com.lightdecoder.sticker.SubjectPick.apply(it, picture, tapPoints(true), tapPoints(false)) }
+                } else {
+                    com.lightdecoder.sticker.TapCutter.combine(
+                        found,
+                        taps.filter { it.third }.mapNotNull { tapMasks[it] },
+                        taps.filter { !it.third }.mapNotNull { tapMasks[it] },
+                    )
+                }
                 tappedFrom = key
             }
             return tapped
         }
+
+    /**
+     * Works out what each new tap is on. True while that is still awaited:
+     * the preview is made when it arrives.
+     */
+    private fun resolvingTaps(): Boolean {
+        if (!wantsSubject || tapsUnavailable) return false
+        val pending = taps.filter { it !in tapMasks }
+        if (pending.isEmpty()) return false
+        if (tapJob?.isActive == true) return true
+        val picture = original ?: return false
+        val open = tapper
+        tapJob = lifecycleScope.launch {
+            val (studied, results) = withContext(Dispatchers.IO) {
+                val t = open ?: com.lightdecoder.sticker.TapCutter.open(applicationContext, picture)
+                t to t?.let { pending.map { tap -> tap to runCatching { it.at(tap.first, tap.second) }.getOrNull() } }
+            }
+            if (picture !== original) {
+                if (studied !== open) studied?.close()
+                return@launch
+            }
+            tapper = studied
+            if (results == null) {
+                tapsUnavailable = true
+                // The older way needs a tap to be on something that was found.
+                taps.removeAll { !com.lightdecoder.sticker.SubjectPick.lands(subjects?.pick(smartKind()), picture, it.first, it.second) }
+            } else {
+                var missed = false
+                for ((tap, mask) in results) {
+                    if (mask != null) tapMasks[tap] = mask else missed = taps.remove(tap) || missed
+                }
+                if (missed) Toast.makeText(this@StickerMakerActivity, R.string.sticker_pick_nothing_there, Toast.LENGTH_LONG).show()
+            }
+            tapJob = null
+            tapsChanged()
+        }
+        updateToleranceVisible()
+        return true
+    }
+
     private var subjectState = Subject.NOT_ASKED
     private var subjectJob: Job? = null
 
@@ -120,8 +179,8 @@ class StickerMakerActivity : AppCompatActivity() {
             tapsChanged()
         }
         binding.pickView.onTap = { x, y ->
-            // A tap on nothing the cut found would change nothing: it is not kept.
-            if (com.lightdecoder.sticker.SubjectPick.lands(subjects?.pick(smartKind()), original, x, y)) {
+            // Any tap is worth asking the tap model about; without it, only one on something found.
+            if (!tapsUnavailable || com.lightdecoder.sticker.SubjectPick.lands(subjects?.pick(smartKind()), original, x, y)) {
                 taps += Triple(x, y, binding.pickMode.checkedButtonId != R.id.pickRemove)
                 tapsChanged()
             } else {
@@ -208,6 +267,14 @@ class StickerMakerActivity : AppCompatActivity() {
         } else {
             savedInstanceState?.getString(STATE_URI)?.let { load(Uri.parse(it)) }
         }
+    }
+
+    override fun onDestroy() {
+        tapJob?.cancel()
+        val studied = tapper
+        tapper = null
+        if (studied != null) Thread { studied.close() }.start()
+        super.onDestroy()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -381,7 +448,7 @@ class StickerMakerActivity : AppCompatActivity() {
      * user taps the people or objects to keep (or, in Remove, to drop).
      */
     private fun startPicking() {
-        if (original == null || subjects == null) return
+        if (original == null) return
         stopTracing()
         stopRefining()
         binding.pickView.visibility = View.VISIBLE
@@ -526,6 +593,15 @@ class StickerMakerActivity : AppCompatActivity() {
     private fun forgetSubject() {
         subjectJob?.cancel()
         subjects = null
+        tapJob?.cancel()
+        tapJob = null
+        val studied = tapper
+        tapper = null
+        tapMasks.clear()
+        tapsUnavailable = false
+        tappedFrom = null
+        // Off the main thread, and after any tap it is still answering.
+        if (studied != null) lifecycleScope.launch(Dispatchers.IO) { studied.close() }
         subjectState = Subject.NOT_ASKED
     }
 
@@ -561,28 +637,33 @@ class StickerMakerActivity : AppCompatActivity() {
 
     private fun updateToleranceVisible() {
         binding.smartPanel.visibility = if (wantsSubject) View.VISIBLE else View.GONE
-        // Found, but nothing of the kind chosen (no people in it, say).
-        val nothing = subjectState == Subject.FOUND && subject == null
-        val status = if (!wantsSubject) 0 else when (subjectState) {
-            Subject.FINDING -> R.string.sticker_smart_finding
-            Subject.UNAVAILABLE -> R.string.sticker_smart_unavailable
-            Subject.FOUND -> if (nothing) R.string.sticker_smart_nothing else 0
-            Subject.NOT_ASKED -> 0
+        val settled = subjectState == Subject.FOUND || subjectState == Subject.UNAVAILABLE
+        val working = tapJob?.isActive == true
+        val mask = if (wantsSubject && settled && !working) subject else null
+        // Found, but nothing of the kind chosen (no people in it, say), and nothing tapped.
+        val nothing = wantsSubject && settled && !working && mask == null
+        val status = when {
+            !wantsSubject -> 0
+            subjectState == Subject.FINDING -> R.string.sticker_smart_finding
+            working -> R.string.sticker_pick_working
+            nothing && subjectState == Subject.UNAVAILABLE -> R.string.sticker_smart_unavailable
+            nothing -> R.string.sticker_smart_nothing
+            else -> 0
         }
         if (status != 0) binding.smartStatus.setText(status)
         binding.smartStatus.visibility = if (status != 0) View.VISIBLE else View.GONE
         // The plain-colour slider is for the cut that is actually in use: the plain one, also
         // when the smart cut has nothing to go by.
-        val smartWorks = wantsSubject && subjectState != Subject.UNAVAILABLE && !nothing
-        val keeping = if (smartWorks && subjectState == Subject.FOUND) View.VISIBLE else View.GONE
+        val keeping = if (mask != null) View.VISIBLE else View.GONE
         binding.smartKeep.visibility = keeping
         binding.smartKeepLabel.visibility = keeping
-        val choosable = wantsSubject && subjectState == Subject.FOUND && subjects?.pick(smartKind()) != null
+        // Tapping can add what was not found, so it is offered whatever was.
+        val choosable = wantsSubject && settled
         binding.pickStart.visibility = if (choosable) View.VISIBLE else View.GONE
         binding.pickStart.text =
             if (taps.isEmpty()) getString(R.string.sticker_pick_start) else getString(R.string.sticker_pick_start_some, taps.size)
         if (!choosable) stopPicking()
-        val plain = binding.removeBackground.isChecked || (wantsSubject && !smartWorks)
+        val plain = binding.removeBackground.isChecked || nothing
         val shown = if (plain) View.VISIBLE else View.GONE
         binding.tolerance.visibility = shown
         binding.toleranceLabel.visibility = shown
@@ -596,6 +677,7 @@ class StickerMakerActivity : AppCompatActivity() {
         updateToleranceVisible()
         val picture = source ?: return
         if (findingSubject()) return
+        if (resolvingTaps()) return
         updateToleranceVisible()
         refreshPickView()
         val options = options()

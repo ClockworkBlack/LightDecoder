@@ -67,3 +67,7 @@ Sticker maker, smart cut-out
   Robust Video Matting model (app/src/main/assets/models/rvm_mobilenetv3.onnx, unmodified)
                   GPL-3.0      https://github.com/PeterL1n/RobustVideoMatting
                   Copyright (c) Peter Lin and the Robust Video Matting authors
+  EfficientSAM model (app/src/main/assets/models/efficient_sam_vitt_encoder.onnx and
+  efficient_sam_vitt_decoder.onnx, unmodified)
+                  Apache-2.0   https://github.com/yformer/EfficientSAM
+                  Copyright (c) the EfficientSAM authors

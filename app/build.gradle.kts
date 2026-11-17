@@ -38,8 +38,8 @@ android {
         applicationId = "com.lightdecoder"
         minSdk = 26
         targetSdk = 36
-        versionCode = 19
-        versionName = "0.5.11"
+        versionCode = 20
+        versionName = "0.5.12"
 
         // The decoder is plain software, so it runs on every ABI. These cover
         // phones (64- and 32-bit ARM) and the emulator.
@@ -413,6 +413,15 @@ val bundleLicenses by tasks.registering {
             )
         }
         if (onnx.isNotEmpty()) {
+            File(licenses, "45-efficient-sam-model.txt").writeText(
+                licenceText(
+                    "EfficientSAM (the tap-to-choose model, assets/models/efficient_sam_vitt_*.onnx): Apache-2.0",
+                    listOf(apacheLicense),
+                    intro = "Copyright (c) the EfficientSAM authors. https://github.com/yformer/EfficientSAM\n" +
+                        "The model files are unmodified, in ONNX form as published at github.com/labelmeai/efficient-sam " +
+                        "(release onnx-models-20231225).",
+                ),
+            )
             File(licenses, "44-robust-video-matting-model.txt").writeText(
                 licenceText(
                     "Robust Video Matting (the people-finding model, assets/models/rvm_mobilenetv3.onnx): GPL-3.0",

@@ -177,6 +177,15 @@ class SmartCutOutTest {
         assertEquals(255, at(21, 30))
         assertEquals(0, at(79, 30))
         assertEquals(255, at(30, 30))
+        // For one tapped thing, a crumb beside it (too big to be a speck) is dropped as well.
+        val crumbed = SubjectMask(100, 100, ByteArray(100 * 100) {
+            val x = it % 100
+            val y = it / 100
+            if ((x in 20..79 && y in 20..79) || (x in 2..7 && y in 2..7)) 255.toByte() else 0
+        })
+        assertEquals("kept as a piece of its own", 255, crumbed.cleaned().confidence[4 * 100 + 4].toInt() and 0xFF)
+        assertEquals("not as part of one thing", 0, crumbed.cleaned(mainOnly = 0.05f).confidence[4 * 100 + 4].toInt() and 0xFF)
+        assertEquals(255, crumbed.cleaned(mainOnly = 0.05f).confidence[50 * 100 + 50].toInt() and 0xFF)
     }
 
     @Test

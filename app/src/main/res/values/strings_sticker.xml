@@ -48,7 +48,9 @@
     <string name="sticker_pick_start">Choose who or what to keep</string>
     <string name="sticker_pick_start_some">Choose who or what to keep (%1$d chosen)</string>
     <string name="sticker_pick_area">Picture: tap the people or objects to keep</string>
-    <string name="sticker_choose_hint">Tap each person or object you want in the sticker. If someone else stays attached, switch to Remove and tap them.</string>
+    <string name="sticker_choose_hint">Tap each person or object you want in the sticker, anything in the picture, even if it is dimmed (something they are holding, say). To take something out, switch to Remove and tap it.</string>
+    <string name="sticker_pick_working">Finding what you tapped…</string>
+    <string name="sticker_pick_nothing_there">Nothing could be made out where you tapped. Try tapping the middle of it.</string>
     <string name="sticker_pick_keep">Keep</string>
     <string name="sticker_pick_remove">Remove</string>
     <string name="sticker_pick_undo">Undo tap</string>

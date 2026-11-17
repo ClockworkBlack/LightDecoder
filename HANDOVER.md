@@ -22,6 +22,21 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.12
+- **A tap finds the thing under it** (`sticker/TapCutter`): EfficientSAM ViT-T
+  (`assets/models/efficient_sam_vitt_encoder.onnx` 25 MB + `_decoder.onnx` 17 MB, Apache-2.0,
+  from github.com/labelmeai/efficient-sam release onnx-models-20231225). The picture is encoded
+  once when the first tap is made (about 1.2 s on the build machine), each tap decoded in about
+  50 ms; the first of the three masks (the whole thing) is taken, made in-or-out, fitted to the
+  picture's edges, tidied, and crumbs under 5% of its main piece dropped.
+  New tap rule (`TapCutter.combine`): keep taps define what stays (the union of what is under
+  them, found by the other models or not: a held bottle); with no keep tap, what Smart cut
+  found; remove taps take their thing out (grown a little, slivers opened away).
+  If the tap model cannot run, the older `SubjectPick` piece-choosing is used.
+  Tried on the user's picture: man + bottle, man alone, woman (two taps: her and her hoodie).
+- APK is now about 157 MB. GitHub repository files (raw/LFS) are blocked from this
+  environment; only release assets download, which is why these model sources were chosen.
+
 ## 0.5.10
 - **Choose who or what to keep** (sticker maker, under Smart cut): `PickView` shows the picture
   with what the cut drops dimmed; taps are Keep or Remove marks (`StickerProject.Edits.keepTaps /

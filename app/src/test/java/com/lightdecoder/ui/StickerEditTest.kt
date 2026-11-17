@@ -215,7 +215,12 @@ class StickerEditTest {
     }
 
     @Test
-    fun oneOfTwoThingsIsChosenByTappingIt() {
+    fun oneOfTwoThingsIsChosenByTappingIt() = choosingByTap(tapModel = true)
+
+    @Test
+    fun withoutTheTapModelATapStillChoosesAmongWhatWasFound() = choosingByTap(tapModel = false)
+
+    private fun choosingByTap(tapModel: Boolean) {
         // Two red squares on green, apart from each other.
         val original = Bitmap.createBitmap(200, 200, Bitmap.Config.ARGB_8888).apply {
             val c = Canvas(this)
@@ -241,6 +246,28 @@ class StickerEditTest {
                     ),
                 )
             )
+        }
+        // The tap model: whichever square is under the tap, and nothing on the background.
+        val realTaps = com.lightdecoder.sticker.TapCutter.engine
+        var studied = 0
+        var closed = 0
+        com.lightdecoder.sticker.TapCutter.engine = com.lightdecoder.sticker.TapCutter.Engine { _, p ->
+            if (!tapModel) return@Engine null
+            studied++
+            object : com.lightdecoder.sticker.TapCutter.Taps {
+                override fun at(x: Float, y: Float): com.lightdecoder.sticker.SubjectMask? {
+                    if (y !in 60f..139f) return null
+                    val columns = if (x in 20f..79f) 20..79 else if (x in 120f..179f) 120..179 else return null
+                    return com.lightdecoder.sticker.SubjectMask(
+                        p.width, p.height,
+                        ByteArray(p.width * p.height) { if ((it / p.width) in 60..139 && (it % p.width) in columns) 255.toByte() else 0 },
+                    )
+                }
+
+                override fun close() {
+                    closed++
+                }
+            }
         }
         fun tap(view: View, x: Float, y: Float) {
             // The picture is fitted, centred, into the view.
@@ -270,9 +297,17 @@ class StickerEditTest {
                     assertFalse(a.findViewById<View>(R.id.pickUndo).isEnabled)
                     // A tap on the background is not a choice.
                     tap(view, 100f, 20f)
+                }
+                settle()
+                scenario.onActivity { a ->
                     assertFalse(a.findViewById<View>(R.id.pickUndo).isEnabled)
                     // The blue one.
-                    tap(view, 150f, 100f)
+                    tap(a.findViewById<View>(R.id.pickView), 150f, 100f)
+                }
+                waitFor(scenario, "the tap") { it.findViewById<View>(R.id.pickUndo).isEnabled && !it.findViewById<View>(R.id.smartStatus).isShown }
+                settle()
+                scenario.onActivity { a ->
+                    val view = a.findViewById<View>(R.id.pickView)
                     assertTrue(a.findViewById<View>(R.id.pickUndo).isEnabled)
                     a.findViewById<View>(R.id.pickDone).performClick()
                     assertFalse(view.isShown)
@@ -284,6 +319,13 @@ class StickerEditTest {
             }
         } finally {
             com.lightdecoder.sticker.SubjectCutter.engine = real
+            com.lightdecoder.sticker.TapCutter.engine = realTaps
+        }
+        if (tapModel) {
+            assertEquals("the picture is studied once, for every tap", 1, studied)
+            val deadline = System.currentTimeMillis() + 5_000
+            while (closed == 0 && System.currentTimeMillis() < deadline) Thread.sleep(20)
+            assertEquals("and let go of with the screen", 1, closed)
         }
         val saved = BitmapFactory.decodeFile(file.path)
         val pixels = IntArray(saved.width * saved.height).also { saved.getPixels(it, 0, saved.width, 0, 0, saved.width, saved.height) }

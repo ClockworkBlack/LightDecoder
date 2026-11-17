@@ -36,7 +36,7 @@ class SubjectMask(val width: Int, val height: Int, val confidence: ByteArray) {
      * away from it are dropped, and the edge is drawn one pixel in, so that
      * no thin fringe of background comes along with the subject.
      */
-    fun cleaned(): SubjectMask {
+    fun cleaned(choke: Boolean = true, mainOnly: Float = 0f): SubjectMask {
         val w = width
         val h = height
         val n = w * h
@@ -78,10 +78,21 @@ class SubjectMask(val width: Int, val height: Int, val confidence: ByteArray) {
         pieces(SURE, above = false) { size, atBorder ->
             if (!atBorder && size <= n * HOLE_SHARE) for (k in 0 until size) out[queue[k]] = 255.toByte()
         }
-        // Specks, faint rim and all (so nothing of them is left to draw an outline around).
+        // Specks, faint rim and all (so nothing of them is left to draw an outline around), and
+        // faint wisps with nothing sure in them.
+        // With [mainOnly], also pieces that small a share of the largest one (one tapped thing
+        // is one piece; crumbs beside it are not part of it).
+        var largest = 0
+        if (mainOnly > 0f) pieces(FAINT, above = true) { size, _ -> if (size > largest) largest = size }
+        val core = (n / 5000).coerceIn(1, 12)
         pieces(FAINT, above = true) { size, _ ->
-            if (size < n * SPECK_SHARE) for (k in 0 until size) out[queue[k]] = 0
+            var sure = 0
+            if (size >= n * SPECK_SHARE && size >= largest * mainOnly) {
+                for (k in 0 until size) if ((out[queue[k]].toInt() and 0xFF) > 200 && ++sure >= core) break
+            }
+            if (sure < core) for (k in 0 until size) out[queue[k]] = 0
         }
+        if (!choke) return SubjectMask(w, h, out)
         // One pixel in: each pixel is as sure as the least sure of its neighbours.
         val choked = ByteArray(n)
         for (y in 0 until h) for (x in 0 until w) {
@@ -366,21 +377,27 @@ object SubjectCutter {
                 coarse[y * w + x] = ((a * (1 - ty) + b * ty) - low) / range
             }
         }
+        val radius = max(2, max(w, h) / 100)
+        return SubjectMask.fromConfidence(w, h, fittedToEdges(greyOf(picture), coarse, w, h, radius))
+    }
+
+    /** The picture in grey, 0..1 per pixel: what a mask's edge is fitted to. */
+    internal fun greyOf(picture: Bitmap): FloatArray {
+        val w = picture.width
+        val h = picture.height
         val pixels = IntArray(w * h)
         picture.getPixels(pixels, 0, w, 0, 0, w, h)
-        val grey = FloatArray(w * h) { i ->
+        return FloatArray(w * h) { i ->
             val p = pixels[i]
             (0.299f * ((p shr 16) and 0xFF) + 0.587f * ((p shr 8) and 0xFF) + 0.114f * (p and 0xFF)) / 255f
         }
-        val radius = max(2, max(w, h) / 100)
-        return SubjectMask.fromConfidence(w, h, fittedToEdges(grey, coarse, w, h, radius))
     }
 
     /**
      * A guided filter (He, Sun, Tang): [mask] redrawn so that where it
      * changes, it changes along the edges of [guide] (the picture in grey).
      */
-    private fun fittedToEdges(guide: FloatArray, mask: FloatArray, w: Int, h: Int, radius: Int): FloatArray {
+    internal fun fittedToEdges(guide: FloatArray, mask: FloatArray, w: Int, h: Int, radius: Int): FloatArray {
         val n = w * h
         val meanGuide = boxMean(guide, w, h, radius)
         val meanMask = boxMean(mask, w, h, radius)
