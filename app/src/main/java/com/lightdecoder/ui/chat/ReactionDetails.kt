@@ -151,3 +151,16 @@ object ReactionDetails {
     /** The id Google Messages gives the phone's own user in a reaction. */
     private const val ME = "1"
 }
+
+/** The line that says when one of the user's messages was read (in the sheet a held message opens). */
+object ReadInfo {
+    fun text(context: Context, time: ReactionTime?, nowMs: Long = System.currentTimeMillis()): String {
+        if (time == null) return context.getString(R.string.read_info_unknown)
+        val at = context.getString(
+            R.string.reaction_time_at,
+            TimeFormat.dayLabel(context, time.atMs, nowMs),
+            TimeFormat.clock(context, time.atMs),
+        )
+        return context.getString(if (time.kind == ReactionTime.Kind.BY) R.string.read_info_by else R.string.read_info_at, at)
+    }
+}

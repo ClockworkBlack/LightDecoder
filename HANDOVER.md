@@ -23,6 +23,15 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.27 (versionCode 35) - when a message was read
+- Holding one of the user's own messages that shows the read tick now says when it was read, at
+  the top of the actions sheet (`sheet_message_actions.readInfo`, `ui/chat/ReadInfo`).
+- Google Messages gives no time with "read", so `reactions/ReadTimes` (read_times.db, cleared with
+  the archive, not created until needed) notes when the link sees a message turn to read:
+  `RelayManager.onMessage` (where `wasUnread` is worked out) and `WaManager.onReceipt`. Same
+  three wordings as reaction times: seen live, "at or before" when caught up, not known when it
+  was already read on first load. Test: `ReadTimesTest`. Next version: 0.5.28 / 36.
+
 ## 0.5.26 (versionCode 34) - Turn button; a calmer archive wipe
 - **Sticker maker "Turn"** (beside "Back to original picture"): the picture a quarter turn
   clockwise per tap, for one that still comes in sideways (a file without its camera's rotation
@@ -42,7 +51,6 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Smart cut, not changed yet:** tried on the owner's statue photo, BiRefNet-lite (MIT, 224 MB,
   1024 px, 7 s on the build machine) cuts far cleaner than U-2-Net-p; full U-2-Net (Apache-2.0,
   176 MB, 0.3 s) is in between. Waiting for the owner's choice (APK size, speed on the phone).
-- Next version: 0.5.27 / 35.
 
 ## 0.5.25 (versionCode 33) - hotfix: camera photos sideways
 - BitmapFactory ignores a JPEG's EXIF orientation, so portrait camera photos came out sideways

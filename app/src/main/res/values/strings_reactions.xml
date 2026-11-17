@@ -10,4 +10,9 @@
     <string name="reaction_time_by">At or before %1$s</string>
     <string name="reaction_time_unknown">Time not known</string>
     <string name="reaction_details_note">Google Messages doesn\'t say when a reaction was made, so LightDecoder notes when it arrives: within moments while connected, \"at or before\" when it came in as the link caught up. Reactions that were already there when a message was first loaded show no time. iPhone reactions show the time the iPhone sent them.</string>
+
+    <!-- When one of the user's messages was read (hold the message). %1$s: "Today, 4:21 PM" -->
+    <string name="read_info_at">Read %1$s</string>
+    <string name="read_info_by">Read at or before %1$s</string>
+    <string name="read_info_unknown">Read (it was already read when LightDecoder loaded it, so the time isn\'t known)</string>
 </resources>
