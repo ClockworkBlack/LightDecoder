@@ -35,6 +35,11 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        # Its default also asks for the old "tools" package, which Google's SDK
+        # repository no longer has: sdkmanager then fails the step. The
+        # packages the build needs are installed by name further down.
+        with:
+          packages: platform-tools
 
       # The Go that builds libgojni.so is the toolchain line of gmbridge/go.mod
       # (a patched go1.26), read here and installed as is. setup-go exports
@@ -224,6 +229,11 @@ jobs:
       - name: Set up Android SDK
         if: steps.key.outputs.sign == 'true'
         uses: android-actions/setup-android@v3
+        # Its default also asks for the old "tools" package, which Google's SDK
+        # repository no longer has: sdkmanager then fails the step. The
+        # packages the build needs are installed by name further down.
+        with:
+          packages: platform-tools
 
       - name: Install build-tools
         if: steps.key.outputs.sign == 'true'
