@@ -56,11 +56,14 @@ class StickerMakerActivity : AppCompatActivity() {
     private var renderJob: Job? = null
 
     /** Where the picture's subject is, for the smart cut-out; found once per picture. */
-    private var subject: com.lightdecoder.sticker.SubjectMask? = null
+    private var subjects: com.lightdecoder.sticker.Subjects? = null
+
+    /** The mask the cut is made with: what was found, of the kind chosen. */
+    private val subject: com.lightdecoder.sticker.SubjectMask? get() = subjects?.pick(smartKind())
     private var subjectState = Subject.NOT_ASKED
     private var subjectJob: Job? = null
 
-    private enum class Subject { NOT_ASKED, FINDING, FOUND, NOTHING, UNAVAILABLE }
+    private enum class Subject { NOT_ASKED, FINDING, FOUND, UNAVAILABLE }
 
     private val pick = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) load(uri)
@@ -77,8 +80,17 @@ class StickerMakerActivity : AppCompatActivity() {
         binding.pick.setOnClickListener {
             pick.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
         }
-        binding.removeBackground.setOnCheckedChangeListener { _, _ -> render() }
-        binding.smart.setOnCheckedChangeListener { _, _ -> render() }
+        // One cut or the other: the smart one, or the plain-background one.
+        binding.removeBackground.setOnCheckedChangeListener { _, isChecked ->
+            if (isChecked) binding.smartCut.isChecked = false
+            render()
+        }
+        binding.smartCut.addOnCheckedChangeListener { _, isChecked ->
+            if (isChecked) binding.removeBackground.isChecked = false
+            render()
+        }
+        binding.smartKind.addOnButtonCheckedListener { _, _, isChecked -> if (isChecked) render() }
+        binding.smartKeep.addOnChangeListener { _, _, fromUser -> if (fromUser) render() }
         binding.caption.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
@@ -194,6 +206,7 @@ class StickerMakerActivity : AppCompatActivity() {
             applyEdits(project.edits)
             binding.trace.isEnabled = true
             binding.refineStart.isEnabled = true
+            binding.smartCut.isEnabled = true
             binding.resetOriginal.visibility = View.VISIBLE
             render()
         }
@@ -208,8 +221,17 @@ class StickerMakerActivity : AppCompatActivity() {
         source = edits.trace?.let { StickerMaker.cutToPath(picture, StickerProject.outlineOf(it)) } ?: picture
         binding.traceUndo.visibility = if (edits.trace != null) View.VISIBLE else View.GONE
         val o = edits.options
-        binding.removeBackground.isChecked = o.removeBackground
-        binding.smart.isChecked = o.smart
+        binding.smartCut.isChecked = o.removeBackground && o.smart
+        binding.removeBackground.isChecked = o.removeBackground && !o.smart
+        binding.smartKind.check(
+            when (o.smartKind) {
+                StickerMaker.SmartKind.PEOPLE -> R.id.kindPeople
+                StickerMaker.SmartKind.OBJECTS -> R.id.kindObjects
+                StickerMaker.SmartKind.BOTH -> R.id.kindBoth
+                StickerMaker.SmartKind.AUTO -> R.id.kindAuto
+            }
+        )
+        binding.smartKeep.value = o.smartKeep.toFloat().coerceIn(binding.smartKeep.valueFrom, binding.smartKeep.valueTo)
         if (binding.caption.text?.toString() != o.caption) binding.caption.setText(o.caption)
         binding.tolerance.value = o.tolerance.toFloat().coerceIn(binding.tolerance.valueFrom, binding.tolerance.valueTo)
         binding.shape.check(
@@ -231,7 +253,7 @@ class StickerMakerActivity : AppCompatActivity() {
     /** Every edit undone: the picture the sticker was made from, with nothing cut, brushed or outlined. */
     private fun resetToOriginal() {
         if (original == null) return
-        applyEdits(StickerProject.Edits(StickerMaker.Options(outline = false, smart = true), null, emptyList()))
+        applyEdits(StickerProject.Edits(StickerMaker.Options(outline = false), null, emptyList()))
         render()
     }
 
@@ -256,6 +278,7 @@ class StickerMakerActivity : AppCompatActivity() {
             stopRefining()
             binding.trace.isEnabled = true
             binding.refineStart.isEnabled = true
+            binding.smartCut.isEnabled = true
             binding.traceUndo.visibility = View.GONE
             stopTracing()
             render()
@@ -364,8 +387,15 @@ class StickerMakerActivity : AppCompatActivity() {
         null
     }
 
+    private fun smartKind() = when (binding.smartKind.checkedButtonId) {
+        R.id.kindPeople -> StickerMaker.SmartKind.PEOPLE
+        R.id.kindObjects -> StickerMaker.SmartKind.OBJECTS
+        R.id.kindBoth -> StickerMaker.SmartKind.BOTH
+        else -> StickerMaker.SmartKind.AUTO
+    }
+
     private fun options() = StickerMaker.Options(
-        removeBackground = binding.removeBackground.isChecked,
+        removeBackground = binding.removeBackground.isChecked || binding.smartCut.isChecked,
         tolerance = binding.tolerance.value.toInt(),
         shape = when (binding.shape.checkedButtonId) {
             R.id.shapeRounded -> StickerMaker.Shape.ROUNDED
@@ -375,18 +405,20 @@ class StickerMakerActivity : AppCompatActivity() {
         outline = binding.outline.isChecked,
         outlineWidth = binding.outlineWidth.value.toInt(),
         solidBackground = binding.solid.isChecked,
-        smart = binding.smart.isChecked,
+        smart = binding.smartCut.isChecked,
+        smartKind = smartKind(),
+        smartKeep = binding.smartKeep.value.toInt(),
         caption = StickerMaker.captionOf(binding.caption.text?.toString().orEmpty()),
     )
 
     /** A new picture: what was found in the old one does not apply. */
     private fun forgetSubject() {
         subjectJob?.cancel()
-        subject = null
+        subjects = null
         subjectState = Subject.NOT_ASKED
     }
 
-    private val wantsSubject: Boolean get() = binding.removeBackground.isChecked && binding.smart.isChecked
+    private val wantsSubject: Boolean get() = binding.smartCut.isChecked
 
     /**
      * Looks for the picture's subject, once. True while the answer is still
@@ -405,13 +437,10 @@ class StickerMakerActivity : AppCompatActivity() {
             }
             if (picture !== original) return@launch
             when (result) {
-                is com.lightdecoder.sticker.SubjectCutter.Result.Found ->
-                    if (result.mask.hasSubject) {
-                        subject = result.mask
-                        subjectState = Subject.FOUND
-                    } else {
-                        subjectState = Subject.NOTHING
-                    }
+                is com.lightdecoder.sticker.SubjectCutter.Result.Found -> {
+                    subjects = result.subjects
+                    subjectState = Subject.FOUND
+                }
                 com.lightdecoder.sticker.SubjectCutter.Result.Unavailable -> subjectState = Subject.UNAVAILABLE
             }
             render()
@@ -420,18 +449,24 @@ class StickerMakerActivity : AppCompatActivity() {
     }
 
     private fun updateToleranceVisible() {
-        val removing = binding.removeBackground.isChecked
-        binding.smart.visibility = if (removing) View.VISIBLE else View.GONE
+        binding.smartPanel.visibility = if (wantsSubject) View.VISIBLE else View.GONE
+        // Found, but nothing of the kind chosen (no people in it, say).
+        val nothing = subjectState == Subject.FOUND && subject == null
         val status = if (!wantsSubject) 0 else when (subjectState) {
             Subject.FINDING -> R.string.sticker_smart_finding
-            Subject.NOTHING -> R.string.sticker_smart_nothing
             Subject.UNAVAILABLE -> R.string.sticker_smart_unavailable
-            Subject.NOT_ASKED, Subject.FOUND -> 0
+            Subject.FOUND -> if (nothing) R.string.sticker_smart_nothing else 0
+            Subject.NOT_ASKED -> 0
         }
         if (status != 0) binding.smartStatus.setText(status)
         binding.smartStatus.visibility = if (status != 0) View.VISIBLE else View.GONE
-        // The plain-colour slider is for the cut that is actually in use.
-        val plain = removing && !(wantsSubject && subjectState in setOf(Subject.FOUND, Subject.FINDING, Subject.NOT_ASKED))
+        // The plain-colour slider is for the cut that is actually in use: the plain one, also
+        // when the smart cut has nothing to go by.
+        val smartWorks = wantsSubject && subjectState != Subject.UNAVAILABLE && !nothing
+        val keeping = if (smartWorks && subjectState == Subject.FOUND) View.VISIBLE else View.GONE
+        binding.smartKeep.visibility = keeping
+        binding.smartKeepLabel.visibility = keeping
+        val plain = binding.removeBackground.isChecked || (wantsSubject && !smartWorks)
         val shown = if (plain) View.VISIBLE else View.GONE
         binding.tolerance.visibility = shown
         binding.toleranceLabel.visibility = shown

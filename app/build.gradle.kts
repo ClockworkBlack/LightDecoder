@@ -38,8 +38,8 @@ android {
         applicationId = "com.lightdecoder"
         minSdk = 26
         targetSdk = 36
-        versionCode = 16
-        versionName = "0.5.8"
+        versionCode = 17
+        versionName = "0.5.9"
 
         // The decoder is plain software, so it runs on every ABI. These cover
         // phones (64- and 32-bit ARM) and the emulator.
@@ -321,6 +321,8 @@ val bundleLicenses by tasks.registering {
     val mailNotice = rootProject.file("third_party/licenses/NOTICE-jakarta-mail.md")
     // ONNX Runtime (the sticker maker's smart cut-out): MIT.
     val onnxLicense = rootProject.file("third_party/licenses/MIT-onnxruntime.txt")
+    // Robust Video Matting (the smart cut's people model): GPL-3.0.
+    val mattingLicense = rootProject.file("third_party/licenses/GPL-3.0-robust-video-matting.txt")
     val onnxLibrary = Regex("com\\.microsoft\\.onnxruntime:onnxruntime-android")
     val mailLibrary = Regex("com\\.sun\\.mail:(android-mail|android-activation)")
     val apacheLibrary = Regex(
@@ -337,7 +339,7 @@ val bundleLicenses by tasks.registering {
     }
     inputs.files(buildGoBridge).withPropertyName("goBridge")
     inputs.file(notice).withPropertyName("notice")
-    inputs.files(fixed.map { it.third } + apacheLicense + mailLicense + mailNotice + onnxLicense).withPropertyName("licenseFiles")
+    inputs.files(fixed.map { it.third } + apacheLicense + mailLicense + mailNotice + onnxLicense + mattingLicense).withPropertyName("licenseFiles")
     // Licence files and PATCHES.md of Go modules replaced by a copy in the repository.
     inputs.files(fileTree(File(goModuleDir, "third_party")) { exclude("**/*.go") })
         .withPropertyName("replacedGoModules").withPathSensitivity(PathSensitivity.RELATIVE)
@@ -407,6 +409,17 @@ val bundleLicenses by tasks.registering {
                     listOf(apacheLicense),
                     intro = "Copyright (c) Xuebin Qin and the U-2-Net authors. https://github.com/xuebinqin/U-2-Net\n" +
                         "The model file is unmodified, in ONNX form as published with rembg (github.com/danielgatis/rembg).",
+                ),
+            )
+        }
+        if (onnx.isNotEmpty()) {
+            File(licenses, "44-robust-video-matting-model.txt").writeText(
+                licenceText(
+                    "Robust Video Matting (the people-finding model, assets/models/rvm_mobilenetv3.onnx): GPL-3.0",
+                    listOf(mattingLicense),
+                    intro = "Copyright (c) Peter Lin and the Robust Video Matting authors. " +
+                        "https://github.com/PeterL1n/RobustVideoMatting\n" +
+                        "The model file is unmodified, as published there (release v1.0.0, rvm_mobilenetv3_fp32.onnx).",
                 ),
             )
         }

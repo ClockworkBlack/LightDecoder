@@ -37,6 +37,9 @@ object StickerMaker {
 
     enum class Shape { ORIGINAL, ROUNDED, CIRCLE }
 
+    /** What the smart cut keeps: people if there are any and otherwise objects, only one of them, or both. */
+    enum class SmartKind { AUTO, PEOPLE, OBJECTS, BOTH }
+
     data class Options(
         val removeBackground: Boolean = false,
         /** 0..100: how different from the edge colour a pixel may be and still count as background. */
@@ -49,6 +52,9 @@ object StickerMaker {
         val solidBackground: Boolean = false,
         /** Remove the background by finding the subject, when a [SubjectMask] is at hand; else by its plain colour. */
         val smart: Boolean = false,
+        val smartKind: SmartKind = SmartKind.AUTO,
+        /** 0..100: how readily the smart cut keeps what it is unsure of (50 is the model's own judgement). */
+        val smartKeep: Int = 50,
         /** A short title in white letters beneath the picture; blank for none. */
         val caption: String = "",
     )
@@ -80,7 +86,7 @@ object StickerMaker {
     fun cutOut(source: Bitmap, options: Options, edits: Edits? = null, subject: SubjectMask? = null): Bitmap {
         var work = scaledDown(source, SIZE * 2)
         if (options.removeBackground) {
-            if (options.smart && subject != null) keepSubject(work, subject)
+            if (options.smart && subject != null) keepSubject(work, subject, options.smartKeep)
             else work = withoutBackground(work, options.tolerance)
         }
         if (edits != null && edits.strokes.isNotEmpty()) {
@@ -127,10 +133,17 @@ object StickerMaker {
 
     /**
      * Multiplies [target]'s transparency by [subject] (stretched over it if
-     * their sizes differ): what is not the subject goes, and the edge between
-     * them is as soft as the mask's.
+     * their sizes differ): what is not the subject goes. [keep] (0..100) moves
+     * the line between the two: higher keeps more of what the model was
+     * unsure of. The short ramp across the line keeps the edge crisp but not
+     * stair-stepped.
      */
-    internal fun keepSubject(target: Bitmap, subject: SubjectMask) {
+    internal fun keepSubject(target: Bitmap, subject: SubjectMask, keep: Int = 50) {
+        val line = 0.8f - 0.6f * keep.coerceIn(0, 100) / 100f
+        val kept = IntArray(256) { level ->
+            val t = ((level / 255f - (line - EDGE_HALF)) / (2 * EDGE_HALF)).coerceIn(0f, 1f)
+            (t * t * (3 - 2 * t) * 255).roundToInt()
+        }
         val w = target.width
         val h = target.height
         val pixels = IntArray(w * h)
@@ -140,11 +153,11 @@ object StickerMaker {
             val my = if (same) y else (y * subject.height / h).coerceAtMost(subject.height - 1)
             for (x in 0 until w) {
                 val mx = if (same) x else (x * subject.width / w).coerceAtMost(subject.width - 1)
-                val keep = subject.alpha[my * subject.width + mx].toInt() and 0xFF
-                if (keep == 255) continue
+                val share = kept[subject.confidence[my * subject.width + mx].toInt() and 0xFF]
+                if (share == 255) continue
                 val i = y * w + x
                 val c = pixels[i]
-                val a = (c ushr 24) * keep / 255
+                val a = (c ushr 24) * share / 255
                 pixels[i] = if (a == 0) 0 else (a shl 24) or (c and 0xFFFFFF)
             }
         }
@@ -362,6 +375,7 @@ object StickerMaker {
     private const val OUTLINE_RING_STEP = 6f
     private const val MARGIN = 4
     private const val OUTLINE_STEPS = 32
+    private const val EDGE_HALF = 0.15f
 
     /** The longest title, and the room it takes beneath the picture (pixels of the 512 px sticker). */
     const val MAX_CAPTION = 40

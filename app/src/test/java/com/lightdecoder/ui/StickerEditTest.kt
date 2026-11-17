@@ -152,20 +152,42 @@ class StickerEditTest {
         com.lightdecoder.sticker.SubjectCutter.engine = com.lightdecoder.sticker.SubjectCutter.Engine { _, p ->
             asked++
             com.lightdecoder.sticker.SubjectCutter.Result.Found(
-                com.lightdecoder.sticker.SubjectMask(p.width, p.height, ByteArray(p.width * p.height) { if (it % p.width < p.width / 2) 255.toByte() else 0 })
+                com.lightdecoder.sticker.Subjects(
+                    people = null,
+                    objects = com.lightdecoder.sticker.SubjectMask(
+                        p.width, p.height, ByteArray(p.width * p.height) { if (it % p.width < p.width / 2) 255.toByte() else 0 },
+                    ),
+                )
             )
         }
         try {
             ActivityScenario.launch<StickerMakerActivity>(StickerMakerActivity.editIntent(context, file)).use { scenario ->
                 waitFor(scenario, "the sticker") { it.findViewById<View>(R.id.save).isEnabled }
                 scenario.onActivity { a ->
-                    assertFalse("offered with background removal", a.findViewById<View>(R.id.smart).isShown)
-                    a.findViewById<MaterialSwitch>(R.id.smart).isChecked = true
+                    val smartCut = a.findViewById<com.google.android.material.button.MaterialButton>(R.id.smartCut)
+                    assertTrue("up with the picture's buttons", smartCut.isShown && smartCut.isEnabled)
+                    assertFalse(smartCut.isChecked)
+                    assertFalse("its choices come with it", a.findViewById<View>(R.id.smartPanel).isShown)
+                    // The plain cut is on; Smart cut takes its place.
                     a.findViewById<MaterialSwitch>(R.id.removeBackground).isChecked = true
-                    assertTrue(a.findViewById<View>(R.id.smart).isShown)
+                    smartCut.performClick()
+                    assertTrue(smartCut.isChecked)
+                    assertFalse("one cut or the other", a.findViewById<MaterialSwitch>(R.id.removeBackground).isChecked)
+                    assertTrue(a.findViewById<View>(R.id.smartPanel).isShown)
                     assertFalse("the plain-colour slider is for the other cut", a.findViewById<View>(R.id.tolerance).isShown)
                 }
-                waitFor(scenario, "the subject") { asked > 0 && !it.findViewById<View>(R.id.smartStatus).isShown }
+                waitFor(scenario, "the subject") { asked > 0 && it.findViewById<View>(R.id.smartKeep).isShown }
+                settle()
+                scenario.onActivity { a ->
+                    assertFalse(a.findViewById<View>(R.id.smartStatus).isShown)
+                    // There are no people in it: choosing People says so, and the plain cut's slider is back.
+                    a.findViewById<com.google.android.material.button.MaterialButtonToggleGroup>(R.id.smartKind).check(R.id.kindPeople)
+                    assertTrue(a.findViewById<View>(R.id.smartStatus).isShown)
+                    assertTrue(a.findViewById<View>(R.id.tolerance).isShown)
+                    assertFalse(a.findViewById<View>(R.id.smartKeep).isShown)
+                    a.findViewById<com.google.android.material.button.MaterialButtonToggleGroup>(R.id.smartKind).check(R.id.kindObjects)
+                    assertFalse(a.findViewById<View>(R.id.smartStatus).isShown)
+                }
                 settle()
                 scenario.onActivity { a ->
                     // Changing something else does not look for the subject again.
@@ -187,7 +209,9 @@ class StickerEditTest {
         val columns = (0 until saved.width).count { x -> (0 until saved.height).any { y -> Color.alpha(pixels[y * saved.width + x]) > 200 } }
         val rows = (0 until saved.height).count { y -> (0 until saved.width).any { x -> Color.alpha(pixels[y * saved.width + x]) > 200 } }
         assertTrue("$columns columns, $rows rows", columns < rows * 0.7)
-        assertTrue(StickerProject.load(context, file)!!.edits.options.smart)
+        val kept = StickerProject.load(context, file)!!.edits.options
+        assertTrue(kept.smart && kept.removeBackground)
+        assertEquals(StickerMaker.SmartKind.OBJECTS, kept.smartKind)
     }
 
     @Test

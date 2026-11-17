@@ -69,6 +69,8 @@ object StickerProject {
         put("outlineWidth", e.options.outlineWidth)
         put("solid", e.options.solidBackground)
         put("smart", e.options.smart)
+        put("smartKind", e.options.smartKind.name)
+        put("smartKeep", e.options.smartKeep)
         put("caption", e.options.caption)
         e.trace?.let { put("trace", floats(it)) }
         put("strokes", JSONArray().apply {
@@ -87,6 +89,8 @@ object StickerProject {
             outlineWidth = o.optInt("outlineWidth", StickerMaker.OUTLINE),
             solidBackground = o.optBoolean("solid"),
             smart = o.optBoolean("smart"),
+            smartKind = runCatching { StickerMaker.SmartKind.valueOf(o.optString("smartKind")) }.getOrDefault(StickerMaker.SmartKind.AUTO),
+            smartKeep = o.optInt("smartKeep", 50),
             caption = o.optString("caption"),
         ),
         trace = o.optJSONArray("trace")?.let(::floats),

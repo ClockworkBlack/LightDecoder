@@ -22,6 +22,21 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.9
+- **Smart cut keeps whole people.** U-2-Net-p alone lost bodies (dark clothes, dim rooms), and so
+  did bigger general models (silueta, isnet-general-use; tried on the user's picture). Added a
+  people model: Robust Video Matting, MobileNetV3 (`assets/models/rvm_mobilenetv3.onnx`, 15 MB,
+  GPL-3.0, sha256 88d45312...), run on one frame with empty memory at about 256 px
+  (`downsample_ratio`), which is where it judges whole bodies best. `SubjectCutter` now returns
+  `Subjects(people, objects)`; `Options.smartKind` (AUTO = people if they cover 2% of the
+  picture, else objects; PEOPLE; OBJECTS; BOTH) picks the mask, and `Options.smartKeep` (0..100)
+  moves the line between kept and cut (`SubjectMask` holds raw confidence now).
+- **Smart cut is a toggle button beside "Choose picture"** (`smartCut`); its choices (kind, keep
+  less/more) appear under the tool buttons. The "Cut away a plain background" switch is the
+  flood fill only, and the two are mutually exclusive. Saved projects still use
+  removeBackground + smart.
+- Tests run both real models (`pictures/astronaut.jpg`, NASA public domain; `coffee.jpg`).
+
 ## 0.5.8
 - **Smart cut-out** (sticker maker, "Remove background" > "Smart cut-out", on by default for new
   stickers): `sticker/SubjectCutter` runs U-2-Net-p (`assets/models/u2netp.onnx`, Apache-2.0,

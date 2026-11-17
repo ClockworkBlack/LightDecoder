@@ -26,14 +26,45 @@ class SmartCutOutTest {
     private fun photo(): Bitmap =
         javaClass.getResourceAsStream("/pictures/coffee.jpg")!!.use { BitmapFactory.decodeStream(it) }
 
-    private fun alphaAt(mask: SubjectMask, x: Int, y: Int) = mask.alpha[y * mask.width + x].toInt() and 0xFF
+    /** A portrait: a person in an orange suit in front of a flag (NASA, public domain, from scikit-image's sample pictures). */
+    private fun portrait(): Bitmap =
+        javaClass.getResourceAsStream("/pictures/astronaut.jpg")!!.use { BitmapFactory.decodeStream(it) }
+
+    private fun alphaAt(mask: SubjectMask, x: Int, y: Int) = mask.confidence[y * mask.width + x].toInt() and 0xFF
+
+    @Test
+    fun aPersonIsCutOutWholeByThePeopleModel() {
+        val picture = portrait()
+        val result = SubjectCutter.find(context, picture)
+        assertTrue("the models shipped in the app ran: $result", result is SubjectCutter.Result.Found)
+        val subjects = (result as SubjectCutter.Result.Found).subjects
+        val people = subjects.people!!
+        assertEquals(picture.width, people.width)
+        assertEquals(picture.height, people.height)
+        assertTrue("people are what Auto cuts by when there are any", subjects.pick(StickerMaker.SmartKind.AUTO) === people)
+        val w = picture.width
+        val h = picture.height
+        // Her face, and her body below it, down to the bottom of the picture ...
+        assertTrue("face", alphaAt(people, w * 43 / 100, h * 22 / 100) > 200)
+        assertTrue("chest", alphaAt(people, w * 35 / 100, h * 60 / 100) > 200)
+        assertTrue("body at the bottom edge", alphaAt(people, w * 30 / 100, h * 95 / 100) > 200)
+        // ... but not the flag behind her or the wall.
+        assertTrue("flag", alphaAt(people, w * 3 / 100, h * 10 / 100) < 40)
+        assertTrue("wall", alphaAt(people, w * 90 / 100, h * 8 / 100) < 40)
+        val kept = people.confidence.count { (it.toInt() and 0xFF) > 127 }
+        assertTrue("a whole person, not a face: $kept of ${people.confidence.size}", kept > people.confidence.size / 4)
+    }
 
     @Test
     fun theModelFindsThePhotosSubject() {
         val picture = photo()
         val result = SubjectCutter.find(context, picture)
         assertTrue("the model shipped in the app ran: $result", result is SubjectCutter.Result.Found)
-        val mask = (result as SubjectCutter.Result.Found).mask
+        val subjects = (result as SubjectCutter.Result.Found).subjects
+        assertFalse("no people in a picture of a cup", subjects.people!!.hasSubject)
+        assertEquals(null, subjects.pick(StickerMaker.SmartKind.PEOPLE))
+        val mask = subjects.pick(StickerMaker.SmartKind.AUTO)!!
+        assertTrue("so Auto cuts by what stands out", mask === subjects.objects)
         assertEquals(picture.width, mask.width)
         assertEquals(picture.height, mask.height)
         assertTrue(mask.hasSubject)
@@ -44,8 +75,8 @@ class SmartCutOutTest {
             assertTrue("corner $x,$y", alphaAt(mask, x, y) < 40)
         }
         // A crisp edge: nearly every pixel is fully in or fully out.
-        val between = mask.alpha.count { (it.toInt() and 0xFF) in 30..225 }
-        assertTrue("$between half-kept pixels of ${mask.alpha.size}", between < mask.alpha.size / 12)
+        val between = mask.confidence.count { (it.toInt() and 0xFF) in 60..195 }
+        assertTrue("$between unsure pixels of ${mask.confidence.size}", between < mask.confidence.size / 12)
 
         val sticker = StickerMaker.make(picture, StickerMaker.Options(removeBackground = true, smart = true, outline = false), subject = mask)
         assertEquals(0, Color.alpha(sticker.getPixel(2, 2)))
@@ -68,6 +99,38 @@ class SmartCutOutTest {
         val stretched = StickerMaker.cutOut(picture, StickerMaker.Options(removeBackground = true, smart = true), subject = small)
         assertEquals(255, Color.alpha(stretched.getPixel(10, 50)))
         assertEquals(0, Color.alpha(stretched.getPixel(90, 50)))
+    }
+
+    @Test
+    fun keepMoreAndKeepLessMoveTheLine() {
+        val picture = Bitmap.createBitmap(3, 1, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLUE) }
+        // Sure, unsure, and nearly sure it is background.
+        val mask = SubjectMask(3, 1, byteArrayOf(250.toByte(), 75, 5))
+        fun cut(keep: Int) = StickerMaker.cutOut(picture, StickerMaker.Options(removeBackground = true, smart = true, smartKeep = keep), subject = mask)
+            .let { c -> (0 until 3).map { Color.alpha(c.getPixel(it, 0)) } }
+        assertEquals(listOf(255, 0, 0), cut(50))
+        assertEquals("keep more takes the unsure part too", listOf(255, 255, 0), cut(100).map { if (it > 200) 255 else it })
+        assertEquals("keep less still keeps what is sure", 255, cut(0)[0])
+        assertEquals(255, cut(0)[0])
+    }
+
+    @Test
+    fun theKindChosenDecidesTheMask() {
+        fun mask(vararg levels: Int) = SubjectMask(levels.size, 1, ByteArray(levels.size) { levels[it].toByte() })
+        val people = mask(255, 0, 0, 0)
+        val objects = mask(0, 255, 0, 0)
+        val subjects = Subjects(people, objects)
+        assertTrue(subjects.pick(StickerMaker.SmartKind.PEOPLE) === people)
+        assertTrue(subjects.pick(StickerMaker.SmartKind.OBJECTS) === objects)
+        assertTrue(subjects.pick(StickerMaker.SmartKind.AUTO) === people)
+        val both = subjects.pick(StickerMaker.SmartKind.BOTH)!!
+        assertEquals(listOf(255, 255, 0, 0), both.confidence.map { it.toInt() and 0xFF })
+        // No people: Auto goes by what stands out, and People has nothing.
+        val none = Subjects(mask(0, 0, 0, 0), objects)
+        assertTrue(none.pick(StickerMaker.SmartKind.AUTO) === objects)
+        assertEquals(null, none.pick(StickerMaker.SmartKind.PEOPLE))
+        // One model could not run: the other still serves.
+        assertTrue(Subjects(null, objects).pick(StickerMaker.SmartKind.BOTH) === objects)
     }
 
     @Test
@@ -100,12 +163,18 @@ class SmartCutOutTest {
 
     @Test
     fun theTitleAndTheSmartCutAreRemembered() {
-        val edits = StickerProject.Edits(StickerMaker.Options(removeBackground = true, smart = true, caption = "Mood"), null, emptyList())
+        val edits = StickerProject.Edits(StickerMaker.Options(
+                removeBackground = true, smart = true, smartKind = StickerMaker.SmartKind.PEOPLE, smartKeep = 70, caption = "Mood",
+            ),
+            null, emptyList(),
+        )
         val back = StickerProject.fromJson(StickerProject.toJson(edits))
         assertEquals(edits.options, back.options)
         // A sticker saved before these existed has neither.
         val old = StickerProject.fromJson(JSONObject().put("removeBackground", true))
         assertFalse(old.options.smart)
+        assertEquals(StickerMaker.SmartKind.AUTO, old.options.smartKind)
+        assertEquals(50, old.options.smartKeep)
         assertEquals("", old.options.caption)
     }
 

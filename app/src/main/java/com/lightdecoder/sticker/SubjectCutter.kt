@@ -13,57 +13,80 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * How much of each pixel of a picture belongs to its subject (a person, a
- * pet, an object): 0 is background, 255 is subject, in between along the
- * edge, which is what makes a cut-out's edge smooth instead of jagged.
+ * How sure a model is, pixel by pixel, that the pixel belongs to the
+ * picture's subject: 0 is background, 255 is subject. Where the line is
+ * drawn between them is the sticker maker's choice ([StickerMaker.keepSubject]).
  */
-class SubjectMask(val width: Int, val height: Int, val alpha: ByteArray) {
+class SubjectMask(val width: Int, val height: Int, val confidence: ByteArray) {
 
     init {
-        require(alpha.size == width * height)
+        require(confidence.size == width * height)
+    }
+
+    /** True when at least [share] of the picture is subject. */
+    fun covers(share: Float): Boolean {
+        var kept = 0
+        for (c in confidence) if ((c.toInt() and 0xFF) > 127) kept++
+        return kept > 0 && kept >= confidence.size * share
     }
 
     /** True when the mask found something worth keeping (not an empty or all-background picture). */
-    val hasSubject: Boolean
-        get() {
-            var kept = 0
-            for (a in alpha) if ((a.toInt() and 0xFF) > 127) kept++
-            return kept > 0 && kept >= alpha.size / 200
-        }
+    val hasSubject: Boolean get() = covers(0.005f)
 
     companion object {
-        /**
-         * A mask from a model's confidence per pixel (0..1). The ramp around
-         * one half keeps the edge crisp but not stair-stepped.
-         */
-        fun fromConfidence(width: Int, height: Int, confidence: FloatArray): SubjectMask {
-            val alpha = ByteArray(width * height)
-            for (i in alpha.indices) {
-                val t = ((confidence[i] - EDGE_LOW) / (EDGE_HIGH - EDGE_LOW)).coerceIn(0f, 1f)
-                alpha[i] = (t * t * (3 - 2 * t) * 255).roundToInt().toByte()
-            }
-            return SubjectMask(width, height, alpha)
-        }
+        /** A mask from a model's confidence per pixel (0..1). */
+        fun fromConfidence(width: Int, height: Int, confidence: FloatArray): SubjectMask =
+            SubjectMask(width, height, ByteArray(width * height) { (confidence[it].coerceIn(0f, 1f) * 255).roundToInt().toByte() })
+    }
+}
 
-        private const val EDGE_LOW = 0.35f
-        private const val EDGE_HIGH = 0.65f
+/**
+ * What the two models found in one picture: the people in it, and whatever
+ * stands out in it (objects, pets, and often people too). Either is null if
+ * its model could not be run.
+ */
+class Subjects(val people: SubjectMask?, val objects: SubjectMask?) {
+
+    private val both: SubjectMask? by lazy {
+        val p = people
+        val o = objects
+        if (p == null || o == null || p.width != o.width || p.height != o.height) p ?: o
+        else SubjectMask(p.width, p.height, ByteArray(p.confidence.size) {
+            max(p.confidence[it].toInt() and 0xFF, o.confidence[it].toInt() and 0xFF).toByte()
+        })
+    }
+
+    /** The mask to cut with for [kind], or null when there is nothing of that kind in the picture. */
+    fun pick(kind: StickerMaker.SmartKind): SubjectMask? = when (kind) {
+        StickerMaker.SmartKind.PEOPLE -> people
+        StickerMaker.SmartKind.OBJECTS -> objects
+        StickerMaker.SmartKind.BOTH -> both
+        // People are cut whole by their own model; without any, whatever stands out.
+        StickerMaker.SmartKind.AUTO -> people?.takeIf { it.covers(PEOPLE_SHARE) } ?: objects
+    }?.takeIf { it.hasSubject }
+
+    private companion object {
+        const val PEOPLE_SHARE = 0.02f
     }
 }
 
 /**
  * Finds the subject of a picture the way a phone's own sticker maker does:
- * with a model that runs on the phone (U-2-Net, shipped inside the app; no
- * network, no Google services, the picture goes nowhere). The model sees
- * the picture small, so its answer is then fitted to the full-size
- * picture's own edges, which is what makes the cut crisp. Takes about a
- * second. Call off the main thread.
+ * with models that run on the phone (shipped inside the app; no network, no
+ * Google services, the picture goes nowhere). Two of them, because neither
+ * does everything: Robust Video Matting cuts people out whole (dark clothes
+ * in a dim room included) with their hair, and finds nothing else; U-2-Net
+ * finds whatever stands out, objects and pets too, but loses parts of
+ * people. U-2-Net sees the picture small, so its answer is then fitted to
+ * the full-size picture's own edges. Takes a second or two. Call off the
+ * main thread.
  */
 object SubjectCutter {
 
     sealed interface Result {
-        class Found(val mask: SubjectMask) : Result
+        class Found(val subjects: Subjects) : Result
 
-        /** The model could not be run on this phone. */
+        /** Neither model could be run on this phone. */
         data object Unavailable : Result
     }
 
@@ -73,7 +96,7 @@ object SubjectCutter {
 
     /** Replaceable in tests. */
     @Volatile
-    var engine: Engine = Engine(::findWithModel)
+    var engine: Engine = Engine(::findWithModels)
 
     fun find(context: Context, picture: Bitmap): Result = try {
         engine.find(context.applicationContext, picture)
@@ -87,27 +110,76 @@ object SubjectCutter {
 
     private val lock = Any()
 
-    private fun findWithModel(context: Context, picture: Bitmap): Result = synchronized(lock) {
-        val model = try {
-            context.assets.open(MODEL).use { it.readBytes() }
-        } catch (e: IOException) {
-            return Result.Unavailable
-        }
-        val confidence = try {
-            val env = OrtEnvironment.getEnvironment()
-            env.createSession(model, OrtSession.SessionOptions()).use { session ->
-                OnnxTensor.createTensor(env, modelInput(picture), longArrayOf(1, 3, INPUT.toLong(), INPUT.toLong())).use { input ->
-                    session.run(mapOf(session.inputNames.first() to input)).use { output ->
-                        val buffer = (output[0] as OnnxTensor).floatBuffer
-                        if (buffer.remaining() < INPUT * INPUT) return Result.Unavailable
-                        FloatArray(INPUT * INPUT).also { buffer.get(it) }
-                    }
-                }
+    private fun findWithModels(context: Context, picture: Bitmap): Result = synchronized(lock) {
+        // One failing (too little memory for it, say) still leaves the other.
+        val people = attempt { people(context, picture) }
+        val objects = attempt { objects(context, picture) }
+        if (people == null && objects == null) Result.Unavailable else Result.Found(Subjects(people, objects))
+    }
+
+    private inline fun attempt(find: () -> SubjectMask?): SubjectMask? = try {
+        find()
+    } catch (e: OrtException) {
+        null
+    } catch (e: IOException) {
+        null
+    } catch (e: RuntimeException) {
+        null
+    } catch (e: OutOfMemoryError) {
+        null
+    }
+
+    private fun <T> withModel(context: Context, asset: String, use: (OrtEnvironment, OrtSession) -> T): T {
+        val model = context.assets.open(asset).use { it.readBytes() }
+        val env = OrtEnvironment.getEnvironment()
+        return env.createSession(model, OrtSession.SessionOptions()).use { use(env, it) }
+    }
+
+    /** Whatever stands out in the picture (U-2-Net). */
+    private fun objects(context: Context, picture: Bitmap): SubjectMask? = withModel(context, OBJECTS_MODEL) { env, session ->
+        OnnxTensor.createTensor(env, modelInput(picture), longArrayOf(1, 3, INPUT.toLong(), INPUT.toLong())).use { input ->
+            session.run(mapOf(session.inputNames.first() to input)).use { output ->
+                val buffer = (output[0] as OnnxTensor).floatBuffer
+                if (buffer.remaining() < INPUT * INPUT) null
+                else maskFor(picture, FloatArray(INPUT * INPUT).also { buffer.get(it) }, INPUT)
             }
-        } catch (e: OrtException) {
-            return Result.Unavailable
         }
-        Result.Found(maskFor(picture, confidence, INPUT))
+    }
+
+    /**
+     * The people in the picture (Robust Video Matting, given one frame). It
+     * takes the picture whole and looks at it at about [PEOPLE_SIDE] pixels,
+     * which is where it judges whole bodies best, then draws the edge at
+     * full size itself.
+     */
+    private fun people(context: Context, picture: Bitmap): SubjectMask? = withModel(context, PEOPLE_MODEL) { env, session ->
+        val w = picture.width
+        val h = picture.height
+        val pixels = IntArray(w * h)
+        picture.getPixels(pixels, 0, w, 0, 0, w, h)
+        val planes = FloatBuffer.allocate(3 * w * h)
+        for (channel in 0 until 3) {
+            val shift = 16 - 8 * channel
+            for (p in pixels) planes.put(((p shr shift) and 0xFF) / 255f)
+        }
+        planes.rewind()
+        val ratio = min(1f, PEOPLE_SIDE.toFloat() / max(w, h))
+        val opened = ArrayList<OnnxTensor>()
+        try {
+            fun tensor(buffer: FloatBuffer, vararg shape: Long) = OnnxTensor.createTensor(env, buffer, shape).also { opened += it }
+            val inputs = HashMap<String, OnnxTensor>()
+            inputs["src"] = tensor(planes, 1, 3, h.toLong(), w.toLong())
+            // No earlier frames: the model's memory starts empty.
+            for (memory in listOf("r1i", "r2i", "r3i", "r4i")) inputs[memory] = tensor(FloatBuffer.allocate(1), 1, 1, 1, 1)
+            inputs["downsample_ratio"] = tensor(FloatBuffer.wrap(floatArrayOf(ratio)), 1)
+            session.run(inputs, setOf("pha")).use { output ->
+                val buffer = (output[0] as OnnxTensor).floatBuffer
+                if (buffer.remaining() < w * h) null
+                else SubjectMask.fromConfidence(w, h, FloatArray(w * h).also { buffer.get(it) })
+            }
+        } finally {
+            opened.forEach { it.close() }
+        }
     }
 
     /** The picture as the model takes it: [INPUT] pixels square, red, green and blue planes, normalised. */
@@ -212,7 +284,9 @@ object SubjectCutter {
         return out
     }
 
-    private const val MODEL = "models/u2netp.onnx"
+    private const val OBJECTS_MODEL = "models/u2netp.onnx"
+    private const val PEOPLE_MODEL = "models/rvm_mobilenetv3.onnx"
+    private const val PEOPLE_SIDE = 256
     private const val INPUT = 320
     private val MEAN = floatArrayOf(0.485f, 0.456f, 0.406f)
     private val DEVIATION = floatArrayOf(0.229f, 0.224f, 0.225f)
