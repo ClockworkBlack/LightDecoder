@@ -140,7 +140,7 @@ object Tapbacks {
                 val i = list.indexOfFirst { it.emoji == emoji && !it.fromMe && who in it.participantIds }
                 if (i < 0) return
                 val left = list[i].participantIds - who
-                if (left.isEmpty()) list.removeAt(i) else list[i] = list[i].copy(participantIds = left)
+                if (left.isEmpty()) list.removeAt(i) else list[i] = list[i].copy(participantIds = left, madeAtMs = list[i].madeAtMs - who)
             }
             if (tapback.removed) {
                 take(tapback.emoji)
@@ -149,10 +149,14 @@ object Tapbacks {
                 byTapback[key]?.let(::take)
                 byTapback[key] = tapback.emoji
                 val i = list.indexOfFirst { it.emoji == tapback.emoji && !it.fromMe }
+                // The tapback text's own time is when the reaction was made.
                 if (i < 0) {
-                    list += ReactionDto(tapback.emoji, listOf(who), fromMe = false)
+                    list += ReactionDto(tapback.emoji, listOf(who), fromMe = false, madeAtMs = mapOf(who to row.timestampMs))
                 } else if (who !in list[i].participantIds) {
-                    list[i] = list[i].copy(participantIds = list[i].participantIds + who)
+                    list[i] = list[i].copy(
+                        participantIds = list[i].participantIds + who,
+                        madeAtMs = list[i].madeAtMs + (who to row.timestampMs),
+                    )
                 }
             }
             hidden += row.id

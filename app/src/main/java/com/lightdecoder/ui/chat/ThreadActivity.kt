@@ -1469,6 +1469,19 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         react(row, reaction.emoji, remove = reaction.fromMe)
     }
 
+    override fun onReactionDetails(row: MessageRow, reaction: ReactionDto) {
+        val service = manager.service
+        val people = participants
+        lifecycleScope.launch {
+            val stored = withContext(Dispatchers.IO) {
+                runCatching { com.lightdecoder.reactions.ReactionTimes.get(this@ThreadActivity).timesFor(service, row.id) }
+                    .getOrDefault(emptyMap())
+            }
+            if (isFinishing || isDestroyed) return@launch
+            ReactionDetails.show(this@ThreadActivity, row, reaction.emoji, people, stored)
+        }
+    }
+
     override fun onQuoteTap(messageId: String) {
         if (messages.any { it.id == messageId }) {
             highlight(messageId)

@@ -42,6 +42,9 @@ class MessagesAdapter(
         fun onLoadFullSize(row: MessageRow, part: MediaRow)
         fun onQuoteTap(messageId: String)
         fun onReactionTap(row: MessageRow, reaction: ReactionDto)
+
+        /** A reaction chip held down: who reacted with what, and when. */
+        fun onReactionDetails(row: MessageRow, reaction: ReactionDto) = Unit
         fun onReply(row: MessageRow)
     }
 
@@ -379,6 +382,19 @@ class MessagesAdapter(
             chip.isEnabled = !row.isLocal
             chip.alpha = if (chip.isEnabled) 1f else DISABLED_ALPHA
             chip.setOnClickListener { callbacks.onReactionTap(row, reaction) }
+            // Held down (enabled or not): who reacted, and when. TalkBack names the action.
+            chip.setOnLongClickListener {
+                callbacks.onReactionDetails(row, reaction)
+                true
+            }
+            androidx.core.view.ViewCompat.replaceAccessibilityAction(
+                chip,
+                androidx.core.view.accessibility.AccessibilityNodeInfoCompat.AccessibilityActionCompat.ACTION_LONG_CLICK,
+                box.context.getString(R.string.reaction_details_action),
+            ) { _, _ ->
+                callbacks.onReactionDetails(row, reaction)
+                true
+            }
             box.addView(chip)
         }
     }

@@ -1,0 +1,13 @@
+<resources>
+    <!-- Reactions: who reacted to a message, and when (hold a reaction down). -->
+    <string name="reaction_details_title">Reactions</string>
+    <string name="reaction_details_action">See who reacted and when</string>
+    <string name="reaction_details_close">Close</string>
+    <!-- %1$s the person, %2$s the emoji, %3$s when -->
+    <string name="reaction_details_line">%1$s, %2$s, %3$s</string>
+    <!-- %1$s the day ("Today"), %2$s the time -->
+    <string name="reaction_time_at">%1$s, %2$s</string>
+    <string name="reaction_time_by">At or before %1$s</string>
+    <string name="reaction_time_unknown">Time not known</string>
+    <string name="reaction_details_note">Google Messages doesn\'t say when a reaction was made, so LightDecoder notes when it arrives: within moments while connected, \"at or before\" when it came in as the link caught up. Reactions that were already there when a message was first loaded show no time. iPhone reactions show the time the iPhone sent them.</string>
+</resources>

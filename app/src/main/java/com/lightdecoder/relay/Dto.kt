@@ -259,6 +259,12 @@ data class ReactionDto(
     val emoji: String,
     val participantIds: List<String> = emptyList(),
     val fromMe: Boolean = false,
+    /**
+     * Display only, never stored or sent: when a participant put it there,
+     * where the screen knows exactly (an iPhone's reaction text has its own
+     * time, see ui.chat.Tapbacks). Participant id to epoch ms.
+     */
+    val madeAtMs: Map<String, Long> = emptyMap(),
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("emoji", emoji)

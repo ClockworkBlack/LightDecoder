@@ -1465,6 +1465,7 @@ class RelayManager private constructor(
     /** Deletes the archive (messages, media, queued sends) between two writes of what the phone sent. */
     private fun wipeArchive() {
         gate.wipe { repo.clearAll() }
+        runCatching { com.lightdecoder.reactions.ReactionTimes.get(app).clear(service) }
         RelayPrefs.setArchiveOwner(app, "", "")
         RelayPrefs.setUnconfirmedSends(app, emptyMap())
         fetchedConversations.clear()
@@ -2181,8 +2182,18 @@ class RelayManager private constructor(
         // One of the user's messages the phone now says was read, and did not before.
         val wasUnread = dto.fromMe && !dto.isDeleted && dto.id.isNotEmpty() && ReadNotifier.isRead(dto.status) &&
             repo.message(dto.id)?.let { it.isOutgoing && !ReadNotifier.isRead(it.status) } == true
+        // Its reactions before this update (null for a message new here), to time the new ones.
+        val reactionsBefore = if (dto.isDeleted || dto.id.isEmpty()) null else
+            try { repo.message(dto.id)?.reactions } catch (e: RuntimeException) { null }
         val result = repo.upsertMessage(dto)
         if (dto.isDeleted || dto.id.isEmpty()) return
+        try {
+            com.lightdecoder.reactions.ReactionTimes.get(app).note(
+                service, dto.id, reactionsBefore, dto.reactions, System.currentTimeMillis(), live = !dto.isOld,
+            )
+        } catch (e: RuntimeException) {
+            // Only the reaction's time is lost.
+        }
         if (wasUnread) repo.message(dto.id)?.let { ReadNotifier.onRead(app, repo, listOf(it)) }
         requestFullSizes(dto, result.newMediaParts)
         if (result.newMediaParts.isNotEmpty() && RelayPrefs.catchStickers(app)) {
