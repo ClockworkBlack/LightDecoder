@@ -23,6 +23,18 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.28 (versionCode 36) - Smart cut: the full U-2-Net
+- The owner chose "Model B": the full U-2-Net (Apache-2.0, 168 MB, sha256 8d10d2f3...2b491, from
+  rembg's release assets) now finds objects instead of U-2-Net-p. It is over GitHub's 100 MB file
+  limit, so it ships as `assets/models/u2net.onnx.0` + `.1`; `SubjectCutter.fullObjectsModel` joins
+  them once into `noBackupFilesDir/models/u2net.onnx` and the runtime loads it from that file
+  (mapped, not held in the Java heap). U-2-Net-p stays as the fallback. APK about 320 MB.
+- **AUTO still picks the people model when people cover 2% of the picture**, so photos of people
+  (and statues of them) are cut by RVM as before; the new model changes Objects / Both and what
+  people hold. Changing that rule is the next thing to try if cuts of people still look ragged.
+- BiRefNet-lite ("Model A") was cleaner but needs about 7 GB of memory at 1024 px: not for a phone.
+- Not trained here: no GPU or dataset in this environment. Next version: 0.5.29 / 37.
+
 ## 0.5.27 (versionCode 35) - when a message was read
 - Holding one of the user's own messages that shows the read tick now says when it was read, at
   the top of the actions sheet (`sheet_message_actions.readInfo`, `ui/chat/ReadInfo`).
@@ -30,7 +42,7 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
   the archive, not created until needed) notes when the link sees a message turn to read:
   `RelayManager.onMessage` (where `wasUnread` is worked out) and `WaManager.onReceipt`. Same
   three wordings as reaction times: seen live, "at or before" when caught up, not known when it
-  was already read on first load. Test: `ReadTimesTest`. Next version: 0.5.28 / 36.
+  was already read on first load. Test: `ReadTimesTest`.
 
 ## 0.5.26 (versionCode 34) - Turn button; a calmer archive wipe
 - **Sticker maker "Turn"** (beside "Back to original picture"): the picture a quarter turn

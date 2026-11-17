@@ -38,8 +38,8 @@ android {
         applicationId = "com.lightdecoder"
         minSdk = 26
         targetSdk = 36
-        versionCode = 35
-        versionName = "0.5.27"
+        versionCode = 36
+        versionName = "0.5.28"
 
         // The decoder is plain software, so it runs on every ABI. These cover
         // phones (64- and 32-bit ARM) and the emulator.
@@ -405,7 +405,7 @@ val bundleLicenses by tasks.registering {
             )
             File(licenses, "43-u2net-model.txt").writeText(
                 licenceText(
-                    "U-2-Net (the subject-finding model, assets/models/u2netp.onnx): Apache-2.0",
+                    "U-2-Net (the subject-finding models, assets/models/u2net.onnx.* and u2netp.onnx): Apache-2.0",
                     listOf(apacheLicense),
                     intro = "Copyright (c) Xuebin Qin and the U-2-Net authors. https://github.com/xuebinqin/U-2-Net\n" +
                         "The model file is unmodified, in ONNX form as published with rembg (github.com/danielgatis/rembg).",

@@ -61,7 +61,8 @@ License 2.0 or the GNU GPL 2.0 with the Classpath Exception; About > Licences li
 Sticker maker, smart cut-out
   ONNX Runtime (com.microsoft.onnxruntime:onnxruntime-android)
                   MIT          Copyright (c) Microsoft Corporation
-  U-2-Net model (app/src/main/assets/models/u2netp.onnx, unmodified)
+  U-2-Net models (app/src/main/assets/models/u2net.onnx.0 + .1, the full model in two
+  parts, and u2netp.onnx, the small one; both unmodified)
                   Apache-2.0   https://github.com/xuebinqin/U-2-Net
                   Copyright (c) Xuebin Qin and the U-2-Net authors
   Robust Video Matting model (app/src/main/assets/models/rvm_mobilenetv3.onnx, unmodified)

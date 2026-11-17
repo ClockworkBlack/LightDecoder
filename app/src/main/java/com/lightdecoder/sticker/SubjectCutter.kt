@@ -285,8 +285,58 @@ object SubjectCutter {
         return env.createSession(model, OrtSession.SessionOptions()).use { use(env, it) }
     }
 
-    /** Whatever stands out in the picture (U-2-Net). */
-    private fun objects(context: Context, picture: Bitmap): SubjectMask? = withModel(context, OBJECTS_MODEL) { env, session ->
+    /**
+     * Whatever stands out in the picture: the full U-2-Net, which cuts far
+     * cleaner than its small sibling; the small one only if the full one
+     * cannot be unpacked or run on this phone.
+     */
+    private fun objects(context: Context, picture: Bitmap): SubjectMask? {
+        val full = try {
+            fullObjectsModel(context)?.let { file ->
+                val env = OrtEnvironment.getEnvironment()
+                env.createSession(file.path, OrtSession.SessionOptions()).use { objectsWith(env, it, picture) }
+            }
+        } catch (e: OrtException) {
+            null
+        } catch (e: IOException) {
+            null
+        } catch (e: RuntimeException) {
+            null
+        } catch (e: OutOfMemoryError) {
+            null
+        }
+        return full ?: withModel(context, OBJECTS_MODEL) { env, session -> objectsWith(env, session, picture) }
+    }
+
+    /**
+     * The full U-2-Net as a file. It is 168 MB, more than one file may be in
+     * the repository, so it ships as parts ([FULL_OBJECTS_PARTS]) that are
+     * put together once, in storage that is not backed up; from a file the
+     * runtime maps it instead of holding it in the app's memory. Null if the
+     * parts are missing.
+     */
+    private fun fullObjectsModel(context: Context): java.io.File? {
+        val file = java.io.File(java.io.File(context.noBackupFilesDir, "models"), "u2net.onnx")
+        if (file.isFile && file.length() == FULL_OBJECTS_BYTES) return file
+        val parts = (0 until FULL_OBJECTS_PARTS).map { "$FULL_OBJECTS_MODEL.$it" }
+        val shipped = context.assets.list("models").orEmpty()
+        if (parts.any { it.substringAfter('/') !in shipped }) return null
+        file.parentFile?.mkdirs()
+        val part = java.io.File(file.path + ".part")
+        try {
+            part.outputStream().use { out -> for (name in parts) context.assets.open(name).use { it.copyTo(out, 1 shl 20) } }
+            if (part.length() != FULL_OBJECTS_BYTES || !part.renameTo(file)) {
+                part.delete()
+                return null
+            }
+        } catch (e: IOException) {
+            part.delete()
+            throw e
+        }
+        return file
+    }
+
+    private fun objectsWith(env: OrtEnvironment, session: OrtSession, picture: Bitmap): SubjectMask? =
         OnnxTensor.createTensor(env, modelInput(picture), longArrayOf(1, 3, INPUT.toLong(), INPUT.toLong())).use { input ->
             session.run(mapOf(session.inputNames.first() to input)).use { output ->
                 val buffer = (output[0] as OnnxTensor).floatBuffer
@@ -294,7 +344,6 @@ object SubjectCutter {
                 else maskFor(picture, FloatArray(INPUT * INPUT).also { buffer.get(it) }, INPUT)
             }
         }
-    }
 
     /**
      * The people in the picture (Robust Video Matting, given one frame). It
@@ -441,6 +490,9 @@ object SubjectCutter {
     }
 
     private const val OBJECTS_MODEL = "models/u2netp.onnx"
+    private const val FULL_OBJECTS_MODEL = "models/u2net.onnx"
+    private const val FULL_OBJECTS_PARTS = 2
+    private const val FULL_OBJECTS_BYTES = 175_997_641L
     private const val PEOPLE_MODEL = "models/rvm_mobilenetv3.onnx"
     private const val PEOPLE_SIDE = 256
     private const val INPUT = 320
