@@ -354,8 +354,9 @@ final class AppModel: ObservableObject {
     func toggleReaction(_ emoji: String, on message: ChatMessage, roomId: String) {
         guard let api, !message.isLocal else { return }
         let user = me
-        if let mine = state.rooms[roomId]?.myReaction(emoji, on: message.id, me: user) {
-            SyncReducer.redact(mine, in: &state.rooms[roomId]!)
+        if var room = state.rooms[roomId], let mine = room.myReaction(emoji, on: message.id, me: user) {
+            SyncReducer.redact(mine, in: &room)
+            state.rooms[roomId] = room
             Task { try? await api.redact(roomId: roomId, eventId: mine, transactionId: newTransactionId()) }
         } else {
             let txn = newTransactionId()
@@ -381,8 +382,9 @@ final class AppModel: ObservableObject {
 
     /// Removes one of the account's own messages for everyone.
     func remove(_ message: ChatMessage, roomId: String) {
-        guard let api, !message.isLocal, message.sender == me else { return }
-        SyncReducer.redact(message.id, in: &state.rooms[roomId]!)
+        guard let api, !message.isLocal, message.sender == me, var room = state.rooms[roomId] else { return }
+        SyncReducer.redact(message.id, in: &room)
+        state.rooms[roomId] = room
         Task { try? await api.redact(roomId: roomId, eventId: message.id, transactionId: newTransactionId()) }
     }
 

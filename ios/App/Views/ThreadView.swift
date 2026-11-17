@@ -82,10 +82,11 @@ struct ThreadView: View {
                     .frame(maxWidth: .infinity)
                     .listRowSeparator(.hidden)
                 }
+                let lastOfMine = room.timeline.last(where: { $0.sender == model.me })?.id
                 ForEach(room.timeline) { message in
                     MessageRow(
                         message: message, room: room, me: model.me,
-                        isLastOfMine: message.id == room.timeline.last(where: { $0.sender == model.me })?.id,
+                        isLastOfMine: message.id == lastOfMine,
                         onReply: { replyTo = message; writing = true },
                         onQuoteTap: { id in withAnimation { proxy.scrollTo(id, anchor: .center) } },
                         onPicture: { viewing = message },
