@@ -11,37 +11,26 @@
         android:layout_height="match_parent"
         android:orientation="vertical">
 
+        <!-- The title is the app switcher: "Messages ▾" (view_app_switcher). -->
         <com.google.android.material.appbar.MaterialToolbar
             android:id="@+id/toolbar"
             android:layout_width="match_parent"
             android:layout_height="?attr/actionBarSize"
-            app:title="@string/chat_title" />
+            app:contentInsetStartWithNavigation="0dp">
 
-        <!-- Which service is shown: Google Messages or WhatsApp (Discord opens its own screen). Everything below follows it. -->
-        <!-- Scrolls sideways when the tabs do not all fit; the arrow lists them all. -->
-        <LinearLayout
+            <include layout="@layout/view_app_switcher" />
+        </com.google.android.material.appbar.MaterialToolbar>
+
+        <!--
+            The apps, as tabs that are not shown: which one is chosen, and each one's unread
+            badge. The switcher above shows them (ServiceTabStrip).
+        -->
+        <com.google.android.material.tabs.TabLayout
+            android:id="@+id/services"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:gravity="center_vertical"
-            android:orientation="horizontal">
-
-            <com.google.android.material.tabs.TabLayout
-                android:id="@+id/services"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                app:tabGravity="start"
-                app:tabMode="scrollable" />
-
-            <ImageButton
-                android:id="@+id/servicesMenu"
-                android:layout_width="48dp"
-                android:layout_height="48dp"
-                android:background="?attr/selectableItemBackgroundBorderless"
-                android:contentDescription="@string/chat_services_menu"
-                android:src="@drawable/ic_arrow_drop_down"
-                app:tint="?attr/colorOnSurface" />
-        </LinearLayout>
+            android:visibility="gone"
+            app:tabMode="scrollable" />
 
         <include
             android:id="@+id/banner"

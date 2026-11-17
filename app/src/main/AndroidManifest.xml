@@ -161,6 +161,11 @@
             outside the app can start it or hand it a URL. Rotation is handled
             in place so the page is not reloaded.
         -->
+        <!-- Readies the Discord tab's process and web engine (no page, no network) so the tab opens quickly. -->
+        <service
+            android:name=".discord.DiscordWarmup"
+            android:exported="false"
+            android:process=":discord" />
         <activity
             android:name=".ui.discord.DiscordActivity"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|keyboard|keyboardHidden|navigation|uiMode"

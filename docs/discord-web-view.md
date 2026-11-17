@@ -103,8 +103,26 @@ Folding and unfolding are handled in place (`configChanges` includes
 `screenSize`, `smallestScreenSize`, `screenLayout` and `density`), so the page
 is fitted again without being reloaded.
 
-The top bar is one 48 dp row: back, the tab strip, the tab list arrow, the
-menu. It shows no title and no address line; only discord.com loads here.
+The top bar is one 44 dp row: the app switcher ("Discord ▾", with the other
+apps' unread count) and the menu. No back arrow (the system's Back walks
+Discord's history, then leaves), no title, no address line.
+
+Switching apps fades the new screen in over the old in 160 ms
+(`ServiceTabStrip.open` / `fadeOnClose`), and going back to the list brings
+the existing list forward (single top) instead of building it again.
+
+## Opening quickly
+
+- `DiscordWarmup`, a service in the ":discord" process, is started when the
+  conversation list is shown, if the Discord tab has been opened before on
+  this phone. It loads the web engine only (`WebSettings.getDefaultUserAgent`):
+  no page, no connection to Discord. The first open of the tab then skips
+  starting the process and the engine.
+- `offscreenPreRaster` draws what is just off screen ahead of time, and the
+  renderer has `RENDERER_PRIORITY_IMPORTANT` while shown. HTTP cache stays on
+  (`LOAD_DEFAULT`).
+- How fast a channel opens inside the page is Discord's own web app and its
+  servers; nothing here changes that.
 
 ## Staying put ("firm")
 

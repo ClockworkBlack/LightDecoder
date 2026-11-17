@@ -73,12 +73,14 @@ class DiscordFitTest {
     }
 
     @Test
-    fun theBarIsOneRowWithTheTabsInIt() {
+    fun theBarIsOneSlimRowWithTheSwitcherInIt() {
         val themed = ContextThemeWrapper(context, R.style.Theme_LightDecoder)
         val binding = ActivityDiscordBinding.inflate(LayoutInflater.from(themed))
-        var parent = binding.services.parent
+        val switcher = binding.root.findViewById<android.view.View>(R.id.servicesMenu)
+        var parent = switcher.parent
         while (parent != null && parent !is MaterialToolbar) parent = parent.parent
-        assertSame("the tab strip sits in the top bar itself", binding.toolbar, parent)
-        assertTrue(binding.servicesMenu.parent === binding.services.parent)
+        assertSame("the app switcher sits in the top bar itself", binding.toolbar, parent)
+        assertEquals("no separate tab row", android.view.View.GONE, binding.services.visibility)
+        assertEquals(44f * context.resources.displayMetrics.density, binding.toolbar.layoutParams.height.toFloat(), 1f)
     }
 }

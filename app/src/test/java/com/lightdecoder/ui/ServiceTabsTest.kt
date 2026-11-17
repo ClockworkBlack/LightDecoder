@@ -64,7 +64,7 @@ class ServiceTabsTest {
     // --- the tabs, and what follows them ----------------------------------------------------
 
     @Test
-    fun theTabsScrollAndTheArrowListsThemAll() {
+    fun theTitleIsTheSwitcherAndListsEveryApp() {
         two.env.pairedManager()
         two.seedConversation(messages, "c1", "Alice", lastTs = 2_000)
         two.seedConversation(whatsApp, "111@s.whatsapp.net", "Carol")
@@ -72,9 +72,10 @@ class ServiceTabsTest {
             scenario.waitFor("the Messages inbox") { titles(it) == listOf("Alice") }
             scenario.onActivity { activity ->
                 val tabs = activity.findViewById<TabLayout>(R.id.services)
-                assertEquals("sideways when they do not fit", TabLayout.MODE_SCROLLABLE, tabs.tabMode)
+                assertFalse("no tab row: the title is the switcher", tabs.isShown)
                 val arrow = activity.findViewById<android.view.View>(R.id.servicesMenu)
                 assertTrue(arrow.isShown)
+                assertEquals("Messages", activity.findViewById<TextView>(R.id.switcherLabel).text.toString())
                 arrow.performClick()
                 val popup = org.robolectric.shadows.ShadowPopupMenu.getLatestPopupMenu()!!
                 val items = (0 until popup.menu.size()).map { popup.menu.getItem(it) }
@@ -432,7 +433,7 @@ class ServiceTabsTest {
             scenario.onActivity { activity ->
                 val item = activity.findViewById<Toolbar>(R.id.toolbar).menu.findItem(R.id.action_search)
                 assertTrue(item.expandActionView())
-                assertEquals("a search is over one service", View.GONE, activity.findViewById<View>(R.id.services).visibility)
+                assertFalse("a search is over one service: the switcher makes way", activity.findViewById<View?>(R.id.servicesMenu)?.isShown == true)
             }
             two.settle()
             // The menu was rebuilt for the search: type into the search field on screen now.
@@ -449,7 +450,7 @@ class ServiceTabsTest {
                 assertEquals("w1", thread.getStringExtra(RelayIntents.EXTRA_MESSAGE_ID))
                 assertEquals(whatsApp, RelayIntents.serviceOf(thread))
                 activity.findViewById<Toolbar>(R.id.toolbar).menu.findItem(R.id.action_search).collapseActionView()
-                assertEquals(View.VISIBLE, activity.findViewById<View>(R.id.services).visibility)
+                assertTrue("the switcher is back", activity.findViewById<View>(R.id.servicesMenu).isShown)
                 selectService(activity, messages)
                 activity.findViewById<Toolbar>(R.id.toolbar).menu.findItem(R.id.action_search).expandActionView()
             }

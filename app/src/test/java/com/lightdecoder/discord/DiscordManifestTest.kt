@@ -34,12 +34,14 @@ class DiscordManifestTest {
     }
 
     @Test
-    fun nothingElseRunsInTheDiscordProcess() {
-        val others = components().filter {
-            it.getAttributeNS(android, "process") == DiscordContainer.PROCESS_SUFFIX &&
-                it.getAttributeNS(android, "name") != ".ui.discord.DiscordActivity"
-        }
-        assertEquals(emptyList<String>(), others.map { it.getAttributeNS(android, "name") })
+    fun onlyTheDiscordScreenAndItsWarmUpRunInTheDiscordProcess() {
+        val inside = components().filter { it.getAttributeNS(android, "process") == DiscordContainer.PROCESS_SUFFIX }
+        assertEquals(
+            setOf(".ui.discord.DiscordActivity", ".discord.DiscordWarmup"),
+            inside.map { it.getAttributeNS(android, "name") }.toSet(),
+        )
+        val warmup = inside.first { it.getAttributeNS(android, "name") == ".discord.DiscordWarmup" }
+        assertEquals("nothing outside the app can start it", "false", warmup.getAttributeNS(android, "exported"))
     }
 
     @Test

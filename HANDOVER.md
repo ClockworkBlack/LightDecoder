@@ -23,6 +23,18 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.21
+- **App switcher replaces the tab row** (`view_app_switcher.xml`, `ServiceTabStrip.attachSwitcher`):
+  the toolbar title is "Messages ▾" / "Discord ▾"; a tap lists the apps with unread counts; the
+  red count beside the switcher is the *other* apps' unread (fixes the badge covering "Messages").
+  The `services` TabLayout is kept but GONE: it is still the model (selection, badges) the screens
+  and tests use. While searching, the SearchView takes the toolbar (switcher detached).
+- **Discord top bar: one 44 dp row**, no back arrow. Switching apps fades (160 ms, `res/anim`),
+  and Discord -> list uses SINGLE_TOP so the list is brought forward, not rebuilt.
+- **Discord speed**: `DiscordWarmup` service in ":discord" (engine only, no page or network,
+  only once the tab has been used), `offscreenPreRaster`, renderer priority IMPORTANT.
+- Tests: `AppSwitcherTest`, updated `ServiceTabsTest`, `DiscordManifestTest`, `DiscordFitTest`.
+
 ## 0.5.20
 - **Tab order: Messages, Discord, WhatsApp** (Discord is added after the first service, in the
   conversation list and on the Discord screen).
