@@ -11,8 +11,15 @@ import com.lightdecoder.R
 import com.lightdecoder.archive.ConversationRow
 import com.lightdecoder.databinding.ItemConversationBinding
 
-/** One row of the list: the stored conversation plus the title worked out for it. */
-data class ConversationItem(val row: ConversationRow, val title: String)
+/**
+ * One row of the list: the stored conversation, the title worked out for it,
+ * and the service it is from (the Messages tab also lists iMessage chats).
+ */
+data class ConversationItem(
+    val row: ConversationRow,
+    val title: String,
+    val service: com.lightdecoder.chat.ChatService = com.lightdecoder.chat.ChatService.MESSAGES,
+)
 
 /** What a conversation is called in a list: its name, else the people in it. */
 internal object ConversationTitles {
@@ -40,7 +47,8 @@ class ConversationsAdapter(
 
     class Holder(val binding: ItemConversationBinding) : RecyclerView.ViewHolder(binding.root)
 
-    override fun getItemId(position: Int): Long = ids.of(getItem(position).row.id)
+    // A conversation id is only unique within its service.
+    override fun getItemId(position: Int): Long = getItem(position).let { ids.of(it.service.key + ":" + it.row.id) }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
         Holder(ItemConversationBinding.inflate(LayoutInflater.from(parent.context), parent, false))
@@ -62,10 +70,13 @@ class ConversationsAdapter(
         b.unreadDot.visibility = if (row.unread) View.VISIBLE else View.GONE
         b.pinned.visibility = if (row.pinned) View.VISIBLE else View.GONE
         b.muted.visibility = if (row.muted) View.VISIBLE else View.GONE
+        val iMessage = item.service == com.lightdecoder.chat.ChatService.IMESSAGE
+        b.imessageBadge.visibility = if (iMessage) View.VISIBLE else View.GONE
 
         // One spoken summary instead of five separate bits.
         b.root.contentDescription = buildList {
             add(item.title)
+            if (iMessage) add(context.getString(R.string.imessage_badge))
             if (row.unread) add(context.getString(R.string.chat_unread))
             if (row.pinned) add(context.getString(R.string.chat_pinned))
             if (row.muted) add(context.getString(R.string.chat_muted))
@@ -97,7 +108,7 @@ class ConversationsAdapter(
 
     private companion object {
         val DIFF = object : DiffUtil.ItemCallback<ConversationItem>() {
-            override fun areItemsTheSame(a: ConversationItem, b: ConversationItem) = a.row.id == b.row.id
+            override fun areItemsTheSame(a: ConversationItem, b: ConversationItem) = a.service == b.service && a.row.id == b.row.id
             override fun areContentsTheSame(a: ConversationItem, b: ConversationItem) = a == b
         }
     }

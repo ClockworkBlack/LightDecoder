@@ -56,7 +56,13 @@ import java.util.EnumMap
  * service that is not linked and has nothing stored shows a card that leads
  * to its setup instead.
  *
- * Extras: [RelayIntents.EXTRA_SERVICE] opens on that service's tab. Without
+ * With "Blue Bubbles" ticked in its menu ([BlueBubblesSetup]), the Messages
+ * tab also lists the iMessage chats that arrived through the OpenBubbles app
+ * ([ChatService.IMESSAGE], which has no tab of its own), merged by time and
+ * marked iMessage; each row keeps its own service for opening and actions.
+ *
+ * Extras: [RelayIntents.EXTRA_SERVICE] opens on that service's tab (iMessage
+ * opens on Messages). Without
  * it the list opens where it was last; and if no service is linked or has
  * anything stored, there is nothing to show, so setup takes over.
  */
@@ -99,10 +105,19 @@ class ConversationsActivity : AppCompatActivity() {
     /** Whether the Deleted folder had anything at its last load (for "Empty Deleted"). */
     private var hasDeleted = false
 
+    private val blueBubbles = BlueBubblesSetup(this) {
+        invalidateOptionsMenu()
+        reload()
+        renderBadges()
+    }
+
+    /** Whether the list shows iMessage chats too: the Messages tab, with Blue Bubbles on. */
+    private fun showsIMessage(): Boolean = backend.service == ChatService.MESSAGES && blueBubbles.isOn()
+
     private val onArchiveChange: (ArchiveChange) -> Unit = { change ->
         // The other service's conversations only change its tab's unread count.
         if (change.kind == ArchiveChange.Kind.CONVERSATIONS) scheduleBadges()
-        if (change.service == backend.service) {
+        if (change.service == backend.service || (change.service == ChatService.IMESSAGE && showsIMessage())) {
             when (change.kind) {
                 ArchiveChange.Kind.CONVERSATIONS -> scheduleReload()
                 ArchiveChange.Kind.MESSAGES -> if (searchQuery != null) scheduleReload()
@@ -124,8 +139,10 @@ class ConversationsActivity : AppCompatActivity() {
         supportActionBar?.setDisplayShowTitleEnabled(false)
 
         val asked = intent.hasExtra(RelayIntents.EXTRA_SERVICE)
-        val service = savedInstanceState?.getString(STATE_SERVICE)?.let(ChatService::fromKey)
-            ?: if (asked) RelayIntents.serviceOf(intent) else ChatUiPrefs.defaultService(this)
+        val service = tabServiceOf(
+            savedInstanceState?.getString(STATE_SERVICE)?.let(ChatService::fromKey)
+                ?: if (asked) RelayIntents.serviceOf(intent) else ChatUiPrefs.defaultService(this)
+        )
         backend = ScreenBackends.get(this, service)
         // A tab that was asked for is the one to come back to; the default is not a choice.
         if (asked && savedInstanceState == null) ChatUiPrefs.setLastService(this, service)
@@ -135,8 +152,9 @@ class ConversationsActivity : AppCompatActivity() {
             folder = Folder.entries.firstOrNull { it.name == state.getString(STATE_FOLDER) } ?: Folder.INBOX
             restoredQuery = state.getString(STATE_QUERY)
         }
+        blueBubbles.restore(savedInstanceState)
 
-        adapter = ConversationsAdapter(onOpen = { openThread(it.row.id, null) }, onLongPress = { showActions(it) })
+        adapter = ConversationsAdapter(onOpen = { openThread(it.row.id, null, it.service) }, onLongPress = { showActions(it) })
         binding.list.layoutManager = LinearLayoutManager(this)
         binding.list.adapter = adapter
         searchAdapter = SearchResultsAdapter(onOpen = { openThread(it.conversationId, it.messageId) })
@@ -177,7 +195,7 @@ class ConversationsActivity : AppCompatActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         if (!intent.hasExtra(RelayIntents.EXTRA_SERVICE)) return
-        val service = RelayIntents.serviceOf(intent)
+        val service = tabServiceOf(RelayIntents.serviceOf(intent))
         if (service == backend.service) return
         // A search is over the service it was started in.
         searchItem?.collapseActionView()
@@ -195,6 +213,12 @@ class ConversationsActivity : AppCompatActivity() {
         renderBadges()
     }
 
+    override fun onResume() {
+        super.onResume()
+        // Back from the notification-access setting Blue Bubbles sent the user to.
+        blueBubbles.onResume()
+    }
+
     override fun onStop() {
         ArchiveEvents.unregister(onArchiveChange)
         ChatVisibility.leave(backend)
@@ -207,6 +231,7 @@ class ConversationsActivity : AppCompatActivity() {
         outState.putString(STATE_SERVICE, backend.service.key)
         outState.putString(STATE_FOLDER, folder.name)
         searchQuery?.let { outState.putString(STATE_QUERY, it) }
+        blueBubbles.save(outState)
     }
 
     /**
@@ -349,7 +374,13 @@ class ConversationsActivity : AppCompatActivity() {
     private fun renderBadges() {
         lifecycleScope.launch {
             val unread = withContext(Dispatchers.IO) {
-                ScreenBackends.all(applicationContext).associate { it.service to it.repo.unreadCount() }
+                val counts = ScreenBackends.all(applicationContext).associate { it.service to it.repo.unreadCount() }.toMutableMap()
+                // iMessage chats are in the Messages tab, and so are their unread ones.
+                if (blueBubbles.isOn()) {
+                    val iMessage = runCatching { ScreenBackends.get(applicationContext, ChatService.IMESSAGE).repo.unreadCount() }.getOrDefault(0)
+                    counts[ChatService.MESSAGES] = (counts[ChatService.MESSAGES] ?: 0) + iMessage
+                }
+                counts
             }
             val tabs = binding.services
             for (i in 0 until tabs.tabCount) {
@@ -473,9 +504,19 @@ class ConversationsActivity : AppCompatActivity() {
         }
         val shown = folder
         val from = backend
+        val iMessage = if (showsIMessage() && (shown == Folder.INBOX || shown == Folder.ARCHIVE)) {
+            ScreenBackends.get(this, ChatService.IMESSAGE)
+        } else {
+            null
+        }
         lifecycleScope.launch {
             val (items, nothingStored) = withContext(Dispatchers.IO) {
-                val rows = from.repo.conversations(shown).map { ConversationItem(it, titleFor(from.repo, it)) }
+                val own = from.repo.conversations(shown).map { ConversationItem(it, titleFor(from.repo, it), from.service) }
+                val extra = iMessage?.let { im ->
+                    runCatching { im.repo.conversations(shown) }.getOrDefault(emptyList())
+                        .map { ConversationItem(it, titleFor(im.repo, it), im.service) }
+                }.orEmpty()
+                val rows = if (extra.isEmpty()) own else mergeByTime(own, extra)
                 rows to (rows.isEmpty() && from.repo.conversations(null, 1).isEmpty())
             }
             if (from !== backend || shown != folder || searchQuery != null) return@launch
@@ -578,6 +619,10 @@ class ConversationsActivity : AppCompatActivity() {
     }
 
     override fun onPrepareOptionsMenu(menu: Menu): Boolean {
+        menu.findItem(R.id.action_blue_bubbles)?.let { item ->
+            item.isVisible = backend.service == ChatService.MESSAGES
+            item.isChecked = blueBubbles.isOn()
+        }
         // Without a pairing, what is listed is an archive an unpair kept: it can be deleted here.
         menu.findItem(R.id.action_delete_archive)?.isVisible = !paired && !archiveEmpty
         menu.findItem(R.id.action_refresh)?.isVisible = paired && folder.listable
@@ -589,6 +634,7 @@ class ConversationsActivity : AppCompatActivity() {
         when (item.itemId) {
             android.R.id.home -> finish()
             R.id.action_refresh -> refreshFromPhone()
+            R.id.action_blue_bubbles -> blueBubbles.toggle()
             R.id.action_link_status -> startActivity(ServiceUi.status(this, backend.service))
             R.id.action_delete_archive -> LocalArchive.confirmDelete(this, backend) { reload() }
             R.id.action_empty_deleted -> confirmEmptyDeleted()
@@ -633,19 +679,19 @@ class ConversationsActivity : AppCompatActivity() {
 
     // --- actions -------------------------------------------------------------
 
-    private fun openThread(conversationId: String, messageId: String?) {
+    private fun openThread(conversationId: String, messageId: String?, service: ChatService = backend.service) {
         startActivity(
             Intent(this, ThreadActivity::class.java)
                 .putExtra(RelayIntents.EXTRA_CONVERSATION_ID, conversationId)
-                .putExtra(RelayIntents.EXTRA_SERVICE, backend.service.key)
+                .putExtra(RelayIntents.EXTRA_SERVICE, service.key)
                 .apply { if (messageId != null) putExtra(RelayIntents.EXTRA_MESSAGE_ID, messageId) }
         )
     }
 
     private fun showActions(item: ConversationItem) {
         val row = item.row
-        // The row is this service's: what is chosen acts on it, whatever tab is shown by then.
-        val on = backend
+        // The row is its service's: what is chosen acts on it, whatever tab is shown by then.
+        val on = if (item.service == backend.service) backend else ScreenBackends.get(this, item.service)
         val actions = ArrayList<Pair<Int, () -> Unit>>()
         when (row.folderEnum) {
             Folder.INBOX -> actions += R.string.chat_action_archive to { setArchived(on, row, true) }
@@ -746,6 +792,17 @@ class ConversationsActivity : AppCompatActivity() {
     }
 
     companion object {
+        /** The tab a service's conversations are listed in: iMessage has none of its own and is in Messages. */
+        internal fun tabServiceOf(service: ChatService): ChatService =
+            if (service == ChatService.IMESSAGE) ChatService.MESSAGES else service
+
+        /**
+         * Two services' rows as one list, in the archive's own order: pinned
+         * first, then the newest last message first.
+         */
+        internal fun mergeByTime(a: List<ConversationItem>, b: List<ConversationItem>): List<ConversationItem> =
+            (a + b).sortedWith(compareByDescending<ConversationItem> { it.row.pinned }.thenByDescending { it.row.lastMessageTs })
+
         private const val STATE_SERVICE = "service"
         private const val STATE_FOLDER = "folder"
         private const val STATE_QUERY = "query"

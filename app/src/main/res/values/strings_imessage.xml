@@ -37,7 +37,7 @@
     <string name="imessage_finish_in_openbubbles">Finish sending in OpenBubbles.</string>
     <string name="imessage_send_imessage">Send iMessage</string>
     <string name="imessage_no_address">This conversation has no phone number or email address to send an iMessage to.</string>
-    <string name="imessage_sent_note">Sent through OpenBubbles</string>
+    <string name="imessage_delete_message_question">Remove this message from LightDecoder? It stays in OpenBubbles and on the other person\'s phone.</string>
 
     <!-- Errors. -->
     <string name="imessage_error_not_enabled">Blue Bubbles is off. Tick it in the Messages menu.</string>

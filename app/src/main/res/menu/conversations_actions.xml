@@ -11,6 +11,13 @@
         android:id="@+id/action_refresh"
         android:title="@string/chat_refresh"
         app:showAsAction="never" />
+    <!-- Messages tab only: iMessage chats from OpenBubbles shown and answered here (ui.chat.BlueBubblesSetup). -->
+    <item
+        android:id="@+id/action_blue_bubbles"
+        android:checkable="true"
+        android:title="@string/blue_bubbles"
+        android:visible="false"
+        app:showAsAction="never" />
     <item
         android:id="@+id/action_link_status"
         android:title="@string/chat_link_status"

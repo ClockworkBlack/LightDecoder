@@ -76,7 +76,7 @@ class IMessageManager private constructor(
     private fun currentState(): RelayState = when {
         !IMessagePrefs.enabled(appContext) -> RelayState(RelayState.Phase.UNPAIRED)
         !OpenBubbles.isInstalled(appContext) -> RelayState(RelayState.Phase.ERROR, IMessageErrors.NOT_INSTALLED)
-        !MessengerNotificationListener.hasAccess(appContext) -> RelayState(RelayState.Phase.DISCONNECTED, IMessageErrors.NO_ACCESS)
+        !MessengerNotificationListener.hasAccess(appContext) -> RelayState(RelayState.Phase.ERROR, IMessageErrors.NO_ACCESS)
         else -> RelayState(RelayState.Phase.CONNECTED)
     }
 

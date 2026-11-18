@@ -39,6 +39,7 @@ class MessengerNotificationListener : NotificationListenerService() {
     private val worker = Executors.newSingleThreadExecutor()
 
     override fun onListenerConnected() {
+        running = this
         // Pick up what is showing: messages that arrived while the service
         // was not running, and the reply buttons a restart lost.
         val active = try { activeNotifications } catch (e: Exception) { null }
@@ -48,6 +49,7 @@ class MessengerNotificationListener : NotificationListenerService() {
     }
 
     override fun onListenerDisconnected() {
+        if (running === this) running = null
         MessengerEvents.notifyChanged()
         refreshIMessage()
     }
@@ -61,6 +63,7 @@ class MessengerNotificationListener : NotificationListenerService() {
     }
 
     override fun onDestroy() {
+        if (running === this) running = null
         worker.shutdown()
         super.onDestroy()
     }
@@ -104,7 +107,52 @@ class MessengerNotificationListener : NotificationListenerService() {
         }
     }
 
+    /** Reads OpenBubbles' notifications that are showing now (Blue Bubbles was just turned on). */
+    private fun scanIMessage() {
+        val active = try { activeNotifications } catch (e: Exception) { null } ?: return
+        active.filter { OpenBubbles.isOpenBubbles(it.packageName) }.forEach { inspect(it, live = false) }
+    }
+
     companion object {
+
+        /** The listener while Android has it connected. */
+        @Volatile
+        private var running: MessengerNotificationListener? = null
+
+        /**
+         * Reads the OpenBubbles notifications showing now, if the listener is
+         * connected (if not, it reads them when it connects).
+         */
+        fun requestIMessageScan() {
+            val listener = running ?: return
+            android.os.Handler(android.os.Looper.getMainLooper()).post { if (running === listener) listener.scanIMessage() }
+        }
+
+        /**
+         * Opens the system setting where notification access is turned on
+         * for LightDecoder: its own page where the phone has one, else the
+         * list of all apps. False if neither could be opened.
+         */
+        fun openAccessSettings(activity: android.app.Activity): Boolean {
+            val component = ComponentName(activity, MessengerNotificationListener::class.java)
+            val detail = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                android.content.Intent(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS)
+                    .putExtra(android.provider.Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME, component.flattenToString())
+            } else {
+                null
+            }
+            for (intent in listOfNotNull(detail, android.content.Intent(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))) {
+                try {
+                    activity.startActivity(intent)
+                    return true
+                } catch (e: android.content.ActivityNotFoundException) {
+                    // Try the next one.
+                } catch (e: SecurityException) {
+                    // Some phones guard the per-app screen; the list of all listeners is open.
+                }
+            }
+            return false
+        }
 
         /** Whether the user has turned notification access on for LightDecoder. */
         fun hasAccess(context: Context): Boolean {

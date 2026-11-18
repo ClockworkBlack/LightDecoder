@@ -80,7 +80,7 @@ class ShareActivity : AppCompatActivity() {
                 val item = withContext(Dispatchers.IO) {
                     directBackend.repo.conversation(direct.second)
                         ?.takeIf { !it.readOnly }
-                        ?.let { ConversationItem(it, ConversationTitles.of(this@ShareActivity, directBackend.repo, it)) }
+                        ?.let { ConversationItem(it, ConversationTitles.of(this@ShareActivity, directBackend.repo, it), directBackend.service) }
                 }
                 if (item != null) deliver(directBackend, item) else showPicker()
             }
@@ -115,7 +115,7 @@ class ShareActivity : AppCompatActivity() {
             val items = withContext(Dispatchers.IO) {
                 from.repo.conversations(Folder.INBOX)
                     .filter { !it.readOnly }
-                    .map { ConversationItem(it, ConversationTitles.of(this@ShareActivity, from.repo, it)) }
+                    .map { ConversationItem(it, ConversationTitles.of(this@ShareActivity, from.repo, it), from.service) }
             }
             if (backend !== from) return@launch
             all = items

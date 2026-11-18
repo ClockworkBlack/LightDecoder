@@ -51,6 +51,13 @@
         <package android:name="com.facebook.orca" />
         <!-- So a Facebook sign-in on the Messenger tab's page can be approved in the Facebook app. -->
         <package android:name="com.facebook.katana" />
+        <!--
+            Blue Bubbles: so the Messages tab can tell whether OpenBubbles (the iMessage app it
+            works through) is installed, and open its chats and new-chat screen.
+        -->
+        <package android:name="com.openbubbles.messaging" />
+        <package android:name="com.bluebubbles.messaging.alpha" />
+        <package android:name="com.bluebubbles.messaging.beta" />
     </queries>
 
     <!--

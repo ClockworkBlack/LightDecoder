@@ -268,7 +268,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         banner.bind(manager)
         // Pictures are fetched through the link, and the list draws them through the loader.
         media = MediaLoader(manager, lifecycleScope)
-        adapter = MessagesAdapter(media, this)
+        adapter = MessagesAdapter(media, this).also { it.blueOutgoing = service == ChatService.IMESSAGE }
         binding.messages.adapter = adapter
         // Until the new link's state is in: cheap to ask, and nothing is tried while "offline".
         paired = manager.isPaired()
@@ -414,7 +414,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     // --- list ----------------------------------------------------------------
 
     private fun setUpList() {
-        adapter = MessagesAdapter(media, this)
+        adapter = MessagesAdapter(media, this).also { it.blueOutgoing = manager.service == ChatService.IMESSAGE }
         layoutManager = LinearLayoutManager(this).apply { stackFromEnd = true }
         binding.messages.layoutManager = layoutManager
         binding.messages.adapter = adapter
@@ -1056,6 +1056,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val file = attachment
         if (text.isEmpty() && file == null) return
         val id = conversationId
+        val iMessage = manager as? com.lightdecoder.imessage.IMessageManager
+        // An iMessage with a picture, or to a chat with no Reply button to send through: OpenBubbles sends it.
+        if (iMessage != null && (file != null || !iMessage.canReply(id))) {
+            handOffToOpenBubbles(iMessage, id, text, file)
+            return
+        }
         // Only ever a message of this conversation (onReply checks too).
         val replyTo = replyTarget?.takeIf { it.conversationId == id }?.id
         scrollToBottomNext = true
@@ -1079,6 +1085,56 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 com.lightdecoder.chat.ShareShortcuts.push(applicationContext, link.service, id, title, row.avatarColor)
             }
         }
+    }
+
+    /**
+     * Opens OpenBubbles on this chat with [text] and [file] filled in (a copy
+     * of the file this app can hand over), for the user to tap send there.
+     * The composer is cleared once OpenBubbles has it.
+     */
+    private fun handOffToOpenBubbles(link: com.lightdecoder.imessage.IMessageManager, id: String, text: String, file: Uri?) {
+        lifecycleScope.launch {
+            val shared = if (file == null) null else withContext(Dispatchers.IO) { shareableCopy(file) }
+            if (!isCurrent(link, id)) return@launch
+            if (file != null && shared == null) {
+                toast(getString(R.string.share_could_not_read))
+                return@launch
+            }
+            val opened = link.handOff(this@ThreadActivity, id, text, shared?.first, shared?.second)
+            if (!opened) {
+                toast(errorText(link, com.lightdecoder.imessage.IMessageErrors.NOT_INSTALLED))
+                return@launch
+            }
+            binding.input.setText("")
+            clearReply()
+            clearAttachment()
+            toast(getString(R.string.imessage_finish_in_openbubbles))
+        }
+    }
+
+    /**
+     * A copy of [source] in the cache folder this app shares files from, as
+     * a uri of its own provider (another app may read it while it is
+     * granted), with its type. Null if it cannot be read. Not on the main thread.
+     */
+    private fun shareableCopy(source: Uri): Pair<Uri, String>? = try {
+        val mime = contentResolver.getType(source)
+            ?: android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(source.lastPathSegment.orEmpty().substringAfterLast('.', "").lowercase())
+            ?: "application/octet-stream"
+        val extension = android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)?.let { ".$it" }.orEmpty()
+        val dir = File(cacheDir, "shared").apply { mkdirs() }
+        val target = File(dir, "imessage-" + java.util.UUID.randomUUID() + extension)
+        val read = (if (source.scheme == "file") java.io.FileInputStream(source.path!!) else contentResolver.openInputStream(source))?.use { input ->
+            target.outputStream().use { input.copyTo(it) }
+        }
+        if (read == null || target.length() == 0L) {
+            target.delete()
+            null
+        } else {
+            androidx.core.content.FileProvider.getUriForFile(this, "$packageName.fileprovider", target) to mime
+        }
+    } catch (e: Exception) {
+        null
     }
 
     // --- stickers ------------------------------------------------------------
@@ -1263,6 +1319,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         if (files.isEmpty()) return
         val id = conversationId
         val link = manager
+        // OpenBubbles takes one picture at a time from another app.
+        if (link is com.lightdecoder.imessage.IMessageManager) {
+            handOffToOpenBubbles(link, id, "", Uri.fromFile(files.first()))
+            return
+        }
         scrollToBottomNext = true
         lifecycleScope.launch {
             for (file in files) {
@@ -1387,7 +1448,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     // Email replies always go to the whole thread: no quoting one message.
     private fun canReplyTo(row: MessageRow) =
-        manager.service != ChatService.GMAIL && !row.isLocal && row.direction != "system" && conversation?.readOnly != true && conversation?.folderEnum != Folder.DELETED
+        manager.service != ChatService.GMAIL && manager.service != ChatService.IMESSAGE &&
+            !row.isLocal && row.direction != "system" && conversation?.readOnly != true && conversation?.folderEnum != Folder.DELETED
 
     // --- message callbacks ---------------------------------------------------
 
@@ -1417,7 +1479,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val mine = row.reactions.firstOrNull { it.fromMe }?.emoji
 
         // Email has no reactions.
-        val reacts = real && manager.service != ChatService.GMAIL
+        // Email has no reactions, and iMessages here are answered through OpenBubbles' notifications, which take text only.
+        val reacts = real && manager.service != ChatService.GMAIL && manager.service != ChatService.IMESSAGE
         b.reactionRow.visibility = if (reacts) View.VISIBLE else View.GONE
         if (reacts) {
             for (emoji in QUICK_REACTIONS) {
@@ -1502,6 +1565,21 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     override fun onFailedTap(row: MessageRow) {
+        // An iMessage that had no Reply button to go through: OpenBubbles sends it instead.
+        val link = manager
+        if (link is com.lightdecoder.imessage.IMessageManager && row.isLocal) {
+            if (!isShown(row)) return
+            if (link.canReply(row.conversationId)) {
+                retry(row)
+            } else if (link.handOff(this, row.conversationId, row.text)) {
+                val tmpId = row.tmpId
+                runInBackground { link.discardFailed(tmpId) }
+                toast(getString(R.string.imessage_finish_in_openbubbles))
+            } else {
+                toast(errorText(link, com.lightdecoder.imessage.IMessageErrors.NOT_INSTALLED))
+            }
+            return
+        }
         if (MessageStatus.canRetryLocally(row)) retryOrAsk(row) else toast(getString(ServiceUi.failedOnPhone(manager.service)))
     }
 
@@ -1718,7 +1796,14 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                     .setPositiveButton(R.string.chat_delete_for_me) { _, _ -> delete(forEveryone = false) }
             }
         } else {
-            builder.setMessage(if (linked) R.string.chat_delete_message_question else R.string.chat_delete_message_question_local)
+            builder.setMessage(
+                when {
+                    // An iMessage goes from this device only: OpenBubbles keeps it.
+                    link.service == ChatService.IMESSAGE -> R.string.imessage_delete_message_question
+                    linked -> R.string.chat_delete_message_question
+                    else -> R.string.chat_delete_message_question_local
+                }
+            )
                 .setPositiveButton(R.string.chat_action_delete) { _, _ -> delete(forEveryone = false) }
         }
         builder.setNegativeButton(android.R.string.cancel, null)
@@ -1790,11 +1875,37 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      */
     private fun callNumber(): String? {
         if (manager.service == ChatService.GMAIL) return null
+        return otherAddress()?.takeIf { it.count(Char::isDigit) >= MIN_CALL_DIGITS && !it.contains('@') }
+    }
+
+    /** The one other person's number (or, for iMessage, email address) in a one-to-one conversation. */
+    private fun otherAddress(): String? {
         val conv = conversation ?: return null
         if (conv.isGroup) return null
         val other = participants.filter { !it.isMe }.singleOrNull() ?: return null
-        val number = other.number.ifBlank { other.formattedNumber }.trim()
-        return number.takeIf { it.count(Char::isDigit) >= MIN_CALL_DIGITS }
+        return other.number.ifBlank { other.formattedNumber }.trim().takeIf { it.isNotEmpty() }
+    }
+
+    /**
+     * "Send iMessage" from a Messages conversation with Blue Bubbles on: the
+     * iMessage chat with the same person if one is stored here, else a new
+     * one in OpenBubbles.
+     */
+    private fun sendIMessage() {
+        val address = otherAddress()
+        if (address == null) {
+            toast(getString(R.string.imessage_no_address))
+            return
+        }
+        val iMessage = com.lightdecoder.imessage.IMessageManager.get(this)
+        lifecycleScope.launch {
+            val existing = withContext(Dispatchers.IO) { iMessage.conversationWith(address) }
+            if (existing != null) {
+                startActivity(RelayIntents.thread(this@ThreadActivity, existing, service = ChatService.IMESSAGE).setFlags(0))
+            } else if (!iMessage.startInOpenBubbles(this@ThreadActivity, address)) {
+                toast(errorText(iMessage, com.lightdecoder.imessage.IMessageErrors.NOT_INSTALLED))
+            }
+        }
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
@@ -1805,6 +1916,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     override fun onPrepareOptionsMenu(menu: Menu): Boolean {
         val conv = conversation
         menu.findItem(R.id.action_call)?.isVisible = callNumber() != null
+        menu.findItem(R.id.action_open_openbubbles)?.isVisible = manager.service == ChatService.IMESSAGE
+        menu.findItem(R.id.action_send_imessage)?.isVisible = manager.service == ChatService.MESSAGES &&
+            com.lightdecoder.imessage.IMessagePrefs.enabled(this) && conv != null && !conv.isGroup && otherAddress() != null
         val archived = conv?.folderEnum == Folder.ARCHIVE
         menu.findItem(R.id.action_archive)?.apply {
             isVisible = conv != null && (conv.folderEnum == Folder.INBOX || archived)
@@ -1823,7 +1937,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         menu.findItem(R.id.action_delete_conversation)?.isVisible = conv != null && !deleted
         menu.findItem(R.id.action_notify_read)?.apply {
             // Where the service says when a message is read, and read notifications are on at all.
-            isVisible = conv != null && !deleted && manager.service != ChatService.GMAIL &&
+            isVisible = conv != null && !deleted && manager.service != ChatService.GMAIL && manager.service != ChatService.IMESSAGE &&
                 com.lightdecoder.relay.ReadNotifyPrefs.enabled(this@ThreadActivity)
             isChecked = com.lightdecoder.relay.ReadNotifyPrefs.forConversation(this@ThreadActivity, manager.service, conversationId)
         }
@@ -1869,6 +1983,13 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             }
             R.id.action_delete_forever -> confirmDeleteForever()
             R.id.action_delete_conversation -> confirmDeleteConversation()
+            R.id.action_send_imessage -> sendIMessage()
+            R.id.action_open_openbubbles -> {
+                val opened = com.lightdecoder.imessage.IMessageReplies.open(this, conversationId) ||
+                    (manager as? com.lightdecoder.imessage.IMessageManager)?.handOff(this, conversationId, "") == true ||
+                    com.lightdecoder.imessage.OpenBubbles.launch(this)
+                if (!opened) toast(errorText(manager, com.lightdecoder.imessage.IMessageErrors.NOT_INSTALLED))
+            }
             R.id.action_link_status -> startActivity(ServiceUi.status(this, manager.service))
             R.id.action_notify_read -> {
                 val on = !com.lightdecoder.relay.ReadNotifyPrefs.forConversation(this, manager.service, conversationId)
@@ -1903,7 +2024,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         startActivity(
             Intent(this, ConversationsActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                .putExtra(RelayIntents.EXTRA_SERVICE, manager.service.key)
+                // iMessage chats are listed in the Messages tab.
+                .putExtra(RelayIntents.EXTRA_SERVICE, ConversationsActivity.tabServiceOf(manager.service).key)
         )
     }
 

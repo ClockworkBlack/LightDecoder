@@ -35,6 +35,13 @@ class MessagesAdapter(
     private val callbacks: Callbacks,
 ) : ListAdapter<ThreadItem, RecyclerView.ViewHolder>(DIFF) {
 
+    /**
+     * The user's own messages in iMessage's blue with white text, as on an
+     * iPhone: set for iMessage chats (Blue Bubbles). Set it before the first
+     * rows are submitted.
+     */
+    var blueOutgoing = false
+
     interface Callbacks {
         fun onMessageLongPress(row: MessageRow)
         fun onFailedTap(row: MessageRow)
@@ -77,6 +84,8 @@ class MessagesAdapter(
         val readTint = MaterialColors.getColor(view, androidx.appcompat.R.attr.colorPrimary)
         val errorTint = MaterialColors.getColor(view, androidx.appcompat.R.attr.colorError)
         val highlight = MaterialColors.getColor(view, com.google.android.material.R.attr.colorSecondaryContainer)
+        val blueBubble = androidx.core.content.ContextCompat.getColor(view.context, R.color.imessage_blue)
+        val onBlue = androidx.core.content.ContextCompat.getColor(view.context, R.color.on_imessage_blue)
 
         /** The "Reply" accessibility action added at the last bind, removed before the next. */
         var replyActionId = View.NO_ID
@@ -133,12 +142,18 @@ class MessagesAdapter(
         // Side and colours.
         (b.column.layoutParams as FrameLayout.LayoutParams).gravity = if (outgoing) Gravity.END else Gravity.START
         b.column.gravity = if (outgoing) Gravity.END else Gravity.START
-        val bubbleColor = if (outgoing) holder.outgoingBubble else holder.incomingBubble
-        val textColor = if (outgoing) holder.onOutgoing else holder.onIncoming
+        val blue = outgoing && blueOutgoing
+        val bubbleColor = when {
+            blue -> holder.blueBubble
+            outgoing -> holder.outgoingBubble
+            else -> holder.incomingBubble
+        }
+        val onOwn = if (blue) holder.onBlue else holder.onOutgoing
+        val textColor = if (outgoing) onOwn else holder.onIncoming
         // A picture or sticker on its own has no bubble: it sits on the conversation itself
         // (as on an iPhone), with its time under it in the conversation's own colours.
         val bare = isBare(item)
-        val metaColor = if (outgoing && !bare) holder.onOutgoing else holder.incomingMeta
+        val metaColor = if (outgoing && !bare) onOwn else holder.incomingMeta
         bindBubbleShape(holder, bare, outgoing)
         b.bubble.backgroundTintList = ColorStateList.valueOf(bubbleColor)
         b.body.setTextColor(textColor)
