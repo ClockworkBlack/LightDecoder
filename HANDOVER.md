@@ -23,6 +23,30 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.33 (versionCode 41) - several pictures at once, voice messages
+- **Several pictures in one go** (thread composer): the picker takes up to 10 pictures/videos
+  (`PickMultipleVisualMedia`); the attachment bar reads "3 attachments". Each picture goes out as a
+  message of its own, in the order picked, the text after the last, the reply on the first. Not one
+  multi-part request on purpose: in 0.5.1 the phone kept only one part of a picture+caption send, so a
+  message with several media parts would most likely arrive as one picture. That is also how Google
+  Messages itself sends several photos over RCS. In the thread, picture-only messages from the same
+  person within 3 minutes are drawn as one stack with one time line (`ThreadItem.Message.stackedWithNext`,
+  `ThreadItems.stacks`). Received messages that do carry several pictures already showed them all.
+  WhatsApp sends each picked file as its own message too; iMessage hand-off passes them all to OpenBubbles.
+- **Voice messages** (Google Messages conversations, and iMessage chats inside them via OpenBubbles):
+  the waveform button next to dictation records (RECORD_AUDIO, asked on first tap; `uses-feature`
+  microphone not required). `VoiceRecorder` = MediaRecorder AAC mono 44.1 kHz 32 kbps in .m4a, sent as
+  `audio/mp4` (Outbox maps .m4a to audio/mp4: some Android versions say audio/mpeg). Recording bar:
+  delete, red dot, timer, send. Under 1 s is not sent; max 10 min in RCS chats, 3 min otherwise (MMS);
+  leaving the screen throws a recording away. Files in `cache/voice`, purged after a day.
+- **Playing audio in the bubble**: any `audio/*` part (received or sent) shows play/pause, a bar that
+  can be moved while it plays, and the time (`VoicePlayer`, one at a time, pauses on onStop). Missing
+  files are downloaded through the link first (`audioFileFor`).
+- Tests: `ui/VoiceAndPicturesTest` (7). On-device Blue Bubbles test (`device-test.yml`) passed on an
+  Android 14 emulator (run 44414229977).
+- Not verified on a real phone yet: how Google's phone app labels an m4a sent from the web link
+  (expected: its own audio player), and the stack look with real pictures.
+
 ## 0.5.32 (versionCode 40) - texts to iPhones never go green
 - Owner's ask: texts to iPhone users must show blue on their iPhone. In a Messages conversation that has a
   companion iMessage chat (Blue Bubbles), send() never sends SMS/RCS any more: silently through

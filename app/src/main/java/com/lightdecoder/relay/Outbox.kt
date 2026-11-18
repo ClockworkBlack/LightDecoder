@@ -734,6 +734,8 @@ internal class Outbox(
         }
         if (!fromProvider.isNullOrBlank()) return fromProvider
         val extension = name.substringAfterLast('.', "").lowercase()
+        // Some Android versions call .m4a audio/mpeg (MP3): Google would label a voice message wrongly.
+        if (extension == "m4a") return "audio/mp4"
         return MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension).orEmpty()
     }
 

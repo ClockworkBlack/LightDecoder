@@ -155,7 +155,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private var highlightId: String? = null
 
     private var replyTarget: MessageRow? = null
-    private var attachment: Uri? = null
+    /** What the next message carries: pictures (several at once), a video or a voice message. */
+    private var attachments: List<Uri> = emptyList()
 
     /**
      * The long-press sheet and the open question (delete, or send again), if
@@ -174,8 +175,30 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private var remoteFailedAtMs = 0L
     private var scrollToBottomNext = false
 
-    private val pickMedia = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        if (uri != null) setAttachment(uri)
+    // Several pictures at once: they go out together, one after another, and show as one stack.
+    private val pickMedia = registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(MAX_ATTACHMENTS)) { uris ->
+        if (uris.isNotEmpty()) setAttachments((attachments + uris).distinct().take(MAX_ATTACHMENTS))
+    }
+
+    // --- voice messages ---
+
+    /** Plays voice messages inside their bubbles, one at a time. */
+    private val voicePlayer = VoicePlayer()
+
+    /** The recording under way, its file and when it started; null when not recording. */
+    private var recorder: VoiceRecorder? = null
+    private var recordingFile: File? = null
+    private var recordingStartedMs = 0L
+    private val recordingTick = object : Runnable {
+        override fun run() {
+            if (recorder == null) return
+            showRecordingTime()
+            binding.recordingTime.postDelayed(this, 500)
+        }
+    }
+
+    private val askMicrophone = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) startRecording() else toast(getString(R.string.chat_voice_permission_needed))
     }
 
     /** The conversation dictation was started in; a result for another one is dropped. */
@@ -243,11 +266,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             targetMessageId = intent.getStringExtra(RelayIntents.EXTRA_MESSAGE_ID)
         } else {
             windowSize = savedInstanceState.getInt(STATE_WINDOW, PAGE)
-            savedInstanceState.getString(STATE_ATTACHMENT)?.let { setAttachment(Uri.parse(it)) }
+            savedInstanceState.getStringArrayList(STATE_ATTACHMENTS)?.map(Uri::parse)?.takeIf { it.isNotEmpty() }?.let(::setAttachments)
         }
 
         setUpList()
         setUpComposer()
+        lifecycleScope.launch { voicePlayer.state.collect { adapter.updateVoiceViews(binding.messages, it) } }
         if (VoicePrefs.readNewAloud(this) && !reader.isAvailable) noteReaderUnavailable()
         savedInstanceState?.getString(STATE_REPLY_TO)?.let(::restoreReply)
         if (savedInstanceState == null) takeShared(intent)
@@ -295,6 +319,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         adapter = MessagesAdapter(media, this).also {
             it.blueOutgoing = service == ChatService.IMESSAGE
             it.blueFor = { row -> row.id in iMessageIds }
+            it.voiceDuration = voicePlayer::durationOf
+            it.voiceState = voicePlayer.state.value
         }
         binding.messages.adapter = adapter
         // Until the new link's state is in: cheap to ask, and nothing is tried while "offline".
@@ -351,6 +377,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             binding.input.setText("")
             clearReply()
             clearAttachment()
+            cancelRecording(quietly = true)
+            voicePlayer.release()
             submitSeq++
             pendingScrollTo = null
             if (otherService) switchService(service) else adapter.submitList(emptyList())
@@ -406,10 +434,13 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         ChatVisibility.leave(manager)
         ArchiveEvents.unregister(onArchiveChange)
         readerInstance?.stop()
+        voicePlayer.pause()
         super.onStop()
     }
 
     override fun onDestroy() {
+        cancelRecording(quietly = true)
+        voicePlayer.release()
         readerInstance?.shutdown()
         readerInstance = null
         super.onDestroy()
@@ -433,6 +464,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             MessageNotifier.setVisibleConversationId(manager.service, null)
         }
         companionId?.let { if (MessageNotifier.visibleConversationId(ChatService.IMESSAGE) == it) MessageNotifier.setVisibleConversationId(ChatService.IMESSAGE, null) }
+        // Nothing is recorded while the screen is not in front: a half-made recording is thrown away.
+        if (recorder != null && !isChangingConfigurations) cancelRecording(quietly = false)
         super.onPause()
     }
 
@@ -447,7 +480,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putInt(STATE_WINDOW, windowSize)
-        attachment?.let { outState.putString(STATE_ATTACHMENT, it.toString()) }
+        if (attachments.isNotEmpty()) outState.putStringArrayList(STATE_ATTACHMENTS, ArrayList(attachments.map(Uri::toString)))
         replyTarget?.takeIf { it.conversationId == conversationId }?.let { outState.putString(STATE_REPLY_TO, it.id) }
     }
 
@@ -457,6 +490,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         adapter = MessagesAdapter(media, this).also {
             it.blueOutgoing = manager.service == ChatService.IMESSAGE
             it.blueFor = { row -> row.id in iMessageIds }
+            it.voiceDuration = voicePlayer::durationOf
+            it.voiceState = voicePlayer.state.value
         }
         layoutManager = LinearLayoutManager(this).apply { stackFromEnd = true }
         binding.messages.layoutManager = layoutManager
@@ -994,6 +1029,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
         binding.stickers.setOnClickListener { showStickers() }
         binding.voiceInput.setOnClickListener { startDictation() }
+        binding.voiceMessage.setOnClickListener { onRecordTapped() }
+        binding.recordingCancel.setOnClickListener { cancelRecording(quietly = true) }
+        binding.recordingSend.setOnClickListener { finishRecording() }
         binding.attachmentRemove.setOnClickListener { clearAttachment() }
         binding.replyClose.setOnClickListener { clearReply() }
         binding.input.addTextChangedListener(object : TextWatcher {
@@ -1013,7 +1051,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val readOnly = conversation?.readOnly == true || deleted
         binding.readOnlyText.setText(if (deleted) R.string.chat_deleted_banner else R.string.chat_read_only)
         binding.readOnlyText.visibility = if (readOnly) View.VISIBLE else View.GONE
-        binding.composer.visibility = if (readOnly) View.GONE else View.VISIBLE
+        // While recording, the recording bar stands in for the composer.
+        binding.composer.visibility = if (readOnly || recorder != null) View.GONE else View.VISIBLE
         if (readOnly) {
             clearReply()
             clearAttachment()
@@ -1022,6 +1061,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         binding.attach.isEnabled = paired
         binding.stickers.isEnabled = paired
         binding.voiceInput.isEnabled = paired
+        binding.voiceMessage.isEnabled = paired
+        updateVoiceMessageButton()
+        if (readOnly || !paired) cancelRecording(quietly = true)
         binding.input.hint = getString(
             when {
                 !paired -> R.string.chat_compose_unpaired
@@ -1033,7 +1075,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     private fun updateSendEnabled() {
-        val hasContent = !binding.input.text.isNullOrBlank() || attachment != null
+        val hasContent = !binding.input.text.isNullOrBlank() || attachments.isNotEmpty()
         binding.send.isEnabled = paired && hasContent
         // The tint has no disabled state: dim it the way Material dims disabled controls.
         binding.send.alpha = if (binding.send.isEnabled) 1f else DISABLED_ALPHA
@@ -1044,7 +1086,154 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     /** The dictation button, only when some app can recognise speech. */
     private fun updateVoiceInput() {
         binding.voiceInput.visibility = if (Dictation.isAvailable(packageManager)) View.VISIBLE else View.GONE
+        updateVoiceMessageButton()
     }
+
+    // --- voice messages -------------------------------------------------------
+
+    /** Voice messages: in Google Messages conversations (and so to iMessage chats shown in them), on a phone with a mic. */
+    private fun updateVoiceMessageButton() {
+        val can = manager.service == ChatService.MESSAGES &&
+            packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_MICROPHONE)
+        binding.voiceMessage.visibility = if (can) View.VISIBLE else View.GONE
+    }
+
+    private fun onRecordTapped() {
+        if (!binding.voiceMessage.isEnabled || recorder != null) return
+        val granted = androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (granted) startRecording() else askMicrophone.launch(android.Manifest.permission.RECORD_AUDIO)
+    }
+
+    /** Where recordings are made; ones more than a day old (sent long ago, or left by a crash) are removed. */
+    private fun voiceDir(): File = File(cacheDir, "voice")
+
+    @androidx.annotation.VisibleForTesting
+    internal fun startRecording() {
+        if (recorder != null || !binding.voiceMessage.isEnabled) return
+        val now = System.currentTimeMillis()
+        voiceDir().listFiles()?.forEach { if (now - it.lastModified() > HAND_OFF_KEEP_MS) it.delete() }
+        val file = File(voiceDir(), "voice-${java.util.UUID.randomUUID()}.${VoiceRecorder.EXTENSION}")
+        val r = VoiceRecorder.factory(this)
+        // An MMS is small; an RCS chat takes much longer messages.
+        val maxMs = if (conversation?.isRcs == true) MAX_VOICE_RCS_MS else MAX_VOICE_MMS_MS
+        r.onMaxDuration = {
+            runOnUiThread {
+                if (recorder === r) {
+                    finishRecording()
+                    toast(getString(R.string.chat_voice_max_reached))
+                }
+            }
+        }
+        voicePlayer.pause()
+        if (!r.start(file, maxMs)) {
+            toast(getString(R.string.chat_voice_mic_busy))
+            return
+        }
+        recorder = r
+        recordingFile = file
+        recordingStartedMs = android.os.SystemClock.elapsedRealtime()
+        binding.composer.visibility = View.GONE
+        binding.recordingBar.visibility = View.VISIBLE
+        showRecordingTime()
+        binding.recordingTime.postDelayed(recordingTick, 500)
+    }
+
+    private fun showRecordingTime() {
+        val elapsed = (android.os.SystemClock.elapsedRealtime() - recordingStartedMs).toInt()
+        binding.recordingTime.text = getString(R.string.chat_voice_recording, VoicePlayer.clock(elapsed))
+    }
+
+    /** Stops recording and sends it (to this conversation), unless it is too short to be anything. */
+    @androidx.annotation.VisibleForTesting
+    internal fun finishRecording() {
+        val r = recorder ?: return
+        val file = recordingFile
+        val elapsed = android.os.SystemClock.elapsedRealtime() - recordingStartedMs
+        endRecordingUi()
+        if (elapsed < MIN_VOICE_MS) {
+            r.cancel()
+            toast(getString(R.string.chat_voice_too_short))
+            return
+        }
+        if (!r.stop() || file == null || !file.isFile) {
+            toast(getString(R.string.chat_voice_too_short))
+            return
+        }
+        sendVoice(file)
+    }
+
+    /** Stops recording and throws it away; [quietly] when the user asked for it (no notice needed). */
+    private fun cancelRecording(quietly: Boolean) {
+        val r = recorder ?: return
+        endRecordingUi()
+        r.cancel()
+        if (!quietly) toast(getString(R.string.chat_voice_discarded))
+    }
+
+    private fun endRecordingUi() {
+        recorder = null
+        recordingFile = null
+        binding.recordingTime.removeCallbacks(recordingTick)
+        binding.recordingBar.visibility = View.GONE
+        renderComposerState()
+    }
+
+    /** Sends a finished recording as a voice message: through OpenBubbles to an iMessage chat, else through Google Messages. */
+    private fun sendVoice(file: File) {
+        val id = conversationId
+        val uri = Uri.fromFile(file)
+        val companion = companionId
+        if (manager.service == ChatService.MESSAGES && companion != null) {
+            handOffToOpenBubbles(iMessageLink, companion, "", listOf(uri), clearComposer = false)
+            return
+        }
+        val replyTo = replyTarget?.takeIf { it.conversationId == id }?.id
+        clearReply()
+        scrollToBottomNext = true
+        val link = manager
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) { relayAttempt { link.sendMedia(id, uri, null, replyTo) } }
+                .onFailure { toast(errorText(link, it)) }
+        }
+    }
+
+    /** A voice message's file: the one already here, or downloaded now. Null (with a notice) if there is none. */
+    private suspend fun audioFileFor(row: MessageRow, part: MediaRow): File? {
+        val link = manager
+        listOf(part.localPath).firstOrNull { it.isNotEmpty() && File(it).isFile }?.let { return File(it) }
+        toast(getString(R.string.chat_media_downloading))
+        return relayAttempt { link.mediaFile(row.id, part.partId, thumbnail = false) }
+            .getOrElse {
+                val code = ChatErrors.codeOf(it)
+                toast(
+                    if (code == RelayException.NOT_CONNECTED) getString(ServiceUi.mediaNeedsConnection(link.service))
+                    else errorText(link, code)
+                )
+                return null
+            } ?: run {
+            toast(getString(R.string.chat_media_unavailable))
+            null
+        }
+    }
+
+    override fun onAudioTap(row: MessageRow, part: MediaRow) {
+        val key = VoicePlayer.keyOf(row.id, part.partId)
+        // Already loaded: play/pause at once, with no download.
+        if (voicePlayer.state.value.key == key) {
+            voicePlayer.toggle(key, File(part.localPath))
+            return
+        }
+        val forConversation = conversationId
+        lifecycleScope.launch {
+            val file = audioFileFor(row, part) ?: return@launch
+            if (conversationId != forConversation) return@launch
+            if (!voicePlayer.toggle(key, file)) toast(getString(R.string.chat_voice_cannot_play))
+        }
+    }
+
+    override fun onAudioSeek(row: MessageRow, part: MediaRow, positionMs: Int) =
+        voicePlayer.seekTo(VoicePlayer.keyOf(row.id, part.partId), positionMs)
 
     private fun startDictation() {
         if (!binding.input.isEnabled) return
@@ -1137,18 +1326,18 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     private fun send() {
         val text = binding.input.text?.toString()?.trim().orEmpty()
-        val file = attachment
-        if (text.isEmpty() && file == null) return
+        val files = attachments
+        if (text.isEmpty() && files.isEmpty()) return
         val id = conversationId
         // Blue Bubbles: to someone with an iMessage chat, everything goes as an iMessage (blue on their
         // iPhone), never as a green text: silently through OpenBubbles' Reply button when it has one,
         // else OpenBubbles opens with the message filled in, for one tap on send.
         val companion = companionId
-        if (manager.service == ChatService.MESSAGES && companion != null && (file != null || !sendsAsIMessage(text))) {
-            handOffToOpenBubbles(iMessageLink, companion, text, listOfNotNull(file), clearComposer = true)
+        if (manager.service == ChatService.MESSAGES && companion != null && (files.isNotEmpty() || !sendsAsIMessage(text))) {
+            handOffToOpenBubbles(iMessageLink, companion, text, files, clearComposer = true)
             return
         }
-        if (manager.service == ChatService.MESSAGES && companion != null && file == null && sendsAsIMessage(text)) {
+        if (manager.service == ChatService.MESSAGES && companion != null && files.isEmpty() && sendsAsIMessage(text)) {
             val im = iMessageLink
             scrollToBottomNext = true
             binding.input.setText("")
@@ -1161,8 +1350,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
         val iMessage = manager as? com.lightdecoder.imessage.IMessageManager
         // An iMessage with a picture, or to a chat with no Reply button to send through: OpenBubbles sends it.
-        if (iMessage != null && (file != null || !iMessage.canReply(id, text))) {
-            handOffToOpenBubbles(iMessage, id, text, listOfNotNull(file), clearComposer = true)
+        if (iMessage != null && (files.isNotEmpty() || !iMessage.canReply(id, text))) {
+            handOffToOpenBubbles(iMessage, id, text, files, clearComposer = true)
             return
         }
         // Only ever a message of this conversation (onReply checks too).
@@ -1176,8 +1365,20 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             // The outbox writes to the archive (and copies an attachment), so not on the main thread.
             val result = withContext(Dispatchers.IO) {
                 relayAttempt {
-                    if (file != null) link.sendMedia(id, file, text.ifEmpty { null }, replyTo)
-                    else link.sendText(id, text, replyTo)
+                    if (files.isEmpty()) {
+                        link.sendText(id, text, replyTo)
+                    } else {
+                        // Each picture as a message of its own, in the order picked (queued in turn, they go
+                        // out in it): the phone keeps only one part of a message with several. The text goes
+                        // with the last, the reply with the first.
+                        files.forEachIndexed { i, file ->
+                            link.sendMedia(
+                                id, file,
+                                text.ifEmpty { null }.takeIf { i == files.lastIndex },
+                                replyTo.takeIf { i == 0 },
+                            )
+                        }
+                    }
                 }
             }
             result.onFailure { toast(errorText(link, it)) }
@@ -1514,17 +1715,26 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     @androidx.annotation.VisibleForTesting
-    internal fun setAttachment(uri: Uri) {
-        attachment = uri
+    internal fun setAttachment(uri: Uri) = setAttachments(listOf(uri))
+
+    /** The composer's attachments: the first one's picture, and its name or how many there are. */
+    @androidx.annotation.VisibleForTesting
+    internal fun setAttachments(uris: List<Uri>) {
+        if (uris.isEmpty()) return clearAttachment()
+        attachments = uris
         binding.attachmentBar.visibility = View.VISIBLE
-        binding.attachmentName.text = getString(R.string.chat_attachment_ready)
+        val several = uris.size > 1
+        binding.attachmentName.text =
+            if (several) resources.getQuantityString(R.plurals.chat_attachments, uris.size, uris.size)
+            else getString(R.string.chat_attachment_ready)
         binding.attachmentThumb.setImageResource(R.drawable.ic_image_placeholder)
         updateSendEnabled()
         val side = (ATTACHMENT_THUMB_DP * resources.displayMetrics.density).toInt()
+        val first = uris.first()
         lifecycleScope.launch {
-            val (name, preview) = withContext(Dispatchers.IO) { describeAttachment(uri, side) }
-            if (attachment != uri) return@launch
-            name?.let { binding.attachmentName.text = it }
+            val (name, preview) = withContext(Dispatchers.IO) { describeAttachment(first, side) }
+            if (attachments != uris) return@launch
+            if (!several) name?.let { binding.attachmentName.text = it }
             preview?.let { binding.attachmentThumb.setImageBitmap(it) }
         }
     }
@@ -1559,7 +1769,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     private fun clearAttachment() {
-        attachment = null
+        attachments = emptyList()
         binding.attachmentBar.visibility = View.GONE
         binding.attachmentThumb.setImageDrawable(null)
         updateSendEnabled()
@@ -2241,7 +2451,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     companion object {
         private const val HAND_OFF_KEEP_MS = 24 * 60 * 60 * 1000L
         private const val STATE_WINDOW = "window"
-        private const val STATE_ATTACHMENT = "attachment"
+        private const val STATE_ATTACHMENTS = "attachments"
 
         /** At most this many pictures are taken in at once as stickers. */
         private const val MAX_STICKER_IMPORT = 50
@@ -2279,6 +2489,14 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         private const val REMOTE_RETRY_MS = 30_000L
         private const val MAX_PREVIEW_READ = 32 * 1024 * 1024
         private const val ATTACHMENT_THUMB_DP = 96
+
+        /** Most pictures picked for one message. */
+        private const val MAX_ATTACHMENTS = 10
+
+        /** Voice messages: shorter than this is a slip of the finger; the longest for an RCS chat and for MMS. */
+        private const val MIN_VOICE_MS = 1_000L
+        private const val MAX_VOICE_RCS_MS = 10 * 60 * 1000
+        private const val MAX_VOICE_MMS_MS = 3 * 60 * 1000
         private const val DISABLED_ALPHA = 0.38f
 
         /** How far behind this phone's clock a message may be stamped and still count as arriving now. */

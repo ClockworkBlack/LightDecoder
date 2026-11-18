@@ -29,6 +29,12 @@ sealed class ThreadItem {
         val quote: Quote?,
         val showSender: Boolean,
         val highlighted: Boolean,
+        /**
+         * Pictures sent together: this message and the next are only pictures,
+         * from the same person, moments apart. They are drawn as one stack,
+         * with the time under the last picture only.
+         */
+        val stackedWithNext: Boolean = false,
     ) : ThreadItem() {
         /**
          * For DiffUtil. MessageRow's byte arrays compare by reference, so a
@@ -39,6 +45,7 @@ sealed class ThreadItem {
             quote == other.quote &&
                 showSender == other.showSender &&
                 highlighted == other.highlighted &&
+                stackedWithNext == other.stackedWithNext &&
                 row.copy(media = emptyList()) == other.row.copy(media = emptyList()) &&
                 row.media.map(::mediaSignature) == other.row.media.map(::mediaSignature)
     }
@@ -73,7 +80,7 @@ object ThreadItems {
         val usedKeys = HashSet<String>()
         var lastDay = Long.MIN_VALUE
         var previous: MessageRow? = null
-        for (row in messages) {
+        for ((index, row) in messages.withIndex()) {
             val day = dayStart(row.timestampMs)
             val newDay = day != lastDay
             if (newDay) {
@@ -97,12 +104,35 @@ object ThreadItems {
                     quote = if (row.replyToId.isNotEmpty()) quotes[row.replyToId] else null,
                     showSender = showSender,
                     highlighted = highlightId != null && row.id == highlightId,
+                    stackedWithNext = messages.getOrNull(index + 1)?.let { stacks(row, it, dayStart) } == true,
                 )
             )
             previous = row
         }
         return items
     }
+
+    /**
+     * Whether [next] continues a stack of pictures [row] is in: both only
+     * pictures (no text, subject or reply), the same side and sender, the
+     * same day and at most [STACK_GAP_MS] apart. Several pictures picked at
+     * once go out as messages of their own, one after another (the phone
+     * keeps only one part of a message with several); this shows them as
+     * the one message they were sent as.
+     */
+    fun stacks(row: MessageRow, next: MessageRow, dayStart: (Long) -> Long): Boolean =
+        picturesOnly(row) && picturesOnly(next) &&
+            row.direction == next.direction && row.isOutgoing == next.isOutgoing && row.senderId == next.senderId &&
+            next.timestampMs >= row.timestampMs && next.timestampMs - row.timestampMs <= STACK_GAP_MS &&
+            dayStart(row.timestampMs) == dayStart(next.timestampMs)
+
+    /** Only pictures or video stills: no text, subject or reply quote. */
+    fun picturesOnly(row: MessageRow): Boolean =
+        row.media.isNotEmpty() && row.media.all(::isVisualPart) && row.text.isEmpty() &&
+            row.subject.isBlank() && row.replyToId.isEmpty()
+
+    /** Pictures sent together arrive within this of each other. */
+    const val STACK_GAP_MS = 3 * 60 * 1000L
 
     /** A one-line preview of a message for quotes and the reply bar; [mediaLabel] when it has no text. */
     fun preview(row: MessageRow, mediaLabel: String): String {
@@ -116,6 +146,11 @@ object ThreadItems {
 
     private const val PREVIEW_CHARS = 140
 }
+
+/** A picture, video or sticker (drawn as an image), not a file, voice message or other audio. */
+internal fun isVisualPart(part: MediaRow): Boolean =
+    part.mime.startsWith("image/") || part.mime.startsWith("video/") ||
+        (part.mime.isEmpty() && (part.thumbMediaId.isNotEmpty() || part.width > 0 || part.inlineData.isNotEmpty()))
 
 /** What of a media part changes how it is drawn. */
 internal fun mediaSignature(m: MediaRow): List<Any> = listOf(

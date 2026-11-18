@@ -419,6 +419,22 @@
 
     <!-- Voice: dictation in the composer, reading messages aloud -->
     <string name="chat_voice_input">Dictate a message</string>
+
+    <!-- Voice messages -->
+    <string name="chat_voice_record">Record a voice message</string>
+    <string name="chat_voice_recording">Recording %1$s</string>
+    <string name="chat_voice_cancel">Delete recording</string>
+    <string name="chat_voice_send">Send voice message</string>
+    <string name="chat_voice_too_short">Too short to send. Tap the waveform, speak, then tap send.</string>
+    <string name="chat_voice_mic_busy">The microphone could not be used. Another app may be using it.</string>
+    <string name="chat_voice_permission_needed">LightDecoder needs the microphone to record voice messages. You can allow it in Android settings.</string>
+    <string name="chat_voice_max_reached">That is the longest a voice message can be. It has been sent.</string>
+    <string name="chat_voice_discarded">Recording stopped and deleted</string>
+    <string name="chat_voice_play">Play voice message</string>
+    <string name="chat_voice_pause">Pause voice message</string>
+    <string name="chat_voice_position">Position in voice message</string>
+    <string name="chat_voice_message">Voice message</string>
+    <string name="chat_voice_cannot_play">This voice message could not be played</string>
     <string name="chat_voice_prompt">Say your message</string>
     <string name="chat_voice_unavailable">Speech recognition is not available.</string>
     <string name="chat_action_read_aloud">Read aloud</string>
