@@ -1,0 +1,41 @@
+# Codemagic (codemagic.io) builds. GitHub's macOS runners do not pick up this account's jobs,
+# so the iPhone relay app is built here instead.
+workflows:
+  validation-relay:
+    name: Patched ValidationRelay (Blue Bubbles iPhone)
+    # The iPhone relay app OpenBubbles uses (JJTech0130/ValidationRelay), with
+    # tools/validation-relay/lightdecoder.patch applied (see tools/validation-relay/README.md).
+    # The .tipa is for installing with TrollStore on the owner's own iPhone; it is not released.
+    instance_type: mac_mini_m2
+    max_build_duration: 30
+    environment:
+      xcode: latest
+    scripts:
+      - name: Fetch ValidationRelay and apply the patch
+        script: |
+          set -e
+          git clone https://github.com/JJTech0130/ValidationRelay vr
+          cd vr
+          git checkout e1b74fbc92a1664dd4fafec526f59acd8f5e6425
+          git apply ../tools/validation-relay/lightdecoder.patch
+      - name: Install ldid
+        script: brew install ldid
+      - name: Build and fake-sign for TrollStore
+        script: |
+          set -e
+          cd vr
+          xcodebuild -configuration Release -derivedDataPath DerivedData \
+            -destination 'generic/platform=iOS' -scheme ValidationRelay \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            -skipPackagePluginValidation | tee ../xcodebuild.log | grep -E "error:|warning: .*ValidationRelay|BUILD" || true
+          test "${PIPESTATUS[0]}" -eq 0 || { grep -B2 -A6 "error:" ../xcodebuild.log | head -80; exit 1; }
+          APP=DerivedData/Build/Products/Release-iphoneos/ValidationRelay.app
+          test -d "$APP"
+          # The entitlements it needs to read the iPhone's serial number; TrollStore keeps them.
+          ldid -SValidationRelay/ValidationRelay.entitlements -Idev.jjtech.experiments.ValidationRelay "$APP/ValidationRelay"
+          mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry ../ValidationRelay-LightDecoder.tipa Payload
+    artifacts:
+      - ValidationRelay-LightDecoder.tipa
+      - xcodebuild.log

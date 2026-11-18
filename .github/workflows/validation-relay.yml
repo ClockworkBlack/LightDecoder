@@ -8,13 +8,10 @@ name: Build patched ValidationRelay
 # The .tipa is for installing with TrollStore on the owner's own iPhone; it is kept for 3 days
 # and never released.
 
+# By hand only: GitHub's macOS runners have not picked up this account's jobs (2026-11-17/18).
+# codemagic.yaml builds the same thing on Codemagic.
 on:
   workflow_dispatch:
-  push:
-    branches: [ccr-4fee5e9f-jrrlhu]
-    paths:
-      - "tools/validation-relay/**"
-      - ".github/workflows/validation-relay.yml"
 
 permissions:
   contents: read
