@@ -517,7 +517,7 @@ class ConversationsActivity : AppCompatActivity() {
                 val own = from.repo.conversations(shown).map { ConversationItem(it, titleFor(from.repo, it), from.service) }
                 val extra = if (!iMessageHere) emptyList() else runCatching { iMessage!!.repo.conversations(shown) }.getOrDefault(emptyList())
                     .map { ConversationItem(it, titleFor(iMessage!!.repo, it), iMessage.service) }
-                val rows = if (extra.isEmpty()) own else mergeByTime(own, extra)
+                val rows = if (extra.isEmpty()) own else foldIn(own, extra, from.repo, iMessage!!)
                 val ownEmpty = from.repo.conversations(null, 1).isEmpty()
                 val iMessageEmpty = iMessage == null || runCatching { iMessage.repo.conversations(null, 1).isEmpty() }.getOrDefault(true)
                 rows to (ownEmpty to (ownEmpty && iMessageEmpty))
@@ -805,6 +805,46 @@ class ConversationsActivity : AppCompatActivity() {
         /** The tab a service's conversations are listed in: iMessage has none of its own and is in Messages. */
         internal fun tabServiceOf(service: ChatService): ChatService =
             if (service == ChatService.IMESSAGE) ChatService.MESSAGES else service
+
+        /**
+         * The Messages rows with the iMessage chats folded in: a chat whose
+         * person has a Messages conversation is shown as that conversation
+         * (its newest message, time and unread mark taken over when newer),
+         * as on an iPhone; the rest are rows of their own. Runs on IO.
+         */
+        private fun foldIn(
+            own: List<ConversationItem>,
+            iMessages: List<ConversationItem>,
+            messagesRepo: ArchiveRepository,
+            iMessage: ChatBackend,
+        ): List<ConversationItem> {
+            val byAddress = HashMap<String, ConversationItem>()
+            for (item in iMessages) {
+                if (item.row.isGroup) continue
+                val key = (iMessage as? com.lightdecoder.imessage.IMessageManager)?.addressOf(item.row.id)
+                    ?.let(com.lightdecoder.imessage.IMessageAddress::key) ?: continue
+                byAddress.putIfAbsent(key, item)
+            }
+            if (byAddress.isEmpty()) return mergeByTime(own, iMessages)
+            val folded = HashSet<String>()
+            val merged = own.map { item ->
+                if (item.row.isGroup) return@map item
+                val key = BlueBubblesLinks.addressKey(runCatching { messagesRepo.participants(item.row.id) }.getOrDefault(emptyList()))
+                val im = key?.let { byAddress[it] } ?: return@map item
+                folded += im.row.id
+                val newer = im.row.lastMessageTs > item.row.lastMessageTs
+                item.copy(
+                    row = item.row.copy(
+                        unread = item.row.unread || im.row.unread,
+                        lastMessageTs = maxOf(item.row.lastMessageTs, im.row.lastMessageTs),
+                        snippet = if (newer) im.row.snippet else item.row.snippet,
+                        snippetFromMe = if (newer) im.row.snippetFromMe else item.row.snippetFromMe,
+                        snippetSender = if (newer) im.row.snippetSender else item.row.snippetSender,
+                    ),
+                )
+            }
+            return mergeByTime(merged, iMessages.filter { it.row.id !in folded })
+        }
 
         /**
          * Two services' rows as one list, in the archive's own order: pinned

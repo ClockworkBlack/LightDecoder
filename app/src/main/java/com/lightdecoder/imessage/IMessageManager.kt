@@ -310,7 +310,7 @@ class IMessageManager private constructor(
     }
 
     /** The other person's number or email address in a stored one-to-one chat. */
-    private fun addressOf(conversationId: String): String? {
+    fun addressOf(conversationId: String): String? {
         val conversation = runCatching { repo.conversation(conversationId) }.getOrNull()
         if (conversation?.isGroup == true) return null
         return runCatching { repo.participants(conversationId) }.getOrDefault(emptyList())

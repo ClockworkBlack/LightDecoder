@@ -42,6 +42,9 @@ class MessagesAdapter(
      */
     var blueOutgoing = false
 
+    /** Which of the user's own messages are iMessages, in a conversation that shows both kinds (Blue Bubbles). */
+    var blueFor: (MessageRow) -> Boolean = { false }
+
     interface Callbacks {
         fun onMessageLongPress(row: MessageRow)
         fun onFailedTap(row: MessageRow)
@@ -142,7 +145,7 @@ class MessagesAdapter(
         // Side and colours.
         (b.column.layoutParams as FrameLayout.LayoutParams).gravity = if (outgoing) Gravity.END else Gravity.START
         b.column.gravity = if (outgoing) Gravity.END else Gravity.START
-        val blue = outgoing && blueOutgoing
+        val blue = outgoing && (blueOutgoing || blueFor(row))
         val bubbleColor = when {
             blue -> holder.blueBubble
             outgoing -> holder.outgoingBubble

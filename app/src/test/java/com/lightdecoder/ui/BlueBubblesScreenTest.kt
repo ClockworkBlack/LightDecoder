@@ -227,23 +227,87 @@ class BlueBubblesScreenTest {
     }
 
     @Test
-    fun aMessagesConversationOffersItsPersonsIMessageChat() {
+    fun aPersonsIMessagesAreInTheirMessagesConversationNotARowOfTheirOwn() {
         two.env.pairedManager()
         IMessagePrefs.setEnabled(two.app, true)
-        seedIMessage()
-        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", number = "+1 555-123-4567")
-        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
-            two.settle()
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        two.seedIncoming(ChatService.MESSAGES, "sms1", "c1", "A text", ts = 1_000)
+        seedIMessage("An iMessage", ts = 5_000)
+        launchList().use { scenario ->
+            scenario.waitFor("one row for Alice") { titles(it) == listOf("Alice") }
             scenario.onActivity { activity ->
-                val item = menu(activity).findItem(R.id.action_send_imessage)
-                assertTrue(item.isVisible)
-                activity.onOptionsItemSelected(item)
+                val item = (activity.findViewById<RecyclerView>(R.id.list).adapter as ConversationsAdapter).currentList.single()
+                assertEquals(ChatService.MESSAGES, item.service)
+                assertEquals("the newer iMessage is its last message", "An iMessage", item.row.snippet)
             }
-            scenario.waitFor("the iMessage chat opened") { shadowOf(it).peekNextStartedActivity() != null }
+        }
+    }
+
+    @Test
+    fun theMessagesConversationShowsTheIMessagesInBlueAndSendsAsIMessage() {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        two.seedIncoming(ChatService.MESSAGES, "sms1", "c1", "A text", ts = 1_000)
+        seedIMessage("An iMessage", ts = 5_000)
+        two.seedOutgoing(ChatService.MESSAGES, "sms2", "c1", "My text", ts = 2_000)
+        iMessage.record(
+            CapturedIMessageChat(ALICE, "m1", "Alice", false, "+15551234567", listOf(CapturedIMessage("", "", true, "My iMessage", 6_000))),
+            live = false,
+        )
+        // OpenBubbles' notification offered a Reply button.
+        val replies = ArrayList<String>()
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: android.content.Context, intent: Intent) {
+                replies += android.app.RemoteInput.getResultsFromIntent(intent)
+                    ?.getCharSequence(com.lightdecoder.imessage.OpenBubblesTestNotifications.REPLY_KEY).toString()
+            }
+        }
+        androidx.core.content.ContextCompat.registerReceiver(
+            two.app, receiver, android.content.IntentFilter(com.lightdecoder.imessage.OpenBubblesTestNotifications.REPLY_ACTION),
+            androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        val reply = com.lightdecoder.imessage.OpenBubblesTestNotifications.replyAction(two.app)
+        com.lightdecoder.imessage.IMessageReplies.update(
+            ALICE, com.lightdecoder.imessage.IMessageAction(reply.actionIntent!!, arrayOf(android.app.RemoteInput.Builder("text_reply").build())),
+            null, null, "m1",
+        )
+        try {
+            ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+                scenario.waitFor("texts and iMessages together") { shownTexts(it) == listOf("A text", "My text", "An iMessage", "My iMessage") }
+                scenario.onActivity { activity ->
+                    val adapter = activity.findViewById<RecyclerView>(R.id.messages).adapter as MessagesAdapter
+                    val rows = adapter.currentList.filterIsInstance<com.lightdecoder.ui.chat.ThreadItem.Message>().map { it.row }
+                    assertTrue("my iMessage is blue", adapter.blueFor(rows.single { it.text == "My iMessage" }))
+                    assertFalse("my text is not", adapter.blueFor(rows.single { it.text == "My text" }))
+                    assertEquals(activity.getString(R.string.imessage_compose_hint), activity.findViewById<EditText>(R.id.input).hint.toString())
+                    assertFalse("its iMessages are already here", menu(activity).findItem(R.id.action_send_imessage).isVisible)
+                    activity.findViewById<EditText>(R.id.input).setText("Blue one")
+                    activity.findViewById<View>(R.id.send).performClick()
+                }
+                scenario.waitFor("sent as an iMessage") {
+                    org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                    replies == listOf("Blue one")
+                }
+                scenario.waitFor("shown in blue") { shownTexts(it).last() == "Blue one" }
+            }
+        } finally {
+            two.app.unregisterReceiver(receiver)
+        }
+    }
+
+    @Test
+    fun anIMessageNotificationOpensThePersonsMessagesConversation() {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", number = "+1 555-123-4567")
+        seedIMessage()
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, ALICE, service = ChatService.IMESSAGE).setFlags(0)).use { scenario ->
+            scenario.waitFor("moved to Messages") { shadowOf(it).peekNextStartedActivity() != null }
             scenario.onActivity { activity ->
-                val started = shadowOf(activity).nextStartedActivity
-                assertEquals(ChatService.IMESSAGE, RelayIntents.serviceOf(started))
-                assertEquals(ALICE, started.getStringExtra(RelayIntents.EXTRA_CONVERSATION_ID))
+                val moved = shadowOf(activity).nextStartedActivity
+                assertEquals(ChatService.MESSAGES, RelayIntents.serviceOf(moved))
+                assertEquals("c1", moved.getStringExtra(RelayIntents.EXTRA_CONVERSATION_ID))
             }
         }
     }
@@ -297,6 +361,10 @@ class BlueBubblesScreenTest {
             onActivity { ok = condition(it) }
             ok
         }
+
+    private fun shownTexts(activity: Activity): List<String> =
+        ((activity.findViewById<RecyclerView>(R.id.messages).adapter as MessagesAdapter).currentList)
+            .filterIsInstance<com.lightdecoder.ui.chat.ThreadItem.Message>().map { it.row.text }
 
     private fun titles(activity: Activity): List<String> =
         (activity.findViewById<RecyclerView>(R.id.list).adapter as ConversationsAdapter).currentList.map { it.title }

@@ -23,6 +23,23 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.31 (versionCode 39) - Blue Bubbles: one conversation per person, iPhone-style
+- Owner's ask: iMessages in the SAME chats as texts, shown blue, not separate chats.
+- `ui/chat/BlueBubblesLinks` matches an iMessage chat to a Messages 1:1 conversation by the other
+  person's address (`IMessageAddress.key`: email lower-case, phone = last 10 digits). The archives stay
+  separate; only the screens merge.
+- ThreadActivity (Messages conversation): `companionId` = the matching iMessage chat; loadNow also reads
+  its rows (from as far back as the texts shown, when the window is full) and interleaves them by time;
+  `iMessageIds` + `MessagesAdapter.blueFor` colour the user's iMessages blue; per-message actions go to
+  `backendFor(row)`; a text goes as an iMessage when `sendsAsIMessage(text)` (the companion has a Reply
+  button and it is not a repeat), else as a normal text; the hint says "iMessage" then. The companion is
+  marked read with the conversation and counts as on screen for notifications. An iMessage thread opened
+  by itself (a notification) moves to the matching Messages conversation (SINGLE_TOP intent).
+- ConversationsActivity.foldIn: a matched iMessage chat is not its own row; its newest message, time and
+  unread fold into the Messages row. Unmatched iMessage chats (and groups) stay rows marked iMessage.
+- Pictures still hand off to OpenBubbles only from an iMessage-only chat; in a merged conversation a
+  picture goes as MMS/RCS. Next version: 0.5.32 / 40.
+
 ## 0.5.30 (versionCode 38) - Blue Bubbles (iMessage inside the Messages tab)
 Owner's ask (2026-11-18): a white checkbox "Blue Bubbles" in the Messages tab's overflow menu (between
 "Refresh from phone" and "Link settings") so the Messages tab itself sends and receives iMessages; NOT a
