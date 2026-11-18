@@ -53,6 +53,9 @@ enum class Capability {
 
     /** A message can be deleted for everyone in the conversation, not only here. */
     DELETE_FOR_EVERYONE,
+
+    /** The text of one's own message can be changed after it was sent, for everyone. */
+    EDIT,
 }
 
 /** Whether someone is online now; [lastSeenMs] (epoch ms) is 0 when it is not known. */

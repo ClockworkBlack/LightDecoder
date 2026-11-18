@@ -169,7 +169,7 @@ class WaManager private constructor(
      * full-size requests, no "use here", no subjects; and no new groups,
      * which the bridge does not create.
      */
-    override val capabilities: Set<Capability> = setOf(Capability.PRESENCE, Capability.DELETE_FOR_EVERYONE)
+    override val capabilities: Set<Capability> = setOf(Capability.PRESENCE, Capability.DELETE_FOR_EVERYONE, Capability.EDIT)
 
     /** Whether a link is stored, as far as known without the bridge ([WaPrefs.link]); the bridge corrects it once loaded. */
     @Volatile
@@ -1094,12 +1094,28 @@ class WaManager private constructor(
     }
 
     /**
+     * Changes the text of one of the user's own sent messages, for everyone
+     * ([Capability.EDIT]). WhatsApp takes it only for a while after sending,
+     * and only for a message that is text alone; the new text arrives in the
+     * archive as the bridge's message event.
+     */
+    suspend fun editMessage(messageId: String, text: String) {
+        if (!paired) notLinked()
+        withContext(Dispatchers.IO) {
+            val b = requireLinkedBridge()
+            val row = repo.message(messageId) ?: throw RelayException(RelayException.NOT_FOUND, "message not found")
+            b.editText(row.conversationId, messageId, text.trim())
+        }
+    }
+
+    /**
      * Deletes a conversation here, with its messages, media and queued
      * sends. The bridge cannot delete a chat on the phone, so WhatsApp on
      * the phone keeps it; here it stays deleted until a new message arrives
      * in it.
      */
     override suspend fun deleteConversation(conversationId: String) {
+        com.lightdecoder.chat.ShareShortcuts.remove(appContext, ChatService.WHATSAPP, conversationId)
         deleteLocally {
             if (paired) forgetChat(conversationId)
             repo.deleteConversationLocal(conversationId)
@@ -1594,6 +1610,7 @@ class WaManager private constructor(
     private fun wipeArchive() {
         gate.wipe { repo.clearAll() }
         runCatching { com.lightdecoder.reactions.ReadTimes.get(appContext).clear(ChatService.WHATSAPP) }
+        com.lightdecoder.chat.ShareShortcuts.removeAll(appContext, ChatService.WHATSAPP)
         WaPrefs.setArchiveOwner(appContext, "")
         synchronized(deletedChats) {
             deletedChats.clear()

@@ -300,6 +300,11 @@
     <!-- TalkBack action on a bubble for each link in its text; %1$s is the link as shown. -->
     <string name="chat_open_link">Open link: %1$s</string>
     <string name="chat_action_copy">Copy text</string>
+    <string name="chat_action_edit">Edit</string>
+    <string name="chat_edit_title">Edit message</string>
+    <string name="chat_edit_note">Everyone in the conversation sees the new text. WhatsApp marks the message as edited.</string>
+    <string name="chat_edit_save">Save</string>
+    <string name="chat_edit_too_late">This message can no longer be edited.</string>
     <string name="chat_action_retry">Try sending again</string>
     <string name="chat_action_discard">Discard</string>
     <string name="chat_delete_message_question">Delete this message? It is deleted on your phone too.</string>

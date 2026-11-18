@@ -14,6 +14,18 @@ import com.lightdecoder.databinding.ItemConversationBinding
 /** One row of the list: the stored conversation plus the title worked out for it. */
 data class ConversationItem(val row: ConversationRow, val title: String)
 
+/** What a conversation is called in a list: its name, else the people in it. */
+internal object ConversationTitles {
+    /** Reads the participants when the conversation has no name: not on the main thread. */
+    fun of(context: android.content.Context, repo: com.lightdecoder.archive.ArchiveRepository, row: ConversationRow): String {
+        if (row.name.isNotBlank()) return row.name
+        val people = repo.participants(row.id).filter { !it.isMe }
+            .map { it.name.ifBlank { it.formattedNumber.ifBlank { it.number } } }
+            .filter { it.isNotBlank() }
+        return if (people.isEmpty()) context.getString(R.string.chat_untitled) else people.joinToString(", ")
+    }
+}
+
 /** The conversation list: avatar, name, last message, time, unread dot, pin and mute marks. */
 class ConversationsAdapter(
     private val onOpen: (ConversationItem) -> Unit,

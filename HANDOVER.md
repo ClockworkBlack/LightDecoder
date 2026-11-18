@@ -23,6 +23,29 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.29 (versionCode 37) - share to LightDecoder, edit a WhatsApp message
+- **Share target.** `ui/share/ShareActivity` (exported) takes ACTION_SEND (text, image, video,
+  audio) and SEND_MULTIPLE (image, video): pick a linked service and a conversation. One file
+  (and any text) opens the thread with it in the composer (`RelayIntents.threadWithShared`,
+  `ThreadActivity.takeShared`); several files are sent after one question. Shared files are copied
+  to `cache/shared-in/` first (`SharedContent.copyIn`, kept a day), because the sharing app's
+  grant ends with the share screen. Only other apps' `content:` uris are taken: a `file:` path or
+  a uri of the app's own provider could name private files. `ViewerActivity`'s older "Open with
+  LightDecoder" entry for pictures is still there, so pictures show two entries.
+- **Direct share.** `chat/ShareShortcuts` pushes a long-lived shortcut for a conversation when the
+  user sends to it from the thread or the share screen (`res/xml/shortcuts.xml`, meta-data on
+  InboxActivity); Android puts them in the share sheet's top row and under the launcher icon.
+  Removed on deleteConversation and wipeArchive. Messenger and Discord cannot be targets (no
+  backend to send through).
+- **Edit (WhatsApp only).** `WABridge.EditText` (whatsmeow `BuildEdit`) -> `WaBridge.editText` ->
+  `WaManager.editMessage`; `Capability.EDIT`; "Edit" in the message sheet when `EditRule.canEdit`
+  (own, text only, under 15 minutes; the bridge allows whatsmeow's 20). The archive has no
+  "edited" mark yet. **Unsend already existed** for WhatsApp: Delete -> "Delete for everyone".
+- **Google Messages cannot edit or unsend**: libgm v0.2610.0 has no such action in its protocol
+  (ActionType has DELETE_MESSAGE only, which deletes on the user's own phone). Not something to
+  add without the protocol.
+- None of this was tried on a phone. Next version: 0.5.30 / 38.
+
 ## 0.5.28 (versionCode 36) - Smart cut: the full U-2-Net
 - The owner chose "Model B": the full U-2-Net (Apache-2.0, 168 MB, sha256 8d10d2f3...2b491, from
   rembg's release assets) now finds objects instead of U-2-Net-p. It is over GitHub's 100 MB file

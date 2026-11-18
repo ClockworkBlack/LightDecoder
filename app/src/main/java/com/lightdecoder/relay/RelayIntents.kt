@@ -63,6 +63,23 @@ object RelayIntents {
             .putExtra(EXTRA_SERVICE, service.key)
             .apply { if (messageId != null) putExtra(EXTRA_MESSAGE_ID, messageId) }
 
+    /** Text for the composer of the thread an intent opens: something another app shared ([threadWithShared]). */
+    const val EXTRA_SHARED_TEXT = "com.lightdecoder.extra.SHARED_TEXT"
+
+    /** A uri (as a string) to attach in the thread an intent opens ([threadWithShared]). */
+    const val EXTRA_SHARED_STREAM = "com.lightdecoder.extra.SHARED_STREAM"
+
+    /**
+     * [thread], with what another app shared put in its composer for the
+     * user to send: [text], and [attachment] (a uri the app itself can read
+     * for as long as the thread may hold it).
+     */
+    fun threadWithShared(context: Context, conversationId: String, service: ChatService, text: String, attachment: Uri?): Intent =
+        thread(context, conversationId, service = service).apply {
+            if (text.isNotEmpty()) putExtra(EXTRA_SHARED_TEXT, text)
+            if (attachment != null) putExtra(EXTRA_SHARED_STREAM, attachment.toString())
+        }
+
     /** Google Messages: pairing. */
     fun setup(context: Context): Intent = activity(context, RelaySetupActivity::class.java)
 

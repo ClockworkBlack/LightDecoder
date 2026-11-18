@@ -79,6 +79,41 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- The share target the conversations in Android's share sheet belong to (chat.ShareShortcuts). -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity>
+
+        <!--
+            "LightDecoder" in Android's share sheet: text, pictures, videos and
+            sound from other apps, sent to a conversation picked here. Exported
+            so other apps can share to it; it takes only the standard share
+            extras and other apps' content: uris, and sends nothing until the
+            user has picked a conversation. Out of recents: it belongs to the
+            share, not to the app's own task.
+        -->
+        <activity
+            android:name=".ui.share.ShareActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:taskAffinity=""
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="video/*" />
+                <data android:mimeType="audio/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="video/*" />
+            </intent-filter>
         </activity>
 
         <!-- About > Licences: NOTICE and the licence texts in the app's assets. -->

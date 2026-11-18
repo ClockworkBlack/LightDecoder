@@ -226,6 +226,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         setUpComposer()
         if (VoicePrefs.readNewAloud(this) && !reader.isAvailable) noteReaderUnavailable()
         savedInstanceState?.getString(STATE_REPLY_TO)?.let(::restoreReply)
+        if (savedInstanceState == null) takeShared(intent)
         // Opened from a message notification on a cold start, the thread is the
         // whole task: Back and Up lead to the conversation list, not out of the app.
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -336,7 +337,25 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             }
         }
         targetMessageId = intent.getStringExtra(RelayIntents.EXTRA_MESSAGE_ID)
+        takeShared(intent)
         reload()
+    }
+
+    /**
+     * What another app shared to this conversation (the share screen's
+     * intent) goes into the composer, for the user to send. Taken once: a
+     * rotation keeps the composer as it then is.
+     */
+    private fun takeShared(intent: Intent) {
+        val text = intent.getStringExtra(RelayIntents.EXTRA_SHARED_TEXT)
+        val stream = intent.getStringExtra(RelayIntents.EXTRA_SHARED_STREAM)
+        intent.removeExtra(RelayIntents.EXTRA_SHARED_TEXT)
+        intent.removeExtra(RelayIntents.EXTRA_SHARED_STREAM)
+        if (!text.isNullOrEmpty()) {
+            binding.input.setText(text)
+            binding.input.setSelection(binding.input.length())
+        }
+        if (!stream.isNullOrEmpty()) setAttachment(Uri.parse(stream))
     }
 
     override fun onStart() {
@@ -1053,6 +1072,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 }
             }
             result.onFailure { toast(errorText(link, it)) }
+            // Someone the user writes to from here: offered in Android's share sheet from now on.
+            val row = conversation?.takeIf { it.id == id && result.isSuccess }
+            val title = supportActionBar?.title?.toString().orEmpty()
+            if (row != null && title != getString(R.string.chat_untitled)) withContext(Dispatchers.IO) {
+                com.lightdecoder.chat.ShareShortcuts.push(applicationContext, link.service, id, title, row.avatarColor)
+            }
         }
     }
 
@@ -1440,6 +1465,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             sheet.dismiss()
             copy(row.text)
         }
+        b.actionEdit.visibility = if (manager.isPaired() && EditRule.canEdit(row, manager.capabilities)) View.VISIBLE else View.GONE
+        b.actionEdit.setOnClickListener {
+            sheet.dismiss()
+            askEdit(row)
+        }
         val sayable = reader.isAvailable && ReadAloudText.sentence(this, row) != null
         b.actionReadAloud.visibility = if (sayable) View.VISIBLE else View.GONE
         b.actionReadAloud.setOnClickListener {
@@ -1694,6 +1724,48 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         builder.setNegativeButton(android.R.string.cancel, null)
             .show()
             .let(::trackConfirm)
+    }
+
+    /** Asks for the new text of one of the user's own messages and sends the change ([Capability.EDIT]). */
+    private fun askEdit(row: MessageRow) {
+        if (!isShown(row)) return
+        val link = manager
+        val field = com.google.android.material.textfield.TextInputEditText(this).apply {
+            setText(row.text)
+            setSelection(row.text.length)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            maxLines = 8
+        }
+        val pad = (20 * resources.displayMetrics.density).toInt()
+        val box = android.widget.FrameLayout(this).apply {
+            setPadding(pad, pad / 2, pad, 0)
+            addView(field)
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.chat_edit_title)
+            .setMessage(R.string.chat_edit_note)
+            .setView(box)
+            .setPositiveButton(R.string.chat_edit_save) { _, _ ->
+                val text = field.text?.toString()?.trim().orEmpty()
+                // The thread switched under the question (onNewIntent closes it; this is the backstop).
+                if (text.isEmpty() || text == row.text || !isShown(row) || link !== manager) return@setPositiveButton
+                lifecycleScope.launch {
+                    relayAttempt { edit(link, row.id, text) }.onFailure {
+                        val tooLate = it is RelayException && it.code == RelayException.INVALID_ARGUMENT
+                        toast(if (tooLate) getString(R.string.chat_edit_too_late) else errorText(link, it))
+                    }
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+            .let(::trackConfirm)
+    }
+
+    /** Like "delete for everyone", editing is the service's own manager's. */
+    private suspend fun edit(link: ChatBackend, messageId: String, text: String) {
+        if (link is WaManager) link.editMessage(messageId, text)
+        else throw RelayException(WaErrors.UNSUPPORTED, "no editing")
     }
 
     /** "Delete for everyone" is the one thing [ChatBackend] leaves to the service's own manager. */

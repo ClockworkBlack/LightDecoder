@@ -91,7 +91,7 @@ class ChatFoundationTest {
             ),
             manager.capabilities,
         )
-        assertEquals(Capability.entries.toSet() - setOf(Capability.PRESENCE, Capability.DELETE_FOR_EVERYONE), manager.capabilities)
+        assertEquals(Capability.entries.toSet() - setOf(Capability.PRESENCE, Capability.DELETE_FOR_EVERYONE, Capability.EDIT), manager.capabilities)
 
         // Presence does not exist for Google Messages: nothing to show, nothing happens.
         assertTrue(manager.presence.value.isEmpty())

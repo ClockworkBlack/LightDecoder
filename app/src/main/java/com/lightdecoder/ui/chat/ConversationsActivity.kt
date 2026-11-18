@@ -502,13 +502,7 @@ class ConversationsActivity : AppCompatActivity() {
     }
 
     /** The phone's name for the conversation, else its people, else a placeholder. Runs on IO. */
-    private fun titleFor(repo: ArchiveRepository, row: ConversationRow): String {
-        if (row.name.isNotBlank()) return row.name
-        val people = repo.participants(row.id).filter { !it.isMe }
-            .map { it.name.ifBlank { it.formattedNumber.ifBlank { it.number } } }
-            .filter { it.isNotBlank() }
-        return if (people.isEmpty()) getString(R.string.chat_untitled) else people.joinToString(", ")
-    }
+    private fun titleFor(repo: ArchiveRepository, row: ConversationRow): String = ConversationTitles.of(this, repo, row)
 
     private fun refreshFromPhone(quiet: Boolean = false) {
         val shown = folder

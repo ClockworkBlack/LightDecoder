@@ -930,6 +930,7 @@ class RelayManager private constructor(
      * Without a pairing it is deleted here only, and the phone keeps it.
      */
     override suspend fun deleteConversation(conversationId: String) {
+        com.lightdecoder.chat.ShareShortcuts.remove(app, service, conversationId)
         if (!paired) {
             deleteLocally { repo.deleteConversationLocal(conversationId) }
         } else {
@@ -1467,6 +1468,7 @@ class RelayManager private constructor(
         gate.wipe { repo.clearAll() }
         runCatching { com.lightdecoder.reactions.ReactionTimes.get(app).clear(service) }
         runCatching { com.lightdecoder.reactions.ReadTimes.get(app).clear(service) }
+        com.lightdecoder.chat.ShareShortcuts.removeAll(app, service)
         RelayPrefs.setArchiveOwner(app, "", "")
         RelayPrefs.setUnconfirmedSends(app, emptyMap())
         fetchedConversations.clear()
