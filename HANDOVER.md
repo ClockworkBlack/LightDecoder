@@ -23,7 +23,7 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
-## 0.5.30 (versionCode 38, IN PROGRESS) - Blue Bubbles (iMessage inside the Messages tab)
+## 0.5.30 (versionCode 38) - Blue Bubbles (iMessage inside the Messages tab)
 Owner's ask (2026-11-18): a white checkbox "Blue Bubbles" in the Messages tab's overflow menu (between
 "Refresh from phone" and "Link settings") so the Messages tab itself sends and receives iMessages; NOT a
 separate tab. The owner sets up an iPhone 7 (iOS 15.x, TrollStore + JJTech's ValidationRelay) and the
@@ -37,6 +37,25 @@ OpenBubbles Android app (package com.openbubbles.messaging) themselves.
   attachments hand off to OpenBubbles (`imessage://<addr>?body=`, or ACTION_SEND with
   EXTRA_SHORTCUT_ID=chatGuid); the user taps send there. Research (7 readers over the OpenBubbles,
   rustpush and ValidationRelay sources) is summarised in this entry; file:line evidence was in the session.
+- **What was built** (commits 511027b..d600249): `imessage/` (IMessagePrefs file "imessage" with the
+  checkbox, notify switch and a salt for opaque notification tags; OpenBubbles = package names, intents,
+  chat-id parsing; IMessageCapture; IMessageReplies = in-memory Reply/Mark As Read/open buttons per
+  chatGuid; IMessageManager = the ChatBackend, archive `imessage-archive.db`, capabilities none).
+  Message ids are `ob:`+hash(chat, time, sender, me/them, text); a reply sent from here is stored as
+  `ld:<tmpId>` when handed over, and OpenBubbles' echo of it (own line, same text, within 3 min) is
+  dropped. Mark As Read is pressed only after something new arrived. `ui/chat/BlueBubblesSetup` runs the
+  checkbox (needs OpenBubbles installed, then notification access; comes on when the user returns with
+  access). ConversationsActivity merges iMessage rows into Messages' Inbox/Archived (pinned, then
+  newest), ConversationItem carries its service (adapter ids keyed by service+id), badges add iMessage
+  unread to Messages, `tabServiceOf` maps IMESSAGE to the Messages tab. ThreadActivity: outgoing bubbles
+  in iMessage blue (#0A84FF, `MessagesAdapter.blueOutgoing`), send() hands off to OpenBubbles for
+  pictures/stickers or chats without a Reply button (copy in cache/shared via FileProvider, ACTION_SEND
+  with EXTRA_SHORTCUT_ID=chatGuid), failed iMessages hand off on tap, no reactions/quotes/read-notify for
+  iMessage, menu "Open in OpenBubbles", and "Send iMessage" in a Messages 1:1 chat (opens the stored
+  iMessage chat with the same number, matched on the last 10 digits, else OpenBubbles' new-chat screen).
+  The overflow menu's checkbox uses `ThemeOverlay.LightDecoder.MenuPopup` (colorOnSurface = white on dark).
+- Tests: imessage/IMessageCaptureTest, IMessageManagerTest, ui/BlueBubblesScreenTest. Not tried on a
+  phone with OpenBubbles: the notification format is from OpenBubbles' source (commit eed1b63, Apr 2026).
 - **Limits of that design** (tell the owner): no history; nothing for chats open in OpenBubbles, muted
   there, or sent from other devices; attachments arrive as text ("Attachment: …"); tapbacks arrive as
   text; a reply needs a live notification for that chat (else hand-off); OpenBubbles' notifications must
@@ -49,6 +68,7 @@ OpenBubbles Android app (package com.openbubbles.messaging) themselves.
   (exception for OpenBubbles only): an APK combining it with LightDecoder's AGPL code could never be given
   to anyone; (4) every Apple and Beeper host is blocked from the cloud build container, so nothing could be
   tested. Do not run OpenBubbles and an embedded client on the same number (they would knock each other off).
+- Next version: 0.5.31 / 39.
 
 ## 0.5.29 (versionCode 37) - share to LightDecoder, edit a WhatsApp message
 - **Share target.** `ui/share/ShareActivity` (exported) takes ACTION_SEND (text, image, video,
