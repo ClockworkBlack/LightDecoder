@@ -46,6 +46,7 @@ class ChatFoundationTest {
     fun tearDown() {
         WaManager.resetForTesting()
         com.lightdecoder.mail.MailManager.resetForTesting()
+        com.lightdecoder.imessage.IMessageManager.resetForTesting()
         env.tearDown()
         waDb.close()
     }
@@ -69,8 +70,10 @@ class ChatFoundationTest {
         assertSame(messages, ChatBackends.get(env.context, ChatService.MESSAGES))
         assertSame(whatsApp, ChatBackends.get(env.context, ChatService.WHATSAPP))
         val gmail = ChatBackends.get(env.context, ChatService.GMAIL)
-        assertEquals(listOf(messages, whatsApp, gmail), ChatBackends.all(env.context))
+        val iMessage = ChatBackends.get(env.context, ChatService.IMESSAGE)
+        assertEquals(listOf(messages, whatsApp, gmail, iMessage), ChatBackends.all(env.context))
         assertEquals(ChatService.GMAIL, gmail.service)
+        assertEquals(ChatService.IMESSAGE, iMessage.service)
         for (backend in ChatBackends.all(env.context)) {
             assertSame("the backend of its own service", backend, ChatBackends.get(env.context, backend.service))
             assertEquals("over its own archive", backend.service, backend.repo.service)
