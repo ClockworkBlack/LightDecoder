@@ -47,23 +47,6 @@ object OpenBubbles {
     fun isInstalled(context: Context): Boolean = installedPackage(context) != null
 
     /**
-     * The address of a one-to-one chat from its OpenBubbles id
-     * ("iMessage;-;+15551234567" or "iMessage;-;name@example.com"); null for
-     * a group ("iMessage;+;chat…").
-     */
-    fun addressOf(chatGuid: String): String? {
-        val parts = chatGuid.split(';')
-        if (parts.size < 3 || parts[1] != "-") return null
-        return parts.drop(2).joinToString(";").trim().takeIf { it.isNotEmpty() }
-    }
-
-    /** Whether [chatGuid] is an iMessage chat, not a text-message one OpenBubbles also handles. */
-    fun isIMessageChat(chatGuid: String): Boolean {
-        val service = chatGuid.substringBefore(';', "")
-        return service.isNotEmpty() && !service.equals("SMS", ignoreCase = true) && !service.equals("RCS", ignoreCase = true)
-    }
-
-    /**
      * OpenBubbles' new-chat screen with [address] (a phone number or an email
      * address) and [body] filled in. The user taps send there.
      */
@@ -75,23 +58,28 @@ object OpenBubbles {
     }
 
     /**
-     * Opens the chat [chatGuid] in OpenBubbles with [text] and, if given, the
-     * file at [stream] (a content uri of this app's, readable by OpenBubbles
-     * for as long as it needs it) ready to send. The user taps send there.
+     * Opens the chat [chatGuid] in OpenBubbles with [text] and the files in
+     * [streams] (content uris of this app's, with their types, readable by
+     * OpenBubbles while it needs them) ready to send. The user taps send there.
      */
-    fun shareToChatIntent(packageName: String, chatGuid: String, text: String, stream: Uri?, mime: String?): Intent =
-        Intent(Intent.ACTION_SEND)
+    fun shareToChatIntent(packageName: String, chatGuid: String, text: String, streams: List<Pair<Uri, String>>): Intent {
+        val intent = when {
+            streams.isEmpty() -> Intent(Intent.ACTION_SEND).setType("text/plain")
+            streams.size == 1 -> Intent(Intent.ACTION_SEND)
+                .setType(streams[0].second.ifBlank { "application/octet-stream" })
+                .putExtra(Intent.EXTRA_STREAM, streams[0].first)
+            else -> Intent(Intent.ACTION_SEND_MULTIPLE)
+                .setType(if (streams.all { it.second.startsWith("image/") }) "image/*" else "*/*")
+                .putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(streams.map { it.first }))
+        }
+        // Android moves the streams into the intent's ClipData when it starts it, and the grant goes with them.
+        if (streams.isNotEmpty()) intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        if (text.isNotEmpty()) intent.putExtra(Intent.EXTRA_TEXT, text)
+        return intent
             .setPackage(packageName)
-            .setType(if (stream != null) mime?.takeIf { it.isNotBlank() } ?: "application/octet-stream" else "text/plain")
             .putExtra(Intent.EXTRA_SHORTCUT_ID, chatGuid)
-            .apply {
-                if (text.isNotEmpty()) putExtra(Intent.EXTRA_TEXT, text)
-                if (stream != null) {
-                    putExtra(Intent.EXTRA_STREAM, stream)
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                }
-            }
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
 
     /** False if OpenBubbles is not installed or would not take [intent]. */
     fun start(context: Context, intent: Intent): Boolean = try {

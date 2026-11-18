@@ -1058,8 +1058,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val id = conversationId
         val iMessage = manager as? com.lightdecoder.imessage.IMessageManager
         // An iMessage with a picture, or to a chat with no Reply button to send through: OpenBubbles sends it.
-        if (iMessage != null && (file != null || !iMessage.canReply(id))) {
-            handOffToOpenBubbles(iMessage, id, text, file)
+        if (iMessage != null && (file != null || !iMessage.canReply(id, text))) {
+            handOffToOpenBubbles(iMessage, id, text, listOfNotNull(file), clearComposer = true)
             return
         }
         // Only ever a message of this conversation (onReply checks too).
@@ -1079,7 +1079,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             }
             result.onFailure { toast(errorText(link, it)) }
             // Someone the user writes to from here: offered in Android's share sheet from now on.
-            val row = conversation?.takeIf { it.id == id && result.isSuccess }
+            // Not iMessage: the share screen cannot send through OpenBubbles, and its chat ids would be on show.
+            val row = conversation?.takeIf { it.id == id && result.isSuccess && link.service != ChatService.IMESSAGE }
             val title = supportActionBar?.title?.toString().orEmpty()
             if (row != null && title != getString(R.string.chat_untitled)) withContext(Dispatchers.IO) {
                 com.lightdecoder.chat.ShareShortcuts.push(applicationContext, link.service, id, title, row.avatarColor)
@@ -1088,53 +1089,87 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     /**
-     * Opens OpenBubbles on this chat with [text] and [file] filled in (a copy
-     * of the file this app can hand over), for the user to tap send there.
-     * The composer is cleared once OpenBubbles has it.
+     * Opens OpenBubbles on this chat with [text] and [files] filled in
+     * (copies of the files this app can hand over), for the user to tap send
+     * there. With [clearComposer] (a send from the composer) the composer is
+     * emptied once OpenBubbles has it; a sticker leaves it as it is.
      */
-    private fun handOffToOpenBubbles(link: com.lightdecoder.imessage.IMessageManager, id: String, text: String, file: Uri?) {
+    private fun handOffToOpenBubbles(
+        link: com.lightdecoder.imessage.IMessageManager,
+        id: String,
+        text: String,
+        files: List<Uri>,
+        clearComposer: Boolean,
+    ) {
         lifecycleScope.launch {
-            val shared = if (file == null) null else withContext(Dispatchers.IO) { shareableCopy(file) }
-            if (!isCurrent(link, id)) return@launch
-            if (file != null && shared == null) {
+            val copies = withContext(Dispatchers.IO) {
+                purgeHandOffCopies()
+                files.map { shareableCopy(it) }
+            }
+            val shared = copies.filterNotNull()
+            fun dropCopies() = runInBackground { shared.forEach { (uri, _) -> handOffFileOf(uri)?.delete() } }
+            if (!isCurrent(link, id)) {
+                dropCopies()
+                return@launch
+            }
+            if (shared.size < files.size) {
+                dropCopies()
                 toast(getString(R.string.share_could_not_read))
                 return@launch
             }
-            val opened = link.handOff(this@ThreadActivity, id, text, shared?.first, shared?.second)
-            if (!opened) {
+            if (!link.handOff(this@ThreadActivity, id, text, shared)) {
+                dropCopies()
                 toast(errorText(link, com.lightdecoder.imessage.IMessageErrors.NOT_INSTALLED))
                 return@launch
             }
-            binding.input.setText("")
-            clearReply()
-            clearAttachment()
+            if (clearComposer) {
+                binding.input.setText("")
+                clearReply()
+                clearAttachment()
+            }
             toast(getString(R.string.imessage_finish_in_openbubbles))
         }
     }
 
+    /** Where copies handed to OpenBubbles are kept: under the cache folder this app shares files from. */
+    private fun handOffDir(): File = File(File(cacheDir, "shared"), "imessage")
+
+    private fun handOffFileOf(uri: Uri): File? =
+        uri.lastPathSegment?.substringAfterLast('/')?.let { File(handOffDir(), it) }?.takeIf { it.parentFile == handOffDir() }
+
+    /** Copies handed over more than a day ago: OpenBubbles has long since sent them, or never will. */
+    private fun purgeHandOffCopies() {
+        val now = System.currentTimeMillis()
+        handOffDir().listFiles()?.forEach { if (now - it.lastModified() > HAND_OFF_KEEP_MS) it.delete() }
+    }
+
     /**
-     * A copy of [source] in the cache folder this app shares files from, as
-     * a uri of its own provider (another app may read it while it is
-     * granted), with its type. Null if it cannot be read. Not on the main thread.
+     * A copy of [source] in [handOffDir], as a uri of this app's own provider
+     * (another app may read it while it is granted), with its type. Null if
+     * it cannot be read. Not on the main thread.
      */
-    private fun shareableCopy(source: Uri): Pair<Uri, String>? = try {
-        val mime = contentResolver.getType(source)
-            ?: android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(source.lastPathSegment.orEmpty().substringAfterLast('.', "").lowercase())
-            ?: "application/octet-stream"
-        val extension = android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)?.let { ".$it" }.orEmpty()
-        val dir = File(cacheDir, "shared").apply { mkdirs() }
-        val target = File(dir, "imessage-" + java.util.UUID.randomUUID() + extension)
-        val read = (if (source.scheme == "file") java.io.FileInputStream(source.path!!) else contentResolver.openInputStream(source))?.use { input ->
-            target.outputStream().use { input.copyTo(it) }
-        }
-        if (read == null || target.length() == 0L) {
-            target.delete()
+    private fun shareableCopy(source: Uri): Pair<Uri, String>? {
+        val dir = handOffDir().apply { mkdirs() }
+        var target: File? = null
+        return try {
+            val mime = contentResolver.getType(source)
+                ?: android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(source.lastPathSegment.orEmpty().substringAfterLast('.', "").lowercase())
+                ?: "application/octet-stream"
+            val extension = android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)?.let { ".$it" }.orEmpty()
+            val file = File(dir, java.util.UUID.randomUUID().toString() + extension).also { target = it }
+            val read = (if (source.scheme == "file") java.io.FileInputStream(source.path!!) else contentResolver.openInputStream(source))?.use { input ->
+                file.outputStream().use { input.copyTo(it) }
+            }
+            if (read == null || file.length() == 0L) {
+                file.delete()
+                null
+            } else {
+                androidx.core.content.FileProvider.getUriForFile(this, "$packageName.fileprovider", file) to mime
+            }
+        } catch (e: Exception) {
+            target?.delete()
             null
-        } else {
-            androidx.core.content.FileProvider.getUriForFile(this, "$packageName.fileprovider", target) to mime
         }
-    } catch (e: Exception) {
-        null
     }
 
     // --- stickers ------------------------------------------------------------
@@ -1319,9 +1354,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         if (files.isEmpty()) return
         val id = conversationId
         val link = manager
-        // OpenBubbles takes one picture at a time from another app.
+        // OpenBubbles sends them, from its own screen.
         if (link is com.lightdecoder.imessage.IMessageManager) {
-            handOffToOpenBubbles(link, id, "", Uri.fromFile(files.first()))
+            handOffToOpenBubbles(link, id, "", files.map { Uri.fromFile(it) }, clearComposer = false)
             return
         }
         scrollToBottomNext = true
@@ -1542,7 +1577,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         b.actionRetry.visibility = if (MessageStatus.canRetryLocally(row)) View.VISIBLE else View.GONE
         b.actionRetry.setOnClickListener {
             sheet.dismiss()
-            if (isShown(row)) retryOrAsk(row)
+            // An iMessage that could not go through OpenBubbles' Reply button goes the way a tap on it does.
+            if (manager is com.lightdecoder.imessage.IMessageManager) onFailedTap(row) else if (isShown(row)) retryOrAsk(row)
         }
         val discardable = row.isLocal && row.localState == LocalState.FAILED
         b.actionDiscard.visibility = if (discardable) View.VISIBLE else View.GONE
@@ -1569,7 +1605,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val link = manager
         if (link is com.lightdecoder.imessage.IMessageManager && row.isLocal) {
             if (!isShown(row)) return
-            if (link.canReply(row.conversationId)) {
+            if (link.canReply(row.conversationId, row.text)) {
                 retry(row)
             } else if (link.handOff(this, row.conversationId, row.text)) {
                 val tmpId = row.tmpId
@@ -2097,6 +2133,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     companion object {
+        private const val HAND_OFF_KEEP_MS = 24 * 60 * 60 * 1000L
         private const val STATE_WINDOW = "window"
         private const val STATE_ATTACHMENT = "attachment"
 

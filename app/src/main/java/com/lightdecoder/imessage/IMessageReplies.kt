@@ -30,6 +30,12 @@ object IMessageReplies {
 
         /** OpenBubbles has withdrawn the button. */
         WITHDRAWN,
+
+        /**
+         * The same text again, answering the same message: OpenBubbles takes
+         * that for a double tap and would drop it without sending.
+         */
+        REPEAT,
     }
 
     private class Entry(
@@ -38,24 +44,55 @@ object IMessageReplies {
         val open: PendingIntent?,
         /** Something arrived since the chat was last marked read through OpenBubbles. */
         val unread: Boolean,
+        /** The newest message of the chat's notification: what its Reply button answers. */
+        val messageGuid: String,
     )
 
     private val entries = ConcurrentHashMap<String, Entry>()
 
-    /** What the latest notification of [chatGuid] offers; [incoming] when it brought a new message from someone else. */
-    fun update(chatGuid: String, reply: IMessageAction?, markRead: IMessageAction?, open: PendingIntent?, incoming: Boolean) {
+    /**
+     * The last reply handed over (the message it answered, and its text).
+     * OpenBubbles remembers exactly one, for all chats, and drops a reply
+     * equal to it.
+     */
+    @Volatile
+    private var lastHandedOver: Pair<String, String>? = null
+
+    /** What the latest notification of [chatGuid] offers, and the newest message it answers. */
+    fun update(chatGuid: String, reply: IMessageAction?, markRead: IMessageAction?, open: PendingIntent?, messageGuid: String) {
         entries.compute(chatGuid) { _, before ->
             // An update without a button does not take away one offered earlier.
-            Entry(reply ?: before?.reply, markRead ?: before?.markRead, open ?: before?.open, incoming || before?.unread == true)
+            Entry(
+                reply ?: before?.reply, markRead ?: before?.markRead, open ?: before?.open,
+                unread = before?.unread == true, messageGuid = messageGuid.ifEmpty { before?.messageGuid.orEmpty() },
+            )
         }
     }
 
-    fun canReply(chatGuid: String): Boolean = entries[chatGuid]?.reply != null
+    /** Something from someone else is in OpenBubbles' notification of [chatGuid] and not yet read there. */
+    fun noteUnread(chatGuid: String) {
+        entries.compute(chatGuid) { _, e -> Entry(e?.reply, e?.markRead, e?.open, unread = true, messageGuid = e?.messageGuid.orEmpty()) }
+    }
+
+    /**
+     * Whether [text] (or, without it, any text) can be sent to [chatGuid]
+     * from here now: it has a Reply button, and the text is not a repeat
+     * OpenBubbles would drop.
+     */
+    fun canReply(chatGuid: String, text: String? = null): Boolean {
+        val entry = entries[chatGuid] ?: return false
+        if (entry.reply == null) return false
+        return text == null || !isRepeat(entry, text)
+    }
+
+    private fun isRepeat(entry: Entry, text: String): Boolean =
+        entry.messageGuid.isNotEmpty() && lastHandedOver == (entry.messageGuid to text)
 
     /** Fills [text] into the chat's Reply button and presses it, as the notification shade would. */
     fun send(context: Context, chatGuid: String, text: String): Result {
         val entry = entries[chatGuid]
         val reply = entry?.reply ?: return Result.NO_REPLY_BUTTON
+        if (isRepeat(entry, text)) return Result.REPEAT
         val fill = Intent()
         val results = Bundle()
         for (input in reply.inputs) results.putCharSequence(input.resultKey, text)
@@ -65,9 +102,10 @@ object IMessageReplies {
         }
         return try {
             reply.intent.send(context, 0, fill)
+            lastHandedOver = entry.messageGuid to text
             Result.HANDED_OVER
         } catch (e: PendingIntent.CanceledException) {
-            entries.computeIfPresent(chatGuid) { _, e2 -> Entry(null, e2.markRead, e2.open, e2.unread) }
+            entries.computeIfPresent(chatGuid) { _, e2 -> Entry(null, e2.markRead, e2.open, e2.unread, e2.messageGuid) }
             Result.WITHDRAWN
         }
     }
@@ -81,12 +119,12 @@ object IMessageReplies {
         val entry = entries[chatGuid] ?: return false
         if (!entry.unread) return false
         val action = entry.markRead ?: return false
-        entries.computeIfPresent(chatGuid) { _, e -> Entry(e.reply, e.markRead, e.open, unread = false) }
+        entries.computeIfPresent(chatGuid) { _, e -> Entry(e.reply, e.markRead, e.open, unread = false, messageGuid = e.messageGuid) }
         return try {
             action.intent.send(context, 0, null)
             true
         } catch (e: PendingIntent.CanceledException) {
-            entries.computeIfPresent(chatGuid) { _, e2 -> Entry(e2.reply, null, e2.open, e2.unread) }
+            entries.computeIfPresent(chatGuid) { _, e2 -> Entry(e2.reply, null, e2.open, e2.unread, e2.messageGuid) }
             false
         }
     }
@@ -122,5 +160,8 @@ object IMessageReplies {
         entries.remove(chatGuid)
     }
 
-    fun clear() = entries.clear()
+    fun clear() {
+        entries.clear()
+        lastHandedOver = null
+    }
 }

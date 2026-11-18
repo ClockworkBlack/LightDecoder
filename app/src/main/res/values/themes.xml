@@ -12,5 +12,12 @@
     <style name="ThemeOverlay.LightDecoder.MenuPopup" parent="ThemeOverlay.Material3">
         <item name="colorControlNormal">?attr/colorOnSurface</item>
         <item name="colorControlActivated">?attr/colorOnSurface</item>
+        <!-- Material 3's checkbox takes its colour from its own tint, not colorControlActivated. -->
+        <item name="checkboxStyle">@style/Widget.LightDecoder.MenuCheckBox</item>
+    </style>
+
+    <style name="Widget.LightDecoder.MenuCheckBox" parent="Widget.Material3.CompoundButton.CheckBox">
+        <item name="buttonTint">@color/menu_checkbox_tint</item>
+        <item name="android:buttonTint">@color/menu_checkbox_tint</item>
     </style>
 </resources>

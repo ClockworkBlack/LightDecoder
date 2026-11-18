@@ -22,8 +22,9 @@ internal object OpenBubblesTestNotifications {
     const val REPLY_ACTION = "com.lightdecoder.test.OPENBUBBLES_REPLY"
     const val MARK_READ_ACTION = "com.lightdecoder.test.OPENBUBBLES_MARK_READ"
     const val REPLY_KEY = "text_reply"
-    const val ALICE_GUID = "iMessage;-;+15551234567"
-    const val GROUP_GUID = "iMessage;+;chat123456"
+    /** OpenBubbles' chat ids are UUIDs (Apple's conversation id, or one it made up). */
+    const val ALICE_GUID = "5D2B5A4C-1F0E-4C3B-9A7D-2E6F1B0C9D11"
+    const val GROUP_GUID = "8A1F3E2D-6C4B-4D5A-9E8F-7B6A5C4D3E2F"
 
     /** OpenBubbles' own user: "You", with no key. */
     private val you: Person = Person.Builder().setName("You").build()

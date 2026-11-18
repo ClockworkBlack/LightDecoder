@@ -84,8 +84,8 @@ class IMessageManagerTest {
         db.close()
     }
 
-    private fun capture(vararg lines: Line, live: Boolean = true) {
-        manager.onNotification(posted(chat(context, lines.toList())), live)
+    private fun capture(vararg lines: Line, live: Boolean = true, messageGuid: String = "msg-1") {
+        manager.onNotification(posted(chat(context, lines.toList(), messageGuid = messageGuid)), live)
     }
 
     private fun idle() = shadowOf(Looper.getMainLooper()).idle()
@@ -138,12 +138,84 @@ class IMessageManagerTest {
     }
 
     @Test
-    fun withoutAReplyButtonTheMessageFailsForOpenBubblesToSend() {
-        val tmpId = manager.sendText(ALICE_GUID, "Hello")
-        val row = repo.message(MessageRow.tmpMessageId(tmpId))!!
+    fun withoutAReplyButtonTheSendFailsLoudlyAndStaysForOpenBubblesToSend() {
+        val failure = runCatching { manager.sendText(ALICE_GUID, "Hello") }.exceptionOrNull()
+        assertEquals(IMessageErrors.NO_REPLY_BUTTON, (failure as com.lightdecoder.relay.RelayException).code)
+        val row = messages().single()
         assertEquals(LocalState.FAILED, row.localState)
         assertEquals(IMessageErrors.NO_REPLY_BUTTON, row.errorText)
         assertTrue(replies.isEmpty())
+    }
+
+    @Test
+    fun theSameTextTwiceInAnswerToTheSameMessageIsNotHandedOverTwice() {
+        // OpenBubbles drops a reply equal to the last one for the same message.
+        capture(Line("Hi there", 1_700_000_000_000L, alice), messageGuid = "m1")
+        manager.sendText(ALICE_GUID, "ok")
+        idle()
+        assertFalse(manager.canReply(ALICE_GUID, "ok"))
+        assertTrue(manager.canReply(ALICE_GUID, "ok then"))
+        assertTrue(runCatching { manager.sendText(ALICE_GUID, "ok") }.isFailure)
+        idle()
+        assertEquals(listOf("ok"), replies)
+        // A new message from them: "ok" answers that one, and goes.
+        capture(Line("Hi there", 1_700_000_000_000L, alice), Line("Sure?", 1_700_000_100_000L, alice), messageGuid = "m2")
+        assertTrue(manager.canReply(ALICE_GUID, "ok"))
+    }
+
+    @Test
+    fun markAsReadIsStillPressedAfterTheAppRestarted() = runBlocking {
+        capture(Line("Hi there", 1_700_000_000_000L, alice))
+        // The process goes; the listener reads OpenBubbles' notification again when it reconnects.
+        IMessageReplies.clear()
+        capture(Line("Hi there", 1_700_000_000_000L, alice), live = false)
+        manager.markRead(ALICE_GUID)
+        idle()
+        assertEquals(1, markReads)
+    }
+
+    @Test
+    fun aLaterIdenticalReplyFromOpenBubblesItselfIsKept() {
+        capture(Line("Hi there", 1_700_000_000_000L, alice))
+        manager.sendText(ALICE_GUID, "ok")
+        val sentAt = messages().single { it.isOutgoing }.timestampMs
+        // OpenBubbles shows it back; then the user answers "ok" again, from OpenBubbles' own notification.
+        capture(Line("Hi there", 1_700_000_000_000L, alice), Line("ok", sentAt / 1000 + 1, sender("Ryan")))
+        capture(
+            Line("Hi there", 1_700_000_000_000L, alice), Line("ok", sentAt / 1000 + 1, sender("Ryan")),
+            Line("Again?", sentAt + 30_000, alice), Line("ok", sentAt / 1000 + 60, sender("Ryan")),
+        )
+        assertEquals(2, messages().count { it.isOutgoing && it.text == "ok" })
+    }
+
+    @Test
+    fun deletedMessagesAndChatsDoNotComeBackFromTheNotification() = runBlocking {
+        capture(Line("One", 1_700_000_000_000L, alice), Line("Two", 1_700_000_060_000L, alice))
+        manager.deleteMessage(messages().first { it.text == "One" }.id)
+        capture(Line("One", 1_700_000_000_000L, alice), Line("Two", 1_700_000_060_000L, alice))
+        assertEquals(listOf("Two"), messages().map { it.text })
+        manager.deleteConversation(ALICE_GUID)
+        // OpenBubbles shows the old lines again with a new one: only the new one comes in.
+        val now = System.currentTimeMillis()
+        capture(Line("One", 1_700_000_000_000L, alice), Line("Two", 1_700_000_060_000L, alice), Line("Three", now + 60_000, alice))
+        assertEquals(listOf("Three"), messages().map { it.text })
+    }
+
+    @Test
+    fun theAddressStaysWhenANotificationCarriesNone() {
+        capture(Line("Hi there", 1_700_000_000_000L, alice))
+        // A "Notify Anyways" post has no handle on its sender.
+        capture(Line("Hi there", 1_700_000_000_000L, alice), Line("Call me", 1_700_000_100_000L, sender("Alice")))
+        assertEquals("+15551234567", repo.participants(ALICE_GUID).single { !it.isMe }.number)
+        assertEquals(ALICE_GUID, manager.conversationWith("(555) 123-4567"))
+    }
+
+    @Test
+    fun aGroupKeepsEveryoneSeenWritingInIt() {
+        val group = OpenBubblesTestNotifications.GROUP_GUID
+        manager.onNotification(posted(chat(context, listOf(Line("Hi", 1_000_000_000_000L, sender("Bob"))), chatGuid = group, groupTitle = "Friends")), true)
+        manager.onNotification(posted(chat(context, listOf(Line("Yo", 1_000_000_100_000L, sender("Carol"))), chatGuid = group, groupTitle = "Friends")), true)
+        assertEquals(setOf("Bob", "Carol"), repo.participants(group).filter { !it.isMe }.map { it.name }.toSet())
     }
 
     @Test

@@ -90,8 +90,11 @@ class ConversationsActivity : AppCompatActivity() {
     /** The shown link's state; null until it has been read (at first, and after a change of tab). */
     private var relayState: RelayState? = null
 
-    /** Whether the shown service's archive holds no conversation at all, as of its last load. */
+    /** Whether the list has nothing at all to show in any folder (the shown service's archive, and iMessage's with it), as of its last load. */
     private var archiveEmpty = false
+
+    /** Whether the shown service's own archive holds no conversation at all (what "Delete archive" would delete). */
+    private var ownArchiveEmpty = false
 
     /** Non-null while the search field is open. */
     private var searchQuery: String? = null
@@ -157,7 +160,7 @@ class ConversationsActivity : AppCompatActivity() {
         adapter = ConversationsAdapter(onOpen = { openThread(it.row.id, null, it.service) }, onLongPress = { showActions(it) })
         binding.list.layoutManager = LinearLayoutManager(this)
         binding.list.adapter = adapter
-        searchAdapter = SearchResultsAdapter(onOpen = { openThread(it.conversationId, it.messageId) })
+        searchAdapter = SearchResultsAdapter(onOpen = { openThread(it.conversationId, it.messageId, it.service) })
         binding.searchResults.layoutManager = LinearLayoutManager(this)
         binding.searchResults.adapter = searchAdapter
         binding.searchResults.addItemDecoration(DividerItemDecoration(this, DividerItemDecoration.VERTICAL))
@@ -244,7 +247,10 @@ class ConversationsActivity : AppCompatActivity() {
         val service = backend.service
         lifecycleScope.launch {
             val nothingToShow = withContext(Dispatchers.IO) {
-                ScreenBackends.all(applicationContext).none { it.isPaired() || it.repo.conversations(null, 1).isNotEmpty() }
+                // iMessage chats (Blue Bubbles) are something to show, in the Messages tab.
+                val iMessage = blueBubbles.isOn() &&
+                    runCatching { ScreenBackends.get(applicationContext, ChatService.IMESSAGE).repo.conversations(null, 1).isNotEmpty() }.getOrDefault(false)
+                !iMessage && ScreenBackends.all(applicationContext).none { it.isPaired() || it.repo.conversations(null, 1).isNotEmpty() }
             }
             if (nothingToShow) {
                 startActivity(ServiceUi.setup(this@ConversationsActivity, service))
@@ -504,21 +510,19 @@ class ConversationsActivity : AppCompatActivity() {
         }
         val shown = folder
         val from = backend
-        val iMessage = if (showsIMessage() && (shown == Folder.INBOX || shown == Folder.ARCHIVE)) {
-            ScreenBackends.get(this, ChatService.IMESSAGE)
-        } else {
-            null
-        }
+        val iMessage = if (showsIMessage()) ScreenBackends.get(this, ChatService.IMESSAGE) else null
+        val iMessageHere = iMessage != null && (shown == Folder.INBOX || shown == Folder.ARCHIVE)
         lifecycleScope.launch {
-            val (items, nothingStored) = withContext(Dispatchers.IO) {
+            val (items, stored) = withContext(Dispatchers.IO) {
                 val own = from.repo.conversations(shown).map { ConversationItem(it, titleFor(from.repo, it), from.service) }
-                val extra = iMessage?.let { im ->
-                    runCatching { im.repo.conversations(shown) }.getOrDefault(emptyList())
-                        .map { ConversationItem(it, titleFor(im.repo, it), im.service) }
-                }.orEmpty()
+                val extra = if (!iMessageHere) emptyList() else runCatching { iMessage!!.repo.conversations(shown) }.getOrDefault(emptyList())
+                    .map { ConversationItem(it, titleFor(iMessage!!.repo, it), iMessage.service) }
                 val rows = if (extra.isEmpty()) own else mergeByTime(own, extra)
-                rows to (rows.isEmpty() && from.repo.conversations(null, 1).isEmpty())
+                val ownEmpty = from.repo.conversations(null, 1).isEmpty()
+                val iMessageEmpty = iMessage == null || runCatching { iMessage.repo.conversations(null, 1).isEmpty() }.getOrDefault(true)
+                rows to (ownEmpty to (ownEmpty && iMessageEmpty))
             }
+            val (ownEmpty, nothingStored) = stored
             if (from !== backend || shown != folder || searchQuery != null) return@launch
             adapter.submitList(items)
             if (shown == Folder.DELETED && hasDeleted != items.isNotEmpty()) {
@@ -534,8 +538,9 @@ class ConversationsActivity : AppCompatActivity() {
                 }
             )
             binding.emptyText.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
-            if (archiveEmpty != nothingStored) {
+            if (archiveEmpty != nothingStored || ownArchiveEmpty != ownEmpty) {
                 archiveEmpty = nothingStored
+                ownArchiveEmpty = ownEmpty
                 refreshMenu()
             }
             renderLinkState()
@@ -624,7 +629,7 @@ class ConversationsActivity : AppCompatActivity() {
             item.isChecked = blueBubbles.isOn()
         }
         // Without a pairing, what is listed is an archive an unpair kept: it can be deleted here.
-        menu.findItem(R.id.action_delete_archive)?.isVisible = !paired && !archiveEmpty
+        menu.findItem(R.id.action_delete_archive)?.isVisible = !paired && !ownArchiveEmpty
         menu.findItem(R.id.action_refresh)?.isVisible = paired && folder.listable
         menu.findItem(R.id.action_empty_deleted)?.isVisible = folder == Folder.DELETED && hasDeleted && searchQuery == null
         return super.onPrepareOptionsMenu(menu)
@@ -666,10 +671,15 @@ class ConversationsActivity : AppCompatActivity() {
         searchQuery = query
         searchJob?.cancel()
         val from = backend
+        val iMessage = if (showsIMessage()) ScreenBackends.get(this, ChatService.IMESSAGE) else null
         searchJob = lifecycleScope.launch {
             if (debounce) delay(SEARCH_DEBOUNCE_MS)
-            val hits: List<SearchHit> =
-                if (query.isBlank()) emptyList() else withContext(Dispatchers.IO) { from.repo.search(query) }
+            val hits: List<SearchHit> = if (query.isBlank()) emptyList() else withContext(Dispatchers.IO) {
+                val own = from.repo.search(query).map { it.copy(service = from.service) }
+                // The iMessage chats listed in the Messages tab are searched with it.
+                val extra = iMessage?.let { im -> runCatching { im.repo.search(query) }.getOrDefault(emptyList()).map { it.copy(service = im.service) } }.orEmpty()
+                if (extra.isEmpty()) own else (own + extra).sortedByDescending { it.timestampMs }
+            }
             if (searchQuery != query || from !== backend) return@launch
             searchAdapter.submitList(hits)
             binding.emptyText.setText(R.string.chat_search_empty)

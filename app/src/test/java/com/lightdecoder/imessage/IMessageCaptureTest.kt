@@ -32,8 +32,9 @@ class IMessageCaptureTest {
 
     @Test
     fun aOneToOneChatIsReadWithItsPersonAndAddress() {
-        val captured = parse(chat(context, listOf(Line("Hi there", 1_700_000_000_000L, alice))))!!
+        val captured = parse(chat(context, listOf(Line("Hi there", 1_700_000_000_000L, alice)), messageGuid = "m-42"))!!
         assertEquals(ALICE_GUID, captured.chatGuid)
+        assertEquals("m-42", captured.messageGuid)
         assertEquals("Alice", captured.title)
         assertFalse(captured.isGroup)
         assertEquals("+15551234567", captured.address)
@@ -72,7 +73,7 @@ class IMessageCaptureTest {
     @Test
     fun anEmailChatsAddressComesFromItsHandle() {
         val captured = parse(
-            chat(context, listOf(Line("Yo", 1_000_000_000_000L, sender("Cara", "mailto:cara@example.com"))), chatGuid = "iMessage;-;cara@example.com"),
+            chat(context, listOf(Line("Yo", 1_000_000_000_000L, sender("Cara", "mailto:cara@example.com"))), chatGuid = "0F0E0D0C-0B0A-4909-8807-060504030201"),
         )!!
         assertEquals("cara@example.com", captured.address)
     }
@@ -82,7 +83,7 @@ class IMessageCaptureTest {
         val ok = chat(context, listOf(Line("Hi", 1_000_000_000_000L, alice)))
         assertNull("another app", parse(ok, packageName = "com.whatsapp"))
         assertNull("another tag", parse(ok, tag = "something-else"))
-        assertNull("a text-message chat", parse(chat(context, listOf(Line("Hi", 1_000_000_000_000L, alice)), chatGuid = "SMS;-;+15551234567")))
+        assertNull("the summary's id", parse(chat(context, listOf(Line("Hi", 1_000_000_000_000L, alice)), chatGuid = "-1")))
         val summary = NotificationCompat.Builder(context, "c").setSmallIcon(android.R.drawable.sym_action_chat)
             .setGroup("g").setGroupSummary(true).build()
         assertNull("the group summary", parse(summary))
@@ -111,11 +112,16 @@ class IMessageCaptureTest {
     }
 
     @Test
-    fun chatIdsAndAddresses() {
-        assertEquals("+15551234567", OpenBubbles.addressOf(ALICE_GUID))
-        assertNull(OpenBubbles.addressOf(GROUP_GUID))
-        assertTrue(OpenBubbles.isIMessageChat(ALICE_GUID))
-        assertFalse(OpenBubbles.isIMessageChat("SMS;-;+1555"))
+    fun aNotifyAnywaysPostHasNoAddressAndAPlainTitle() {
+        // OpenBubbles leaves the person's handle out of it and prefixes the title.
+        val notification = chat(context, listOf(Line("Urgent", 1_000_000_000_000L, sender("Alice"))))
+        val captured = parse(notification)!!
+        assertEquals("", captured.address)
+        assertEquals("Alice", captured.title)
+    }
+
+    @Test
+    fun addressesAreComparedLoosely() {
         assertEquals(IMessageAddress.key("+1 (555) 123-4567"), IMessageAddress.key("tel:5551234567"))
         assertEquals(IMessageAddress.key("Cara@Example.com"), IMessageAddress.key("mailto:cara@example.com"))
         assertNull(IMessageAddress.key("Alice"))

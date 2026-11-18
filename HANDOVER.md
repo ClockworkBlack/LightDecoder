@@ -30,8 +30,9 @@ separate tab. The owner sets up an iPhone 7 (iOS 15.x, TrollStore + JJTech's Val
 OpenBubbles Android app (package com.openbubbles.messaging) themselves.
 - **Design chosen: OpenBubbles is the iMessage client; LightDecoder mirrors it.** The listener
   (`messenger/MessengerNotificationListener`, one listener for both) reads OpenBubbles' MessagingStyle
-  notifications (extras `chatGuid`, `messageGuid`; Person uri tel:/mailto: in 1:1; chatGuid
-  `iMessage;-;<addr>` 1:1, `iMessage;+;chat…` groups) into a hidden `ChatService.IMESSAGE` with its own
+  notifications (extras `chatGuid` = the chat's UUID, `messageGuid` = newest message; the sender's
+  Person uri is tel:/mailto: in 1:1; groups by MessagingStyle.isGroupConversation) into a hidden
+  `ChatService.IMESSAGE` with its own
   archive. Replies go through the notification's Reply action (RemoteInput key `text_reply`, OpenBubbles
   sends in the background); Mark As Read through its SEMANTIC_ACTION_MARK_AS_READ action. New chats and
   attachments hand off to OpenBubbles (`imessage://<addr>?body=`, or ACTION_SEND with
@@ -54,6 +55,18 @@ OpenBubbles Android app (package com.openbubbles.messaging) themselves.
   iMessage, menu "Open in OpenBubbles", and "Send iMessage" in a Messages 1:1 chat (opens the stored
   iMessage chat with the same number, matched on the last 10 digits, else OpenBubbles' new-chat screen).
   The overflow menu's checkbox uses `ThemeOverlay.LightDecoder.MenuPopup` (colorOnSurface = white on dark).
+- **Review fixes** (an 8-agent review against OpenBubbles' source): chat ids are UUIDs, so nothing is
+  parsed out of them (address only from the sender's handle, kept from before when a post has none);
+  OpenBubbles drops a reply equal to the last one for the same messageGuid, so that is refused here
+  (`IMessageReplies.REPEAT`, hand-off instead); Mark As Read is still pressed after a restart (a showing
+  notification with their lines = unread in OpenBubbles); only messages sent from here (`ld:`) match
+  OpenBubbles' line for them, each once, and are replaced by it; deleted messages (ids) and chats
+  (time) are remembered in IMessagePrefs so the notification does not bring them back; sendText throws
+  NO_REPLY_BUTTON (after storing the failed row) so a notification reply is not shown as sent; no share
+  shortcuts for iMessage (they would expose the chat and cannot be opened); stickers hand off all of them
+  without clearing the draft; long-press Retry hands off like a tap; Messages search includes iMessage;
+  checkSetUp/empty card count iMessage, Delete archive only the Messages archive; hand-off copies live in
+  cache/shared/imessage/ and go after a day; the checkbox colour is set through checkboxStyle.
 - Tests: imessage/IMessageCaptureTest, IMessageManagerTest, ui/BlueBubblesScreenTest. Not tried on a
   phone with OpenBubbles: the notification format is from OpenBubbles' source (commit eed1b63, Apr 2026).
 - **Limits of that design** (tell the owner): no history; nothing for chats open in OpenBubbles, muted

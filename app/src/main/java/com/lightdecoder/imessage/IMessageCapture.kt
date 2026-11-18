@@ -21,11 +21,20 @@ data class CapturedIMessage(
 
 /** What one of OpenBubbles' notifications said about one chat. */
 data class CapturedIMessageChat(
-    /** OpenBubbles' id of the chat ("iMessage;-;+15551234567", "iMessage;+;chat…"). */
+    /**
+     * OpenBubbles' id of the chat: a UUID (Apple's id for the conversation,
+     * or one OpenBubbles made up), which names no one.
+     */
     val chatGuid: String,
+    /** The newest message's OpenBubbles id (the notification's "messageGuid"); empty if not given. */
+    val messageGuid: String,
     val title: String,
     val isGroup: Boolean,
-    /** The other person's address in a one-to-one chat ("+15551234567", "name@example.com"), else empty. */
+    /**
+     * The other person's address in a one-to-one chat ("+15551234567",
+     * "name@example.com"), from the sender's handle; empty when the
+     * notification did not carry one (a group, or a "Notify Anyways" post).
+     */
     val address: String,
     val messages: List<CapturedIMessage>,
 )
@@ -40,7 +49,9 @@ class IMessageAction(val intent: PendingIntent, val inputs: Array<RemoteInput>)
  *
  * How OpenBubbles posts them (its CreateIncomingMessageNotification and
  * InternalIntentReceiver): one notification per chat, tag [OpenBubbles.MESSAGE_TAG],
- * extras "chatGuid" and "messageGuid" (the newest message), a MessagingStyle
+ * extras "chatGuid" (the chat's UUID) and "messageGuid" (the newest message),
+ * the sender as a Person whose uri is their handle ("tel:+1…", "mailto:…") in
+ * a one-to-one chat, a MessagingStyle
  * whose user is "You" and which keeps the chat's earlier lines while the
  * notification is up, a Reply button (text key "text_reply") and a Mark As
  * Read button. After a reply is sent from the notification, OpenBubbles
@@ -78,7 +89,8 @@ object IMessageCapture {
         if (notification.flags and Notification.FLAG_GROUP_SUMMARY != 0) return null
         val extras = notification.extras ?: return null
         val chatGuid = extras.getString(OpenBubbles.EXTRA_CHAT_GUID)?.trim().orEmpty()
-        if (chatGuid.isEmpty() || chatGuid == "-1" || !OpenBubbles.isIMessageChat(chatGuid)) return null
+        // "-1" is the summary's "open the app" id.
+        if (chatGuid.isEmpty() || chatGuid == "-1") return null
         val style = NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(notification) ?: return null
         val user = style.user
         val fallbackTime = notification.`when`.takeIf { it > 0 } ?: postTimeMs
@@ -102,25 +114,29 @@ object IMessageCapture {
             )
         }
         if (messages.isEmpty()) return null
-        val isGroup = style.isGroupConversation || chatGuid.contains(";+;")
+        val isGroup = style.isGroupConversation
         val shownTitle = extras.getCharSequence(NotificationCompat.EXTRA_TITLE)?.toString()?.trim().orEmpty().removePrefix(NOTIFY_ANYWAYS)
         val groupTitle = style.conversationTitle?.toString()?.trim().orEmpty().removePrefix(NOTIFY_ANYWAYS)
         val other = messages.lastOrNull { !it.fromMe && it.sender.isNotEmpty() }?.sender.orEmpty()
-        val address = if (isGroup) "" else addressOf(chatGuid, messages)
+        val address = if (isGroup) "" else addressOf(messages)
         val title = (if (isGroup) groupTitle else "")
             .ifEmpty { other }
             .ifEmpty { shownTitle.takeUnless { it == user.name?.toString()?.trim() }.orEmpty() }
             .ifEmpty { groupTitle }
             .ifEmpty { address }
         if (title.isEmpty()) return null
-        return CapturedIMessageChat(chatGuid, title, isGroup, address, messages)
+        val messageGuid = extras.getString(OpenBubbles.EXTRA_MESSAGE_GUID)?.trim().orEmpty()
+        return CapturedIMessageChat(chatGuid, messageGuid, title, isGroup, address, messages)
     }
 
-    /** The other person's address: from a message's handle, else from the chat's id. */
-    private fun addressOf(chatGuid: String, messages: List<CapturedIMessage>): String {
-        val handle = messages.firstOrNull { it.senderHandle.isNotEmpty() }?.senderHandle.orEmpty()
-        val fromHandle = handle.substringAfter("tel:", "").ifEmpty { handle.substringAfter("mailto:", "") }.trim()
-        return fromHandle.ifEmpty { OpenBubbles.addressOf(chatGuid).orEmpty() }
+    /** The other person's address, from a message's handle ("tel:…" or "mailto:…"). */
+    private fun addressOf(messages: List<CapturedIMessage>): String {
+        val handle = messages.lastOrNull { it.senderHandle.isNotEmpty() }?.senderHandle.orEmpty().trim()
+        return when {
+            handle.startsWith("tel:") -> handle.removePrefix("tel:")
+            handle.startsWith("mailto:") -> handle.removePrefix("mailto:")
+            else -> ""
+        }.trim()
     }
 
     /** The notification's Reply button (takes typed text). */

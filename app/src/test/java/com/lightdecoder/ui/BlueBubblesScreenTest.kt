@@ -61,7 +61,6 @@ class BlueBubblesScreenTest {
         ArchiveRepository.installForTesting(imRepo)
         iMessage = IMessageManager.installForTesting(two.app, imRepo)
         IMessagePrefs.setEnabled(two.app, false)
-        two.env.pairedManager()
     }
 
     @After
@@ -74,7 +73,7 @@ class BlueBubblesScreenTest {
 
     private fun seedIMessage(text: String = "Hi from an iPhone", ts: Long = 5_000) {
         iMessage.record(
-            CapturedIMessageChat(ALICE, "Alice", false, "+15551234567", listOf(CapturedIMessage("Alice", "tel:+15551234567", false, text, ts))),
+            CapturedIMessageChat(ALICE, "m1", "Alice", false, "+15551234567", listOf(CapturedIMessage("Alice", "tel:+15551234567", false, text, ts))),
             live = false,
         )
     }
@@ -90,6 +89,7 @@ class BlueBubblesScreenTest {
 
     @Test
     fun theCheckboxIsInTheMessagesMenuOnly() {
+        two.env.pairedManager()
         two.seedConversation(ChatService.MESSAGES, "c1", "Bob")
         two.seedConversation(ChatService.WHATSAPP, "111@s.whatsapp.net", "Carol")
         launchList().use { scenario ->
@@ -109,6 +109,7 @@ class BlueBubblesScreenTest {
 
     @Test
     fun withBlueBubblesOnIMessageChatsAreListedInMessagesMarkedIMessage() {
+        two.env.pairedManager()
         two.seedConversation(ChatService.MESSAGES, "c1", "Bob", lastTs = 1_000)
         seedIMessage(ts = 5_000)
         launchList().use { scenario ->
@@ -136,6 +137,7 @@ class BlueBubblesScreenTest {
 
     @Test
     fun tickingItWithoutOpenBubblesOffersTheApp() {
+        two.env.pairedManager()
         two.seedConversation(ChatService.MESSAGES, "c1", "Bob")
         launchList().use { scenario ->
             scenario.waitFor("the Messages inbox") { titles(it) == listOf("Bob") }
@@ -154,6 +156,7 @@ class BlueBubblesScreenTest {
 
     @Test
     fun tickingItAsksForNotificationAccessAndComesOnOnceGranted() {
+        two.env.pairedManager()
         installOpenBubbles()
         two.seedConversation(ChatService.MESSAGES, "c1", "Bob")
         launchList().use { scenario ->
@@ -181,6 +184,7 @@ class BlueBubblesScreenTest {
 
     @Test
     fun untickingItTurnsItOff() {
+        two.env.pairedManager()
         IMessagePrefs.setEnabled(two.app, true)
         two.seedConversation(ChatService.MESSAGES, "c1", "Bob", lastTs = 1_000)
         seedIMessage()
@@ -194,6 +198,7 @@ class BlueBubblesScreenTest {
 
     @Test
     fun anIMessageChatHasBlueBubblesAndHandsOffToOpenBubblesWithoutAReplyButton() {
+        two.env.pairedManager()
         installOpenBubbles()
         IMessagePrefs.setEnabled(two.app, true)
         seedIMessage()
@@ -223,6 +228,7 @@ class BlueBubblesScreenTest {
 
     @Test
     fun aMessagesConversationOffersItsPersonsIMessageChat() {
+        two.env.pairedManager()
         IMessagePrefs.setEnabled(two.app, true)
         seedIMessage()
         two.seedConversation(ChatService.MESSAGES, "c1", "Alice", number = "+1 555-123-4567")
@@ -238,6 +244,44 @@ class BlueBubblesScreenTest {
                 val started = shadowOf(activity).nextStartedActivity
                 assertEquals(ChatService.IMESSAGE, RelayIntents.serviceOf(started))
                 assertEquals(ALICE, started.getStringExtra(RelayIntents.EXTRA_CONVERSATION_ID))
+            }
+        }
+    }
+
+    @Test
+    fun withOnlyBlueBubblesTheListOpensOnItsChatsInsteadOfSetup() {
+        two.env.manager()
+        two.wa.paired = false
+        IMessagePrefs.setEnabled(two.app, true)
+        seedIMessage()
+        ActivityScenario.launch(ConversationsActivity::class.java).use { scenario ->
+            scenario.waitFor("the iMessage chat") { titles(it) == listOf("Alice") }
+            scenario.onActivity { activity ->
+                assertFalse("not sent to Google Messages setup", activity.isFinishing)
+                assertFalse("the Messages archive is empty: nothing to delete", menu(activity).findItem(R.id.action_delete_archive).isVisible)
+            }
+        }
+    }
+
+    @Test
+    fun searchInMessagesFindsIMessagesToo() {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        seedIMessage("Dinner at eight?")
+        launchList().use { scenario ->
+            scenario.waitFor("the iMessage chat") { titles(it) == listOf("Alice") }
+            scenario.onActivity { activity ->
+                val search = menu(activity).findItem(R.id.action_search)
+                search.expandActionView()
+                (search.actionView as androidx.appcompat.widget.SearchView).setQuery("dinner", true)
+            }
+            scenario.waitFor("the hit") {
+                (it.findViewById<RecyclerView>(R.id.searchResults).adapter as com.lightdecoder.ui.chat.SearchResultsAdapter).currentList.isNotEmpty()
+            }
+            scenario.onActivity { activity ->
+                val hit = (activity.findViewById<RecyclerView>(R.id.searchResults).adapter as com.lightdecoder.ui.chat.SearchResultsAdapter).currentList.single()
+                assertEquals(ChatService.IMESSAGE, hit.service)
+                assertEquals(ALICE, hit.conversationId)
             }
         }
     }
@@ -276,6 +320,6 @@ class BlueBubblesScreenTest {
 
     private companion object {
         const val IM_DB = "imessage-screen-test.db"
-        const val ALICE = "iMessage;-;+15551234567"
+        const val ALICE = "5D2B5A4C-1F0E-4C3B-9A7D-2E6F1B0C9D11"
     }
 }

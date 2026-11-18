@@ -15,6 +15,9 @@ object IMessagePrefs {
     private const val KEY_ENABLED = "blue_bubbles"
     private const val KEY_NOTIFY = "notify_messages"
     private const val KEY_ID_SALT = "id_salt"
+    private const val KEY_DELETED = "deleted_messages"
+    private const val KEY_CLEARED_PREFIX = "cleared:"
+    private const val MAX_DELETED = 500
     private val saltLock = Any()
 
     private fun prefs(context: Context) = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -31,6 +34,37 @@ object IMessagePrefs {
     fun notifyMessages(context: Context): Boolean = prefs(context).getBoolean(KEY_NOTIFY, true)
 
     fun setNotifyMessages(context: Context, on: Boolean) = prefs(context).edit { putBoolean(KEY_NOTIFY, on) }
+
+    /**
+     * Messages the user deleted here. OpenBubbles' notification shows a
+     * chat's earlier lines again with every new message until the chat is
+     * read, so without this they would come back. The newest
+     * [MAX_DELETED] are kept.
+     */
+    fun deletedMessages(context: Context): Set<String> =
+        prefs(context).getString(KEY_DELETED, null)?.split('\n')?.filter { it.isNotEmpty() }?.toSet().orEmpty()
+
+    fun addDeletedMessage(context: Context, messageId: String) = synchronized(saltLock) {
+        val now = prefs(context).getString(KEY_DELETED, null)?.split('\n')?.filter { it.isNotEmpty() && it != messageId }.orEmpty()
+        prefs(context).edit { putString(KEY_DELETED, (now + messageId).takeLast(MAX_DELETED).joinToString("\n")) }
+    }
+
+    /**
+     * The time up to which a chat the user deleted here is cleared: lines of
+     * OpenBubbles' notification from before it are not taken in again.
+     * Keyed by the hashed chat id.
+     */
+    fun clearedBefore(context: Context, chatGuid: String): Long =
+        prefs(context).getLong(KEY_CLEARED_PREFIX + opaque(context, chatGuid), 0L)
+
+    fun setClearedBefore(context: Context, chatGuid: String, timestampMs: Long) =
+        prefs(context).edit { putLong(KEY_CLEARED_PREFIX + opaque(context, chatGuid), timestampMs) }
+
+    /** Forgets what was deleted (the whole iMessage archive went). */
+    fun clearDeleted(context: Context) = prefs(context).edit {
+        remove(KEY_DELETED)
+        for (key in prefs(context).all.keys) if (key.startsWith(KEY_CLEARED_PREFIX)) remove(key)
+    }
 
     /**
      * A name for a conversation that other apps may read (a notification's
