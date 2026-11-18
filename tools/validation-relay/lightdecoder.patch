@@ -1,0 +1,238 @@
+diff --git a/ValidationRelay/Info.plist b/ValidationRelay/Info.plist
+index 28094e2..a873fc3 100644
+--- a/ValidationRelay/Info.plist
++++ b/ValidationRelay/Info.plist
+@@ -2,6 +2,17 @@
+ <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+ <plist version="1.0">
+ <dict>
++	<key>NSAppTransportSecurity</key>
++	<dict>
++		<key>NSExceptionDomains</key>
++		<dict>
++			<key>static.ess.apple.com</key>
++			<dict>
++				<key>NSExceptionAllowsInsecureHTTPLoads</key>
++				<true/>
++			</dict>
++		</dict>
++	</dict>
+ 	<key>UIBackgroundModes</key>
+ 	<array>
+ 		<string>processing</string>
+diff --git a/ValidationRelay/Relay.swift b/ValidationRelay/Relay.swift
+index fd5922c..bd7c0b5 100644
+--- a/ValidationRelay/Relay.swift
++++ b/ValidationRelay/Relay.swift
+@@ -160,7 +160,10 @@ class RelayConnectionDelegate: WebSocketConnectionDelegate, ObservableObject {
+     func webSocketDidReceiveMessage(connection: WebSocketConnection, string: String) {
+         print("Got string msg")
+         // Parse as JSON
+-        let json = try! JSONSerialization.jsonObject(with: string.data(using: .utf8)!, options: [])
++        guard let raw = string.data(using: .utf8), let json = try? JSONSerialization.jsonObject(with: raw, options: []) else {
++            manager.logItems.log("Unreadable message from the relay server", isError: true)
++            return
++        }
+         print(json)
+         
+         // Save registration code
+@@ -186,13 +189,27 @@ class RelayConnectionDelegate: WebSocketConnectionDelegate, ObservableObject {
+                     connection.send(string: String(data: data, encoding: .utf8)!)
+                 }
+                 if command == "get-validation-data" {
+-                    print("Sending val data")
+-                    let v = generateValidationData()
+-                    print("Validation data: \(v.base64EncodedString())")
+-                    manager.logItems.log("Generated validation data: \(v.base64EncodedString())")
+-                    let validationData = ["command": "response", "data": ["data": v.base64EncodedString()], "id": jsonDict["id"]!] as [String : Any]
+-                    let data = try! JSONSerialization.data(withJSONObject: validationData)
+-                    connection.send(string: String(data: data, encoding: .utf8)!)
++                    // Patched for LightDecoder: made off the main thread, so the connection keeps
++                    // answering pings meanwhile, and a failure is logged instead of crashing the app.
++                    let id = jsonDict["id"]!
++                    manager.logItems.log("Validation data asked for")
++                    let log = manager.logItems
++                    DispatchQueue.global(qos: .userInitiated).async {
++                        do {
++                            let v = try generateValidationData { step in
++                                DispatchQueue.main.async { log.log(step) }
++                            }
++                            DispatchQueue.main.async {
++                                log.log("Sending validation data (\(v.count) bytes)")
++                                let response = ["command": "response", "data": ["data": v.base64EncodedString()], "id": id] as [String : Any]
++                                if let data = try? JSONSerialization.data(withJSONObject: response), let text = String(data: data, encoding: .utf8) {
++                                    connection.send(string: text)
++                                }
++                            }
++                        } catch {
++                            DispatchQueue.main.async { log.log("Validation data failed: \(error)", isError: true) }
++                        }
++                    }
+                 }
+             }
+         }
+diff --git a/ValidationRelay/ValidationData.swift b/ValidationRelay/ValidationData.swift
+index 283a4cb..b036e2d 100644
+--- a/ValidationRelay/ValidationData.swift
++++ b/ValidationRelay/ValidationData.swift
+@@ -3,79 +3,98 @@
+ //  ValidationRelay
+ //
+ //  Created by James Gill on 3/24/24.
++//  Patched for LightDecoder: no crashes on a network or NAC failure, a time
++//  limit on each request, and every step reported so a failure can be seen.
+ //
+ 
+ import Foundation
+ 
+-//struct ValidationSession {
+-//    init() {
+-//        // Setup session, make request
+-//    }
+-//    
+-//    var expiry: Date {
+-//        get {
+-//            return Date()
+-//        }
+-//    }
+-//    
+-//    func sign(_ data: Data = Data()) -> Data {
+-//        return Data()
+-//    }
+-//}
++struct ValidationError: Error, CustomStringConvertible {
++    let description: String
++}
++
++private let validationSession: URLSession = {
++    let config = URLSessionConfiguration.ephemeral
++    config.timeoutIntervalForRequest = 20
++    config.timeoutIntervalForResource = 30
++    return URLSession(configuration: config)
++}()
++
++/// One HTTP request, waited for on the calling (background) thread.
++private func fetch(_ request: URLRequest) throws -> Data {
++    let done = DispatchSemaphore(value: 0)
++    var result: Result<Data, Error> = .failure(ValidationError(description: "no answer"))
++    validationSession.dataTask(with: request) { data, response, error in
++        if let error = error {
++            result = .failure(error)
++        } else if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
++            result = .failure(ValidationError(description: "HTTP \(http.statusCode) from \(request.url?.host ?? "?")"))
++        } else {
++            result = .success(data ?? Data())
++        }
++        done.signal()
++    }.resume()
++    if done.wait(timeout: .now() + 35) == .timedOut {
++        throw ValidationError(description: "timed out reaching \(request.url?.host ?? "?")")
++    }
++    return try result.get()
++}
+ 
+-/// Makes an HTTP request to http://static.ess.apple.com/identity/validation/cert-1.0.plist
+-/// parses the plist and extracts the raw certificate data
+-func getCertificate() -> Data {
+-    let url = URL(string: "http://static.ess.apple.com/identity/validation/cert-1.0.plist")!
+-    let data = try! Data(contentsOf: url)
+-    let plist = try! PropertyListSerialization.propertyList(from: data, options: [], format: nil) as! [String: Any]
+-    let certData = plist["cert"] as! Data
+-    return certData
++private func plistDict(_ data: Data, _ what: String) throws -> [String: Any] {
++    guard let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] else {
++        throw ValidationError(description: "\(what): not a plist (\(data.count) bytes)")
++    }
++    return plist
+ }
+ 
+-/// Makes an HTTPS POST to https://identity.ess.apple.com/WebObjects/TDIdentityService.woa/wa/initializeValidation
+-/// with a plist containing the session-info-request and returns the session-info
+-func initializeValidation(_ request: Data) -> Data {
+-    // Encode body as session-info-request key in plist
+-    let requestB = try! PropertyListSerialization.data(fromPropertyList: ["session-info-request": request], format: .xml, options: 0)
+-    
+-    let url = URL(string: "https://identity.ess.apple.com/WebObjects/TDIdentityService.woa/wa/initializeValidation")!
+-    var req = URLRequest(url: url)
++/// Apple's validation certificate, from static.ess.apple.com (plain HTTP first, as iOS
++/// itself fetches it; HTTPS if that is refused).
++func getCertificate() throws -> Data {
++    var lastError: Error = ValidationError(description: "no certificate")
++    for address in ["http://static.ess.apple.com/identity/validation/cert-1.0.plist",
++                    "https://static.ess.apple.com/identity/validation/cert-1.0.plist"] {
++        do {
++            let plist = try plistDict(try fetch(URLRequest(url: URL(string: address)!)), "certificate")
++            guard let cert = plist["cert"] as? Data else { throw ValidationError(description: "certificate plist has no cert") }
++            return cert
++        } catch {
++            lastError = error
++        }
++    }
++    throw lastError
++}
++
++/// POSTs the session-info-request to identity.ess.apple.com and returns the session-info.
++func initializeValidation(_ request: Data) throws -> Data {
++    let body = try PropertyListSerialization.data(fromPropertyList: ["session-info-request": request], format: .xml, options: 0)
++    var req = URLRequest(url: URL(string: "https://identity.ess.apple.com/WebObjects/TDIdentityService.woa/wa/initializeValidation")!)
+     req.httpMethod = "POST"
+-    req.httpBody = requestB
++    req.httpBody = body
+     req.setValue("application/x-apple-plist", forHTTPHeaderField: "Content-Type")
+-    NSLog("Making POST request to \(url) with body \(requestB)")
+-    let data = try! NSURLConnection.sendSynchronousRequest(req, returning: nil)
+-    // Parse the response
+-    NSLog("Got response \(data)")
+-    let plist = try! PropertyListSerialization.propertyList(from: data, options: [], format: nil) as! [String: Any]
+-    NSLog("Got plist \(plist)")
+-    let sessionInfo = plist["session-info"] as! Data
+-    NSLog("Got session info \(sessionInfo)")
++    let plist = try plistDict(try fetch(req), "initializeValidation")
++    guard let sessionInfo = plist["session-info"] as? Data else {
++        throw ValidationError(description: "initializeValidation answered without session-info: \(plist.keys.sorted())")
++    }
+     return sessionInfo
+ }
+ 
+-func generateValidationData() -> Data {
+-    let cert: Data = getCertificate()
+-    var val_ctx: UInt64 = 0
+-    var session_req: NSData? = NSData()
+-    var ret = NACInit(cert, &val_ctx, &session_req)
+-    NSLog("NACInit returned \(ret)")
+-    assert(ret == 0)
+-    let sessionInfo = initializeValidation(session_req! as Data)
+-    NSLog("Got session info \(sessionInfo)")
+-    
+-    ret = NACKeyEstablishment(val_ctx, sessionInfo)
+-    NSLog("NACKeyEstablishment returned \(ret)")
+-    assert(ret == 0)
+-    
++/// Generates validation data. Run it off the main thread; [step] reports progress.
++func generateValidationData(step: (String) -> Void) throws -> Data {
++    step("Fetching Apple's validation certificate")
++    let cert = try getCertificate()
++    var valCtx: UInt64 = 0
++    var sessionReq: NSData? = NSData()
++    var ret = NACInit(cert, &valCtx, &sessionReq)
++    step("NACInit returned \(ret)")
++    guard ret == 0, let request = sessionReq else { throw ValidationError(description: "NACInit failed (\(ret))") }
++    step("Asking Apple to start validation")
++    let sessionInfo = try initializeValidation(request as Data)
++    ret = NACKeyEstablishment(valCtx, sessionInfo)
++    step("NACKeyEstablishment returned \(ret)")
++    guard ret == 0 else { throw ValidationError(description: "NACKeyEstablishment failed (\(ret))") }
+     var signature: NSData? = NSData()
+-    ret = NACSign(val_ctx, Data(), &signature)
+-    NSLog("NACSign returned \(ret)")
+-    assert(ret == 0)
+-    
+-    NSLog("VALIDATION DATA \(signature!.base64EncodedString())")
+-    
+-    return signature! as Data
++    ret = NACSign(valCtx, Data(), &signature)
++    step("NACSign returned \(ret)")
++    guard ret == 0, let sig = signature, sig.length > 0 else { throw ValidationError(description: "NACSign failed (\(ret))") }
++    return sig as Data
+ }
+-
