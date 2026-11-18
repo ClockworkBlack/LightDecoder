@@ -20,10 +20,198 @@ index 28094e2..a873fc3 100644
  	<key>UIBackgroundModes</key>
  	<array>
  		<string>processing</string>
+diff --git a/ValidationRelay/LogView.swift b/ValidationRelay/LogView.swift
+index 04234e8..0eea490 100644
+--- a/ValidationRelay/LogView.swift
++++ b/ValidationRelay/LogView.swift
+@@ -14,13 +14,141 @@ struct LogItem: Identifiable, Hashable {
+     var date: Date
+ }
+ 
++/// The Event Log. Patched for LightDecoder: every line also goes to a file
++/// (Documents/relay-log.txt) that outlives the app, so a crash or a run that
++/// iOS ended can be seen next time; crashes themselves are written there as
++/// they happen; and the whole file can be shared.
+ class LogItems: ObservableObject {
+     @Published var items: [LogItem] = []
+-    
++
++    init() {
++        RelayLogFile.shared.start()
++        // What the last run left behind: how it ended, and its last lines.
++        for line in RelayLogFile.shared.previousRunNotes() {
++            items.append(LogItem(message: line, isError: true, date: Date()))
++        }
++        log("App started: \(RelayLogFile.deviceSummary())")
++    }
++
+     func log(_ message: String, isError: Bool = false) {
+         let item = LogItem(message: message, isError: isError, date: Date())
+         items.append(item)
++        if items.count > 1000 { items.removeFirst(items.count - 1000) }
++        RelayLogFile.shared.append(message, isError: isError)
++    }
++}
++
++/// The log file, and catching crashes into it.
++final class RelayLogFile {
++    static let shared = RelayLogFile()
++
++    let url: URL
++    private let markerURL: URL
++    private let queue = DispatchQueue(label: "relay-log")
++    private var started = false
++    private var notes: [String] = []
++    private static let maxBytes = 512 * 1024
++
++    private init() {
++        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
++        url = docs.appendingPathComponent("relay-log.txt")
++        markerURL = docs.appendingPathComponent("relay-running")
++    }
++
++    func start() {
++        if started { return }
++        started = true
++        trim()
++        // Still there from the last run: it never ended cleanly.
++        if FileManager.default.fileExists(atPath: markerURL.path) {
++            notes.append("The last run ended unexpectedly (a crash, or iOS closed the app). Its log is in the shared file.")
++        }
++        if let last = try? String(contentsOf: url, encoding: .utf8) {
++            let crashes = last.split(separator: "\n").filter { $0.contains("CRASH") }.suffix(3)
++            for line in crashes { notes.append("Earlier: " + line) }
++        }
++        FileManager.default.createFile(atPath: markerURL.path, contents: Data())
++        installCrashHandlers(path: url.path)
++        NotificationCenter.default.addObserver(forName: UIApplication.willTerminateNotification, object: nil, queue: nil) { [weak self] _ in
++            self?.append("App closing normally", isError: false)
++            self?.cleanExit()
++        }
++    }
++
++    func previousRunNotes() -> [String] { notes }
++
++    /// The user closed the app, or iOS is ending it the normal way.
++    func cleanExit() {
++        try? FileManager.default.removeItem(at: markerURL)
++    }
++
++    func append(_ message: String, isError: Bool) {
++        let stamp = ISO8601DateFormatter().string(from: Date())
++        let line = "\(stamp) \(isError ? "E" : "I") \(message)\n"
++        queue.async { [url] in
++            guard let data = line.data(using: .utf8) else { return }
++            if let handle = try? FileHandle(forWritingTo: url) {
++                handle.seekToEndOfFile()
++                handle.write(data)
++                try? handle.close()
++            } else {
++                try? data.write(to: url)
++            }
++        }
++    }
++
++    /// Keeps the file to its newest half megabyte.
++    private func trim() {
++        guard let data = try? Data(contentsOf: url), data.count > RelayLogFile.maxBytes else { return }
++        let tail = data.suffix(RelayLogFile.maxBytes / 2)
++        try? Data(tail).write(to: url)
++    }
++
++    func clear() {
++        queue.async { [url] in try? Data().write(to: url) }
++    }
++
++    static func deviceSummary() -> String {
++        var info = utsname()
++        uname(&info)
++        let machine = withUnsafePointer(to: &info.machine) {
++            $0.withMemoryRebound(to: CChar.self, capacity: 256) { String(cString: $0) }
++        }
++        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
++        return "\(machine), iOS \(UIDevice.current.systemVersion), Relay \(version) (LightDecoder patch)"
++    }
++}
++
++// --- crash catching -------------------------------------------------------------------------
++// A crash (a Swift trap, a fatal error, a bad memory access) is written to the log file
++// from the signal handler with write(2) only, the one thing safe to do there.
++
++private var crashFD: Int32 = -1
++
++private func writeCrash(_ text: StaticString) {
++    guard crashFD >= 0 else { return }
++    _ = text.withUTF8Buffer { write(crashFD, $0.baseAddress, $0.count) }
++}
++
++private func installCrashHandlers(path: String) {
++    crashFD = open(path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
++    NSSetUncaughtExceptionHandler { exception in
++        RelayLogFile.shared.append("CRASH: uncaught exception \(exception.name.rawValue): \(exception.reason ?? "")", isError: true)
++        Thread.sleep(forTimeInterval: 0.2)
++    }
++    let handler: @convention(c) (Int32) -> Void = { sig in
++        switch sig {
++        case SIGTRAP: writeCrash("\nCRASH: SIGTRAP (a Swift error: a failed try!, a nil unwrap or an assert)\n")
++        case SIGABRT: writeCrash("\nCRASH: SIGABRT (the app aborted)\n")
++        case SIGSEGV: writeCrash("\nCRASH: SIGSEGV (bad memory access)\n")
++        case SIGBUS: writeCrash("\nCRASH: SIGBUS (bad memory access)\n")
++        case SIGILL: writeCrash("\nCRASH: SIGILL (illegal instruction)\n")
++        default: writeCrash("\nCRASH: signal\n")
++        }
++        signal(sig, SIG_DFL)
++        raise(sig)
+     }
++    for sig in [SIGTRAP, SIGABRT, SIGSEGV, SIGBUS, SIGILL] { signal(sig, handler) }
+ }
+ 
+ struct LogView: View {
+@@ -46,17 +174,17 @@ struct LogView: View {
+                 ToolbarItem(placement: .navigationBarTrailing) {
+                     Button("Clear") {
+                         logItems.items = []
++                        RelayLogFile.shared.clear()
+                     }
+                 }
+                 // Export log button
+                 ToolbarItem(placement: .navigationBarTrailing) {
+                     // Pop up a share sheet, use share sheet icon for button
+                     Button(action: {
+-                        // Create a string of the log items
+-                        let logString = logItems.items.map { item in
+-                            "\(item.date): \(item.message)"
+-                        }.joined(separator: "\n")
+-                        let av = UIActivityViewController(activityItems: [logString], applicationActivities: nil)
++                        // The whole log file (this run and earlier ones, crashes included).
++                        let file = RelayLogFile.shared.url
++                        let items: [Any] = FileManager.default.fileExists(atPath: file.path) ? [file] : [logItems.items.map { "\($0.date): \($0.message)" }.joined(separator: "\n")]
++                        let av = UIActivityViewController(activityItems: items, applicationActivities: nil)
+                         UIApplication.shared.windows.first?.rootViewController?.present(av, animated: true, completion: nil)
+                     }) {
+                         Image(systemName: "square.and.arrow.up")
 diff --git a/ValidationRelay/Relay.swift b/ValidationRelay/Relay.swift
-index fd5922c..bd7c0b5 100644
+index fd5922c..bd376f1 100644
 --- a/ValidationRelay/Relay.swift
 +++ b/ValidationRelay/Relay.swift
+@@ -122,7 +122,7 @@ class RelayConnectionDelegate: WebSocketConnectionDelegate, ObservableObject {
+         if manager.currentURL?.absoluteString == manager.savedRegistrationURL {
+             print("Using saved registration code")
+             manager.logItems.log("Using saved registration code \(manager.savedRegistrationCode)")
+-            manager.logItems.log("Using saved registration secret \(manager.savedRegistrationSecret)")
++            manager.logItems.log("Using saved registration secret (hidden)")
+             registerCommand["data"] = ["code": manager.savedRegistrationCode, "secret": manager.savedRegistrationSecret]
+         }
+         let data = try! JSONSerialization.data(withJSONObject: registerCommand)
+@@ -131,7 +131,7 @@ class RelayConnectionDelegate: WebSocketConnectionDelegate, ObservableObject {
+     }
+     
+     func webSocketDidDisconnect(connection: WebSocketConnection, closeCode: NWProtocolWebSocket.CloseCode, reason: Data?) {
+-        manager.logItems.log("Websocket did disconnect", isError: true)
++        manager.logItems.log("Websocket did disconnect (close code \(closeCode), reason \(reason.flatMap { String(data: $0, encoding: .utf8) } ?? "none"))", isError: true)
+         print("Disconnected")
+     }
+     
 @@ -160,7 +160,10 @@ class RelayConnectionDelegate: WebSocketConnectionDelegate, ObservableObject {
      func webSocketDidReceiveMessage(connection: WebSocketConnection, string: String) {
          print("Got string msg")
@@ -36,7 +224,22 @@ index fd5922c..bd7c0b5 100644
          print(json)
          
          // Save registration code
-@@ -186,13 +189,27 @@ class RelayConnectionDelegate: WebSocketConnectionDelegate, ObservableObject {
+@@ -170,7 +173,7 @@ class RelayConnectionDelegate: WebSocketConnectionDelegate, ObservableObject {
+                     manager.registrationCode = code
+                     if manager.savedRegistrationCode != code {
+                         manager.logItems.log("New registration code \(code)")
+-                        manager.logItems.log("secret \(data["secret"] as? String ?? "")")
++                        manager.logItems.log("secret (hidden)")
+                     }
+                     manager.savedRegistrationCode = code
+                     manager.savedRegistrationSecret = data["secret"] as? String ?? ""
+@@ -181,18 +184,32 @@ class RelayConnectionDelegate: WebSocketConnectionDelegate, ObservableObject {
+                 if command == "get-version-info" {
+                     let versionInfo = ["command": "response", "data": ["versions": getIdentifiers()], "id": jsonDict["id"]!] as [String : Any]
+                     print("Sending version info: \(versionInfo)")
+-                    manager.logItems.log("Sending version info: \(versionInfo)")
++                    manager.logItems.log("Sending version info (asked for by OpenBubbles)")
+                     let data = try! JSONSerialization.data(withJSONObject: versionInfo)
                      connection.send(string: String(data: data, encoding: .utf8)!)
                  }
                  if command == "get-validation-data" {

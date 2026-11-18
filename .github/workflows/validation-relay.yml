@@ -3,8 +3,10 @@ name: Build patched ValidationRelay
 # The iPhone relay app that OpenBubbles uses for Blue Bubbles (JJTech0130/ValidationRelay),
 # with tools/validation-relay/lightdecoder.patch applied: validation data is made off the
 # main thread, a failure is logged in its Event Log instead of crashing the app, and plain-
-# HTTP access to Apple's certificate is allowed. The .tipa is for installing with TrollStore
-# on the owner's own iPhone; it is kept for 3 days and never released.
+# HTTP access to Apple's certificate is allowed. Its Event Log also goes to a file that survives
+# crashes and restarts (crashes are caught into it), and the share button shares that file.
+# The .tipa is for installing with TrollStore on the owner's own iPhone; it is kept for 3 days
+# and never released.
 
 on:
   workflow_dispatch:
