@@ -40,6 +40,9 @@ android {
         targetSdk = 36
         versionCode = 40
         versionName = "0.5.32"
+        // On-device tests (app/src/androidTest): the Blue Bubbles round trip against the
+        // stand-in OpenBubbles app (:fakebubbles), run on an emulator by .github/workflows/device-test.yml.
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // The decoder is plain software, so it runs on every ABI. These cover
         // phones (64- and 32-bit ARM) and the emulator.
@@ -613,6 +616,9 @@ dependencies {
     testImplementation("androidx.test:core:1.6.1")
     testImplementation("androidx.test.ext:junit:1.2.1")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:core:1.6.1")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }
 
 // --- unit tests run the real decoder ----------------------------------------

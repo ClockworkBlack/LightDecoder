@@ -1,0 +1,92 @@
+name: Blue Bubbles device test
+
+# LightDecoder's Blue Bubbles on a real Android system (an emulator), against a stand-in for the
+# OpenBubbles app (:fakebubbles) that posts message notifications the way OpenBubbles does:
+# app/src/androidTest/java/com/lightdecoder/BlueBubblesDeviceTest.kt. Apple and real iPhones are not
+# part of it (they cannot be, from a build machine).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ccr-4fee5e9f-jrrlhu]
+    paths:
+      - "app/src/main/java/com/lightdecoder/imessage/**"
+      - "app/src/main/java/com/lightdecoder/messenger/MessengerNotificationListener.kt"
+      - "app/src/main/java/com/lightdecoder/ui/chat/**"
+      - "app/src/androidTest/**"
+      - "fakebubbles/**"
+      - ".github/workflows/device-test.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  device-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Read the pinned Go toolchain
+        id: go-pin
+        run: echo "version=$(sed -n 's/^toolchain go//p' gmbridge/go.mod)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ steps.go-pin.outputs.version }}
+          cache-dependency-path: gmbridge/go.sum
+
+      - name: Install NDK, CMake, SDK platform and build-tools
+        run: sdkmanager "ndk;28.2.13676358" "cmake;3.31.6" "platforms;android-36" "build-tools;35.0.0"
+
+      - name: Build LightDecoder (debug), its device test, and the OpenBubbles stand-in
+        run: ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest :fakebubbles:assembleDebug --no-daemon --stacktrace
+
+      - name: Enable KVM for the emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run the test on an Android 14 emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: |
+            adb install -r app/build/outputs/apk/debug/app-debug.apk
+            adb install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+            adb install -r fakebubbles/build/outputs/apk/debug/fakebubbles-debug.apk
+            adb logcat -c
+            adb shell am instrument -w -r -e class com.lightdecoder.BlueBubblesDeviceTest com.lightdecoder.debug.test/androidx.test.runner.AndroidJUnitRunner | tee instrument.txt
+            adb logcat -d > logcat.txt || true
+            grep -q "INSTRUMENTATION_CODE: -1" instrument.txt && ! grep -q "FAILURES!!!" instrument.txt
+
+      - name: Show the result
+        if: always()
+        run: |
+          grep -E "INSTRUMENTATION_STATUS: (test|stack)=|OK \(|FAILURES|Tests run|INSTRUMENTATION_CODE" instrument.txt | head -60 || true
+          grep -iE "lightdecoder|fakebubbles|AndroidRuntime|TestRunner" logcat.txt | grep -iE "error|exception|fail|E/" | head -60 || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: device-test-logs
+          path: |
+            instrument.txt
+            logcat.txt
+          retention-days: 7
