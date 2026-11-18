@@ -1025,7 +1025,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         binding.input.hint = getString(
             when {
                 !paired -> R.string.chat_compose_unpaired
-                sendsAsIMessage() -> R.string.imessage_compose_hint
+                companionId != null -> R.string.imessage_compose_hint
                 else -> ServiceUi.composeHint(manager.service)
             }
         )
@@ -1140,8 +1140,14 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val file = attachment
         if (text.isEmpty() && file == null) return
         val id = conversationId
-        // Blue Bubbles: to an iPhone whose iMessage chat can take it, a text goes as an iMessage.
+        // Blue Bubbles: to someone with an iMessage chat, everything goes as an iMessage (blue on their
+        // iPhone), never as a green text: silently through OpenBubbles' Reply button when it has one,
+        // else OpenBubbles opens with the message filled in, for one tap on send.
         val companion = companionId
+        if (manager.service == ChatService.MESSAGES && companion != null && (file != null || !sendsAsIMessage(text))) {
+            handOffToOpenBubbles(iMessageLink, companion, text, listOfNotNull(file), clearComposer = true)
+            return
+        }
         if (manager.service == ChatService.MESSAGES && companion != null && file == null && sendsAsIMessage(text)) {
             val im = iMessageLink
             scrollToBottomNext = true
@@ -1205,7 +1211,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             }
             val shared = copies.filterNotNull()
             fun dropCopies() = runInBackground { shared.forEach { (uri, _) -> handOffFileOf(uri)?.delete() } }
-            if (!isCurrent(link, id)) {
+            // The chat on screen, or the person's iMessage chat shown inside it (Blue Bubbles).
+            if (!isCurrent(link, id) && id != companionId) {
                 dropCopies()
                 return@launch
             }

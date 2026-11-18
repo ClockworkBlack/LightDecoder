@@ -23,6 +23,18 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.32 (versionCode 40) - texts to iPhones never go green
+- Owner's ask: texts to iPhone users must show blue on their iPhone. In a Messages conversation that has a
+  companion iMessage chat (Blue Bubbles), send() never sends SMS/RCS any more: silently through
+  OpenBubbles' Reply button when `sendsAsIMessage(text)`, else (no Reply button since the app started, a
+  repeat text, or a picture) `handOffToOpenBubbles` opens OpenBubbles on that chat with the text/picture
+  filled in for one tap. The hint always says "iMessage" there. Fixed on the way: the hand-off's
+  "still on screen" check now accepts the companion chat. Test: BlueBubblesScreenTest
+  `toSomeoneWithAnIMessageChatATextNeverGoesGreen`. 666 tests pass. Next version: 0.5.33 / 41.
+- A person with no iMessage chat stored yet still gets SMS/RCS: LightDecoder cannot know they have an
+  iPhone until an iMessage from them arrives through OpenBubbles ("Send iMessage" in the menu starts one).
+  Sending silently to anyone would need an API in OpenBubbles (or a fork); proposed, not built.
+
 ## Blue Bubbles setup that works (2026-11-18)
 - The owner's OpenBubbles failed with "Token not found": adb logcat showed rustpush's activation at
   albert.apple.com answered without a DeviceCertificate (`failed to connect Failed to parse Albert Cert!`).

@@ -297,6 +297,33 @@ class BlueBubblesScreenTest {
     }
 
     @Test
+    fun toSomeoneWithAnIMessageChatATextNeverGoesGreen() {
+        two.env.pairedManager()
+        installOpenBubbles()
+        IMessagePrefs.setEnabled(two.app, true)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        seedIMessage("An iMessage", ts = 5_000)
+        // No OpenBubbles notification has offered a Reply button since the app started.
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("the iMessage shown") { shownTexts(it).contains("An iMessage") }
+            scenario.onActivity { activity ->
+                assertEquals(activity.getString(R.string.imessage_compose_hint), activity.findViewById<EditText>(R.id.input).hint.toString())
+                activity.findViewById<EditText>(R.id.input).setText("Blue please")
+                activity.findViewById<View>(R.id.send).performClick()
+            }
+            scenario.waitFor("OpenBubbles opened on the chat") { shadowOf(it).peekNextStartedActivity() != null }
+            scenario.onActivity { activity ->
+                val handOff = shadowOf(activity).nextStartedActivity
+                assertEquals(OpenBubbles.PACKAGES.first(), handOff.`package`)
+                assertEquals(ALICE, handOff.getStringExtra(Intent.EXTRA_SHORTCUT_ID))
+                assertEquals("Blue please", handOff.getStringExtra(Intent.EXTRA_TEXT))
+            }
+            // Nothing went out as a text.
+            assertTrue(two.env.repo.messages("c1").none { it.text == "Blue please" })
+        }
+    }
+
+    @Test
     fun anIMessageNotificationOpensThePersonsMessagesConversation() {
         two.env.pairedManager()
         IMessagePrefs.setEnabled(two.app, true)
