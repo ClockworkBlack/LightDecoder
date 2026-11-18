@@ -23,6 +23,33 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.30 (versionCode 38, IN PROGRESS) - Blue Bubbles (iMessage inside the Messages tab)
+Owner's ask (2026-11-18): a white checkbox "Blue Bubbles" in the Messages tab's overflow menu (between
+"Refresh from phone" and "Link settings") so the Messages tab itself sends and receives iMessages; NOT a
+separate tab. The owner sets up an iPhone 7 (iOS 15.x, TrollStore + JJTech's ValidationRelay) and the
+OpenBubbles Android app (package com.openbubbles.messaging) themselves.
+- **Design chosen: OpenBubbles is the iMessage client; LightDecoder mirrors it.** The listener
+  (`messenger/MessengerNotificationListener`, one listener for both) reads OpenBubbles' MessagingStyle
+  notifications (extras `chatGuid`, `messageGuid`; Person uri tel:/mailto: in 1:1; chatGuid
+  `iMessage;-;<addr>` 1:1, `iMessage;+;chat…` groups) into a hidden `ChatService.IMESSAGE` with its own
+  archive. Replies go through the notification's Reply action (RemoteInput key `text_reply`, OpenBubbles
+  sends in the background); Mark As Read through its SEMANTIC_ACTION_MARK_AS_READ action. New chats and
+  attachments hand off to OpenBubbles (`imessage://<addr>?body=`, or ACTION_SEND with
+  EXTRA_SHORTCUT_ID=chatGuid); the user taps send there. Research (7 readers over the OpenBubbles,
+  rustpush and ValidationRelay sources) is summarised in this entry; file:line evidence was in the session.
+- **Limits of that design** (tell the owner): no history; nothing for chats open in OpenBubbles, muted
+  there, or sent from other devices; attachments arrive as text ("Attachment: …"); tapbacks arrive as
+  text; a reply needs a live notification for that chat (else hand-off); OpenBubbles' notifications must
+  stay on (set them Silent to avoid double alerts).
+- **Why not embed OpenBubbles' library (rustpush) so LightDecoder is the iMessage client:** (1) its
+  public FairPlay activation certificate expired 2024-10-11 and a source build was reported refused by
+  albert.apple.com (rustpush issue #18, Jan 2026); OpenBubbles' working keys are private; (2) Beeper's
+  hosted relay (registration-relay.beeper.com) needs an X-Beeper-Access-Token (OpenBubbles ships a shared
+  "burner" token; not ours to reuse), so the owner would need a self-hosted relay; (3) rustpush is SSPL-1.0
+  (exception for OpenBubbles only): an APK combining it with LightDecoder's AGPL code could never be given
+  to anyone; (4) every Apple and Beeper host is blocked from the cloud build container, so nothing could be
+  tested. Do not run OpenBubbles and an embedded client on the same number (they would knock each other off).
+
 ## 0.5.29 (versionCode 37) - share to LightDecoder, edit a WhatsApp message
 - **Share target.** `ui/share/ShareActivity` (exported) takes ACTION_SEND (text, image, video,
   audio) and SEND_MULTIPLE (image, video): pick a linked service and a conversation. One file
