@@ -23,6 +23,19 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## Blue Bubbles setup that works (2026-11-18)
+- The owner's OpenBubbles failed with "Token not found": adb logcat showed rustpush's activation at
+  albert.apple.com answered without a DeviceCertificate (`failed to connect Failed to parse Albert Cert!`).
+  Since Oct 2026 Apple refuses activations that look like an iPhone. Fixed by replacing JJTech's
+  ValidationRelay with **Validation Relay+** (github.com/mkitchingh/ValidationRelay-plus, TrollStore .tipa
+  from its releases, built by its own CI; source checked: talks only to Apple and the chosen relay) with
+  **Report as Mac** on, then a fresh OpenBubbles setup. OpenBubbles then registered.
+- `tools/validation-relay/` (our patch of the old relay, with a JSON event log) and `codemagic.yaml` are
+  superseded by that; kept only for reference. GitHub's macOS runners did not start because the account's
+  Actions budget was at $0 (owner raised it).
+- iPhone 7 relay: iOS 15.x, TrollStore, signed out of Apple ID, iMessage/FaceTime off, plugged in,
+  Validation Relay+ open with Keep Awake. Keep its "Copy Identity" backup: Apple activates a serial once.
+
 ## 0.5.31 (versionCode 39) - Blue Bubbles: one conversation per person, iPhone-style
 - Owner's ask: iMessages in the SAME chats as texts, shown blue, not separate chats.
 - `ui/chat/BlueBubblesLinks` matches an iMessage chat to a Messages 1:1 conversation by the other
