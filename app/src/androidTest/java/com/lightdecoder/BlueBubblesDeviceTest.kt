@@ -174,6 +174,70 @@ class BlueBubblesDeviceTest {
         assertFalse(replies.isEmpty())
     }
 
+    /**
+     * Check iMessage, as close to a real iPhone as a test machine gets: the check goes from the
+     * Messages conversation through OpenBubbles' Reply button, OpenBubbles shows it back, and
+     * "Alice's iPhone" replies by iMessage (through OpenBubbles): the verdict is blue. Then the same
+     * with her reply arriving as a text in Google Messages: green.
+     */
+    @Test
+    fun checkIMessageReadsTheColourFromHowTheIPhoneReplies() {
+        val repo = IMessageManager.get(context).repo
+        post("Hi from my iPhone", "m1")
+        waitFor("the iMessage in LightDecoder") { repo.messages(GUID).any { it.text == "Hi from my iPhone" } }
+
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(context, MESSAGES_ID).setFlags(0)).use { scenario ->
+            waitFor("her iMessages in her Messages conversation") {
+                var shown = emptyList<String>()
+                scenario.onActivity { shown = shownTexts(it) }
+                shown.contains("Hi from my iPhone")
+            }
+            // Blue: she answers by iMessage.
+            val blueCheck = com.lightdecoder.imessage.IMessageCheck.text("1111")
+            scenario.onActivity { it.startIMessageCheck(blueCheck) }
+            waitFor("the check through the Reply button") { replies.contains(blueCheck) }
+            waitFor("OpenBubbles to show it back") { checkLine(scenario, 1).startsWith("\u2713") }
+            post("OK", "m-ok")
+            val blue = context.getString(R.string.imessage_check_blue, "Alice")
+            waitFor("the verdict: blue") { checkVerdict(scenario) == blue }
+            scenario.onActivity { it.checkDialog?.dismiss() }
+
+            // Green: she answers by text (it arrives in Google Messages).
+            val greenCheck = com.lightdecoder.imessage.IMessageCheck.text("2222")
+            scenario.onActivity { it.startIMessageCheck(greenCheck) }
+            waitFor("the second check through the Reply button") { replies.contains(greenCheck) }
+            Thread.sleep(1_500)
+            ArchiveRepository.get(context, ChatService.MESSAGES).upsertMessage(
+                com.lightdecoder.relay.MessageDto(
+                    id = "sms-ok", conversationId = MESSAGES_ID, senderId = "p1", senderName = "Alice", direction = "in",
+                    timestampMs = System.currentTimeMillis(), text = "OK", isOld = true,
+                ),
+            )
+            val green = context.getString(R.string.imessage_check_green, "Alice")
+            waitFor("the verdict: green") { checkVerdict(scenario) == green }
+            assertTrue("no check went out as a text", ArchiveRepository.get(context, ChatService.MESSAGES).messages(MESSAGES_ID)
+                .none { it.isOutgoing && it.text.startsWith("LightDecoder iMessage check") })
+        }
+    }
+
+    private fun shownTexts(activity: ThreadActivity): List<String> =
+        (activity.findViewById<RecyclerView>(R.id.messages).adapter as MessagesAdapter).currentList
+            .filterIsInstance<ThreadItem.Message>().map { it.row.text }
+
+    private fun checkLine(scenario: ActivityScenario<ThreadActivity>, index: Int): String {
+        var line = ""
+        scenario.onActivity {
+            line = it.checkDialog?.findViewById<android.widget.TextView>(R.id.checkSteps)?.text?.toString()?.lines()?.getOrNull(index).orEmpty()
+        }
+        return line
+    }
+
+    private fun checkVerdict(scenario: ActivityScenario<ThreadActivity>): String {
+        var text = ""
+        scenario.onActivity { text = it.checkDialog?.findViewById<android.widget.TextView>(R.id.checkVerdict)?.text?.toString().orEmpty() }
+        return text
+    }
+
     private companion object {
         const val FAKE = "com.bluebubbles.messaging.beta"
         const val GUID = "5D2B5A4C-1F0E-4C3B-9A7D-2E6F1B0C9D11"

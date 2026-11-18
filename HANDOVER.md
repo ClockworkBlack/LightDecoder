@@ -23,7 +23,7 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
-## 0.5.33 (versionCode 41) - several pictures at once, voice messages
+## 0.5.33 (versionCode 41) - several pictures at once, voice messages, Check iMessage
 - **Several pictures in one go** (thread composer): the picker takes up to 10 pictures/videos
   (`PickMultipleVisualMedia`); the attachment bar reads "3 attachments". Each picture goes out as a
   message of its own, in the order picked, the text after the last, the reply on the first. Not one
@@ -42,7 +42,16 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Playing audio in the bubble**: any `audio/*` part (received or sent) shows play/pause, a bar that
   can be moved while it plays, and the time (`VoicePlayer`, one at a time, pauses on onStop). Missing
   files are downloaded through the link first (`audioFileFor`).
-- Tests: `ui/VoiceAndPicturesTest` (7). On-device Blue Bubbles test (`device-test.yml`) passed on an
+- **Check iMessage** (thread menu of a Messages conversation with the person's iMessages in it):
+  no test machine can sign into iMessage, so it uses the person's iPhone. It sends "LightDecoder
+  iMessage check NNNN. Please reply OK." as an iMessage (shown before sending) and ticks off live:
+  handed to OpenBubbles, shown back by OpenBubbles (sent to Apple), their reply. An iPhone replies
+  the way the thread shows on it, so a reply through OpenBubbles = blue, a reply through Google
+  Messages = green (with what to do). Logic in `imessage/IMessageCheck` (pure, over both archives).
+  Also runs on the emulator (`BlueBubblesDeviceTest.checkIMessageReadsTheColourFromHowTheIPhoneReplies`,
+  stand-in plays the iPhone). OpenBubbles needs no Apple ID for this: the phone number registration
+  through the relay is what makes it blue; keep "Start new conversations from" on the number.
+- Tests: `ui/VoiceAndPicturesTest` (7), `imessage/IMessageCheckTest` (7), 2 more in `BlueBubblesScreenTest`. On-device Blue Bubbles test (`device-test.yml`) passed on an
   Android 14 emulator (run 44414229977).
 - Not verified on a real phone yet: how Google's phone app labels an m4a sent from the web link
   (expected: its own audio player), and the stack look with real pictures.

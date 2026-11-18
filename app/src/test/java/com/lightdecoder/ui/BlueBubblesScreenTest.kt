@@ -377,6 +377,92 @@ class BlueBubblesScreenTest {
         }
     }
 
+    // --- Check iMessage -----------------------------------------------------------------
+
+    @Test
+    fun checkIMessageSaysBlueWhenTheyReplyByIMessage() = runCheck(replyByIMessage = true)
+
+    @Test
+    fun checkIMessageSaysGreenWhenTheyReplyByText() = runCheck(replyByIMessage = false)
+
+    /**
+     * Check iMessage in Alice's Messages conversation: it goes through OpenBubbles' Reply button,
+     * OpenBubbles shows it back, and Alice's reply (by iMessage, or by text) gives the verdict.
+     */
+    private fun runCheck(replyByIMessage: Boolean) {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        seedIMessage("An iMessage", ts = 5_000)
+        val replies = ArrayList<String>()
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: android.content.Context, intent: Intent) {
+                replies += android.app.RemoteInput.getResultsFromIntent(intent)
+                    ?.getCharSequence(com.lightdecoder.imessage.OpenBubblesTestNotifications.REPLY_KEY).toString()
+            }
+        }
+        androidx.core.content.ContextCompat.registerReceiver(
+            two.app, receiver, android.content.IntentFilter(com.lightdecoder.imessage.OpenBubblesTestNotifications.REPLY_ACTION),
+            androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        val reply = com.lightdecoder.imessage.OpenBubblesTestNotifications.replyAction(two.app)
+        com.lightdecoder.imessage.IMessageReplies.update(
+            ALICE, com.lightdecoder.imessage.IMessageAction(reply.actionIntent!!, arrayOf(android.app.RemoteInput.Builder("text_reply").build())),
+            null, null, "m1",
+        )
+        try {
+            ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+                scenario.waitFor("the iMessage shown") { shownTexts(it).contains("An iMessage") }
+                scenario.onActivity { activity ->
+                    val item = menu(activity).findItem(R.id.action_check_imessage)
+                    assertTrue("offered where the person's iMessages are", item.isVisible)
+                    activity.onOptionsItemSelected(item)
+                }
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                latestDialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+                scenario.waitFor("the check sent through OpenBubbles' Reply button") {
+                    org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                    replies.size == 1
+                }
+                val check = replies.single()
+                assertTrue(check, check.startsWith("LightDecoder iMessage check "))
+                assertTrue("not as a text", two.env.repo.messages("c1").none { it.text == check })
+                scenario.waitFor("step 1 ticked") { steps(it).lines().first().startsWith("\u2713") }
+                // OpenBubbles shows it back (it went to Apple as an iMessage).
+                val now = System.currentTimeMillis()
+                iMessage.record(
+                    CapturedIMessageChat(ALICE, "m2", "Alice", false, "+15551234567", listOf(CapturedIMessage("", "", true, check, now))),
+                    live = true,
+                )
+                scenario.waitFor("step 2 ticked") { steps(it).lines()[1].startsWith("\u2713") }
+                // Alice answers from her iPhone.
+                if (replyByIMessage) {
+                    iMessage.record(
+                        CapturedIMessageChat(ALICE, "m3", "Alice", false, "+15551234567", listOf(CapturedIMessage("Alice", "tel:+15551234567", false, "OK", now + 1_000))),
+                        live = true,
+                    )
+                } else {
+                    two.seedIncoming(ChatService.MESSAGES, "sms-ok", "c1", "OK", ts = now + 1_000)
+                }
+                val expected = scenario.let {
+                    var text = ""
+                    it.onActivity { a -> text = a.getString(if (replyByIMessage) R.string.imessage_check_blue else R.string.imessage_check_green, "Alice") }
+                    text
+                }
+                scenario.waitFor("the verdict") { verdict(it) == expected }
+                scenario.onActivity { assertTrue(steps(it).lines()[2].startsWith("\u2713")) }
+            }
+        } finally {
+            two.app.unregisterReceiver(receiver)
+        }
+    }
+
+    private fun steps(activity: Activity): String =
+        (activity as ThreadActivity).checkDialog?.findViewById<android.widget.TextView>(R.id.checkSteps)?.text?.toString().orEmpty()
+
+    private fun verdict(activity: Activity): String =
+        (activity as ThreadActivity).checkDialog?.findViewById<android.widget.TextView>(R.id.checkVerdict)?.text?.toString().orEmpty()
+
     // --- helpers ------------------------------------------------------------------------
 
     private fun launchList(): ActivityScenario<ConversationsActivity> =

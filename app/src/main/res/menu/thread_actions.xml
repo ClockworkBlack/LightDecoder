@@ -21,6 +21,12 @@
         android:title="@string/imessage_send_imessage"
         android:visible="false"
         app:showAsAction="never" />
+    <!-- A Messages conversation with the person's iMessages in it: is it blue on their iPhone? -->
+    <item
+        android:id="@+id/action_check_imessage"
+        android:title="@string/imessage_check"
+        android:visible="false"
+        app:showAsAction="never" />
     <!-- An iMessage chat: the same chat in OpenBubbles. -->
     <item
         android:id="@+id/action_open_openbubbles"

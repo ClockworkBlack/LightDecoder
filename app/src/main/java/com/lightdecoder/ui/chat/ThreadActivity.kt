@@ -2259,6 +2259,95 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
     }
 
+    // --- Check iMessage -------------------------------------------------------------------
+
+    /** Shows what the check sends, and to whom, before anything is sent. */
+    private fun confirmIMessageCheck() {
+        val companion = companionId ?: return
+        val name = supportActionBar?.title?.toString().orEmpty()
+        val text = com.lightdecoder.imessage.IMessageCheck.text(com.lightdecoder.imessage.IMessageCheck.newCode())
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.imessage_check)
+            .setMessage(getString(R.string.imessage_check_explain, name, text))
+            .setPositiveButton(R.string.imessage_check_send) { _, _ -> runIMessageCheck(companion, text) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /** Starts a check of [text] at once, without asking first (for the on-device test). */
+    @androidx.annotation.VisibleForTesting
+    internal fun startIMessageCheck(text: String) {
+        companionId?.let { runIMessageCheck(it, text) }
+    }
+
+    /** The dialog of the check under way, while it is open. */
+    @androidx.annotation.VisibleForTesting
+    internal var checkDialog: androidx.appcompat.app.AlertDialog? = null
+
+    /**
+     * Sends [text] to the person's iMessage chat [companion] (silently through
+     * OpenBubbles' Reply button, else OpenBubbles opens with it filled in)
+     * and shows, live, how far it got and how the person replied.
+     */
+    private fun runIMessageCheck(companion: String, text: String) {
+        val id = conversationId
+        val name = supportActionBar?.title?.toString().orEmpty()
+        val im = iMessageLink
+        val textLink = manager
+        val sentAt = System.currentTimeMillis()
+        val view = layoutInflater.inflate(R.layout.dialog_imessage_check, binding.root as android.view.ViewGroup, false)
+        val steps = view.findViewById<android.widget.TextView>(R.id.checkSteps)
+        val verdict = view.findViewById<android.widget.TextView>(R.id.checkVerdict)
+        val dialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.imessage_check)
+            .setView(view)
+            .setPositiveButton(R.string.imessage_check_close, null)
+            .create()
+        checkDialog = dialog
+        val job = lifecycleScope.launch {
+            val silent = withContext(Dispatchers.IO) { relayAttempt { im.sendText(companion, text) } }.isSuccess
+            if (!silent) handOffToOpenBubbles(im, companion, text, emptyList(), clearComposer = false)
+            while (true) {
+                if (conversationId != id) return@launch
+                val progress = withContext(Dispatchers.IO) {
+                    com.lightdecoder.imessage.IMessageCheck.progress(
+                        text, sentAt, im.repo.messages(companion, limit = 50), textLink.repo.messages(id, limit = 50),
+                    )
+                }
+                val waited = System.currentTimeMillis() - sentAt
+                steps.text = checkSteps(progress, name, silent, waited)
+                verdict.text = checkVerdict(progress, name, waited)
+                if (progress.done) return@launch
+                kotlinx.coroutines.delay(CHECK_POLL_MS)
+            }
+        }
+        dialog.setOnDismissListener {
+            job.cancel()
+            if (checkDialog === dialog) checkDialog = null
+        }
+        dialog.show()
+    }
+
+    private fun checkSteps(p: com.lightdecoder.imessage.IMessageCheck.Progress, name: String, silent: Boolean, waitedMs: Long): String {
+        fun line(done: Boolean, text: String) = (if (done) "\u2713  " else "\u2026  ") + text
+        return listOf(
+            line(p.handedOver, getString(if (silent || p.handedOver) R.string.imessage_check_step_handed else R.string.imessage_check_step_tap_send)),
+            line(p.inOpenBubbles, getString(R.string.imessage_check_step_openbubbles)),
+            line(p.done, getString(R.string.imessage_check_step_reply, name)),
+        ).joinToString("\n") + when {
+            p.sentAsText -> "\n\n" + getString(R.string.imessage_check_went_as_text)
+            !p.inOpenBubbles && waitedMs > CHECK_SLOW_MS -> "\n\n" + getString(R.string.imessage_check_not_in_openbubbles)
+            else -> ""
+        }
+    }
+
+    private fun checkVerdict(p: com.lightdecoder.imessage.IMessageCheck.Progress, name: String, waitedMs: Long): String = when (p.reply) {
+        com.lightdecoder.imessage.IMessageCheck.Reply.IMESSAGE -> getString(R.string.imessage_check_blue, name)
+        com.lightdecoder.imessage.IMessageCheck.Reply.TEXT -> getString(R.string.imessage_check_green, name)
+        com.lightdecoder.imessage.IMessageCheck.Reply.NONE ->
+            getString(if (waitedMs > CHECK_SLOW_MS) R.string.imessage_check_still_waiting else R.string.imessage_check_waiting, name)
+    }
+
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
         menuInflater.inflate(R.menu.thread_actions, menu)
         return true
@@ -2271,6 +2360,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         // Not when the person's iMessages are already here.
         menu.findItem(R.id.action_send_imessage)?.isVisible = manager.service == ChatService.MESSAGES && companionId == null &&
             com.lightdecoder.imessage.IMessagePrefs.enabled(this) && conv != null && !conv.isGroup && otherAddress() != null
+        menu.findItem(R.id.action_check_imessage)?.isVisible = manager.service == ChatService.MESSAGES && companionId != null
         val archived = conv?.folderEnum == Folder.ARCHIVE
         menu.findItem(R.id.action_archive)?.apply {
             isVisible = conv != null && (conv.folderEnum == Folder.INBOX || archived)
@@ -2336,6 +2426,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             R.id.action_delete_forever -> confirmDeleteForever()
             R.id.action_delete_conversation -> confirmDeleteConversation()
             R.id.action_send_imessage -> sendIMessage()
+            R.id.action_check_imessage -> confirmIMessageCheck()
             R.id.action_open_openbubbles -> {
                 val opened = com.lightdecoder.imessage.IMessageReplies.open(this, conversationId) ||
                     (manager as? com.lightdecoder.imessage.IMessageManager)?.handOff(this, conversationId, "") == true ||
@@ -2489,6 +2580,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         private const val REMOTE_RETRY_MS = 30_000L
         private const val MAX_PREVIEW_READ = 32 * 1024 * 1024
         private const val ATTACHMENT_THUMB_DP = 96
+
+        /** Check iMessage: how often it looks, and when a step is late enough to say so. */
+        private const val CHECK_POLL_MS = 1_000L
+        private const val CHECK_SLOW_MS = 60_000L
 
         /** Most pictures picked for one message. */
         private const val MAX_ATTACHMENTS = 10

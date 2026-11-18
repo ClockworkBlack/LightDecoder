@@ -34,6 +34,22 @@
     <string name="imessage_delete_conversation_body">Remove this chat from LightDecoder? It stays in OpenBubbles, and comes back here if someone writes in it.</string>
     <string name="imessage_notifications_needed_body">LightDecoder needs notifications to tell you about new iMessages.</string>
     <string name="imessage_open_in_openbubbles">Open in OpenBubbles</string>
+
+    <!-- Check iMessage: is it blue on their iPhone? -->
+    <string name="imessage_check">Check iMessage (blue on their iPhone?)</string>
+    <string name="imessage_check_explain">LightDecoder will send this to %1$s as an iMessage:\n\n\u201c%2$s\u201d\n\nAsk them to reply. An iPhone replies the way the conversation shows on it: by iMessage when it is blue, by text when it is green. So their reply tells you which colour they see.</string>
+    <string name="imessage_check_send">Send check</string>
+    <string name="imessage_check_close">Close</string>
+    <string name="imessage_check_step_handed">Handed to OpenBubbles</string>
+    <string name="imessage_check_step_tap_send">Tap send in OpenBubbles</string>
+    <string name="imessage_check_step_openbubbles">In OpenBubbles\u2019 iMessage chat (sent to Apple)</string>
+    <string name="imessage_check_step_reply">%1$s replied</string>
+    <string name="imessage_check_waiting">Waiting for %1$s to reply\u2026</string>
+    <string name="imessage_check_still_waiting">Still waiting for %1$s to reply. You can close this: a reply that comes later shows in the conversation (blue bubble from them = iMessage).</string>
+    <string name="imessage_check_blue">Blue. %1$s replied by iMessage, so your messages show blue on their iPhone.</string>
+    <string name="imessage_check_green">Green. %1$s replied by text, so on their iPhone this conversation is green (or they replied from a phone that is not an iPhone). On the iPhone: delete the conversation with you, or turn iMessage off and on in Settings &gt; Messages, then check again.</string>
+    <string name="imessage_check_went_as_text">The check also went out as a text through Google Messages. That should not happen: please send a problem report.</string>
+    <string name="imessage_check_not_in_openbubbles">OpenBubbles has not shown it yet. Open OpenBubbles: if it says Not Delivered, Apple refused it. Check that the relay iPhone is on and connected.</string>
     <string name="imessage_finish_in_openbubbles">Finish sending in OpenBubbles.</string>
     <string name="imessage_send_imessage">Send iMessage</string>
     <string name="imessage_no_address">This conversation has no phone number or email address to send an iMessage to.</string>
