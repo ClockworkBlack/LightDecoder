@@ -7,10 +7,17 @@ import android.os.Build
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import androidx.core.app.NotificationManagerCompat
+import com.lightdecoder.imessage.IMessageManager
+import com.lightdecoder.imessage.IMessagePrefs
+import com.lightdecoder.imessage.OpenBubbles
 import java.util.concurrent.Executors
 
 /**
- * Builds the Messenger inbox from the Messenger app's own notifications.
+ * Builds the Messenger inbox from the Messenger app's own notifications, and,
+ * with "Blue Bubbles" on, the iMessage chats of the Messages tab from the
+ * OpenBubbles app's ([com.lightdecoder.imessage.IMessageManager]). One
+ * listener for both, so notification access is granted once. Its class name
+ * stays: Android files the user's grant under it.
  *
  * All through public Android APIs, the ones watches and cars use:
  *  - Android starts this service only after the user turns on notification
@@ -35,16 +42,22 @@ class MessengerNotificationListener : NotificationListenerService() {
         // Pick up what is showing: messages that arrived while the service
         // was not running, and the reply buttons a restart lost.
         val active = try { activeNotifications } catch (e: Exception) { null }
-        active?.forEach { inspect(it) }
+        active?.forEach { inspect(it, live = false) }
         MessengerEvents.notifyChanged()
+        refreshIMessage()
     }
 
     override fun onListenerDisconnected() {
         MessengerEvents.notifyChanged()
+        refreshIMessage()
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
-        if (sbn != null) inspect(sbn)
+        if (sbn != null) inspect(sbn, live = true)
+    }
+
+    private fun refreshIMessage() {
+        if (IMessagePrefs.enabled(this)) IMessageManager.get(this).refreshState()
     }
 
     override fun onDestroy() {
@@ -52,8 +65,24 @@ class MessengerNotificationListener : NotificationListenerService() {
         super.onDestroy()
     }
 
-    /** Runs on the main thread: it only reads the notification and hands the storing off. */
-    private fun inspect(sbn: StatusBarNotification) {
+    /**
+     * Runs on the main thread: it only reads the notification and hands the
+     * storing off. [live] is false for the ones already showing when the
+     * listener connected.
+     */
+    private fun inspect(sbn: StatusBarNotification, live: Boolean) {
+        if (OpenBubbles.isOpenBubbles(sbn.packageName)) {
+            if (!IMessagePrefs.enabled(this)) return
+            val context = applicationContext
+            worker.execute {
+                try {
+                    IMessageManager.get(context).onNotification(sbn, live)
+                } catch (e: Exception) {
+                    // A full disk or a damaged file: this message is not kept.
+                }
+            }
+            return
+        }
         if (!MessengerCapture.isMessenger(sbn.packageName)) return
         if (MessengerPrefs.isPaused(this)) return
         val captured = try {

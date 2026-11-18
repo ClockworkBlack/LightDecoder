@@ -34,6 +34,7 @@ object MediaCache {
         ChatService.MESSAGES -> "relay-media"
         ChatService.WHATSAPP -> "whatsapp-media"
         ChatService.GMAIL -> "gmail-media"
+        ChatService.IMESSAGE -> "imessage-media"
     }
 
     /** The directory of [service]'s attachments waiting to be sent, under filesDir. */
@@ -41,6 +42,7 @@ object MediaCache {
         ChatService.MESSAGES -> "relay-outbox"
         ChatService.WHATSAPP -> "whatsapp-outbox"
         ChatService.GMAIL -> "gmail-outbox"
+        ChatService.IMESSAGE -> "imessage-outbox"
     }
 
     /** Cache keys of media that came inside the message (no media id) start with this. */

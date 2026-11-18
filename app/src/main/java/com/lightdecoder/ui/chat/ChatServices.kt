@@ -80,6 +80,7 @@ internal object ServiceUi {
         ChatService.MESSAGES -> R.string.chat_service_messages
         ChatService.WHATSAPP -> R.string.chat_service_whatsapp
         ChatService.GMAIL -> R.string.chat_service_gmail
+        ChatService.IMESSAGE -> R.string.chat_service_imessage
     }
 
     /**
@@ -91,6 +92,8 @@ internal object ServiceUi {
         ChatService.MESSAGES -> RelayIntents.setup(context)
         ChatService.WHATSAPP -> RelayIntents.waSetup(context)
         ChatService.GMAIL -> RelayIntents.mailSetup(context)
+        // No setup screen of its own: "Blue Bubbles" is ticked in the Messages tab's menu.
+        ChatService.IMESSAGE -> RelayIntents.conversations(context, ChatService.MESSAGES)
     }.setFlags(0)
 
     /** The status and settings of [service]'s link, started from one of the app's own screens. */
@@ -98,6 +101,7 @@ internal object ServiceUi {
         ChatService.MESSAGES -> RelayIntents.status(context)
         ChatService.WHATSAPP -> RelayIntents.waStatus(context)
         ChatService.GMAIL -> RelayIntents.mailSetup(context)
+        ChatService.IMESSAGE -> RelayIntents.conversations(context, ChatService.MESSAGES)
     }.setFlags(0)
 
     /**
@@ -143,6 +147,7 @@ internal object ServiceUi {
         ChatService.MESSAGES -> R.string.link_setup_title
         ChatService.WHATSAPP -> R.string.chat_wa_link_title
         ChatService.GMAIL -> R.string.mail_link_title
+        ChatService.IMESSAGE -> R.string.imessage_link_title
     }
 
     @StringRes
@@ -150,6 +155,7 @@ internal object ServiceUi {
         ChatService.MESSAGES -> R.string.link_card_not_set_up
         ChatService.WHATSAPP -> R.string.chat_wa_link_body
         ChatService.GMAIL -> R.string.mail_link_body
+        ChatService.IMESSAGE -> R.string.imessage_link_body
     }
 
     @StringRes
@@ -157,6 +163,7 @@ internal object ServiceUi {
         ChatService.MESSAGES -> R.string.chat_empty_inbox
         ChatService.WHATSAPP -> R.string.chat_wa_empty_inbox
         ChatService.GMAIL -> R.string.mail_empty_inbox
+        ChatService.IMESSAGE -> R.string.imessage_empty_inbox
     }
 
     @StringRes
@@ -164,6 +171,7 @@ internal object ServiceUi {
         ChatService.MESSAGES -> R.string.chat_compose_hint
         ChatService.WHATSAPP -> R.string.chat_wa_compose_hint
         ChatService.GMAIL -> R.string.mail_compose_hint
+        ChatService.IMESSAGE -> R.string.imessage_compose_hint
     }
 
     /** Said when a message the service itself failed to send is tapped: only the phone's app can retry it. */
@@ -172,6 +180,7 @@ internal object ServiceUi {
         ChatService.MESSAGES -> R.string.chat_failed_phone_detail
         ChatService.WHATSAPP -> R.string.chat_wa_failed_phone_detail
         ChatService.GMAIL -> R.string.mail_failed_detail
+        ChatService.IMESSAGE -> R.string.imessage_failed_detail
     }
 
     /** The "Send again?" question for a send that was never confirmed. */
@@ -180,6 +189,7 @@ internal object ServiceUi {
         ChatService.MESSAGES -> R.string.chat_resend_body
         ChatService.WHATSAPP -> R.string.chat_wa_resend_body
         ChatService.GMAIL -> R.string.mail_resend_body
+        ChatService.IMESSAGE -> R.string.imessage_resend_body
     }
 
     @StringRes
@@ -187,6 +197,7 @@ internal object ServiceUi {
         ChatService.MESSAGES -> R.string.chat_media_needs_connection
         ChatService.WHATSAPP -> R.string.chat_wa_media_needs_connection
         ChatService.GMAIL -> R.string.mail_media_needs_connection
+        ChatService.IMESSAGE -> R.string.imessage_media_needs_connection
     }
 
     @StringRes
@@ -194,6 +205,7 @@ internal object ServiceUi {
         ChatService.MESSAGES -> R.string.chat_contacts_no_match
         ChatService.WHATSAPP -> R.string.chat_wa_contacts_no_match
         ChatService.GMAIL -> R.string.mail_contacts_no_match
+        ChatService.IMESSAGE -> R.string.imessage_contacts_no_match
     }
 
     @StringRes
@@ -201,6 +213,7 @@ internal object ServiceUi {
         ChatService.MESSAGES -> R.string.chat_delete_conversation_body
         ChatService.WHATSAPP -> R.string.chat_wa_delete_conversation_body
         ChatService.GMAIL -> R.string.mail_delete_conversation_body
+        ChatService.IMESSAGE -> R.string.imessage_delete_conversation_body
     }
 }
 
@@ -223,6 +236,19 @@ internal object ChatErrors {
         ChatService.MESSAGES -> RelayErrors.messageRes(code)
         ChatService.WHATSAPP -> whatsAppRes(code)
         ChatService.GMAIL -> mailRes(code)
+        ChatService.IMESSAGE -> iMessageRes(code)
+    }
+
+    @StringRes
+    private fun iMessageRes(code: String): Int = when (code) {
+        RelayException.NOT_PAIRED -> R.string.imessage_error_not_enabled
+        com.lightdecoder.imessage.IMessageErrors.NOT_INSTALLED -> R.string.imessage_error_not_installed
+        com.lightdecoder.imessage.IMessageErrors.NO_ACCESS -> R.string.imessage_error_no_access
+        com.lightdecoder.imessage.IMessageErrors.NO_REPLY_BUTTON -> R.string.imessage_error_no_reply
+        com.lightdecoder.imessage.IMessageErrors.HAND_OFF -> R.string.imessage_error_hand_off
+        WaErrors.UNSUPPORTED -> R.string.imessage_error_unsupported
+        RelayState.NOTIFICATIONS_OFF -> R.string.link_error_notifications_off
+        else -> R.string.imessage_error_internal
     }
 
     @StringRes

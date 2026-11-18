@@ -22,6 +22,10 @@ object Features {
      */
     const val MESSENGER = true
 
-    /** The services shown as tabs (and set up from the home screen). */
-    fun shownServices(): List<ChatService> = ChatService.entries.filter { it != ChatService.GMAIL || GMAIL }
+    /**
+     * The services shown as tabs (and set up from the home screen). iMessage
+     * is never one: with "Blue Bubbles" on, its chats show in the Messages tab.
+     */
+    fun shownServices(): List<ChatService> =
+        ChatService.entries.filter { (it != ChatService.GMAIL || GMAIL) && it != ChatService.IMESSAGE }
 }
