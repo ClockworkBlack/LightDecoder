@@ -21,7 +21,7 @@ index 28094e2..a873fc3 100644
  	<array>
  		<string>processing</string>
 diff --git a/ValidationRelay/LogView.swift b/ValidationRelay/LogView.swift
-index 04234e8..fc70b7b 100644
+index 04234e8..ed3228f 100644
 --- a/ValidationRelay/LogView.swift
 +++ b/ValidationRelay/LogView.swift
 @@ -6,6 +6,7 @@
@@ -32,7 +32,7 @@ index 04234e8..fc70b7b 100644
  
  struct LogItem: Identifiable, Hashable {
      var id = UUID()
-@@ -14,13 +15,250 @@ struct LogItem: Identifiable, Hashable {
+@@ -14,13 +15,261 @@ struct LogItem: Identifiable, Hashable {
      var date: Date
  }
  
@@ -238,11 +238,22 @@ index 04234e8..fc70b7b 100644
 +        return [
 +            "model": machine,
 +            "ios": UIDevice.current.systemVersion,
-+            "build": buildNumber() ?? "?",
++            // Not the bridging header's buildNumber(): a C function defined in a header gets a copy
++            // in every Swift file that calls it, and two copies do not link.
++            "build": osBuild(),
 +            "app_version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?",
 +            "low_power": ProcessInfo.processInfo.isLowPowerModeEnabled,
 +            "battery_state": UIDevice.current.batteryState.rawValue,
 +        ]
++    }
++
++    private static func osBuild() -> String {
++        var size = 0
++        sysctlbyname("kern.osversion", nil, &size, nil, 0)
++        guard size > 0 else { return "?" }
++        var buffer = [CChar](repeating: 0, count: size)
++        sysctlbyname("kern.osversion", &buffer, &size, nil, 0)
++        return String(cString: buffer)
 +    }
 +
 +    static func deviceSummary() -> String {
@@ -285,7 +296,7 @@ index 04234e8..fc70b7b 100644
  }
  
  struct LogView: View {
-@@ -46,17 +284,16 @@ struct LogView: View {
+@@ -46,17 +295,16 @@ struct LogView: View {
                  ToolbarItem(placement: .navigationBarTrailing) {
                      Button("Clear") {
                          logItems.items = []
