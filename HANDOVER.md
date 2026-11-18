@@ -44,6 +44,9 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Google Messages cannot edit or unsend**: libgm v0.2610.0 has no such action in its protocol
   (ActionType has DELETE_MESSAGE only, which deletes on the user's own phone). Not something to
   add without the protocol.
+- **Swipe between apps.** A sideways swipe along the top bar (the switcher or the empty bar beside
+  it) selects the next app's tab, leftwards for the next, going round at the ends
+  (`ServiceTabStrip.swipeListener`); it works on every screen that has the switcher.
 - None of this was tried on a phone. Next version: 0.5.30 / 38.
 
 ## 0.5.28 (versionCode 36) - Smart cut: the full U-2-Net

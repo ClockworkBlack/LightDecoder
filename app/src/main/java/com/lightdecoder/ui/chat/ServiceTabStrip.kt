@@ -17,7 +17,8 @@ import com.lightdecoder.R
  * not shown: it holds which is chosen and each one's unread badge, and the
  * screens listen to it as before. The switcher shows the app on screen, and
  * how many conversations are unread in the others; a tap lists every app with
- * its count, the one showing ticked, and choosing one selects its tab.
+ * its count, the one showing ticked, and choosing one selects its tab. A
+ * sideways swipe along the bar goes to the next app, or the one before.
  */
 object ServiceTabStrip {
 
@@ -63,6 +64,15 @@ object ServiceTabStrip {
             }
             menu.show()
         }
+        // A sideways swipe along the top bar goes to the next app (leftwards) or the one before.
+        val swipe = swipeListener(switcher.resources.displayMetrics.density) { step ->
+            val showing = current()
+            val at = (0 until tabs.tabCount).firstOrNull { tabs.getTabAt(it)?.text == showing } ?: tabs.selectedTabPosition
+            neighbour(at, tabs.tabCount, step)?.let { tabs.getTabAt(it)?.select() }
+            switcher.post { refresh.refresh() }
+        }
+        switcher.setOnTouchListener(swipe)
+        (switcher.parent as? View)?.setOnTouchListener(swipe)
         tabs.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
             override fun onTabSelected(tab: TabLayout.Tab) = refresh.refresh()
             override fun onTabUnselected(tab: TabLayout.Tab) = Unit
@@ -71,6 +81,55 @@ object ServiceTabStrip {
         refresh.refresh()
         return refresh
     }
+
+    /** The app [step] places on from the one at [at], going round at the ends; null when there is no other. */
+    internal fun neighbour(at: Int, count: Int, step: Int): Int? =
+        if (count < 2 || at !in 0 until count) null else ((at + step) % count + count) % count
+
+    /**
+     * Which way a finger's movement asks to go: 1 (the next app) for a swipe
+     * to the left, -1 for one to the right, 0 for anything that is not
+     * clearly a sideways swipe of at least [minPx].
+     */
+    internal fun swipeStep(dx: Float, dy: Float, minPx: Float): Int = when {
+        kotlin.math.abs(dx) < minPx || kotlin.math.abs(dx) < 2 * kotlin.math.abs(dy) -> 0
+        dx < 0 -> 1
+        else -> -1
+    }
+
+    /**
+     * Calls [onSwipe] with [swipeStep]'s answer when a touch ends as a
+     * sideways swipe, and takes that touch (so it is not also a tap);
+     * every other touch is left to the view.
+     */
+    @android.annotation.SuppressLint("ClickableViewAccessibility")
+    private fun swipeListener(density: Float, onSwipe: (Int) -> Unit): View.OnTouchListener {
+        var downX = 0f
+        var downY = 0f
+        return View.OnTouchListener { view, event ->
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    downX = event.rawX
+                    downY = event.rawY
+                    false
+                }
+                android.view.MotionEvent.ACTION_UP -> {
+                    val step = swipeStep(event.rawX - downX, event.rawY - downY, SWIPE_DP * density)
+                    if (step == 0) {
+                        false
+                    } else {
+                        view.isPressed = false
+                        view.cancelLongPress()
+                        onSwipe(step)
+                        true
+                    }
+                }
+                else -> false
+            }
+        }
+    }
+
+    private const val SWIPE_DP = 56
 
     /** Opens another app's screen with a quick fade, as one screen changing, not pages sliding. */
     fun open(from: Activity, intent: Intent) {
