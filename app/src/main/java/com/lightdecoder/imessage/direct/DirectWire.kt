@@ -223,6 +223,7 @@ object DirectWire {
     fun encode(u: DirectArchive.Update): JSONObject = when (u) {
         is DirectArchive.Update.Upsert -> JSONObject().put("kind", "upsert")
             .put("conversation", u.conversation.toJson()).put("message", u.message.toJson())
+            .apply { u.groupGuid?.let { put("groupGuid", it) } }.put("groupOnly", u.groupOnly).put("renamed", u.renamed)
         is DirectArchive.Update.Remove -> JSONObject().put("kind", "remove").put("messageId", u.messageId)
         is DirectArchive.Update.Receipt -> JSONObject().put("kind", "receipt")
             .put("messageIds", JSONArray(u.messageIds)).put("status", u.status)
@@ -269,6 +270,9 @@ object DirectWire {
         "upsert" -> DirectArchive.Update.Upsert(
             ConversationDto.fromJson(o.getJSONObject("conversation")),
             MessageDto.fromJson(o.getJSONObject("message")),
+            groupGuid = o.optString("groupGuid").takeIf { it.isNotEmpty() },
+            groupOnly = o.optBoolean("groupOnly"),
+            renamed = o.optBoolean("renamed"),
         )
         "remove" -> DirectArchive.Update.Remove(o.getString("messageId"))
         "receipt" -> DirectArchive.Update.Receipt(

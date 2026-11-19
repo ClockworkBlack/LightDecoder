@@ -107,9 +107,10 @@ class DirectLinkTest {
         participants: List<String> = listOf(me, from),
         groupGuid: String? = null,
         ts: Long = 1_700_000_009_000L,
+        groupName: String? = null,
     ) =
         DirectArchive.map(
-            MessageInst(guid, from, ConversationData(participants, null, groupGuid, null), m, ts.toULong(), null, false, false, null),
+            MessageInst(guid, from, ConversationData(participants, groupName, groupGuid, null), m, ts.toULong(), null, false, false, null),
             setOf(me), Handles::display, DirectTexts(context),
         ).let(::wire)
 
@@ -897,8 +898,9 @@ class DirectLinkTest {
         val manager = IMessageManager.get(context)
         link.apply(incoming("B1", bob, "hi"))
         sentHere("M1", "mine", ts = System.currentTimeMillis() - 30_000)
-        // Through OpenBubbles' notifications: neither.
+        // Through OpenBubbles' notifications: neither (and no groups are started here).
         assertFalse(com.lightdecoder.chat.Capability.EDIT in manager.capabilities)
+        assertFalse(com.lightdecoder.chat.Capability.NEW_GROUP in manager.capabilities)
         fun unsupported(block: suspend () -> Unit) = try {
             runBlocking { block() }
             fail("went through without the library")
@@ -1236,15 +1238,21 @@ class DirectLinkTest {
         link.apply(event("GN2", bob, PushChatMessage.RenameMessage(ChatRenameMessage("Ski trip")), members, "G-N", ts = 1_700_000_010_000L))
         assertEquals("Ski trip", repo.conversation(id)!!.name)
         assertEquals("Ski trip", link.targetOf(id)!!.groupName)
-        // Someone leaves: the group follows, and the user is still in it.
+        // Someone leaves: the group follows (its name with it), and the user is still in it.
         link.apply(
-            event("GN3", carol, PushChatMessage.ChangeParticipants(uniffi.rust_bridge.ChangeParticipantMessage(listOf(me, bob, alice), 2UL)), members, "G-N", ts = 1_700_000_011_000L),
+            event(
+                "GN3", carol, PushChatMessage.ChangeParticipants(uniffi.rust_bridge.ChangeParticipantMessage(listOf(me, bob, alice), 2UL)), members, "G-N",
+                ts = 1_700_000_011_000L, groupName = "Ski trip",
+            ),
         )
         assertEquals(setOf("me", "+15559876543", "+15551234567"), repo.participants(id).map { it.id }.toSet())
         assertEquals("Ski trip", repo.conversation(id)!!.name)
         // The user removed from it: still "me" in it here, with the others.
         link.apply(
-            event("GN4", bob, PushChatMessage.ChangeParticipants(uniffi.rust_bridge.ChangeParticipantMessage(listOf(bob, alice), 3UL)), listOf(me, bob, alice), "G-N", ts = 1_700_000_012_000L),
+            event(
+                "GN4", bob, PushChatMessage.ChangeParticipants(uniffi.rust_bridge.ChangeParticipantMessage(listOf(bob, alice), 3UL)), listOf(me, bob, alice), "G-N",
+                ts = 1_700_000_012_000L, groupName = "Ski trip",
+            ),
         )
         assertEquals("me", repo.participants(id).single { it.isMe }.id)
         assertEquals(setOf("me", "+15559876543", "+15551234567"), repo.participants(id).map { it.id }.toSet())

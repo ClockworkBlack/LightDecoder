@@ -120,8 +120,8 @@ class DirectLink private constructor(
         if (group && guid == null) return null
         val after = repo.latestMessageId(conversationId, DirectArchive.PREFIX)?.let(DirectArchive::guidOf)
         // The group's own name, never the members' names it is shown by here: the iPhones in it
-        // would take those for its name. A group stored before its own name was kept: as stored.
-        val name = if (group) (groupNames.of(conversationId) ?: row.name).ifBlank { null } else null
+        // would take those for its name.
+        val name = if (group) ownName(conversationId).ifBlank { null } else null
         return DirectWire.Target(others, name, guid, row.defaultOutgoingId, after)
     }
 
@@ -193,7 +193,7 @@ class DirectLink private constructor(
             if (handle == null || key == null) notOnIMessage += address else people.putIfAbsent(key, handle)
         }
         if (notOnIMessage.isEmpty() && people.size <= 1) {
-            val only = people.values.singleOrNull() ?: throw RelayException(RelayException.INVALID_ARGUMENT, "nobody to start a group with")
+            val only = people.values.singleOrNull() ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_group_nobody))
             return conversationFor(only) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_not_on_imessage, Handles.display(only)))
         }
         var from = ""
@@ -228,7 +228,7 @@ class DirectLink private constructor(
                     participants = listOf(ParticipantDto(id = ME, isMe = true)) + members,
                 ),
             )
-            groupNames.note(id, name.orEmpty())
+            groupNames.note(id, name.orEmpty(), System.currentTimeMillis())
         }
         IMessageLog.add(app, "${IMessageLog.chatRef(id)}: iMessage group of ${members.size + 1} started through the iMessage library")
         return id
@@ -823,21 +823,22 @@ class DirectLink private constructor(
      * The archive's form of a conversation the library describes: the person's stored chat if
      * there is one (one-to-one), `me` for the user, addresses without their scheme, contact names.
      */
-    private fun toArchive(c: ConversationDto): ConversationDto {
+    private fun toArchive(c: ConversationDto, groupId: String? = null, groupName: String? = null): ConversationDto {
         val others = c.participants.filter { !it.isMe }
-        val existingId = if (!c.isGroup && others.size == 1) manager.conversationWith(Handles.display(others[0].id)) else null
-        val id = existingId ?: c.id
+        val group = c.isGroup || groupId != null
+        val existingId = if (!group && others.size == 1) manager.conversationWith(Handles.display(others[0].id)) else null
+        val id = groupId ?: existingId ?: c.id
         val existing = repo.conversation(id)
         val people = others.map {
             val address = Handles.display(it.id)
             ParticipantDto(id = address, name = nameOf(it.id), number = address, formattedNumber = address)
         }
         // A group's own name (commas and all), else its members' names.
-        val name = if (c.isGroup) c.name.ifBlank { people.joinToString(", ") { it.name } } else ""
+        val name = if (group) (groupName ?: c.name).ifBlank { people.joinToString(", ") { it.name } } else ""
         return ConversationDto(
             id = id,
             name = name,
-            isGroup = c.isGroup,
+            isGroup = group,
             type = IMessageManager.TRANSPORT,
             folder = existing?.folder?.takeIf { it.isNotEmpty() && it != Folder.DELETED.wire } ?: Folder.INBOX.wire,
             unread = existing?.unread == true,
@@ -897,7 +898,11 @@ class DirectLink private constructor(
     }
 
     private fun upsert(update: DirectArchive.Update.Upsert) {
-        val conversation = toArchive(update.conversation)
+        // A group down to one other person is still that group, when it is stored as one.
+        val groupId = update.groupGuid?.let(DirectArchive::groupConversationId)?.takeIf { repo.conversation(it)?.isGroup == true }
+        if (update.groupOnly && groupId == null) return
+        val id = groupId ?: update.conversation.id
+        val conversation = toArchive(update.conversation, groupId, if (DirectArchive.isGroup(id)) groupNameAfter(id, update) else null)
         val onScreen = MessageNotifier.visibleConversationId(ChatService.IMESSAGE) == conversation.id
         // A group's event (renamed, someone added) is shown, but is not a message to read.
         val system = update.message.direction == "system"
@@ -907,8 +912,6 @@ class DirectLink private constructor(
         if (existing != null && existing.direction == "system" && !system) return
         // The message moves the chat's latest message, time and snippet (see toArchive).
         repo.upsertConversation(conversation.copy(unread = (conversation.unread || incoming) && !onScreen, lastMessageTs = 0))
-        // What the group is called on Apple's side (none, for one shown by its members' names), as of this.
-        if (DirectArchive.isGroup(conversation.id)) groupNames.note(conversation.id, update.conversation.name)
         val fresh = update.message.copy(
             conversationId = conversation.id,
             senderId = if (update.message.fromMe) "" else Handles.display(update.message.senderId),
@@ -929,6 +932,31 @@ class DirectLink private constructor(
                     (if (incoming) "received" else "sent from another device") + " through the iMessage library",
             )
         }
+    }
+
+    /**
+     * What group [id] is called on Apple's side after [update]: its name, when it carries one (or
+     * is a rename) and is not older than the name known; else the name known. A message without a
+     * name says nothing about it: only a rename takes a name off.
+     */
+    private fun groupNameAfter(id: String, update: DirectArchive.Update.Upsert): String {
+        val name = update.conversation.name
+        if ((name.isNotBlank() || update.renamed) && groupNames.note(id, name, update.message.timestampMs)) return name
+        return ownName(id)
+    }
+
+    /**
+     * Group [id]'s own name on Apple's side ("" for none). For a group stored before these were
+     * kept, its stored name unless that is its members' names (what an unnamed group is shown by).
+     */
+    private fun ownName(id: String): String {
+        groupNames.of(id)?.let { return it }
+        val row = repo.conversation(id) ?: return ""
+        val members = repo.participants(id).filter { !it.isMe }.joinToString(", ") { it.name }
+        val name = row.name.takeIf { it != members }.orEmpty()
+        // As old as can be: whatever Apple says next wins.
+        groupNames.note(id, name, 0)
+        return name
     }
 
     private fun noteRead(messageIds: Collection<String>) {
@@ -1385,11 +1413,21 @@ internal class GroupNames(context: Context) {
     /** [conversationId]'s own name ("" for none), or null when not known (a group stored before these were kept). */
     fun of(conversationId: String): String? = prefs.getString(conversationId, null)
 
-    fun note(conversationId: String, name: String) {
-        if (prefs.getString(conversationId, null) != name) prefs.edit().putString(conversationId, name).apply()
+    /**
+     * Notes that [conversationId] was called [name] as of [atMs], unless the name known is newer
+     * (a message from before a rename, come late). True when [name] is now its name.
+     */
+    @Synchronized
+    fun note(conversationId: String, name: String, atMs: Long): Boolean {
+        val known = prefs.getString(conversationId, null)
+        val knownAt = prefs.getLong(conversationId + AT, Long.MIN_VALUE)
+        if (known != null && atMs < knownAt) return false
+        if (known != name || atMs != knownAt) prefs.edit().putString(conversationId, name).putLong(conversationId + AT, atMs).apply()
+        return true
     }
 
     private companion object {
         const val FILE = "imessage_group_names"
+        const val AT = "@at"
     }
 }

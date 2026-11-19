@@ -106,7 +106,20 @@ object DirectArchive {
          * a group's events (renamed, members changed, photo changed): the group as it now is, and
          * a row of the conversation's own (direction "system") saying what happened.
          */
-        data class Upsert(val conversation: ConversationDto, val message: MessageDto) : Update()
+        data class Upsert(
+            val conversation: ConversationDto,
+            val message: MessageDto,
+            /**
+             * Apple's group id when [conversation] is a one-to-one chat by its members but the
+             * message carries one: a group that is down to one other person, which stays the group
+             * when it is stored as one.
+             */
+            val groupGuid: String? = null,
+            /** A group's event filed by [groupGuid] alone: only stored in that group, if there is one. */
+            val groupOnly: Boolean = false,
+            /** The group was renamed: [conversation]'s name is its new one, even blank (the name taken off). */
+            val renamed: Boolean = false,
+        ) : Update()
 
         /** A message to take out of the archive. */
         data class Remove(val messageId: String) : Update()
@@ -217,7 +230,7 @@ object DirectArchive {
             is PushChatMessage.RenameMessage -> {
                 val conversation = inst.conversation ?: return Update.Ignore
                 val who = actor(sender, fromMe, nameOf, texts) ?: return Update.Ignore
-                groupEvent(inst, conversation, conversation.participants, m.v1.newName, me, nameOf, texts.named(who, m.v1.newName))
+                groupEvent(inst, conversation, conversation.participants, m.v1.newName, me, nameOf, texts.named(who, m.v1.newName), renamed = true)
             }
             is PushChatMessage.ChangeParticipants -> {
                 val conversation = inst.conversation ?: return Update.Ignore
@@ -270,7 +283,7 @@ object DirectArchive {
         val conv = conversationDto(id, participants, conversation.cvName, me, nameOf)
         val texts = partTexts(n.parts)
         // An app's card has no words of its own on the wire: what it shows stands for them.
-        val text = n.app?.summary() ?: IMessageExtra(parts = texts).text()
+        val text = n.app?.summary()?.takeIf { it.isNotEmpty() } ?: IMessageExtra(parts = texts).text()
         val attachments = attachments(n.parts)
         val extra = IMessageExtra(
             parts = texts,
@@ -297,7 +310,7 @@ object DirectArchive {
             replyToId = n.replyGuid?.let(::messageId).orEmpty(),
             extra = extra.toJson(),
         )
-        return Update.Upsert(conv, msg)
+        return Update.Upsert(conv, msg, groupGuid = conversation.senderGuid?.takeIf { it.isNotBlank() && !isGroup(id) })
     }
 
     /**
@@ -461,11 +474,14 @@ object DirectArchive {
         me: Set<String>,
         nameOf: (String) -> String,
         text: String,
+        renamed: Boolean = false,
     ): Update {
         // The group as it was, so that members leaving never turn it into a one-to-one chat.
         val id = conversationId((conversation.participants + listOfNotNull(inst.sender)).distinct(), me, conversation.senderGuid)
-        if (!isGroup(id)) return Update.Ignore
-        return eventRow(inst, conversation, members, groupName, me, nameOf, text)
+        // Down to one other person, it is the group only by its guid: the main process knows if it is one.
+        if (!isGroup(id) && conversation.senderGuid.isNullOrBlank()) return Update.Ignore
+        val row = eventRow(inst, conversation, members, groupName, me, nameOf, text) as Update.Upsert
+        return row.copy(groupOnly = !isGroup(id), renamed = renamed)
     }
 
     /**
@@ -497,7 +513,7 @@ object DirectArchive {
             text = text,
             parts = listOf(PartDto(partId = "0", kind = "text", text = text)),
         )
-        return Update.Upsert(conv, msg)
+        return Update.Upsert(conv, msg, groupGuid = conversation.senderGuid?.takeIf { it.isNotBlank() && !isGroup(id) })
     }
 
     private fun actor(sender: String?, fromMe: Boolean, nameOf: (String) -> String, texts: Texts): String? = when {

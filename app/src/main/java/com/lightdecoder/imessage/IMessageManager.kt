@@ -656,7 +656,7 @@ class IMessageManager private constructor(
         if (!direct.active) throw RelayException(IMessageErrors.HAND_OFF, "new chats start in OpenBubbles")
         val addresses = numbers.map { it.trim() }.filter { it.isNotEmpty() }.distinctBy { IMessageAddress.key(it) ?: it }
         when (addresses.size) {
-            0 -> throw RelayException(RelayException.INVALID_ARGUMENT, "no address")
+            0 -> throw com.lightdecoder.imessage.direct.DirectEngine.ImessageError(appContext.getString(com.lightdecoder.R.string.imessage_group_nobody))
             1 -> direct.conversationFor(addresses[0])
                 ?: throw com.lightdecoder.imessage.direct.DirectEngine.ImessageError(appContext.getString(com.lightdecoder.R.string.imessage_not_on_imessage, addresses[0]))
             else -> direct.startGroup(addresses, groupName)

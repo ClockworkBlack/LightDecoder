@@ -219,6 +219,7 @@
     <string name="imessage_new_group">New iMessage group</string>
     <string name="imessage_to_hint">Name, number or email</string>
     <string name="imessage_group_body">Group name (optional). Everyone in the group sees it.</string>
+    <string name="imessage_group_nobody">Pick at least one person to send to.</string>
     <!-- %1$s: the people Apple says are not on iMessage, by name or address, comma-separated. -->
     <plurals name="imessage_group_not_on_imessage">
         <item quantity="one">%1$s is not on iMessage, so the group can\'t be started.</item>
