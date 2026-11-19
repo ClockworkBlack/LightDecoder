@@ -21,3 +21,9 @@
 # ONNX Runtime (the sticker maker's smart cut-out): its native library finds these
 # classes, their fields and their constructors by name.
 -keep class ai.onnxruntime.** { *; }
+
+# Guava (through the emoji picker) is annotated with jsr305, checker-qual and j2objc annotations,
+# which are left out of the app (annotations only; nothing reads them at run time).
+-dontwarn javax.annotation.**
+-dontwarn org.checkerframework.**
+-dontwarn com.google.j2objc.annotations.**

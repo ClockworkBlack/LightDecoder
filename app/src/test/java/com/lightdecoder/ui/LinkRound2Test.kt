@@ -251,7 +251,7 @@ class LinkRound2Test {
     fun sixReactionsAllFitUnderABubbleAndKeepTheirPadding() {
         val (manager, _) = env.pairedManager()
         seedConversation("c1", "Alice")
-        val reactions = ThreadActivity.QUICK_REACTIONS.mapIndexed { i, emoji ->
+        val reactions = (ThreadActivity.QUICK_REACTIONS + "🙏").mapIndexed { i, emoji ->
             ReactionDto(emoji, participantIds = listOf("p1", "p$i", "q$i"), fromMe = i == 0)
         }
         env.repo.upsertMessage(textMessage("m1", "c1", 1_000).copy(reactions = reactions))

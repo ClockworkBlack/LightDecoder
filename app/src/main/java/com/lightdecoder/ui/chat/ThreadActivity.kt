@@ -1869,20 +1869,24 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val reacts = real && manager.service != ChatService.GMAIL
         b.reactionRow.visibility = if (reacts) View.VISIBLE else View.GONE
         if (reacts) {
-            for (emoji in QUICK_REACTIONS) {
+            // Five quick ones (the user's own reaction in the last place if it is another emoji), then "+" for any emoji.
+            for (emoji in quickReactions(mine)) {
                 val view = layoutInflater.inflate(R.layout.item_quick_reaction, b.reactionRow, false) as TextView
                 view.text = emoji
                 view.isSelected = emoji == mine
                 view.contentDescription = getString(R.string.chat_react_with, emoji)
                 view.setOnClickListener {
                     sheet.dismiss()
-                    // A tapback goes through OpenBubbles' own screen: its notification takes text only.
-                    if (!isShown(row)) return@setOnClickListener
-                    if (isIMessage) openInOpenBubblesFor(row, getString(R.string.imessage_react_how, emoji), "react")
-                    else react(row, emoji, remove = emoji == mine)
+                    reactionPicked(row, emoji, mine, isIMessage)
                 }
                 b.reactionRow.addView(view)
             }
+            val more = layoutInflater.inflate(R.layout.item_quick_reaction_more, b.reactionRow, false)
+            more.findViewById<View>(R.id.reactionMore).setOnClickListener {
+                sheet.dismiss()
+                showEmojiPicker(row, mine, isIMessage)
+            }
+            b.reactionRow.addView(more)
         }
         b.actionRemoveReaction.visibility = if (real && mine != null) View.VISIBLE else View.GONE
         b.actionRemoveReaction.setOnClickListener {
@@ -1962,6 +1966,32 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         sheet.setContentView(b.root)
         sheet.setOnDismissListener { if (actionSheet === sheet) actionSheet = null }
         actionSheet = sheet
+        sheet.show()
+    }
+
+    /** The quick reactions: the five usual ones, with [mine] in the last place when it is another emoji. */
+    private fun quickReactions(mine: String?): List<String> =
+        if (mine == null || mine in QUICK_REACTIONS) QUICK_REACTIONS else QUICK_REACTIONS.take(QUICK_REACTIONS.size - 1) + mine
+
+    /** [emoji] chosen for [row]: the same as [mine] takes it back. An iMessage's tapback goes through OpenBubbles. */
+    @androidx.annotation.VisibleForTesting
+    internal fun reactionPicked(row: MessageRow, emoji: String, mine: String?, isIMessage: Boolean) {
+        if (!isShown(row)) return
+        if (isIMessage) openInOpenBubblesFor(row, getString(R.string.imessage_react_how, emoji), "react")
+        else react(row, emoji, remove = emoji == mine)
+    }
+
+    /** Every emoji, by category, recently used first (Android's own picker); one tap reacts with it. */
+    private fun showEmojiPicker(row: MessageRow, mine: String?, isIMessage: Boolean) {
+        val sheet = BottomSheetDialog(this)
+        val view = layoutInflater.inflate(R.layout.sheet_emoji_picker, binding.root as android.view.ViewGroup, false)
+        view.findViewById<androidx.emoji2.emojipicker.EmojiPickerView>(R.id.emojiPicker).setOnEmojiPickedListener { item ->
+            sheet.dismiss()
+            reactionPicked(row, item.emoji, mine, isIMessage)
+        }
+        sheet.setContentView(view)
+        sheet.behavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED
+        sheet.behavior.skipCollapsed = true
         sheet.show()
     }
 
@@ -2890,7 +2920,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         internal var readerUnavailableShown = false
 
         /** The quick reactions offered on long press, in Google Messages' order. */
-        val QUICK_REACTIONS = listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
+        val QUICK_REACTIONS = listOf("👍", "❤️", "😂", "😮", "😢")
 
         /**
          * Tests only: runs on the IO thread before every read of a

@@ -23,6 +23,17 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.46 (versionCode 54) - every emoji as a reaction
+- Long-press sheet: five quick reactions (👍 ❤️ 😂 😮 😢; the user's own reaction takes the last place
+  when it is another emoji), then a white round "+" (`item_quick_reaction_more`). It opens
+  `sheet_emoji_picker`: AndroidX `EmojiPickerView` (androidx.emoji2:emoji2-emojipicker 1.5.0), with every
+  emoji, categories, recently used and skin tones (long press). Any emoji goes as a reaction to Google
+  Messages and WhatsApp (`ThreadActivity.reactionPicked`), and to iMessage through OpenBubbles (the
+  wrapper branch does the tapback itself).
+- The picker brings Guava (Apache-2.0, added to `bundleLicenses`' Apache list and NOTICE). Its
+  annotation-only dependencies (jsr305, checker-qual, j2objc-annotations) are excluded, not shipped.
+- versionCode 53 was the wrapper branch's 0.5.45-wrapper. Main continues at 54, so it installs over it.
+
 ## 0.5.44 (versionCode 52) - received iMessage pictures in their bubbles
 - OpenBubbles' notification carries only a description ("Image", "Attachments: 2 images, 1 movie"), never
   the picture (its payload is title, text, time, guid). `IMessageCapture.attachmentKinds` turns such a line
