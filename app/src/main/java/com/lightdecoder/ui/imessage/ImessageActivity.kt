@@ -75,6 +75,7 @@ class ImessageActivity : AppCompatActivity() {
         binding.relayCode.setText(prefs.getString(ImessagePrefs.KEY_CODE, ""))
         binding.importLibrary.setOnClickListener { pickFiles.launch(arrayOf("*/*")) }
         binding.register.setOnClickListener { onRegister() }
+        binding.pasteReply.setOnClickListener { askForReply() }
 
         showLibrary()
         engine.start()
@@ -147,10 +148,42 @@ class ImessageActivity : AppCompatActivity() {
         binding.statusTitle.text = title
         binding.statusBody.text = body
         binding.statusProgress.visibility = if (status is Status.Working) View.VISIBLE else View.GONE
+        // While Apple's reply text is awaited: it can be pasted if LightDecoder does not catch it.
+        binding.pasteReply.visibility = if (status is Status.Working && "SMS" in status.step) View.VISIBLE else View.GONE
         val working = status is Status.Working
         binding.register.isEnabled = !working && status !is Status.LibraryMissing
         binding.importLibrary.isEnabled = !working
         binding.registerCard.alpha = if (status is Status.LibraryMissing) 0.5f else 1f
+    }
+
+    /** Apple's REG-RESP text, copied by the user from their messages app. */
+    private fun askForReply() {
+        val input = com.google.android.material.textfield.TextInputEditText(this).apply {
+            hint = getString(R.string.imessage_paste_reply_hint)
+            minLines = 3
+        }
+        val clip = (getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager)
+            .primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString()
+        if (clip != null && "REG-RESP" in clip) input.setText(clip)
+        val box = android.widget.FrameLayout(this).apply {
+            val pad = (20 * resources.displayMetrics.density).toInt()
+            setPadding(pad, pad / 2, pad, 0)
+            addView(input)
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.imessage_paste_reply)
+            .setMessage(R.string.imessage_paste_reply_body)
+            .setView(box)
+            .setPositiveButton(R.string.imessage_continue) { _, _ ->
+                when (SmsPhoneVerifier.paste(input.text?.toString().orEmpty())) {
+                    SmsPhoneVerifier.Companion.Paste.TAKEN -> Unit
+                    SmsPhoneVerifier.Companion.Paste.NOT_WAITING -> showError(getString(R.string.imessage_paste_not_waiting))
+                    SmsPhoneVerifier.Companion.Paste.NOT_A_REPLY -> showError(getString(R.string.imessage_paste_not_reply))
+                    SmsPhoneVerifier.Companion.Paste.OTHER_REQUEST -> showError(getString(R.string.imessage_paste_other_request))
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
     }
 
     private fun showError(message: String) {

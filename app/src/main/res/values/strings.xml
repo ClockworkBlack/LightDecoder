@@ -126,6 +126,12 @@
     <string name="imessage_status_working_body">This can take a minute.</string>
     <string name="imessage_status_registered">iMessage is on</string>
     <string name="imessage_status_failed">iMessage is not working</string>
+    <string name="imessage_paste_reply">Paste Apple\'s reply…</string>
+    <string name="imessage_paste_reply_body">Apple answers the verification text with one that starts with REG-RESP. If it shows up in your messages app and LightDecoder did not pick it up, copy all of it and paste it here.</string>
+    <string name="imessage_paste_reply_hint">REG-RESP?v=3;r=…;n=…;s=…</string>
+    <string name="imessage_paste_not_waiting">Nothing is waiting for Apple\'s reply right now. Tap Register first.</string>
+    <string name="imessage_paste_not_reply">That is not Apple\'s reply: it should start with REG-RESP and contain r=, n= and s=.</string>
+    <string name="imessage_paste_other_request">That reply is for an earlier attempt (its r= number differs). Use the reply to the latest verification text.</string>
     <string name="imessage_menu">iMessage…</string>
     <string name="imessage_where">Once iMessage is on, iMessage conversations are in the Messages tab with your texts, and LightDecoder stays connected in the background so they arrive whether it is open or not. A new conversation with someone who has iMessage starts as an iMessage.</string>
     <string name="imessage_service_channel">iMessage connection</string>

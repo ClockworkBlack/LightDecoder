@@ -7,6 +7,7 @@ import android.content.IntentFilter
 import android.os.Build
 import android.provider.Telephony
 import android.telephony.SmsManager
+import android.telephony.SmsMessage
 import android.telephony.TelephonyManager
 import androidx.core.content.ContextCompat
 import kotlin.coroutines.resume
@@ -30,28 +31,66 @@ class SmsPhoneVerifier(private val context: Context) : PhoneVerifier {
         val gateway = gateway(mccmnc)
         val requestId = PhoneRegSms.newRequestId()
         val reply = CompletableDeferred<PhoneRegSms.Response>()
-        val receiver = object : BroadcastReceiver() {
+        fun offer(text: String?): Boolean {
+            val r = text?.let(PhoneRegSms::parseResponse) ?: return false
+            if (r.requestId != requestId) return false
+            reply.complete(r)
+            return true
+        }
+        // Apple's reply comes as a text on most carriers, as a binary ("data") SMS on some.
+        val textReceiver = object : BroadcastReceiver() {
             override fun onReceive(c: Context, intent: Intent) {
-                val body = Telephony.Sms.Intents.getMessagesFromIntent(intent)
-                    ?.joinToString("") { it?.messageBody.orEmpty() } ?: return
-                val r = PhoneRegSms.parseResponse(body) ?: return
-                if (r.requestId == requestId) reply.complete(r)
+                val parts = Telephony.Sms.Intents.getMessagesFromIntent(intent)?.mapNotNull { it?.messageBody } ?: return
+                offer(PhoneRegSms.joinTextParts(parts))
             }
         }
+        val dataReceiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context, intent: Intent) {
+                @Suppress("DEPRECATION")
+                val pdus = intent.extras?.get("pdus") as? Array<*> ?: return
+                val format = intent.getStringExtra("format")
+                for (pdu in pdus.filterIsInstance<ByteArray>()) offer(dataText(pdu, format))
+            }
+        }
+        val data = IntentFilter(DATA_SMS_RECEIVED).apply {
+            addDataScheme("sms")
+            addDataAuthority("*", null)
+        }
         ContextCompat.registerReceiver(
-            context, receiver, IntentFilter(Telephony.Sms.Intents.SMS_RECEIVED_ACTION),
+            context, textReceiver, IntentFilter(Telephony.Sms.Intents.SMS_RECEIVED_ACTION),
             android.Manifest.permission.BROADCAST_SMS, null, ContextCompat.RECEIVER_EXPORTED,
         )
+        ContextCompat.registerReceiver(
+            context, dataReceiver, data, android.Manifest.permission.BROADCAST_SMS, null, ContextCompat.RECEIVER_EXPORTED,
+        )
+        manual = ::offer
         try {
             smsManager().sendTextMessage(gateway, null, PhoneRegSms.request(pushToken, requestId), null, null)
             return withTimeoutOrNull(REPLY_TIMEOUT_MS) { reply.await() }
                 ?: throw ImessageEngine.ImessageError(
-                    "Apple did not answer the verification text within ${REPLY_TIMEOUT_MS / 1000} seconds. " +
-                        "Check that this SIM can send texts to short codes, then try again.",
+                    "Apple did not answer the verification text within ${REPLY_TIMEOUT_MS / 60000} minutes. " +
+                        "If a reply starting with REG-RESP arrived in your messages, register again and paste it " +
+                        "when asked. Otherwise check that this SIM can text short codes.",
                 )
         } finally {
-            context.unregisterReceiver(receiver)
+            manual = null
+            context.unregisterReceiver(textReceiver)
+            context.unregisterReceiver(dataReceiver)
         }
+    }
+
+    /** The readable text of a data SMS: decoded as 3GPP or 3GPP2, else its raw bytes. */
+    private fun dataText(pdu: ByteArray, format: String?): String? {
+        for (f in listOfNotNull(format, "3gpp", "3gpp2").distinct()) {
+            val msg = try {
+                SmsMessage.createFromPdu(pdu, f)
+            } catch (e: RuntimeException) {
+                null
+            } ?: continue
+            val body = msg.messageBody ?: msg.userData?.let { String(it, Charsets.US_ASCII) }
+            if (body != null && "REG-RESP" in body) return body
+        }
+        return String(pdu, Charsets.US_ASCII).takeIf { "REG-RESP" in it }
     }
 
     private suspend fun gateway(mccmnc: String): String = suspendCancellableCoroutine { cont ->
@@ -81,6 +120,23 @@ class SmsPhoneVerifier(private val context: Context) : PhoneVerifier {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) context.getSystemService(SmsManager::class.java) else SmsManager.getDefault()
 
     companion object {
-        const val REPLY_TIMEOUT_MS = 90_000L
+        const val REPLY_TIMEOUT_MS = 3 * 60_000L
+        private const val DATA_SMS_RECEIVED = "android.intent.action.DATA_SMS_RECEIVED"
+
+        /** While a verification waits: takes Apple's reply pasted by the user (setup screen). */
+        @Volatile
+        private var manual: ((String) -> Boolean)? = null
+
+        val waiting: Boolean get() = manual != null
+
+        /** What became of a pasted reply. */
+        enum class Paste { TAKEN, NOT_WAITING, NOT_A_REPLY, OTHER_REQUEST }
+
+        /** Hands a reply the user pasted to the waiting verification. */
+        fun paste(text: String): Paste {
+            val m = manual ?: return Paste.NOT_WAITING
+            if (PhoneRegSms.parseResponse(text) == null) return Paste.NOT_A_REPLY
+            return if (m(text)) Paste.TAKEN else Paste.OTHER_REQUEST
+        }
     }
 }

@@ -166,6 +166,15 @@
                     </com.google.android.material.textfield.TextInputLayout>
 
                     <com.google.android.material.button.MaterialButton
+                        android:id="@+id/pasteReply"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="@string/imessage_paste_reply"
+                        android:visibility="gone" />
+
+                    <com.google.android.material.button.MaterialButton
                         android:id="@+id/register"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"

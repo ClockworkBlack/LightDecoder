@@ -18,20 +18,29 @@ object PhoneRegSms {
 
     data class Response(val requestId: String, val number: String, val signature: ByteArray)
 
-    /** The answer, if [body] is Apple's REG-RESP; null for any other text. */
+    /**
+     * The answer, if [body] holds Apple's REG-RESP; null for any other text. The reply may come
+     * with something before it (a carrier header, or the raw bytes of a data SMS) and after the
+     * signature, so it is looked for anywhere and the signature ends at its last hex digit.
+     */
     fun parseResponse(body: String): Response? {
-        val text = body.trim()
-        if (text.substringBefore('?') != "REG-RESP") return null
+        val at = body.indexOf("REG-RESP?")
+        if (at < 0) return null
+        val text = body.substring(at)
         val fields = text.substringAfter('?').split(';')
             .filter { '=' in it }
-            .associate { it.substringBefore('=') to it.substringAfter('=') }
-        val id = fields["r"] ?: return null
-        val number = fields["n"]?.takeIf { it.isNotBlank() } ?: return null
-        val sigHex = fields["s"] ?: return null
-        if (sigHex.isEmpty() || sigHex.length % 2 != 0 || !sigHex.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) {
-            return null
-        }
+            .associate { it.substringBefore('=').trim() to it.substringAfter('=') }
+        val id = fields["r"]?.takeWhile { it.isDigit() }?.takeIf { it.isNotEmpty() } ?: return null
+        val number = fields["n"]?.trim()?.takeWhile { it == '+' || it.isDigit() }?.takeIf { it.count(Char::isDigit) >= 7 } ?: return null
+        val sigHex = fields["s"]?.takeWhile { it.isDigit() || it.lowercaseChar() in 'a'..'f' } ?: return null
+        if (sigHex.isEmpty() || sigHex.length % 2 != 0) return null
         val sig = ByteArray(sigHex.length / 2) { sigHex.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
         return Response(id, number, sig)
     }
+
+    /**
+     * The text of a text-SMS broadcast's parts, as Apple's reply is read from them: parts that
+     * start with "~" are carrier headers and left out (as OpenBubbles does).
+     */
+    fun joinTextParts(parts: List<String>): String = parts.filterNot { it.startsWith("~") }.joinToString("")
 }

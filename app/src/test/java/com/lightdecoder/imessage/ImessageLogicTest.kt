@@ -50,6 +50,18 @@ class ImessageLogicTest {
     }
 
     @Test
+    fun aReplyIsFoundInsideOtherTextAndEndsAtItsSignature() {
+        // A data SMS read as raw bytes: header bytes before, padding after.
+        val raw = "\u0000\u0005\u0004xxREG-RESP?v=3;r=662599697;n=+15551234567;s=0AFF10\u0000\u0000"
+        val r = PhoneRegSms.parseResponse(raw)!!
+        assertEquals("662599697", r.requestId)
+        assertEquals("+15551234567", r.number)
+        assertArrayEquals(byteArrayOf(0x0a, 0xff.toByte(), 0x10), r.signature)
+        // Text parts: carrier headers starting with "~" are left out.
+        assertEquals("REG-RESP?v=3;r=1;n=+15551234567;s=AB", PhoneRegSms.joinTextParts(listOf("~hdr", "REG-RESP?v=3;r=1;", "n=+15551234567;s=AB")))
+    }
+
+    @Test
     fun otherTextsAreNotReplies() {
         assertNull(PhoneRegSms.parseResponse("Your code is 123456"))
         assertNull(PhoneRegSms.parseResponse("REG-RESP?v=3;r=1;n=+1555"))           // no signature
