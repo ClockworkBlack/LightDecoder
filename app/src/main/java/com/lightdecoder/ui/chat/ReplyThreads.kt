@@ -5,7 +5,9 @@ import com.lightdecoder.archive.MessageRow
 /**
  * Inline replies as an iPhone shows them (iOS 14 and later), in iPhone-style chats: every reply
  * belongs to the thread of the first message of its chain (its root: a reply to a reply is in
- * the same thread), the root says "N Replies" under it, and a reply is joined to the message it
+ * the same thread), and the root says "N Replies" under it. By default a reply is an ordinary
+ * bubble with a small "Reply" under it, and a tap on any message of a thread opens the thread
+ * view. With "Show reply threads in the chat" on, a reply is instead joined to the message it
  * answers by a thin line when that is close above it, else it shows a faded copy of it. Pure, so
  * it can be tested; [ThreadItems.build] puts what it works out on the rows ([Mark]).
  */
@@ -42,12 +44,14 @@ object ReplyThreads {
      * @param replyCount "N Replies" under it (a root's; 0 for the others)
      * @param fadedQuote a faded copy of the message it answers goes above it
      * @param connectTo the message above it a line joins it to (the one it answers, close enough); null for none
+     * @param marker a small "Reply" goes under it: a reply, where threads are not drawn in the chat
      */
     data class Mark(
         val root: String = "",
         val replyCount: Int = 0,
         val fadedQuote: Boolean = false,
         val connectTo: String? = null,
+        val marker: Boolean = false,
     )
 
     /**
@@ -143,22 +147,24 @@ object ReplyThreads {
     }
 
     /**
-     * The marks of [rows] (shown, oldest first) in the transcript: counts under roots, a faded copy
-     * and a line on replies, as [link] says. Only rows with something to draw are in it.
+     * The marks of [rows] (shown, oldest first) in the transcript: counts under roots and "Reply"
+     * under replies; with [inChat] ("Show reply threads in the chat") a faded copy and a line on
+     * replies instead, as [link] says. Only rows of a thread are in it.
      */
-    fun marks(rows: List<MessageRow>, threads: Threads, timeBefore: (Int) -> Boolean = { false }): Map<String, Mark> {
+    fun marks(rows: List<MessageRow>, threads: Threads, inChat: Boolean = false, timeBefore: (Int) -> Boolean = { false }): Map<String, Mark> {
         if (threads.rootOf.isEmpty()) return emptyMap()
         val out = HashMap<String, Mark>()
         for ((i, row) in rows.withIndex()) {
             val count = threads.count(row.id)
             val root = threads.rootOf[row.id]
             if (root == null && count == 0) continue
-            val link = if (root != null) link(rows, i, timeBefore) else Link.NONE
+            val link = if (root != null && inChat) link(rows, i, timeBefore) else Link.NONE
             out[row.id] = Mark(
                 root = root ?: row.id,
                 replyCount = count,
                 fadedQuote = link == Link.NEAR || link == Link.FAR,
                 connectTo = row.replyToId.takeIf { link == Link.ADJACENT || link == Link.NEAR },
+                marker = root != null && !inChat,
             )
         }
         return out

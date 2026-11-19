@@ -110,7 +110,8 @@ class ReplyThreadsTest {
     @Test
     fun marksSayWhatIsDrawn() {
         val rows = listOf(row("a"), row("b", "a", mine = true), row("c"), row("d", "a"))
-        val marks = ReplyThreads.marks(rows, ReplyThreads.threads(rows))
+        // With reply threads drawn in the chat (the setting on).
+        val marks = ReplyThreads.marks(rows, ReplyThreads.threads(rows), inChat = true)
         assertEquals(ReplyThreads.Mark(root = "a", replyCount = 2), marks["a"])
         assertEquals(ReplyThreads.Mark(root = "a", fadedQuote = false, connectTo = "a"), marks["b"])
         assertEquals(ReplyThreads.Mark(root = "a", fadedQuote = true, connectTo = "a"), marks["d"])
@@ -121,6 +122,23 @@ class ReplyThreadsTest {
             mapOf("a" to ReplyThreads.Mark("a"), "b" to ReplyThreads.Mark("a", connectTo = "a"), "d" to ReplyThreads.Mark("a", connectTo = "b")),
             ReplyThreads.panelMarks(members, "a"),
         )
+    }
+
+    @Test
+    fun byDefaultARepliesMarkIsOnlyItsThreadAndAReplyMarker() {
+        val rows = listOf(row("a"), row("b", "a", mine = true), row("c"), row("d", "a"), row("e", "b"))
+        val marks = ReplyThreads.marks(rows, ReplyThreads.threads(rows))
+        assertEquals("the count stays under the first message", ReplyThreads.Mark(root = "a", replyCount = 3), marks["a"])
+        for (reply in listOf("b", "d", "e")) {
+            assertEquals("no copy and no line, right under it or far from it", ReplyThreads.Mark(root = "a", marker = true), marks[reply])
+        }
+        assertNull("not in a thread", marks["c"])
+        assertTrue(marks.values.none { it.fadedQuote || it.connectTo != null })
+        // A reply to a message that is not shown is marked too, in that message's thread.
+        val lone = listOf(row("r", "elsewhere"))
+        assertEquals(ReplyThreads.Mark(root = "elsewhere", marker = true), ReplyThreads.marks(lone, ReplyThreads.threads(lone))["r"])
+        // Drawn in the chat, nothing has the marker.
+        assertTrue(ReplyThreads.marks(rows, ReplyThreads.threads(rows), inChat = true).values.none { it.marker })
     }
 
     @Test
@@ -141,14 +159,20 @@ class ReplyThreadsTest {
     fun theTranscriptCarriesTheMarksOnlyInIphoneStyleChats() {
         val rows = listOf(row("a"), row("b", "a", mine = true), row("c", "a"))
         val threads = ReplyThreads.threads(rows)
-        fun build(phone: Boolean) = ThreadItems.build(
+        fun build(phone: Boolean, inChat: Boolean = false) = ThreadItems.build(
             rows, isGroup = false, quotes = emptyMap(), header = null, highlightId = null,
-            dayStart = dayStart, dayLabel = { "day" }, phone = phone, threads = threads,
+            dayStart = dayStart, dayLabel = { "day" }, phone = phone, threads = threads, threadsInChat = inChat,
         ).filterIsInstance<ThreadItem.Message>().associate { it.row.id to it.thread }
-        val phone = build(true)
-        assertEquals(2, phone["a"]?.replyCount)
-        assertEquals("a", phone["b"]?.connectTo)
-        assertEquals(true, phone["c"]?.fadedQuote)
+        val drawn = build(true, inChat = true)
+        assertEquals(2, drawn["a"]?.replyCount)
+        assertEquals("a", drawn["b"]?.connectTo)
+        assertEquals(true, drawn["c"]?.fadedQuote)
+        // By default: the count and the markers only.
+        val plain = build(true)
+        assertEquals(ReplyThreads.Mark(root = "a", replyCount = 2), plain["a"])
+        assertEquals(ReplyThreads.Mark(root = "a", marker = true), plain["b"])
+        assertEquals(ReplyThreads.Mark(root = "a", marker = true), plain["c"])
         assertTrue("other chats: as before", build(false).values.all { it == null })
+        assertTrue(build(false, inChat = true).values.all { it == null })
     }
 }

@@ -8,12 +8,21 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
    had earlier chosen "build with a warning", then "pause on Discord", and has now asked for
    the web-view tab only, with no bridge). **Instagram: skipped** (ban risk, like Messenger).
 
+## 0.5.65 (versionCode 76) - reply threads open on tap, clean chat by default
+- Owner: the chain should show when a reply is pressed, not by default. Default now: plain bubbles, a
+  small "Reply" marker under replies, "N Replies" under originals; tapping a threaded text bubble or a
+  marker opens `ReplyThreadPanel` (precedence in MessagesAdapter: failed, ink reveal, app card, text
+  effect replay, thread; media bubbles open the thread only from the marker). Setting "Show reply
+  threads in the chat" (off; file flag `imessage/reply-threads-in-chat`) restores the 0.5.64 faded
+  copies and lines.
+- Unit tests: 1127 (1 skipped: screenshots), all passing. Next version: 0.5.66 / 77.
+
 ## 0.5.64 (versionCode 75) - iPhone-style inline replies and reply threads
 - In iPhone-style chats: faded copy of the answered message above a reply, connector lines
   (`ReplyLines` ItemDecoration), "N Replies" under the original, and a blurred thread panel
   (`ReplyThreadPanel`) with the root and every reply; panel and swipe replies target the thread root
   (as OpenBubbles, threadOriginatorGuid). Pure model in `ReplyThreads`. Not yet seen on a device.
-- Unit tests: 1121 (1 skipped: screenshots), all passing. Next version: 0.5.65 / 76.
+- Unit tests: 1121 (1 skipped: screenshots), all passing.
 
 ## 0.5.63 (versionCode 74) - iPhone-style iMessage chats
 - Owner asked for an iPhone-like thread in iMessage chats. `ui/chat/PhoneStyle.kt` (pure rules + tail

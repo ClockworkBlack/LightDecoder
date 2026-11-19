@@ -24,8 +24,8 @@ import com.lightdecoder.archive.MessageRow
 import com.lightdecoder.databinding.DialogReplyThreadBinding
 
 /**
- * The thread view of iPhone-style chats, as an iPhone opens it from "N Replies" or a reply's
- * faded copy: over the whole chat, which is blurred (Android 12 and later) and veiled behind it,
+ * The thread view of iPhone-style chats, opened by a tap on a reply, on a message others answered
+ * or on "N Replies" (as an iPhone opens it from "N Replies" or a reply's faded copy): over the whole chat, which is blurred (Android 12 and later) and veiled behind it,
  * the first message of the thread ([rootId]) and every reply in it, drawn as in the chat and
  * joined by a line, with a field at the bottom whose message goes into the thread ([send]). A tap
  * beside the messages, or Back, closes it. [update] shows it as the chat now is (new replies
@@ -61,6 +61,8 @@ class ReplyThreadPanel(
     val adapter = MessagesAdapter(media, panelCallbacks).also {
         configure(it)
         it.phoneStyle = true
+        // Already in the thread: a tap on a bubble opens nothing.
+        it.threadTaps = false
     }
     private val layoutManager = LinearLayoutManager(activity).apply { stackFromEnd = true }
 

@@ -48,7 +48,7 @@ sealed class ThreadItem {
         val place: PhoneStyle.Place? = null,
         /** iPhone-style group chats: someone else's message, which leaves room at its side for the sender's picture. */
         val besideAvatar: Boolean = false,
-        /** iPhone-style chats: its inline-reply thread ([ReplyThreads.Mark]: "N Replies", a faded copy, a line); null otherwise. */
+        /** iPhone-style chats: its inline-reply thread ([ReplyThreads.Mark]: "N Replies", "Reply", or a faded copy and a line); null otherwise. */
         val thread: ReplyThreads.Mark? = null,
     ) : ThreadItem() {
         /**
@@ -125,6 +125,8 @@ object ThreadItems {
         clock: (Long) -> String = { "" },
         /** iPhone-style chats ([phone]): who is in which inline-reply thread ([ReplyThreads.threads] of [messages]). */
         threads: ReplyThreads.Threads = ReplyThreads.Threads.NONE,
+        /** [phone]: replies are drawn joined to what they answer in the transcript (the setting; else a "Reply" under them). */
+        threadsInChat: Boolean = false,
         /** The thread view: [messages] are one thread, each joined to the one before it ([ReplyThreads.panelMarks]). */
         panelRoot: String? = null,
     ): List<ThreadItem> {
@@ -137,7 +139,7 @@ object ThreadItems {
         val marks = when {
             !phone -> emptyMap()
             panelRoot != null -> ReplyThreads.panelMarks(messages, panelRoot)
-            else -> ReplyThreads.marks(messages, threads) { i -> PhoneStyle.timeHeader(messages.getOrNull(i - 1), messages[i], dayStart) }
+            else -> ReplyThreads.marks(messages, threads, threadsInChat) { i -> PhoneStyle.timeHeader(messages.getOrNull(i - 1), messages[i], dayStart) }
         }
         for ((index, row) in messages.withIndex()) {
             val day = dayStart(row.timestampMs)

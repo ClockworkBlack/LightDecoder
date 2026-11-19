@@ -85,12 +85,14 @@ class PhoneStyleScreenTest {
         iMessage = IMessageManager.installForTesting(two.app, imRepo)
         IMessagePrefs.setEnabled(two.app, true)
         DirectPrefs.setPhoneStyleOn(two.app, true)
+        DirectPrefs.setReplyThreadsInChat(two.app, false)
         ChatBackgrounds.dir(two.app).deleteRecursively()
     }
 
     @After
     fun tearDown() {
         DirectPrefs.setPhoneStyleOn(two.app, true)
+        DirectPrefs.setReplyThreadsInChat(two.app, false)
         ChatBackgrounds.dir(two.app).deleteRecursively()
         IMessagePrefs.setEnabled(two.app, false)
         DirectPrefs.setRegistered(two.app, false)
@@ -625,9 +627,10 @@ class PhoneStyleScreenTest {
 
     @Test
     @Config(qualifiers = "w390dp-h1400dp-xhdpi")
-    fun aReplyShowsAFadedCopyOfWhatItAnswersAndThatMessageHowManyReplies() {
+    fun withReplyThreadsShownInTheChatAReplyShowsAFadedCopyOfWhatItAnswersAndThatMessageHowManyReplies() {
         directMode()
         replyChat()
+        DirectPrefs.setReplyThreadsInChat(two.app, true)
         launch(ALICE_DIRECT).use { scenario ->
             scenario.waitFor("the replies") { rowOf(it, "Turkey or ham, by the way?") != null && rowOf(it, "Lunch at the summit?") != null }
             scenario.onActivity { activity ->
@@ -664,15 +667,18 @@ class PhoneStyleScreenTest {
                 // The lines, drawn with the list: right under (R1-R2, R5-R6), close (R3 to the copy of it, the
                 // copy to R5), and the far one's copy to it.
                 assertEquals(5, linesDrawn(list))
+                // No "Reply" under a reply: the copy or the line says it.
+                assertTrue(two.findAll(list) { it.id == R.id.replyMarker }.none { it.visibility == View.VISIBLE })
             }
         }
     }
 
     @Test
     @Config(qualifiers = "w390dp-h1400dp-xhdpi")
-    fun repliesOpenTheThreadWithOnlyItsMessagesAndBackClosesIt() {
+    fun withReplyThreadsShownInTheChatRepliesOpenTheThreadWithOnlyItsMessagesAndBackClosesIt() {
         directMode()
         replyChat()
+        DirectPrefs.setReplyThreadsInChat(two.app, true)
         launch(ALICE_DIRECT).use { scenario ->
             scenario.waitFor("the replies") { rowOf(it, "Who's bringing the tent?") != null }
             scenario.onActivity { activity ->
@@ -706,6 +712,13 @@ class PhoneStyleScreenTest {
                 ShadowLooper.idleMainLooper()
                 assertEquals(listOf("Lunch at the summit?", "Yes! I'll pack sandwiches", "Turkey or ham, by the way?"), panelTexts(activity.threadPanel!!))
                 activity.threadPanel!!.dismiss()
+                ShadowLooper.idleMainLooper()
+
+                // And, new with the bubbles' own tap: a reply's bubble opens its thread here too.
+                assertTrue(rowOf(activity, "Perfect, I'll bring the poles")!!.findViewById<View>(R.id.bubble).performClick())
+                ShadowLooper.idleMainLooper()
+                assertEquals("imsg:R3", activity.threadPanel!!.rootId)
+                activity.threadPanel!!.dismiss()
             }
         }
     }
@@ -719,7 +732,7 @@ class PhoneStyleScreenTest {
             scenario.waitFor("the replies") { rowOf(it, "Tent is in my car") != null }
             var panel: com.lightdecoder.ui.chat.ReplyThreadPanel? = null
             scenario.onActivity { activity ->
-                rowOf(activity, "Tent is in my car")!!.findViewById<View>(R.id.threadQuote).performClick()
+                rowOf(activity, "Tent is in my car")!!.findViewById<View>(R.id.replyMarker).performClick()
                 ShadowLooper.idleMainLooper()
                 panel = activity.threadPanel!!
                 panel!!.binding.threadInput.setText("And a tarp")
@@ -775,6 +788,276 @@ class PhoneStyleScreenTest {
         }
     }
 
+    private fun marker(activity: Activity, text: String): TextView = rowOf(activity, text)!!.findViewById(R.id.replyMarker)
+
+    private fun bubble(activity: Activity, text: String): View = rowOf(activity, text)!!.findViewById(R.id.bubble)
+
+    /** A real touch (down and up) at ([x], [y]) of [view]. */
+    private fun touch(view: View, x: Float, y: Float) {
+        val at = android.os.SystemClock.uptimeMillis()
+        for (action in listOf(android.view.MotionEvent.ACTION_DOWN, android.view.MotionEvent.ACTION_UP)) {
+            val event = android.view.MotionEvent.obtain(at, at + 20, action, x, y, 0)
+            view.dispatchTouchEvent(event)
+            event.recycle()
+        }
+        ShadowLooper.idleMainLooper()
+    }
+
+    @Test
+    @Config(qualifiers = "w390dp-h1400dp-xhdpi")
+    fun byDefaultARepliesBubbleIsAnOrdinaryOneMarkedReplyAndNothingIsDrawnBetweenThem() {
+        directMode()
+        replyChat()
+        assertFalse("off by default", DirectPrefs.replyThreadsInChat(two.app))
+        launch(ALICE_DIRECT).use { scenario ->
+            scenario.waitFor("the replies") { rowOf(it, "Turkey or ham, by the way?") != null && rowOf(it, "Lunch at the summit?") != null }
+            scenario.onActivity { activity ->
+                val list = activity.findViewById<RecyclerView>(R.id.messages)
+                assertFalse(activity.threadsInChat)
+                // No faded copy anywhere, no old quote block, and no line.
+                assertTrue(two.findAll(list) { it.id == R.id.threadQuote }.none { it.visibility == View.VISIBLE })
+                assertTrue(two.findAll(list) { it.id == R.id.quote }.none { it.visibility == View.VISIBLE })
+                assertEquals(0, linesDrawn(list))
+                assertTrue(items(activity).filterIsInstance<ThreadItem.Message>().none { it.thread?.fadedQuote == true || it.thread?.connectTo != null })
+                // Every reply (right under its message, close to it, far from it) has a small grey "Reply" under its bubble.
+                for (reply in listOf("Yes! I'll pack sandwiches", "Tent is in my car", "Perfect, I'll bring the poles", "Turkey or ham, by the way?")) {
+                    val mark = marker(activity, reply)
+                    assertEquals(reply, View.VISIBLE, mark.visibility)
+                    assertEquals("Reply", mark.text.toString())
+                    assertEquals(activity.getColor(R.color.phone_meta), mark.currentTextColor)
+                    assertNotNull("with its arrow", mark.compoundDrawablesRelative[0])
+                    assertTrue("under the bubble", mark.top >= bubble(activity, reply).bottom)
+                    assertTrue(mark.isClickable)
+                }
+                assertEquals("Reply to Alice Martin: Who's bringing the tent?, opens the thread", marker(activity, "Tent is in my car").contentDescription.toString())
+                // On the bubble's own side.
+                assertTrue(marker(activity, "Tent is in my car").let { it.left + (it.parent as View).left } > list.width / 2)
+                assertTrue(marker(activity, "Turkey or ham, by the way?").let { it.right + (it.parent as View).left } < list.width / 2)
+                // The others have none; the messages answered keep "2 Replies" in blue.
+                for (other in listOf("Lunch at the summit?", "Who's bringing the tent?", "8 works", "Already packed")) {
+                    assertEquals(other, View.GONE, marker(activity, other).visibility)
+                }
+                fun count(text: String) = rowOf(activity, text)!!.findViewById<TextView>(R.id.replyCount)
+                assertEquals("2 Replies", count("Who's bringing the tent?").text.toString())
+                assertEquals(View.VISIBLE, count("Lunch at the summit?").visibility)
+                assertEquals(activity.getColor(R.color.phone_blue), count("Lunch at the summit?").currentTextColor)
+                assertEquals(View.GONE, count("Tent is in my car").visibility)
+            }
+        }
+    }
+
+    @Test
+    @Config(qualifiers = "w390dp-h1400dp-xhdpi")
+    fun aTapOnAReplyOrOnAMessageWithRepliesOpensItsThread() {
+        directMode()
+        replyChat()
+        launch(ALICE_DIRECT).use { scenario ->
+            scenario.waitFor("the replies") { rowOf(it, "Turkey or ham, by the way?") != null && rowOf(it, "Lunch at the summit?") != null }
+            scenario.onActivity { activity ->
+                fun opened(): List<String>? = activity.threadPanel?.also { assertTrue(it.isShowing) }?.let(::panelTexts)
+                fun close() {
+                    activity.threadPanel?.dismiss()
+                    ShadowLooper.idleMainLooper()
+                    assertNull(activity.threadPanel)
+                }
+                val tent = listOf("Who's bringing the tent?", "Tent is in my car", "Perfect, I'll bring the poles")
+                val lunch = listOf("Lunch at the summit?", "Yes! I'll pack sandwiches", "Turkey or ham, by the way?")
+                // A reply's bubble: a real touch on its text.
+                val body = rowOf(activity, "Tent is in my car")!!.findViewById<View>(R.id.body)
+                touch(bubble(activity, "Tent is in my car"), body.left + body.width / 2f, body.top + body.height / 2f)
+                assertEquals(tent, opened())
+                assertEquals("imsg:R3", activity.threadPanel!!.rootId)
+                // In the thread view a bubble's tap opens nothing more.
+                val inPanel = activity.threadPanel!!.binding.threadMessages
+                assertTrue(two.findAll(inPanel) { it.id == R.id.bubble }.none { it.isClickable })
+                assertTrue(two.findAll(inPanel) { it.id == R.id.replyMarker }.none { it.visibility == View.VISIBLE })
+                close()
+                // A reply to a reply: the thread of the first message.
+                assertTrue(bubble(activity, "Perfect, I'll bring the poles").performClick())
+                assertEquals(tent, opened())
+                close()
+                // Its "Reply" marker.
+                assertTrue(marker(activity, "Turkey or ham, by the way?").performClick())
+                assertEquals(lunch, opened())
+                close()
+                // The message others answered: its bubble, and "2 Replies".
+                assertTrue(bubble(activity, "Lunch at the summit?").performClick())
+                assertEquals(lunch, opened())
+                close()
+                assertTrue(rowOf(activity, "Who's bringing the tent?")!!.findViewById<View>(R.id.replyCount).performClick())
+                assertEquals(tent, opened())
+                close()
+                // A message in no thread: a tap does nothing.
+                assertFalse(bubble(activity, "8 works").isClickable)
+                assertFalse(bubble(activity, "8 works").performClick())
+                assertNull(activity.threadPanel)
+                // A long press is still the message's actions, not the thread.
+                assertTrue(bubble(activity, "Tent is in my car").performLongClick())
+                ShadowLooper.idleMainLooper()
+                assertNull(activity.threadPanel)
+                assertTrue(ShadowDialog.getLatestDialog() is com.google.android.material.bottomsheet.BottomSheetDialog)
+                ShadowDialog.getLatestDialog().dismiss()
+                // TalkBack is told what the tap does.
+                val info = androidx.core.view.accessibility.AccessibilityNodeInfoCompat.wrap(bubble(activity, "Tent is in my car").createAccessibilityNodeInfo())
+                assertEquals("open the thread", info.actionList.first { it.id == android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK }.label.toString())
+            }
+        }
+    }
+
+    @Test
+    @Config(qualifiers = "w390dp-h1400dp-xhdpi")
+    fun aLinkInvisibleInkAPictureAndAFailedMessageKeepTheirOwnTap() {
+        directMode()
+        val now = System.currentTimeMillis()
+        message("T1", "Where do we meet?", now - 10 * 60_000, mine = false)
+        fun reply(guid: String, text: String, ago: Long, mine: Boolean = true, status: String = "", extra: String = "", parts: List<PartDto> = listOf(PartDto("0", "text", text))) =
+            imRepo.upsertMessage(
+                MessageDto(
+                    id = "imsg:$guid", conversationId = ALICE_DIRECT, fromMe = mine,
+                    senderId = if (mine) "" else "+15551234567", senderName = if (mine) "" else "Alice Martin",
+                    timestampMs = now - ago, direction = if (mine) "out" else "in",
+                    status = status.ifEmpty { if (mine) "OUTGOING_COMPLETE" else "INCOMING_COMPLETE" },
+                    transport = IMessageManager.TRANSPORT, text = text, parts = parts, isOld = true, replyToId = "imsg:T1", extra = extra,
+                ),
+            )
+        reply("T2", "Here: https://example.com/trailhead", 9 * 60_000, mine = false)
+        reply("T3", "The secret spot", 8 * 60_000, mine = false, extra = com.lightdecoder.imessage.direct.IMessageExtra(effect = com.lightdecoder.imessage.direct.IMessageExtra.INVISIBLE_INK).toJson())
+        val png = java.io.ByteArrayOutputStream().also { Bitmap.createBitmap(40, 30, Bitmap.Config.ARGB_8888).compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
+        reply("T4", "", 7 * 60_000, mine = false, parts = listOf(PartDto("p0", "media", mime = "image/png", fileName = "map.png", width = 40, height = 30, inlineData = png)))
+        reply("T5", "Never left", 6 * 60_000, status = "OUTGOING_FAILED_GENERIC")
+        launch(ALICE_DIRECT).use { scenario ->
+            scenario.waitFor("the replies") { a -> rowOf(a, "Never left") != null && rowOf(a, "Where do we meet?") != null && items(a).count { (it as? ThreadItem.Message)?.thread?.marker == true } == 4 }
+            two.settle()
+            scenario.onActivity { activity ->
+                val list = activity.findViewById<RecyclerView>(R.id.messages)
+                fun rowOfId(id: String): View = (0 until list.childCount).map { list.getChildAt(it) }
+                    .first { (list.getChildViewHolder(it) as? MessagesAdapter.MessageHolder)?.let { h -> (items(activity)[h.bindingAdapterPosition] as ThreadItem.Message).row.id == id } == true }
+                fun close() {
+                    activity.threadPanel?.dismiss()
+                    ShadowLooper.idleMainLooper()
+                }
+
+                // A link in the text: a touch on it opens the link, not the thread; a touch on the words before it, the thread.
+                val linkRow = rowOf(activity, "Here: https://example.com/trailhead")!!
+                val body = linkRow.findViewById<TextView>(R.id.body)
+                val layout = body.layout
+                val text = body.text.toString()
+                val onLink = layout.getPrimaryHorizontal(text.indexOf("example")) + body.totalPaddingLeft
+                val y = body.totalPaddingTop + layout.getLineBottom(0) / 2f
+                touch(body, onLink, y)
+                assertNull("the link's tap is the link's", activity.threadPanel)
+                assertEquals("https://example.com/trailhead", org.robolectric.Shadows.shadowOf(activity).nextStartedActivity?.dataString)
+                touch(body, body.totalPaddingLeft + layout.getPrimaryHorizontal(2), y)
+                assertEquals("imsg:T1", activity.threadPanel?.rootId)
+                assertNull(org.robolectric.Shadows.shadowOf(activity).nextStartedActivity)
+                close()
+
+                // Invisible ink: the first tap shows the text.
+                val inked = rowOfId("imsg:T3")
+                assertTrue(inked.findViewById<View>(R.id.bubble).performClick())
+                ShadowLooper.idleMainLooper()
+                assertNull("the first tap shows it", activity.threadPanel)
+            }
+            scenario.waitFor("the ink gone") { rowOf(it, "The secret spot") != null }
+            scenario.onActivity { activity ->
+                val list = activity.findViewById<RecyclerView>(R.id.messages)
+                // The next tap is as on any reply.
+                assertTrue(bubble(activity, "The secret spot").performClick())
+                ShadowLooper.idleMainLooper()
+                assertEquals("imsg:T1", activity.threadPanel?.rootId)
+                activity.threadPanel?.dismiss()
+                ShadowLooper.idleMainLooper()
+
+                // A picture: its tap opens the picture; the bubble around it opens nothing; "Reply" under it, the thread.
+                val picture = (0 until list.childCount).map { list.getChildAt(it) }.first { it.findViewById<View>(R.id.mediaFrame) != null }
+                assertTrue(picture.findViewById<View>(R.id.mediaFrame).performClick())
+                ShadowLooper.idleMainLooper()
+                assertNull("a picture's tap is the picture's", activity.threadPanel)
+                assertFalse(picture.findViewById<View>(R.id.bubble).isClickable)
+                assertEquals(View.VISIBLE, picture.findViewById<View>(R.id.replyMarker).visibility)
+                assertTrue(picture.findViewById<View>(R.id.replyMarker).performClick())
+                ShadowLooper.idleMainLooper()
+                assertEquals("imsg:T1", activity.threadPanel?.rootId)
+                activity.threadPanel?.dismiss()
+                ShadowLooper.idleMainLooper()
+
+                // A failed one: its tap is the failure's (on the bubble and on the text), never the thread.
+                val failed = rowOf(activity, "Never left")!!
+                assertEquals(View.VISIBLE, failed.findViewById<View>(R.id.failedText).visibility)
+                assertTrue(failed.findViewById<View>(R.id.bubble).performClick())
+                failed.findViewById<View>(R.id.body).performClick()
+                ShadowLooper.idleMainLooper()
+                assertNull("a failed message's tap is the retry's", activity.threadPanel)
+                // Its marker still opens the thread.
+                assertTrue(failed.findViewById<View>(R.id.replyMarker).performClick())
+                ShadowLooper.idleMainLooper()
+                assertEquals("imsg:T1", activity.threadPanel?.rootId)
+                activity.threadPanel?.dismiss()
+            }
+        }
+    }
+
+    @Test
+    @Config(qualifiers = "w390dp-h1400dp-xhdpi")
+    fun turnedOnTheSettingBringsTheCopiesAndLinesBackWhenTheChatIsReturnedTo() {
+        directMode()
+        replyChat()
+        launch(ALICE_DIRECT).use { scenario ->
+            scenario.waitFor("the replies") { rowOf(it, "Tent is in my car") != null && marker(it, "Tent is in my car").visibility == View.VISIBLE }
+            scenario.onActivity { assertEquals(0, linesDrawn(it.findViewById(R.id.messages))) }
+            // Turned on on the iMessage screen, and back to the chat.
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.STARTED)
+            DirectPrefs.setReplyThreadsInChat(two.app, true)
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
+            scenario.waitFor("the copies") { rowOf(it, "Tent is in my car")?.findViewById<View>(R.id.threadQuote)?.visibility == View.VISIBLE }
+            two.settle()
+            scenario.onActivity { activity ->
+                val list = activity.findViewById<RecyclerView>(R.id.messages)
+                assertTrue(activity.threadsInChat)
+                assertEquals("Who's bringing the tent?", rowOf(activity, "Tent is in my car")!!.findViewById<TextView>(R.id.threadQuote).text.toString())
+                assertEquals(View.VISIBLE, rowOf(activity, "Turkey or ham, by the way?")!!.findViewById<View>(R.id.threadQuote).visibility)
+                assertTrue(two.findAll(list) { it.id == R.id.replyMarker }.none { it.visibility == View.VISIBLE })
+                assertEquals(5, linesDrawn(list))
+                assertEquals("2 Replies", rowOf(activity, "Who's bringing the tent?")!!.findViewById<TextView>(R.id.replyCount).text.toString())
+            }
+            // And off again.
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.STARTED)
+            DirectPrefs.setReplyThreadsInChat(two.app, false)
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
+            scenario.waitFor("the markers") { rowOf(it, "Tent is in my car")?.findViewById<View>(R.id.replyMarker)?.visibility == View.VISIBLE }
+            two.settle()
+            scenario.onActivity { activity ->
+                val list = activity.findViewById<RecyclerView>(R.id.messages)
+                assertTrue(two.findAll(list) { it.id == R.id.threadQuote }.none { it.visibility == View.VISIBLE })
+                assertEquals(0, linesDrawn(list))
+            }
+        }
+    }
+
+    @Test
+    fun showingReplyThreadsInTheChatIsOnTheIMessageScreenOffByDefaultAndIsKept() {
+        assertFalse("off by default", DirectPrefs.replyThreadsInChat(two.app))
+        ActivityScenario.launch(DirectSetupActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                val switch = activity.findViewById<com.google.android.material.materialswitch.MaterialSwitch>(R.id.switchReplyThreads)
+                assertEquals("Show reply threads in the chat", switch.text.toString())
+                assertFalse(switch.isChecked)
+                switch.isChecked = true
+                assertTrue(DirectPrefs.replyThreadsInChat(activity))
+                assertTrue("the other setting is its own", DirectPrefs.phoneStyleOn(activity))
+            }
+        }
+        // Kept: the screen shows it on when opened again.
+        ActivityScenario.launch(DirectSetupActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                val switch = activity.findViewById<com.google.android.material.materialswitch.MaterialSwitch>(R.id.switchReplyThreads)
+                assertTrue(switch.isChecked)
+                switch.isChecked = false
+                assertFalse(DirectPrefs.replyThreadsInChat(activity))
+            }
+        }
+    }
+
     @Test
     @Config(qualifiers = "w390dp-h1400dp-xhdpi")
     fun withTheSettingOffRepliesKeepTheirQuoteAsBefore() {
@@ -789,6 +1072,8 @@ class PhoneStyleScreenTest {
                 assertEquals(View.VISIBLE, row.findViewById<View>(R.id.quote).visibility)
                 assertEquals("Who's bringing the tent?", row.findViewById<TextView>(R.id.quoteText).text.toString())
                 assertEquals(View.GONE, row.findViewById<View>(R.id.threadQuote).visibility)
+                assertEquals(View.GONE, row.findViewById<View>(R.id.replyMarker).visibility)
+                assertFalse("a tap on it opens nothing", row.findViewById<View>(R.id.bubble).performClick())
                 assertEquals(View.GONE, rowOf(activity, "Who's bringing the tent?")!!.findViewById<View>(R.id.replyCount).visibility)
                 assertTrue(items(activity).filterIsInstance<ThreadItem.Message>().all { it.thread == null })
                 assertEquals(0, linesDrawn(activity.findViewById(R.id.messages)))
@@ -860,6 +1145,7 @@ class PhoneStyleScreenTest {
             launch(REPLY_CHAT).use { scenario ->
                 scenario.waitFor("the replies") { rowOf(it, "Turkey or ham, by the way?") != null }
                 two.settle()
+                // By default: ordinary bubbles, "Reply" under the replies and "N Replies" under what they answer.
                 scenario.onActivity { shoot(it, File(out, "reply-chain-$suffix.png")) }
                 scenario.onActivity { it.openThread("imsg:R3") }
                 two.settle()
@@ -870,6 +1156,15 @@ class PhoneStyleScreenTest {
                 }
             }
         }
+        // With "Show reply threads in the chat" on: the faded copies and the lines.
+        RuntimeEnvironment.setQualifiers("+notnight")
+        DirectPrefs.setReplyThreadsInChat(two.app, true)
+        launch(REPLY_CHAT).use { scenario ->
+            scenario.waitFor("the copies") { rowOf(it, "Turkey or ham, by the way?")?.findViewById<View>(R.id.threadQuote)?.visibility == View.VISIBLE }
+            two.settle()
+            scenario.onActivity { shoot(it, File(out, "reply-chain-lines-light.png")) }
+        }
+        DirectPrefs.setReplyThreadsInChat(two.app, false)
         // The same chat with the setting off, to compare.
         RuntimeEnvironment.setQualifiers("+notnight")
         ChatBackgrounds.dir(two.app).deleteRecursively()

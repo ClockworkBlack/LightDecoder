@@ -89,6 +89,29 @@ object DirectPrefs {
         }
     }
 
+    private fun replyThreadsInChatMarker(context: Context) = File(context.filesDir, "imessage/reply-threads-in-chat")
+
+    /**
+     * Whether iPhone-style chats draw inline replies in the transcript itself (a faded copy of the
+     * message answered above a reply, and thin lines joining them). Off by default: a reply is then
+     * an ordinary bubble with a small "Reply" under it, and a tap opens its thread. A file, like
+     * [gamesOn]: the setup screen sets it, the chat screen (main process) reads it.
+     */
+    fun replyThreadsInChat(context: Context): Boolean = replyThreadsInChatMarker(context).isFile
+
+    /** Turns reply threads drawn in the chat on or off (see [replyThreadsInChat]). */
+    fun setReplyThreadsInChat(context: Context, on: Boolean) {
+        runCatching {
+            val f = replyThreadsInChatMarker(context)
+            if (on) {
+                f.parentFile?.mkdirs()
+                if (!f.isFile) f.writeText("1")
+            } else {
+                f.delete()
+            }
+        }
+    }
+
     private fun marker(context: Context) = File(context.filesDir, "imessage/registered")
 
     private fun shownMarker(context: Context) = File(context.filesDir, "imessage/blue-bubbles-turned-on")

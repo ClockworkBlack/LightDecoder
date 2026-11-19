@@ -287,6 +287,25 @@
             android:textStyle="bold"
             android:visibility="gone" />
 
+        <!--
+            iPhone-style chats: a small "Reply" with an arrow under a bubble that answers another message
+            (unless reply threads are drawn in the chat); tapped, its thread opens.
+        -->
+        <TextView
+            android:id="@+id/replyMarker"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:background="?attr/selectableItemBackground"
+            android:drawablePadding="3dp"
+            android:drawableStart="@drawable/ic_thread_reply"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:minHeight="28dp"
+            android:paddingHorizontal="8dp"
+            android:text="@string/imessage_thread_reply_marker"
+            android:textSize="12sp"
+            android:visibility="gone" />
+
         <!-- "Sent with Slam · Replay" under an iMessage sent with an effect, as an iPhone shows it; Replay plays it again. -->
         <LinearLayout
             android:id="@+id/effectRow"

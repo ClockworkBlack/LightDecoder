@@ -94,6 +94,8 @@ class DirectWordingTest {
             R.string.imessage_phone_header, R.string.imessage_phone_add, R.string.imessage_attach_stickers,
             R.string.imessage_thread_quote_description, R.string.imessage_thread_open, R.string.imessage_thread_title,
             R.string.imessage_thread_reply_hint, R.string.imessage_thread_close, R.string.imessage_thread_send,
+            R.string.imessage_thread_reply_marker, R.string.imessage_thread_reply_marker_description,
+            R.string.imessage_reply_threads_in_chat, R.string.imessage_reply_threads_in_chat_help,
         )
         for (res in direct) {
             val text = context.getString(res)

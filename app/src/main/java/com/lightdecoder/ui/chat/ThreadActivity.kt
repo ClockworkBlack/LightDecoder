@@ -378,6 +378,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         effectPlayer = EffectPlayer(this, binding.messages)
         setUpComposer()
         binding.phoneHeader.setOnClickListener { binding.toolbar.showOverflowMenu() }
+        updateThreadsInChat()
         updatePhoneStyle()
         lifecycleScope.launch { voicePlayer.state.collect { adapter.updateVoiceViews(binding.messages, it) } }
         if (VoicePrefs.readNewAloud(this) && !reader.isAvailable) noteReaderUnavailable()
@@ -598,7 +599,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         com.lightdecoder.relay.ReadNotifier.cancel(this, manager.service, conversationId)
         markCompanionVisible()
         // The setting may have been changed on the iMessage screen meanwhile.
-        if (updatePhoneStyle()) resubmit()
+        val threadsChanged = updateThreadsInChat()
+        if (updatePhoneStyle() || (threadsChanged && phoneStyle)) resubmit()
         animateBackground(true)
         // iMessage pictures OpenBubbles has saved meanwhile.
         if (com.lightdecoder.imessage.IMessagePrefs.enabled(this) &&
@@ -1036,6 +1038,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val context = applicationContext
         val known = knownRows
         var shownThreads = ReplyThreads.Threads.NONE
+        val inChat = threadsInChat
         val items = withContext(Dispatchers.Default) {
             // An iPhone's reactions arrive as texts ("Loved an image"): shown on their message instead.
             val rows = Tapbacks.apply(shown)
@@ -1052,6 +1055,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 phone = phone,
                 clock = { TimeFormat.clock(context, it) },
                 threads = shownThreads,
+                threadsInChat = inChat,
             )
         }
         if (seq != submitSeq) return
@@ -1334,6 +1338,22 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         adapter.notifyDataSetChanged()
         if (!want) threadPanel?.dismiss()
         renderPhoneChrome()
+        return true
+    }
+
+    /**
+     * "Show reply threads in the chat" ([com.lightdecoder.imessage.direct.DirectPrefs.replyThreadsInChat]),
+     * as last read: replies drawn joined to what they answer in the transcript, instead of a "Reply" under them.
+     */
+    @VisibleForTesting
+    internal var threadsInChat = false
+        private set
+
+    /** Reads [threadsInChat] again (it is set on the iMessage screen). True if it changed: the rows are then built again. */
+    private fun updateThreadsInChat(): Boolean {
+        val want = com.lightdecoder.imessage.direct.DirectPrefs.replyThreadsInChat(this)
+        if (want == threadsInChat) return false
+        threadsInChat = want
         return true
     }
 

@@ -38,6 +38,38 @@ class TextEffectView @JvmOverloads constructor(
     private val letterPaint = TextPaint()
     private val unclipped = ArrayList<ViewGroup>()
 
+    /**
+     * Whether the touch that last ended on the text was on one of its links (which then opened):
+     * a click that follows it is the link's, not a tap on the bubble. Cleared once that click is handled.
+     */
+    var tappedLink = false
+        private set
+
+    @android.annotation.SuppressLint("ClickableViewAccessibility")
+    override fun onTouchEvent(event: android.view.MotionEvent): Boolean {
+        when (event.actionMasked) {
+            android.view.MotionEvent.ACTION_DOWN -> tappedLink = false
+            android.view.MotionEvent.ACTION_UP -> tappedLink = linkAt(event.x, event.y)
+        }
+        return super.onTouchEvent(event)
+    }
+
+    override fun performClick(): Boolean {
+        val handled = super.performClick()
+        tappedLink = false
+        return handled
+    }
+
+    /** Whether a link is at ([x], [y]) of the view, found as the text's own link handling finds it. */
+    private fun linkAt(x: Float, y: Float): Boolean {
+        val layout = layout ?: return false
+        val spanned = text as? Spanned ?: return false
+        if (movementMethod == null) return false
+        val line = layout.getLineForVertical((y - totalPaddingTop + scrollY).toInt())
+        val offset = layout.getOffsetForHorizontal(line, x - totalPaddingLeft + scrollX)
+        return spanned.getSpans(offset, offset, android.text.style.ClickableSpan::class.java).isNotEmpty()
+    }
+
     /** The text's stretches with an effect, in order. */
     private fun effectSpans(): List<Pair<TextEffectSpan, IntRange>> {
         val t = text as? Spanned ?: return emptyList()

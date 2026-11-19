@@ -63,6 +63,12 @@ class MessagesAdapter(
      */
     var phoneStyle = false
 
+    /**
+     * iPhone-style chats: a tap on a bubble that is in an inline-reply thread opens the thread
+     * ([Callbacks.onOpenThread]). Off in the thread view itself.
+     */
+    var threadTaps = true
+
     /** A picture is behind the messages: iPhone-style times and notices keep their pill, to stay readable on it. */
     var onPicture = false
 
@@ -99,7 +105,10 @@ class MessagesAdapter(
         /** Its text tapped: its text effects play again. */
         fun onTextEffectsTap(row: MessageRow, text: TextEffectView) = Unit
 
-        /** iPhone-style chats: "N Replies" or a reply's faded copy tapped: the thread rooted at [rootId] opens. */
+        /**
+         * iPhone-style chats: a message of a thread tapped (a reply, or one others answered), its
+         * "Reply" or "N Replies", or a reply's faded copy: the thread rooted at [rootId] opens.
+         */
         fun onOpenThread(rootId: String) = Unit
     }
 
@@ -433,7 +442,13 @@ class MessagesAdapter(
         b.bubble.setOnLongClickListener(longPress)
         b.body.setOnLongClickListener(longPress)
         b.linkCard.setOnLongClickListener(longPress)
-        // A tap: a failed one sends again (or asks), invisible ink shows its text, an app's card opens.
+        // A tap, in this order: a failed one sends again (or asks), invisible ink shows its text (the
+        // next tap is then as on any other), an app's card opens, text effects play again; else, on a
+        // message of an inline-reply thread (iPhone-style chats), the thread opens. A link in the
+        // text, a link's card, a picture, a video or a voice message take their own taps as ever: a
+        // bubble with pictures or files opens its thread from "Reply" / "N Replies" under it only.
+        val threadRoot = item.thread?.root?.takeIf { phone && threadTaps && it.isNotEmpty() && row.media.isEmpty() }
+        val openThread = threadRoot?.let { root -> View.OnClickListener { callbacks.onOpenThread(root) } }
         val reveal = View.OnClickListener {
             revealed += row.id
             val at = holder.bindingAdapterPosition
@@ -445,7 +460,7 @@ class MessagesAdapter(
             inked -> reveal
             app != null -> View.OnClickListener { callbacks.onAppCardTap(row) }
             textEffects.isNotEmpty() -> playText
-            else -> null
+            else -> openThread
         }
         b.bubble.setOnClickListener(tap)
         if (tap == null) b.bubble.isClickable = false
@@ -455,6 +470,10 @@ class MessagesAdapter(
             b.body.setOnClickListener(reveal)
         } else if (textEffects.isNotEmpty() && tick != Tick.FAILED) {
             b.body.setOnClickListener(playText)
+        } else if (tap === openThread && openThread != null) {
+            // The text takes the touch where it has links (or had, before the holder was reused): the
+            // thread opens from it too, unless the tap was on a link, which opened.
+            b.body.setOnClickListener { if (!b.body.tappedLink) openThread.onClick(it) }
         } else if (b.body.hasOnClickListeners()) {
             b.body.setOnClickListener(null)
             b.body.isClickable = b.body.movementMethod != null
@@ -463,6 +482,7 @@ class MessagesAdapter(
             inked -> context.getString(R.string.imessage_invisible_ink_hidden)
             app != null -> app.shownName.ifBlank { context.getString(R.string.imessage_app_unnamed) }
             textEffects.isNotEmpty() -> context.getString(R.string.imessage_text_effect_replay_action)
+            openThread != null -> context.getString(R.string.imessage_thread_open)
             else -> null
         }
         ViewCompat.replaceAccessibilityAction(b.bubble, AccessibilityActionCompat.ACTION_CLICK, tapLabel, null)
@@ -487,10 +507,11 @@ class MessagesAdapter(
     }
 
     /**
-     * Inline replies in iPhone-style chats ([ThreadItem.Message.thread]): a reply's faded copy of the
-     * message it answers, above it on that message's side (a grey outline, smaller text, at most
-     * two lines), and "N Replies" in blue under a message others answered. A tap on either opens
-     * the thread ([Callbacks.onOpenThread]). Elsewhere both are hidden.
+     * Inline replies in iPhone-style chats ([ThreadItem.Message.thread]): "N Replies" in blue under a
+     * message others answered, and a small grey "Reply" with an arrow under a reply; or, with reply
+     * threads drawn in the chat, a reply's faded copy of the message it answers instead, above it on
+     * that message's side (a grey outline, smaller text, at most two lines). A tap on any of them
+     * opens the thread ([Callbacks.onOpenThread]). Elsewhere all are hidden.
      */
     private fun bindThread(holder: MessageHolder, item: ThreadItem.Message) {
         val b = holder.binding
@@ -524,6 +545,25 @@ class MessagesAdapter(
         } else {
             copy.visibility = View.GONE
             copy.setOnClickListener(null)
+        }
+        val marker = b.replyMarker
+        if (mark != null && mark.marker) {
+            val quote = item.quote
+            marker.visibility = View.VISIBLE
+            underBubble(marker, holder.phoneMeta)
+            androidx.core.widget.TextViewCompat.setCompoundDrawableTintList(marker, ColorStateList.valueOf(marker.currentTextColor))
+            val side = holder.dp(PHONE_FOOTER_SIDE_DP)
+            marker.setPaddingRelative(side, 0, side, 0)
+            marker.contentDescription = context.getString(
+                R.string.imessage_thread_reply_marker_description,
+                quote?.sender ?: context.getString(R.string.chat_unknown_sender),
+                quote?.text?.ifEmpty { null } ?: context.getString(R.string.chat_reply_unavailable),
+            )
+            marker.setOnClickListener { callbacks.onOpenThread(mark.root) }
+        } else {
+            marker.visibility = View.GONE
+            marker.setOnClickListener(null)
+            marker.isClickable = false
         }
         val count = mark?.replyCount ?: 0
         val replies = b.replyCount
