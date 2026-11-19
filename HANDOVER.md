@@ -23,6 +23,24 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.43 (versionCode 51) - LightDecoder's features with iMessages
+- **Reply to a message:** now offered on iMessages too (`canReplyTo` no longer excludes them). It goes as an
+  iMessage of its own: OpenBubbles' Reply button cannot make an inline thread reply. The reply bar says
+  "(sent as an iMessage of its own)".
+- **Stickers** in a Messages conversation with an iMessage chat go through OpenBubbles as iMessage. Before,
+  they went through Google Messages, green.
+- **Edit** on one's own iMessage (15 minutes): "Edit (in OpenBubbles)" opens OpenBubbles on the chat.
+  **Reactions** on iMessages: the quick-reaction row shows, and a tap opens OpenBubbles to add the tapback
+  (`openInOpenBubblesFor`, logged).
+- **Reply from LightDecoder's own notification** in a Messages conversation with an iMessage chat goes as
+  iMessage (`ReplyReceiver`). Without a Reply button it waits, failed, in the conversation (a tap hands it to
+  OpenBubbles). Never as a text.
+- Already working with iMessages: sending and receiving text, pictures, several pictures and voice messages
+  (one tap in OpenBubbles), stickers, read aloud, copy, delete here, search, mute, archive, mark read
+  (OpenBubbles told), Unsend, Check iMessage, notifications.
+- Still only with the OpenBubbles link (plan on hold): inline thread replies, silent edits, unsends and
+  tapbacks, delivered/read ticks, pictures received inline (next: Auto-save + MediaStore, see 0.5.42).
+
 ## 0.5.42 (versionCode 50) - iMessage history back in every conversation
 - User report after updating: "removed history of already linked and working" chats. Nothing was deleted (no
   schema change since v2), but 0.5.38's one-to-one pairing hid iMessages in two ways. Both fixed:

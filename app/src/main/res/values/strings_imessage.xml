@@ -55,6 +55,10 @@
     <string name="imessage_light_no_access">LightDecoder is not allowed to read notifications, so it cannot see or answer iMessages. Allow it in Android settings (Notification access).</string>
     <string name="imessage_light_reader_stopped">Android has stopped LightDecoder\u2019s notification reader, so new iMessages are missed until it starts again. Turning notification access off and on for LightDecoder restarts it.</string>
     <string name="imessage_unsend">Unsend (in OpenBubbles)</string>
+    <string name="imessage_edit">Edit (in OpenBubbles)</string>
+    <string name="imessage_edit_how">In OpenBubbles, long-press the message and tap Edit (Apple allows it for 15 minutes).</string>
+    <string name="imessage_react_how">In OpenBubbles, double-tap the message and pick %1$s.</string>
+    <string name="imessage_replying_to">Replying to %1$s (sent as an iMessage of its own)</string>
     <string name="imessage_unsend_how">In OpenBubbles, long-press the message and tap Undo Send. Then delete it here too.</string>
     <string name="imessage_unsend_too_late">Apple only lets an iMessage be unsent within 2 minutes of sending, so it stays on their iPhone. You can still delete it here, on this phone only.</string>
     <string name="imessage_delete_here">Delete here</string>

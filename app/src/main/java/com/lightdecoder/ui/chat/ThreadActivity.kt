@@ -1675,13 +1675,21 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private fun sendSticker(file: File) = sendStickers(listOf(file))
 
     /** Sends [files] to this conversation one after the other, in order; stops at the first that fails. */
-    private fun sendStickers(files: List<File>) {
+    @androidx.annotation.VisibleForTesting
+    internal fun sendStickers(files: List<File>) {
         if (files.isEmpty()) return
         val id = conversationId
         val link = manager
         // OpenBubbles sends them, from its own screen.
         if (link is com.lightdecoder.imessage.IMessageManager) {
             handOffToOpenBubbles(link, id, "", files.map { Uri.fromFile(it) }, clearComposer = false)
+            return
+        }
+        // Someone with an iMessage chat: as iMessage too, never as a green text.
+        val companion = companionId
+        if (link.service == ChatService.MESSAGES && companion != null) {
+            com.lightdecoder.imessage.IMessageLog.add(this, "Messages conversation with ${com.lightdecoder.imessage.IMessageLog.chatRef(companion)}: sticker sent as iMessage, through OpenBubbles' screen")
+            handOffToOpenBubbles(iMessageLink, companion, "", files.map { Uri.fromFile(it) }, clearComposer = false)
             return
         }
         scrollToBottomNext = true
@@ -1817,7 +1825,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     // Email replies always go to the whole thread: no quoting one message.
     private fun canReplyTo(row: MessageRow) =
-        manager.service != ChatService.GMAIL && backendFor(row).service != ChatService.IMESSAGE &&
+        manager.service != ChatService.GMAIL &&
             !row.isLocal && row.direction != "system" && conversation?.readOnly != true && conversation?.folderEnum != Folder.DELETED
 
     // --- message callbacks ---------------------------------------------------
@@ -1832,7 +1840,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         binding.replyBar.visibility = View.VISIBLE
         val who = if (row.isOutgoing) getString(R.string.chat_you)
         else row.senderName.ifBlank { getString(R.string.chat_unknown_sender) }
-        binding.replySender.text = getString(R.string.chat_replying_to, who)
+        // Through OpenBubbles' notification an iMessage goes as a message of its own: say so, rather than promise a thread.
+        val asIMessage = backendFor(row).service == ChatService.IMESSAGE || manager.service == ChatService.IMESSAGE ||
+            (manager.service == ChatService.MESSAGES && companionId != null)
+        binding.replySender.text = getString(if (asIMessage) R.string.imessage_replying_to else R.string.chat_replying_to, who)
         binding.replyText.text = ThreadItems.preview(row, getString(R.string.chat_media_picture))
         binding.input.requestFocus()
         // Ready to type the reply, with the message replied to still in its place above.
@@ -1850,7 +1861,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
         // Email has no reactions.
         // Email has no reactions, and iMessages here are answered through OpenBubbles' notifications, which take text only.
-        val reacts = real && manager.service != ChatService.GMAIL && backendFor(row).service != ChatService.IMESSAGE
+        val isIMessage = backendFor(row).service == ChatService.IMESSAGE
+        val reacts = real && manager.service != ChatService.GMAIL
         b.reactionRow.visibility = if (reacts) View.VISIBLE else View.GONE
         if (reacts) {
             for (emoji in QUICK_REACTIONS) {
@@ -1860,7 +1872,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 view.contentDescription = getString(R.string.chat_react_with, emoji)
                 view.setOnClickListener {
                     sheet.dismiss()
-                    if (isShown(row)) react(row, emoji, remove = emoji == mine)
+                    // A tapback goes through OpenBubbles' own screen: its notification takes text only.
+                    if (!isShown(row)) return@setOnClickListener
+                    if (isIMessage) openInOpenBubblesFor(row, getString(R.string.imessage_react_how, emoji), "react")
+                    else react(row, emoji, remove = emoji == mine)
                 }
                 b.reactionRow.addView(view)
             }
@@ -1898,9 +1913,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             sheet.dismiss()
             copy(row.text)
         }
-        b.actionEdit.visibility = if (manager.isPaired() && EditRule.canEdit(row, backendFor(row).capabilities)) View.VISIBLE else View.GONE
         val ownIMessage = backendFor(row).service == ChatService.IMESSAGE && (row.isOutgoing || row.direction == "out") &&
             row.localState != LocalState.FAILED && !row.isLocal
+        // An iMessage of one's own: edited in OpenBubbles (Apple allows 15 minutes), as WhatsApp's edits are here.
+        val editIMessage = ownIMessage && row.text.isNotBlank() && System.currentTimeMillis() - row.timestampMs < EditRule.WINDOW_MS
+        b.actionEdit.visibility = if (editIMessage || (manager.isPaired() && EditRule.canEdit(row, backendFor(row).capabilities))) View.VISIBLE else View.GONE
+        if (editIMessage) b.actionEdit.setText(R.string.imessage_edit)
         b.actionUnsend.visibility = if (ownIMessage) View.VISIBLE else View.GONE
         b.actionUnsend.setOnClickListener {
             sheet.dismiss()
@@ -1908,7 +1926,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
         b.actionEdit.setOnClickListener {
             sheet.dismiss()
-            askEdit(row)
+            if (!isShown(row)) return@setOnClickListener
+            if (editIMessage) openInOpenBubblesFor(row, getString(R.string.imessage_edit_how), "edit") else askEdit(row)
         }
         val sayable = reader.isAvailable && ReadAloudText.sentence(this, row) != null
         b.actionReadAloud.visibility = if (sayable) View.VISIBLE else View.GONE
@@ -2377,6 +2396,16 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      * One of the user's iMessages: OpenBubbles' notification has no unsend button, so OpenBubbles opens
      * on the chat, where a long press on it offers Undo Send. Apple allows that for [UNSEND_WINDOW_MS].
      */
+    /** Opens OpenBubbles on [row]'s chat for something its notification cannot do ([what]: edit, react), with [how] to do it there. */
+    private fun openInOpenBubblesFor(row: MessageRow, how: String, what: String) {
+        val chat = row.conversationId.takeIf { backendFor(row).service == ChatService.IMESSAGE } ?: companionId ?: return
+        val opened = com.lightdecoder.imessage.IMessageReplies.open(this, chat) ||
+            iMessageLink.handOff(this, chat, "") ||
+            com.lightdecoder.imessage.OpenBubbles.launch(this)
+        com.lightdecoder.imessage.IMessageLog.add(this, "${com.lightdecoder.imessage.IMessageLog.chatRef(chat)}: $what: ${if (opened) "OpenBubbles opened on the chat" else "OpenBubbles would not open"}")
+        toast(if (opened) how else errorText(iMessageLink, com.lightdecoder.imessage.IMessageErrors.NOT_INSTALLED))
+    }
+
     private fun unsendIMessage(row: MessageRow) {
         val chat = row.conversationId
         val ref = com.lightdecoder.imessage.IMessageLog.chatRef(chat)

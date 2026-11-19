@@ -68,6 +68,11 @@ class BlueBubblesScreenTest {
     @After
     fun tearDown() {
         reader?.onListenerDisconnected()
+        // FileProvider keeps the first test's folders for good; each test has its own (a hand-off shares files).
+        runCatching {
+            val cache = androidx.core.content.FileProvider::class.java.getDeclaredField("sCache").apply { isAccessible = true }
+            (cache.get(null) as MutableMap<*, *>).clear()
+        }
         com.lightdecoder.imessage.IMessageChecks.resetForTesting()
         IMessagePrefs.setEnabled(two.app, false)
         IMessageManager.resetForTesting()
@@ -582,6 +587,146 @@ class BlueBubblesScreenTest {
         }
         launchList().use { scenario ->
             scenario.waitFor("one row for Alice") { titles(it) == listOf("Alice") }
+        }
+    }
+
+    // --- LightDecoder's own features with iMessages --------------------------------------
+
+    /** Alice's Messages conversation with her iMessages in it, and OpenBubbles' Reply button held; the replies it gets. */
+    private fun withReplyButton(block: (ArrayList<String>) -> Unit) {
+        val replies = ArrayList<String>()
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: android.content.Context, intent: Intent) {
+                replies += android.app.RemoteInput.getResultsFromIntent(intent)
+                    ?.getCharSequence(com.lightdecoder.imessage.OpenBubblesTestNotifications.REPLY_KEY).toString()
+            }
+        }
+        androidx.core.content.ContextCompat.registerReceiver(
+            two.app, receiver, android.content.IntentFilter(com.lightdecoder.imessage.OpenBubblesTestNotifications.REPLY_ACTION),
+            androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        val reply = com.lightdecoder.imessage.OpenBubblesTestNotifications.replyAction(two.app)
+        com.lightdecoder.imessage.IMessageReplies.update(
+            ALICE, com.lightdecoder.imessage.IMessageAction(reply.actionIntent!!, arrayOf(android.app.RemoteInput.Builder("text_reply").build())),
+            null, null, "m1",
+        )
+        try {
+            block(replies)
+        } finally {
+            two.app.unregisterReceiver(receiver)
+        }
+    }
+
+    private fun rowOf(activity: ThreadActivity, text: String) =
+        ((activity.findViewById<RecyclerView>(R.id.messages).adapter as MessagesAdapter).currentList)
+            .filterIsInstance<com.lightdecoder.ui.chat.ThreadItem.Message>().map { it.row }.single { it.text == text }
+
+    @Test
+    fun anIMessageCanBeRepliedToAndTheReplyGoesAsIMessage() {
+        val (_, fake) = two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        seedIMessage("Dinner at 7?", ts = 5_000)
+        withReplyButton { replies ->
+            ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+                scenario.waitFor("her iMessage") { shownTexts(it).contains("Dinner at 7?") }
+                scenario.onActivity { activity -> activity.onMessageLongPress(rowOf(activity, "Dinner at 7?")) }
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                val reply = ShadowDialog.getLatestDialog().findViewById<View>(R.id.actionReply)
+                assertEquals("Reply is offered on an iMessage", View.VISIBLE, reply.visibility)
+                reply.performClick()
+                scenario.onActivity { activity ->
+                    assertEquals(activity.getString(R.string.imessage_replying_to, "Alice"),
+                        activity.findViewById<android.widget.TextView>(R.id.replySender).text.toString())
+                    activity.findViewById<EditText>(R.id.input).setText("Yes!")
+                    activity.findViewById<View>(R.id.send).performClick()
+                }
+                scenario.waitFor("sent through OpenBubbles' Reply button") {
+                    org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                    replies == listOf("Yes!")
+                }
+                assertTrue("never as a green text", fake.sent.isEmpty())
+            }
+        }
+    }
+
+    @Test
+    fun aStickerToSomeoneWithAnIMessageChatGoesAsIMessage() {
+        val (manager, fake) = two.env.pairedManager()
+        fake.goOnline()
+        installOpenBubbles()
+        IMessagePrefs.setEnabled(two.app, true)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        seedIMessage("An iMessage", ts = 5_000)
+        val sticker = java.io.File(two.app.filesDir, "sticker.webp").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("her iMessage") { shownTexts(it).contains("An iMessage") }
+            scenario.onActivity { it.sendStickers(listOf(sticker)) }
+            scenario.waitFor("OpenBubbles opened with the sticker") { shadowOf(it).peekNextStartedActivity() != null }
+            scenario.onActivity { activity ->
+                val handOff = shadowOf(activity).nextStartedActivity
+                assertEquals(OpenBubbles.PACKAGES.first(), handOff.`package`)
+                assertEquals(ALICE, handOff.getStringExtra(Intent.EXTRA_SHORTCUT_ID))
+            }
+            manager.awaitIdleForTesting()
+            assertTrue("not through Google Messages", fake.sent.isEmpty())
+        }
+    }
+
+    @Test
+    fun myIMessageCanBeEditedAndReactedToThroughOpenBubbles() {
+        two.env.pairedManager()
+        installOpenBubbles()
+        IMessagePrefs.setEnabled(two.app, true)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        seedIMessage("Hers", ts = 5_000)
+        iMessage.record(
+            CapturedIMessageChat(ALICE, "m2", "Alice", false, "+15551234567", listOf(CapturedIMessage("", "", true, "Mine, with a tpyo", System.currentTimeMillis() - 60_000))),
+            live = false,
+        )
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("my iMessage") { shownTexts(it).contains("Mine, with a tpyo") }
+            scenario.onActivity { activity -> activity.onMessageLongPress(rowOf(activity, "Mine, with a tpyo")) }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val editItem = ShadowDialog.getLatestDialog().findViewById<android.widget.TextView>(R.id.actionEdit)
+            assertEquals(View.VISIBLE, editItem.visibility)
+            assertEquals(two.app.getString(R.string.imessage_edit), editItem.text.toString())
+            editItem.performClick()
+            scenario.onActivity { activity -> assertEquals(OpenBubbles.PACKAGES.first(), shadowOf(activity).nextStartedActivity?.`package`) }
+            // A reaction on her iMessage: the reactions row is there, and a tap opens OpenBubbles.
+            scenario.onActivity { activity -> activity.onMessageLongPress(rowOf(activity, "Hers")) }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val row = ShadowDialog.getLatestDialog().findViewById<android.view.ViewGroup>(R.id.reactionRow)
+            assertEquals(View.VISIBLE, row.visibility)
+            row.getChildAt(0).performClick()
+            scenario.onActivity { activity -> assertEquals(OpenBubbles.PACKAGES.first(), shadowOf(activity).nextStartedActivity?.`package`) }
+            assertTrue(com.lightdecoder.imessage.IMessageLog.read(two.app).any { it.contains(": react: OpenBubbles opened on the chat") })
+        }
+    }
+
+    @Test
+    fun aReplyFromTheNotificationGoesAsIMessageNotGreen() {
+        val (manager, fake) = two.env.pairedManager()
+        fake.goOnline()
+        IMessagePrefs.setEnabled(two.app, true)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        seedIMessage("An iMessage", ts = 5_000)
+        withReplyButton { replies ->
+            val intent = Intent(two.app, com.lightdecoder.relay.ReplyReceiver::class.java)
+                .setAction(com.lightdecoder.relay.MessageNotifier.ACTION_REPLY)
+                .putExtra(RelayIntents.EXTRA_CONVERSATION_ID, "c1")
+                .putExtra(RelayIntents.EXTRA_SERVICE, ChatService.MESSAGES.key)
+            android.app.RemoteInput.addResultsToIntent(
+                arrayOf(android.app.RemoteInput.Builder(com.lightdecoder.relay.MessageNotifier.KEY_REPLY_TEXT).build()),
+                intent, android.os.Bundle().apply { putCharSequence(com.lightdecoder.relay.MessageNotifier.KEY_REPLY_TEXT, "From the notification") },
+            )
+            two.app.sendBroadcast(intent)
+            two.waitUntil("sent as iMessage") {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                replies == listOf("From the notification")
+            }
+            manager.awaitIdleForTesting()
+            assertTrue("not as a text", fake.sent.isEmpty())
         }
     }
 

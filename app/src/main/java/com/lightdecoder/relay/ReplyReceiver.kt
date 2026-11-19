@@ -37,8 +37,29 @@ class ReplyReceiver : BroadcastReceiver() {
             ?.toString()?.trim()
         if (text.isNullOrEmpty()) return
         val backend = ChatBackends.get(context, service)
+        // Blue Bubbles: to someone with an iMessage chat, a reply from the notification goes as iMessage, never green.
+        val companion = if (service == ChatService.MESSAGES && com.lightdecoder.imessage.IMessagePrefs.enabled(context)) {
+            runCatching {
+                com.lightdecoder.ui.chat.BlueBubblesLinks.iMessageFor(context, backend.repo.conversation(conversationId), backend.repo.participants(conversationId))
+            }.getOrNull()
+        } else {
+            null
+        }
         try {
-            backend.sendText(conversationId, text)
+            if (companion != null) {
+                val ref = com.lightdecoder.imessage.IMessageLog.chatRef(companion)
+                try {
+                    com.lightdecoder.imessage.IMessageManager.get(context).sendText(companion, text)
+                    com.lightdecoder.imessage.IMessageLog.add(context, "Notification reply in a Messages conversation with $ref: sent as iMessage")
+                } catch (e: RelayException) {
+                    // No Reply button from OpenBubbles yet: it waits, failed, in the conversation, where a tap sends it through OpenBubbles.
+                    com.lightdecoder.imessage.IMessageLog.add(context, "Notification reply in a Messages conversation with $ref: no Reply button, waits in the conversation (not sent as a text)")
+                    MessageNotifier.cancel(context, conversationId, service)
+                    return
+                }
+            } else {
+                backend.sendText(conversationId, text)
+            }
         } catch (e: RelayException) {
             // Could not even be queued (sends are queued, so this is not the
             // link being down): nothing was sent, and the notification must
