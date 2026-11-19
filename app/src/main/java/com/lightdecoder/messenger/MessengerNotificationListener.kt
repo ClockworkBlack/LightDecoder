@@ -160,6 +160,9 @@ class MessengerNotificationListener : NotificationListenerService() {
         }
 
         /** Whether the user has turned notification access on for LightDecoder. */
+        /** Whether Android has the notification reader running right now (it can stop it, and start it again). */
+        fun isConnected(): Boolean = running != null
+
         fun hasAccess(context: Context): Boolean {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
                 val manager = context.getSystemService(NotificationManager::class.java)

@@ -2533,6 +2533,15 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         // Also before they have an iMessage chat: the check then starts one in OpenBubbles.
         menu.findItem(R.id.action_check_imessage)?.isVisible = manager.service == ChatService.MESSAGES &&
             (companionId != null || (com.lightdecoder.imessage.IMessagePrefs.enabled(this) && conv != null && !conv.isGroup && otherAddress() != null))
+        // The iMessage light: how this conversation sends (Messages tab and its iMessage chats).
+        menu.findItem(R.id.action_imessage_light)?.let { item ->
+            val chat = if (manager.service == ChatService.IMESSAGE) conversationId else companionId
+            if (manager.service == ChatService.MESSAGES || manager.service == ChatService.IMESSAGE) {
+                IMessageLight.bind(this, item, IMessageLight.forConversation(this, chat, conv?.isGroup == true), hideWhenOff = true)
+            } else {
+                item.isVisible = false
+            }
+        }
         val blueOn = com.lightdecoder.imessage.IMessagePrefs.enabled(this)
         menu.findItem(R.id.action_link_imessage)?.isVisible =
             manager.service == ChatService.MESSAGES && blueOn && companionId == null && conv != null && !conv.isGroup

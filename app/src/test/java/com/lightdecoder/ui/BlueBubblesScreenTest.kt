@@ -67,6 +67,7 @@ class BlueBubblesScreenTest {
 
     @After
     fun tearDown() {
+        reader?.onListenerDisconnected()
         com.lightdecoder.imessage.IMessageChecks.resetForTesting()
         IMessagePrefs.setEnabled(two.app, false)
         IMessageManager.resetForTesting()
@@ -622,6 +623,78 @@ class BlueBubblesScreenTest {
             scenario.onActivity { activity -> activity.onMessageLongPress(rowOf(activity, "An iMessage")) }
             org.robolectric.shadows.ShadowLooper.idleMainLooper()
             assertEquals(View.GONE, ShadowDialog.getLatestDialog().findViewById<View>(R.id.actionUnsend).visibility)
+        }
+    }
+
+    // --- the iMessage light ----------------------------------------------------------------
+
+    private fun light(activity: Activity): Pair<Boolean, com.lightdecoder.ui.chat.IMessageLight.State?> {
+        val item = menu(activity).findItem(R.id.action_imessage_light)
+        val dot = item.actionView?.findViewById<View>(R.id.imessageLightDot)
+        return item.isVisible to (dot?.tag as? com.lightdecoder.ui.chat.IMessageLight.State)
+    }
+
+    private var reader: MessengerNotificationListener? = null
+
+    private fun startReader() {
+        reader = org.robolectric.Robolectric.setupService(MessengerNotificationListener::class.java).also { it.onListenerConnected() }
+    }
+
+    @Test
+    fun theListsLightSaysWhetherIMessageIsWorking() {
+        two.env.pairedManager()
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        launchList().use { scenario ->
+            scenario.waitFor("the list") { titles(it).isNotEmpty() }
+            scenario.onActivity { assertFalse("no light while Blue Bubbles is off", light(it).first) }
+        }
+        installOpenBubbles()
+        IMessagePrefs.setEnabled(two.app, true)
+        iMessage.refreshState()
+        launchList().use { scenario ->
+            scenario.waitFor("the list") { titles(it).isNotEmpty() }
+            scenario.onActivity { assertEquals("on, but no notification access", true to com.lightdecoder.ui.chat.IMessageLight.State.PROBLEM, light(it)) }
+        }
+        grantAccess()
+        startReader()
+        iMessage.refreshState()
+        launchList().use { scenario ->
+            scenario.waitFor("the list") { titles(it).isNotEmpty() }
+            scenario.onActivity { activity ->
+                assertEquals(true to com.lightdecoder.ui.chat.IMessageLight.State.ACTIVE, light(activity))
+                // A tap says why, in words.
+                menu(activity).findItem(R.id.action_imessage_light).actionView!!.performClick()
+            }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            assertEquals(two.app.getString(R.string.imessage_light_on), latestDialog().findViewById<android.widget.TextView>(android.R.id.message)?.text?.toString())
+        }
+    }
+
+    @Test
+    fun aConversationsLightSaysHowItSends() {
+        two.env.pairedManager()
+        installOpenBubbles()
+        grantAccess()
+        startReader()
+        IMessagePrefs.setEnabled(two.app, true)
+        iMessage.refreshState()
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        two.seedConversation(ChatService.MESSAGES, "c2", "Bob", lastTs = 1_000, number = "+1 555-987-6543")
+        seedIMessage("An iMessage", ts = 5_000)
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("her iMessage") { shownTexts(it).contains("An iMessage") }
+            // Her iMessage chat, but no Reply button from OpenBubbles yet: amber (one tap in OpenBubbles).
+            scenario.onActivity { assertEquals(com.lightdecoder.ui.chat.IMessageLight.State.HAND_OFF, light(it).second) }
+            val reply = com.lightdecoder.imessage.OpenBubblesTestNotifications.replyAction(two.app)
+            com.lightdecoder.imessage.IMessageReplies.update(
+                ALICE, com.lightdecoder.imessage.IMessageAction(reply.actionIntent!!, arrayOf(android.app.RemoteInput.Builder("text_reply").build())),
+                null, null, "m1",
+            )
+            scenario.onActivity { assertEquals("straight through OpenBubbles: blue", com.lightdecoder.ui.chat.IMessageLight.State.ACTIVE, light(it).second) }
+        }
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c2").setFlags(0)).use { scenario ->
+            scenario.waitFor("the conversation") { it.findViewById<View>(R.id.input).isEnabled }
+            scenario.onActivity { assertEquals("texts only: grey, but shown", true to com.lightdecoder.ui.chat.IMessageLight.State.OFF, light(it)) }
         }
     }
 

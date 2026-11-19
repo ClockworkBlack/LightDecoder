@@ -220,6 +220,8 @@ class ConversationsActivity : AppCompatActivity() {
         super.onResume()
         // Back from the notification-access setting Blue Bubbles sent the user to.
         blueBubbles.onResume()
+        // The iMessage light may have changed meanwhile (notification access, OpenBubbles installed).
+        invalidateOptionsMenu()
     }
 
     override fun onStop() {
@@ -627,6 +629,11 @@ class ConversationsActivity : AppCompatActivity() {
         menu.findItem(R.id.action_blue_bubbles)?.let { item ->
             item.isVisible = backend.service == ChatService.MESSAGES
             item.isChecked = blueBubbles.isOn()
+        }
+        // The iMessage light: Messages tab, while Blue Bubbles is on.
+        menu.findItem(R.id.action_imessage_light)?.let { item ->
+            if (backend.service == ChatService.MESSAGES) IMessageLight.bind(this, item, IMessageLight.overall(this), hideWhenOff = true)
+            else item.isVisible = false
         }
         // Without a pairing, what is listed is an archive an unpair kept: it can be deleted here.
         menu.findItem(R.id.action_delete_archive)?.isVisible = !paired && !ownArchiveEmpty

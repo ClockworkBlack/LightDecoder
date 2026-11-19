@@ -6,4 +6,8 @@
     <!-- iMessage's blue, for Blue Bubbles: the user's own iMessages and the iMessage mark in the list. -->
     <color name="imessage_blue">#FF0A84FF</color>
     <color name="on_imessage_blue">#FFFFFFFF</color>
+    <!-- The iMessage light's other colours (ui.chat.IMessageLight). -->
+    <color name="imessage_light_amber">#FFFFB300</color>
+    <color name="imessage_light_red">#FFE53935</color>
+    <color name="imessage_light_grey">#FF8E8E93</color>
 </resources>

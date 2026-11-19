@@ -23,6 +23,22 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.39 (versionCode 47) - the iMessage light
+- `ui/chat/IMessageLight`: a dot in the top bar (menu item with `action_imessage_light` layout), Messages tab
+  only, hidden while Blue Bubbles is off. List: blue = working, red = OpenBubbles missing / no notification
+  access / notification reader stopped by Android (`MessengerNotificationListener.isConnected`). Conversation:
+  blue = sends as iMessage straight through OpenBubbles' Reply button, amber = iMessage through OpenBubbles'
+  screen (no Reply button held yet), grey = texts (no iMessage chat, or a group), red = as above. Tap: what
+  it means, in words.
+- **Unsend from LightDecoder without opening OpenBubbles is not possible with the Play Store OpenBubbles.**
+  Checked its source (OpenBubbles/openbubbles-app 1.15.0): nothing exported takes commands. The only outside
+  interface, `IMadridExtension` (AIDL, `com.openbubbles.messaging.MadridExtensionService`), is for iMessage
+  app extensions (GamePigeon): OpenBubbles binds to them, and they can only update their own messages.
+  Unsend/edit/send live in Dart (`rustpush_service.dart`) behind its own UI. A real link needs a modified
+  OpenBubbles (an exported service guarded by LightDecoder's signature, calling into Dart over a
+  MethodChannel), built with Flutter + Rust/NDK, replacing the user's install (uninstall, re-register with the
+  relay). Offered to the user; not started.
+
 ## 0.5.38 (versionCode 46) - iMessages in the right conversation; Unsend
 - **Linking** (`imessage/IMessageLinks.pair`, pure; `BlueBubblesLinks.pairs` builds it from both archives,
   cached and dropped on any conversation change of either archive). Order: by hand (thread menu "Link an

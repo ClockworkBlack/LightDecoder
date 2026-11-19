@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The iMessage light in the top bar (Messages tab): a small dot whose colour says whether iMessage is in use. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/imessageLight"
+    android:layout_width="48dp"
+    android:layout_height="48dp"
+    android:background="?attr/selectableItemBackgroundBorderless"
+    android:clickable="true"
+    android:focusable="true">
+
+    <View
+        android:id="@+id/imessageLightDot"
+        android:layout_width="12dp"
+        android:layout_height="12dp"
+        android:layout_gravity="center"
+        android:background="@drawable/bg_imessage_light"
+        android:importantForAccessibility="no" />
+</FrameLayout>
