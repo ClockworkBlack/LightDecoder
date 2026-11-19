@@ -8,6 +8,15 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
    had earlier chosen "build with a warning", then "pause on Discord", and has now asked for
    the web-view tab only, with no bridge). **Instagram: skipped** (ban risk, like Messenger).
 
+## 0.5.59 (versionCode 70) - iPhone-style effects sheet; Games sheet diagnosable
+- Owner's 0.5.58 test: the Games sheet showed blank with OpenPigeon installed (cause unknown, no logcat);
+  OpenPigeon's own launcher says "OpenBubbles not installed" (it only checks for com.openbubbles.messaging;
+  its extension service accepts any host). Holding Send now opens `EffectSheet` (Bubble / Screen tabs,
+  preview, send arrow); in a non-iMessage chat it says "Effects are for iMessage chats."
+- `MadridHost.Picker`: spinner, error panel with Try again (8 s timeout, null or throwing keyboardOpened,
+  failed apply), apply fallbacks, and every step written to `IMessageLog` (in Report a problem).
+- Unit tests: 1020, all passing. Next version: 0.5.60 / 71.
+
 ## 0.5.58 (versionCode 69; 0.5.58-beta1 was 68) - iPhone-level iMessage, games through OpenPigeon
 - Owner asked for native Edit and Unsend (no "in OpenBubbles"), iPhone parity in the Messages tab, full
   integration with the bundled library, and games with iPhone users. Spec and phase reports were kept
@@ -21,7 +30,6 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - Unit tests: 1015, all passing. **Nothing here has been seen on a real phone with an iPhone yet**; the
   owner has the beta1 checklist. Live views, upload/download progress, AMR-WB, and iCloud history
   import are not built.
-- Next version: 0.5.59 / 70.
 
 ## 0.5.57 (versionCode 67) - the ADB pairing step is gone; inline replies through the library
 - On the owner's phone the built-in pairing failed ("Could not exchange peer info") while number
