@@ -159,6 +159,12 @@ class WrapperService : AccessibilityService() {
             Wrapper.Kind.STATUS -> status(job, mark)
             else -> act(job, mark)
         }
+        // A menu (or edit) left open in OpenBubbles would be in the way of the next job: closed.
+        if (failed != null && menuUp) {
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            delay(BACK_MS)
+        }
+        menuUp = false
         // Whatever was done, OpenBubbles' chat is on screen: what it says under the newest message.
         if (failed == null && job.kind != Wrapper.Kind.STATUS) {
             root()?.let(WrapperNodes::receipt)?.let { Wrapper.receipt(this, job.chatGuid, it) }
@@ -166,10 +172,26 @@ class WrapperService : AccessibilityService() {
         return failed
     }
 
+    /** A message's menu was opened in OpenBubbles by the job under way. */
+    @Volatile
+    private var menuUp = false
+
+    /**
+     * OpenBubbles' chat, open: its message field. If something else is in front there (a menu left from
+     * before), one press of Back and another wait.
+     */
+    private suspend fun chatField(mark: (String) -> Unit): UiNode? {
+        waitFor(CHAT_FIRST_MS) { root -> WrapperNodes.field(root) }?.let { return it }
+        if (stop || root() == null) return waitFor(OPEN_MS - CHAT_FIRST_MS) { root -> WrapperNodes.field(root) }
+        mark("no chat yet, back")
+        performGlobalAction(GLOBAL_ACTION_BACK)
+        return waitFor(OPEN_MS - CHAT_FIRST_MS) { root -> WrapperNodes.field(root) }
+    }
+
     /** Only a look: the chat opened, the receipt under the newest message read. */
     private suspend fun status(job: Wrapper.Job, mark: (String) -> Unit): String? {
         if (!Wrapper.openChat(this, job.chatGuid)) return "open"
-        waitFor(OPEN_MS) { root -> WrapperNodes.field(root) } ?: return "chat"
+        chatField(mark) ?: return "chat"
         mark("chat")
         val receipt = waitFor(RECEIPT_MS) { root -> if (WrapperNodes.receipt(root) != null) root else null }
             ?.let(WrapperNodes::receipt) ?: return "no receipt shown"
@@ -181,7 +203,7 @@ class WrapperService : AccessibilityService() {
     private suspend fun act(job: Wrapper.Job, mark: (String) -> Unit): String? {
         if (!Wrapper.openChat(this, job.chatGuid)) return "open"
         // 1. The chat is open: its message field is there.
-        waitFor(OPEN_MS) { root -> WrapperNodes.field(root) } ?: return "chat"
+        chatField(mark) ?: return "chat"
         mark("chat")
         // 2. The message replied to (or to unsend), scrolling back to it if need be.
         val mine = job.kind != Wrapper.Kind.REPLY && job.kind != Wrapper.Kind.REACT
@@ -202,6 +224,7 @@ class WrapperService : AccessibilityService() {
         if (press == null || !act(press, AccessibilityNodeInfo.ACTION_LONG_CLICK)) {
             if (!gesture(bubble.bounds, long = true)) return "long-press"
         }
+        menuUp = true
         // A reaction: tap its emoji in the reaction row at the top of the menu (scrolling along it if need be).
         if (job.kind == Wrapper.Kind.REACT) {
             var emoji = waitFor(MENU_MS) { root -> WrapperNodes.reaction(root, job.text) }
@@ -234,7 +257,9 @@ class WrapperService : AccessibilityService() {
         }
         if (found == null) {
             IMessageLog.add(this, "Wrapper: no ${titles.first()} in OpenBubbles' menu; buttons there: ${root()?.let { WrapperNodes.buttonNames(it) } ?: "no OpenBubbles window"}")
-            return "menu"
+            // The menu is there (its reactions are) without the action: OpenBubbles does not offer it for this message.
+            val menuShown = root()?.let { WrapperNodes.reaction(it, "\u2764\uFE0F") ?: WrapperNodes.reaction(it, "\uD83D\uDC4D") } != null
+            return if (menuShown) "${titles.first()} is not offered for that message in OpenBubbles" else "menu"
         }
         var item: UiNode = found
         if (WrapperNodes.action(root() ?: found, *titles) == null) {
@@ -291,7 +316,7 @@ class WrapperService : AccessibilityService() {
             )
         }.isSuccess
         if (!started) return "open"
-        waitFor(OPEN_MS) { root -> WrapperNodes.field(root) } ?: return "chat"
+        chatField(mark) ?: return "chat"
         mark("chat")
         // The shared files load into the composer; the send button shows once they have.
         delay(ATTACH_MS)
@@ -490,6 +515,8 @@ class WrapperService : AccessibilityService() {
         private const val ATTACH_MS = 600L
         private const val RECEIPT_MS = 900L
         private const val UNSENT_MS = 2_500L
+        private const val BACK_MS = 200L
+        private const val CHAT_FIRST_MS = 1_500L
         private val UNSEND_TITLES = arrayOf("Undo Send", "Unsend", "Undo send message", "Unsend message")
         private val EDIT_TITLES = arrayOf("Edit", "Edit message")
         private val REPLY_TITLES = arrayOf("Reply", "Reply in thread")

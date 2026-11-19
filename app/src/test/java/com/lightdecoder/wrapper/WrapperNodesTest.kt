@@ -45,7 +45,8 @@ class WrapperNodesTest {
     @Test
     fun theNewestBubbleWithTheMessagesWordsIsFound() {
         assertSame(newDinner, WrapperNodes.message(screen, "Dinner at 7? I can do 8"))
-        assertSame("the lowest on screen, the newest", newDinner, WrapperNodes.message(screen, "dinner   AT 7?"))
+        assertSame("the one saying exactly that", oldDinner, WrapperNodes.message(screen, "dinner   AT 7?"))
+        assertSame("the lowest on screen, the newest, of those holding it", newDinner, WrapperNodes.message(screen, "Dinner at"))
         assertNull(WrapperNodes.message(screen, "Something else"))
         assertSame("its bubble takes the long press", newBubble, WrapperNodes.longPressTarget(newDinner))
     }
@@ -77,6 +78,14 @@ class WrapperNodesTest {
         val menu = N(kids = listOf(N(text = "Copy", clickable = true), unsend))
         assertSame("another wording, on a line of a merged label", unsend, WrapperNodes.action(menu, "Undo Send", "Unsend"))
         assertEquals("copy | unsend | tooltip", WrapperNodes.buttonNames(menu))
+    }
+
+    @Test
+    fun aBubbleSayingExactlyThatIsPickedOverOneThatOnlyHoldsIt() {
+        val exact = N(description = "Hi", bounds = Rect(700, 100, 1000, 200))
+        val holds = N(description = "This is it", bounds = Rect(700, 900, 1000, 1000))
+        val chat = N(bounds = Rect(0, 0, 1080, 2000), kids = listOf(exact, holds))
+        assertSame(exact, WrapperNodes.message(chat, "Hi", mine = true))
     }
 
     @Test

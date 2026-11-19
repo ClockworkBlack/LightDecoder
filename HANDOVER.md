@@ -34,6 +34,15 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - Pictures were already shown from the original file, decoded at the bubble's size, and full resolution and
   zoomable in the gallery (HEIC included).
 - versionCode 55–57 were wrapper-branch builds, so main jumps to 58 to install over them.
+## 0.5.52-wrapper (versionCode 62) - BRANCH ccr-4fee5e9f-jrrlhu-wrapper: menus closed after a failed job
+- User's log: an Unsend "done", 5 s later a second Unsend on the same (already unsent) message stopped at
+  menu (only the reaction row was there: OpenBubbles offered no Undo Send), and the next send "stopped at
+  chat in 5037ms": the failed job had left OpenBubbles' message menu open, so the composer never showed.
+- `perform` presses Back when a job fails after its long press (`menuUp`); `chatField` presses Back once if
+  no message field shows within 1.5 s. A menu with reactions but no action now stops at "Undo Send is not
+  offered for that message in OpenBubbles" (shown in the dialog). `WrapperNodes.message` prefers a bubble
+  saying exactly the text over one only containing it.
+
 ## 0.5.51-wrapper (versionCode 61) - BRANCH ccr-4fee5e9f-jrrlhu-wrapper: no false "Not finished", no stutter
 - 0.5.50 bug: `Wrapper.finish` showed the "Not finished in OpenBubbles" dialog after every job, done or not
   (the `result.ok` check was lost when the toast became a dialog). The user's log: both Unsends and sends

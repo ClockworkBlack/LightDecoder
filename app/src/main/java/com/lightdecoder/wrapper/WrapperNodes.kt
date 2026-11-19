@@ -50,7 +50,9 @@ object WrapperNodes {
     fun message(root: UiNode, text: String, mine: Boolean = false): UiNode? {
         val want = norm(text).take(MATCH_CHARS)
         if (want.isEmpty()) return null
-        val found = all(root).filter { !it.editable && norm(said(it)).contains(want) }.toList()
+        val holding = all(root).filter { !it.editable && norm(said(it)).contains(want) }.toList()
+        // A bubble that says exactly this, over one that only has it among other words ("Hi" in "This").
+        val found = holding.filter { norm(said(it)).take(MATCH_CHARS) == want }.ifEmpty { holding }
         // The user's own messages sit on the right: with several alike ("Test", "Test"), one of theirs.
         val middle = boundsOf(root).centerX()
         val pick = if (mine && middle > 0) found.filter { boundsOf(it).centerX() > middle }.ifEmpty { found } else found
@@ -106,7 +108,7 @@ object WrapperNodes {
 
     /** The short names of the buttons on screen, for the log when a step finds nothing (what OpenBubbles shows). */
     fun buttonNames(root: UiNode, max: Int = 24): String =
-        all(root).filter { it.clickable || it.longClickable }.flatMap { names(it).asSequence() }
+        all(root).filter { clickTarget(it) != null || it.longClickable }.flatMap { names(it).asSequence() }
             .filter { it.length <= 24 }.distinct().take(max).joinToString(" | ").ifEmpty { "none named" }
 
     /** The message field: the editable node, preferring the one hinted "iMessage". */
