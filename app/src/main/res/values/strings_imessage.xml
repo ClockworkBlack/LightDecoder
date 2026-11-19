@@ -411,13 +411,9 @@
     <string name="imessage_thread_quote_description">Reply to %1$s: %2$s</string>
     <!-- What TalkBack says a tap on a faded copy does ("Double-tap to open the thread"). -->
     <string name="imessage_thread_open">open the thread</string>
-    <!-- Under a reply's bubble when reply threads are not drawn in the chat: small, with an arrow; tapped, the thread opens. -->
-    <string name="imessage_thread_reply_marker">Reply</string>
-    <!-- The same, read by TalkBack. %1$s: who sent the message it answers ("You" for the user); %2$s: its first line. -->
-    <string name="imessage_thread_reply_marker_description">Reply to %1$s: %2$s, opens the thread</string>
     <!-- The iMessage screen: whether replies are drawn joined to what they answer in the chat itself. -->
     <string name="imessage_reply_threads_in_chat">Show reply threads in the chat</string>
-    <string name="imessage_reply_threads_in_chat_help">Off: a reply is an ordinary bubble marked Reply, and a tap on it opens its thread. On: every reply also shows a faded copy of the message it answers, joined to it by a line.</string>
+    <string name="imessage_reply_threads_in_chat_help">Off: a reply shows a faded copy of the message it answers above it, and a tap on it opens its thread. On: a reply is also joined to the message it answers by a line when that is close above it.</string>
     <string name="imessage_thread_title">Thread</string>
     <string name="imessage_thread_reply_hint">Reply</string>
     <string name="imessage_thread_close">Close the thread</string>

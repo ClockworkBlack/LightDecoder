@@ -125,20 +125,22 @@ class ReplyThreadsTest {
     }
 
     @Test
-    fun byDefaultARepliesMarkIsOnlyItsThreadAndAReplyMarker() {
+    fun byDefaultEveryReplyHasAFadedCopyAndNoLine() {
         val rows = listOf(row("a"), row("b", "a", mine = true), row("c"), row("d", "a"), row("e", "b"))
         val marks = ReplyThreads.marks(rows, ReplyThreads.threads(rows))
         assertEquals("the count stays under the first message", ReplyThreads.Mark(root = "a", replyCount = 3), marks["a"])
         for (reply in listOf("b", "d", "e")) {
-            assertEquals("no copy and no line, right under it or far from it", ReplyThreads.Mark(root = "a", marker = true), marks[reply])
+            assertEquals("a copy and no line, right under it or far from it", ReplyThreads.Mark(root = "a", fadedQuote = true), marks[reply])
         }
         assertNull("not in a thread", marks["c"])
-        assertTrue(marks.values.none { it.fadedQuote || it.connectTo != null })
-        // A reply to a message that is not shown is marked too, in that message's thread.
+        assertTrue("no lines by default", marks.values.none { it.connectTo != null })
+        assertTrue("a root that replies to nothing has no copy", marks["a"]?.fadedQuote == false)
+        // A reply to a message that is not shown has its copy too, in that message's thread.
         val lone = listOf(row("r", "elsewhere"))
-        assertEquals(ReplyThreads.Mark(root = "elsewhere", marker = true), ReplyThreads.marks(lone, ReplyThreads.threads(lone))["r"])
-        // Drawn in the chat, nothing has the marker.
-        assertTrue(ReplyThreads.marks(rows, ReplyThreads.threads(rows), inChat = true).values.none { it.marker })
+        assertEquals(ReplyThreads.Mark(root = "elsewhere", fadedQuote = true), ReplyThreads.marks(lone, ReplyThreads.threads(lone))["r"])
+        // Drawn in the chat, the reply right under what it answers has the line instead of the copy.
+        val drawn = ReplyThreads.marks(rows, ReplyThreads.threads(rows), inChat = true)
+        assertEquals(ReplyThreads.Mark(root = "a", connectTo = "a"), drawn["b"])
     }
 
     @Test
@@ -167,11 +169,11 @@ class ReplyThreadsTest {
         assertEquals(2, drawn["a"]?.replyCount)
         assertEquals("a", drawn["b"]?.connectTo)
         assertEquals(true, drawn["c"]?.fadedQuote)
-        // By default: the count and the markers only.
+        // By default: the count and the faded copies, no lines.
         val plain = build(true)
         assertEquals(ReplyThreads.Mark(root = "a", replyCount = 2), plain["a"])
-        assertEquals(ReplyThreads.Mark(root = "a", marker = true), plain["b"])
-        assertEquals(ReplyThreads.Mark(root = "a", marker = true), plain["c"])
+        assertEquals(ReplyThreads.Mark(root = "a", fadedQuote = true), plain["b"])
+        assertEquals(ReplyThreads.Mark(root = "a", fadedQuote = true), plain["c"])
         assertTrue("other chats: as before", build(false).values.all { it == null })
         assertTrue(build(false, inChat = true).values.all { it == null })
     }

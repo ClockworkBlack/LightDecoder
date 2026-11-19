@@ -446,7 +446,7 @@ class MessagesAdapter(
         // next tap is then as on any other), an app's card opens, text effects play again; else, on a
         // message of an inline-reply thread (iPhone-style chats), the thread opens. A link in the
         // text, a link's card, a picture, a video or a voice message take their own taps as ever: a
-        // bubble with pictures or files opens its thread from "Reply" / "N Replies" under it only.
+        // bubble with pictures or files opens its thread from its faded copy / "N Replies" only.
         val threadRoot = item.thread?.root?.takeIf { phone && threadTaps && it.isNotEmpty() && row.media.isEmpty() }
         val openThread = threadRoot?.let { root -> View.OnClickListener { callbacks.onOpenThread(root) } }
         val reveal = View.OnClickListener {
@@ -508,10 +508,10 @@ class MessagesAdapter(
 
     /**
      * Inline replies in iPhone-style chats ([ThreadItem.Message.thread]): "N Replies" in blue under a
-     * message others answered, and a small grey "Reply" with an arrow under a reply; or, with reply
-     * threads drawn in the chat, a reply's faded copy of the message it answers instead, above it on
-     * that message's side (a grey outline, smaller text, at most two lines). A tap on any of them
-     * opens the thread ([Callbacks.onOpenThread]). Elsewhere all are hidden.
+     * message others answered, and a reply's faded copy of the message it answers, above it on that
+     * message's side (a grey outline, smaller text, at most two lines; filled over a chat background).
+     * A tap on either opens the thread ([Callbacks.onOpenThread]); TalkBack reads the copy as "Reply
+     * to <sender>: <text>", double-tap to open the thread. Elsewhere both are hidden.
      */
     private fun bindThread(holder: MessageHolder, item: ThreadItem.Message) {
         val b = holder.binding
@@ -545,25 +545,7 @@ class MessagesAdapter(
         } else {
             copy.visibility = View.GONE
             copy.setOnClickListener(null)
-        }
-        val marker = b.replyMarker
-        if (mark != null && mark.marker) {
-            val quote = item.quote
-            marker.visibility = View.VISIBLE
-            underBubble(marker, holder.phoneMeta)
-            androidx.core.widget.TextViewCompat.setCompoundDrawableTintList(marker, ColorStateList.valueOf(marker.currentTextColor))
-            val side = holder.dp(PHONE_FOOTER_SIDE_DP)
-            marker.setPaddingRelative(side, 0, side, 0)
-            marker.contentDescription = context.getString(
-                R.string.imessage_thread_reply_marker_description,
-                quote?.sender ?: context.getString(R.string.chat_unknown_sender),
-                quote?.text?.ifEmpty { null } ?: context.getString(R.string.chat_reply_unavailable),
-            )
-            marker.setOnClickListener { callbacks.onOpenThread(mark.root) }
-        } else {
-            marker.visibility = View.GONE
-            marker.setOnClickListener(null)
-            marker.isClickable = false
+            copy.isClickable = false
         }
         val count = mark?.replyCount ?: 0
         val replies = b.replyCount

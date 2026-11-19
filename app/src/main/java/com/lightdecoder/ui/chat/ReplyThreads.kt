@@ -5,11 +5,11 @@ import com.lightdecoder.archive.MessageRow
 /**
  * Inline replies as an iPhone shows them (iOS 14 and later), in iPhone-style chats: every reply
  * belongs to the thread of the first message of its chain (its root: a reply to a reply is in
- * the same thread), and the root says "N Replies" under it. By default a reply is an ordinary
- * bubble with a small "Reply" under it, and a tap on any message of a thread opens the thread
- * view. With "Show reply threads in the chat" on, a reply is instead joined to the message it
- * answers by a thin line when that is close above it, else it shows a faded copy of it. Pure, so
- * it can be tested; [ThreadItems.build] puts what it works out on the rows ([Mark]).
+ * the same thread), and the root says "N Replies" under it. By default a reply shows a faded copy
+ * of the message it answers above it, and a tap on any message of a thread opens the thread view.
+ * With "Show reply threads in the chat" on, a reply is also joined to the message it answers by a
+ * thin line when that is close above it (right under it, the line only). Pure, so it can be
+ * tested; [ThreadItems.build] puts what it works out on the rows ([Mark]).
  */
 object ReplyThreads {
 
@@ -44,14 +44,12 @@ object ReplyThreads {
      * @param replyCount "N Replies" under it (a root's; 0 for the others)
      * @param fadedQuote a faded copy of the message it answers goes above it
      * @param connectTo the message above it a line joins it to (the one it answers, close enough); null for none
-     * @param marker a small "Reply" goes under it: a reply, where threads are not drawn in the chat
      */
     data class Mark(
         val root: String = "",
         val replyCount: Int = 0,
         val fadedQuote: Boolean = false,
         val connectTo: String? = null,
-        val marker: Boolean = false,
     )
 
     /**
@@ -165,7 +163,6 @@ object ReplyThreads {
                 replyCount = count,
                 fadedQuote = if (inChat) link == Link.NEAR || link == Link.FAR else root != null,
                 connectTo = row.replyToId.takeIf { link == Link.ADJACENT || link == Link.NEAR },
-                marker = false,
             )
         }
         return out
