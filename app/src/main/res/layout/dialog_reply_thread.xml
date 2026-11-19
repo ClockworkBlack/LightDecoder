@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The thread view of iPhone-style chats: the first message of an inline-reply thread and every
+    reply in it, over the chat (blurred and veiled behind), with a field to reply into the thread.
+    A tap beside the messages, or Back, closes it.
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/threadPanel"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <View
+        android:id="@+id/threadScrim"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="@string/imessage_thread_close" />
+
+    <LinearLayout
+        android:id="@+id/threadContent"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical">
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/threadMessages"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:clipToPadding="false"
+            android:overScrollMode="never"
+            android:paddingVertical="12dp" />
+
+        <LinearLayout
+            android:id="@+id/threadComposer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="12dp"
+            android:paddingEnd="4dp"
+            android:paddingVertical="6dp">
+
+            <EditText
+                android:id="@+id/threadInput"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="@string/imessage_thread_reply_hint"
+                android:importantForAutofill="no"
+                android:inputType="textCapSentences|textMultiLine|textShortMessage"
+                android:maxLines="5"
+                android:minHeight="36dp"
+                android:paddingHorizontal="14dp"
+                android:paddingVertical="7dp"
+                android:textSize="16sp" />
+
+            <ImageButton
+                android:id="@+id/threadSend"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:background="@drawable/bg_phone_send"
+                android:contentDescription="@string/imessage_thread_send"
+                android:src="@drawable/ic_phone_send" />
+        </LinearLayout>
+    </LinearLayout>
+</FrameLayout>

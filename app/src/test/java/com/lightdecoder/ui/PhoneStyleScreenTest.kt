@@ -72,6 +72,9 @@ class PhoneStyleScreenTest {
     private lateinit var imRepo: ArchiveRepository
     private lateinit var iMessage: IMessageManager
 
+    /** What was sent to Apple, through the iMessage library ([directMode]). */
+    private val sentRequests: MutableList<org.json.JSONObject> = java.util.Collections.synchronizedList(ArrayList())
+
     @Before
     fun setUp() {
         two = TwoServicesEnv()
@@ -104,8 +107,13 @@ class PhoneStyleScreenTest {
         DirectPrefs.setRegistered(two.app, true)
         DirectLibrary.REQUIRED.forEach { File(DirectLibrary.dir(two.app), it).apply { parentFile?.mkdirs(); writeText("") } }
         var sends = 0
-        DirectLink.installForTesting(two.app) { what, _, _ ->
-            if (what == DirectWire.SEND) DirectWire.sent("S${++sends}", System.currentTimeMillis()) else DirectWire.ok()
+        DirectLink.installForTesting(two.app) { what, request, _ ->
+            if (what == DirectWire.SEND) {
+                sentRequests += request
+                DirectWire.sent("S${++sends}", System.currentTimeMillis())
+            } else {
+                DirectWire.ok()
+            }
         }
         imRepo.upsertConversation(
             ConversationDto(
@@ -128,6 +136,8 @@ class PhoneStyleScreenTest {
         reactions: List<ReactionDto> = emptyList(),
         system: Boolean = false,
         editedAtMs: Long = 0,
+        /** The GUID of the message it answers inline, if any. */
+        replyTo: String = "",
     ) {
         imRepo.upsertMessage(
             MessageDto(
@@ -142,6 +152,7 @@ class PhoneStyleScreenTest {
                 status = if (mine) "OUTGOING_COMPLETE" else "INCOMING_COMPLETE",
                 transport = IMessageManager.TRANSPORT, text = text, parts = listOf(PartDto("0", "text", text)), isOld = true,
                 reactions = reactions, editedAtMs = editedAtMs,
+                replyToId = if (replyTo.isEmpty()) "" else "imsg:$replyTo",
             ),
         )
     }
@@ -160,6 +171,40 @@ class PhoneStyleScreenTest {
         message("C2", "I'll bring the map and the good boots this time", now - 5 * 60_000 + 15_000, mine = true, editedAtMs = now - 4 * 60_000)
         message("C3", "See you there", now - 5 * 60_000 + 30_000, mine = true)
         imRepo.advanceMessageStatus(listOf("imsg:C3"), DirectArchive.STATUS_DELIVERED, 2, DirectArchive::statusRank)
+    }
+
+    /**
+     * Inline replies, as an iPhone sends them: one right under its message, one a message further
+     * down (with a faded copy), a reply to that reply (in the same thread), and one far below
+     * the message it answers (the copy only).
+     */
+    private fun replyChat(now: Long = System.currentTimeMillis(), chat: String = ALICE_DIRECT) {
+        if (chat != ALICE_DIRECT) {
+            imRepo.upsertConversation(
+                ConversationDto(
+                    id = chat, name = "Alice Martin", type = IMessageManager.TRANSPORT, defaultOutgoingId = "tel:+15550000001",
+                    participants = listOf(
+                        ParticipantDto(id = "me", isMe = true),
+                        ParticipantDto(id = "+15551234567", name = "Alice Martin", number = "+15551234567", formattedNumber = "+15551234567"),
+                    ),
+                ),
+            )
+        }
+        val start = now - 20 * 60_000
+        var at = start
+        fun next() = 20_000L.also { at += it }.let { at }
+        message("R1", "Lunch at the summit?", next(), mine = false, chat = chat)
+        message("R2", "Yes! I'll pack sandwiches", next(), mine = true, chat = chat, replyTo = "R1")
+        message("R3", "Who's bringing the tent?", next(), mine = false, chat = chat)
+        message("R4", "And the stove, it gets cold up there", next(), mine = false, chat = chat)
+        message("R5", "Tent is in my car", next(), mine = true, chat = chat, replyTo = "R3")
+        message("R6", "Perfect, I'll bring the poles", next(), mine = false, chat = chat, replyTo = "R5")
+        message("R7", "What time do we leave?", next(), mine = true, chat = chat)
+        message("R8", "8?", next(), mine = false, chat = chat)
+        message("R9", "8 works", next(), mine = true, chat = chat)
+        message("R10", "Bring a headlamp too", next(), mine = false, chat = chat)
+        message("R11", "Already packed", next(), mine = true, chat = chat)
+        message("R12", "Turkey or ham, by the way?", next(), mine = false, chat = chat, replyTo = "R1")
     }
 
     /** An iMessage group with Alice and Ben. */
@@ -560,6 +605,199 @@ class PhoneStyleScreenTest {
         }
     }
 
+    // --- inline replies ----------------------------------------------------------------------
+
+    private fun rowItem(activity: Activity, text: String): ThreadItem.Message =
+        items(activity).filterIsInstance<ThreadItem.Message>().first { it.row.text == text }
+
+    private fun replyLines(list: RecyclerView): com.lightdecoder.ui.chat.ReplyLines =
+        (0 until list.itemDecorationCount).map { list.getItemDecorationAt(it) }.filterIsInstance<com.lightdecoder.ui.chat.ReplyLines>().single()
+
+    /** Draws [list] once (the lines are drawn with it) and says how many lines it drew. */
+    private fun linesDrawn(list: RecyclerView): Int {
+        val bitmap = Bitmap.createBitmap(maxOf(1, list.width), maxOf(1, list.height), Bitmap.Config.ARGB_8888)
+        list.draw(Canvas(bitmap))
+        return replyLines(list).drawn
+    }
+
+    private fun panelTexts(panel: com.lightdecoder.ui.chat.ReplyThreadPanel): List<String> =
+        panel.adapter.currentList.filterIsInstance<ThreadItem.Message>().map { it.row.text }
+
+    @Test
+    @Config(qualifiers = "w390dp-h1400dp-xhdpi")
+    fun aReplyShowsAFadedCopyOfWhatItAnswersAndThatMessageHowManyReplies() {
+        directMode()
+        replyChat()
+        launch(ALICE_DIRECT).use { scenario ->
+            scenario.waitFor("the replies") { rowOf(it, "Turkey or ham, by the way?") != null && rowOf(it, "Lunch at the summit?") != null }
+            scenario.onActivity { activity ->
+                val list = activity.findViewById<RecyclerView>(R.id.messages)
+                // Close under the message it answers: a faded copy of it, on that message's side (Alice's: the left).
+                val near = rowOf(activity, "Tent is in my car")!!
+                val copy = near.findViewById<TextView>(R.id.threadQuote)
+                assertEquals(View.VISIBLE, copy.visibility)
+                assertEquals("Who's bringing the tent?", copy.text.toString())
+                assertTrue("on her side", copy.right < list.width / 2 + copy.width / 2 && copy.left < list.width / 4)
+                assertTrue("above the bubble", copy.bottom <= near.findViewById<View>(R.id.column).top)
+                assertEquals("the old quote block is not drawn", View.GONE, near.findViewById<View>(R.id.quote).visibility)
+                assertEquals("Reply to Alice Martin: Who's bringing the tent?", copy.contentDescription.toString())
+                assertEquals(com.lightdecoder.ui.chat.ReplyThreads.Mark(root = "imsg:R3", fadedQuote = true, connectTo = "imsg:R3"), rowItem(activity, "Tent is in my car").thread)
+                // Right under it: the line only.
+                assertEquals(View.GONE, rowOf(activity, "Yes! I'll pack sandwiches")!!.findViewById<View>(R.id.threadQuote).visibility)
+                assertEquals(View.GONE, rowOf(activity, "Perfect, I'll bring the poles")!!.findViewById<View>(R.id.threadQuote).visibility)
+                assertEquals("a reply to a reply is in its thread", "imsg:R3", rowItem(activity, "Perfect, I'll bring the poles").thread?.root)
+                // Far below: the copy only.
+                val far = rowItem(activity, "Turkey or ham, by the way?").thread!!
+                assertTrue(far.fadedQuote)
+                assertNull(far.connectTo)
+                assertEquals(View.VISIBLE, rowOf(activity, "Turkey or ham, by the way?")!!.findViewById<View>(R.id.threadQuote).visibility)
+
+                // "2 Replies" in blue under each message answered; none under the others.
+                fun count(text: String) = rowOf(activity, text)!!.findViewById<TextView>(R.id.replyCount)
+                assertEquals(View.VISIBLE, count("Who's bringing the tent?").visibility)
+                assertEquals("2 Replies", count("Who's bringing the tent?").text.toString())
+                assertEquals(activity.getColor(R.color.phone_blue), count("Who's bringing the tent?").currentTextColor)
+                assertEquals("2 Replies", count("Lunch at the summit?").text.toString())
+                assertEquals(View.GONE, count("Tent is in my car").visibility)
+                assertEquals(View.GONE, count("8 works").visibility)
+
+                // The lines, drawn with the list: right under (R1-R2, R5-R6), close (R3 to the copy of it, the
+                // copy to R5), and the far one's copy to it.
+                assertEquals(5, linesDrawn(list))
+            }
+        }
+    }
+
+    @Test
+    @Config(qualifiers = "w390dp-h1400dp-xhdpi")
+    fun repliesOpenTheThreadWithOnlyItsMessagesAndBackClosesIt() {
+        directMode()
+        replyChat()
+        launch(ALICE_DIRECT).use { scenario ->
+            scenario.waitFor("the replies") { rowOf(it, "Who's bringing the tent?") != null }
+            scenario.onActivity { activity ->
+                rowOf(activity, "Who's bringing the tent?")!!.findViewById<View>(R.id.replyCount).performClick()
+                ShadowLooper.idleMainLooper()
+                val panel = activity.threadPanel!!
+                assertTrue(panel.isShowing)
+                assertEquals(listOf("Who's bringing the tent?", "Tent is in my car", "Perfect, I'll bring the poles"), panelTexts(panel))
+                // Drawn as in the chat: the same bubbles, no copies and no counts, one line between each.
+                assertTrue(panel.adapter.phoneStyle)
+                assertTrue(panel.adapter.currentList.filterIsInstance<ThreadItem.Message>().all { it.thread?.fadedQuote == false && it.thread?.replyCount == 0 })
+                assertEquals(activity.getString(R.string.imessage_thread_reply_hint), panel.binding.threadInput.hint.toString())
+                assertFalse("nothing to send yet", panel.binding.threadSend.isEnabled)
+                // Back closes it.
+                panel.dialog.onBackPressed()
+                ShadowLooper.idleMainLooper()
+                assertFalse(panel.isShowing)
+                assertNull(activity.threadPanel)
+
+                // A reply's faded copy opens its thread too; a tap beside the messages closes it.
+                rowOf(activity, "Tent is in my car")!!.findViewById<View>(R.id.threadQuote).performClick()
+                ShadowLooper.idleMainLooper()
+                val again = activity.threadPanel!!
+                assertEquals(listOf("Who's bringing the tent?", "Tent is in my car", "Perfect, I'll bring the poles"), panelTexts(again))
+                again.binding.threadScrim.performClick()
+                ShadowLooper.idleMainLooper()
+                assertNull(activity.threadPanel)
+
+                // The far one's thread: the first message and both its replies.
+                rowOf(activity, "Lunch at the summit?")!!.findViewById<View>(R.id.replyCount).performClick()
+                ShadowLooper.idleMainLooper()
+                assertEquals(listOf("Lunch at the summit?", "Yes! I'll pack sandwiches", "Turkey or ham, by the way?"), panelTexts(activity.threadPanel!!))
+                activity.threadPanel!!.dismiss()
+            }
+        }
+    }
+
+    @Test
+    @Config(qualifiers = "w390dp-h1400dp-xhdpi")
+    fun aReplyFromTheThreadGoesToItsFirstMessageAndShowsInIt() {
+        directMode()
+        replyChat()
+        launch(ALICE_DIRECT).use { scenario ->
+            scenario.waitFor("the replies") { rowOf(it, "Tent is in my car") != null }
+            var panel: com.lightdecoder.ui.chat.ReplyThreadPanel? = null
+            scenario.onActivity { activity ->
+                rowOf(activity, "Tent is in my car")!!.findViewById<View>(R.id.threadQuote).performClick()
+                ShadowLooper.idleMainLooper()
+                panel = activity.threadPanel!!
+                panel!!.binding.threadInput.setText("And a tarp")
+                assertTrue(panel!!.binding.threadSend.isEnabled)
+                panel!!.binding.threadSend.performClick()
+                assertEquals("the field is emptied", "", panel!!.binding.threadInput.text.toString())
+            }
+            two.waitUntil("sent to Apple") { sentRequests.any { it.optString("text") == "And a tarp" } }
+            val sent = sentRequests.first { it.optString("text") == "And a tarp" }
+            assertEquals("to the thread's first message", "R3", sent.getString("replyGuid"))
+            assertEquals("0:0:" + "Who's bringing the tent?".length, sent.getString("replyPart"))
+            // It shows in the open thread, and so does a reply that arrives meanwhile.
+            scenario.waitFor("in the thread") { panelTexts(panel!!).lastOrNull() == "And a tarp" }
+            message("R13", "Good idea", System.currentTimeMillis() + 1_000, mine = false, replyTo = "R3")
+            scenario.waitFor("hers too") { panelTexts(panel!!).lastOrNull() == "Good idea" }
+            scenario.onActivity { activity ->
+                assertEquals(5, panelTexts(panel!!).size)
+                assertEquals("4 Replies", rowOf(activity, "Who's bringing the tent?")?.findViewById<TextView>(R.id.replyCount)?.text?.toString())
+                // A long press in it opens the message's actions, as in the chat.
+                val list = panel!!.binding.threadMessages
+                val bubble = (0 until list.childCount).map { list.getChildAt(it) }
+                    .first { it.findViewById<TextView>(R.id.body)?.text?.toString() == "Tent is in my car" }.findViewById<View>(R.id.bubble)
+                assertTrue(bubble.performLongClick())
+                ShadowLooper.idleMainLooper()
+                assertTrue(ShadowDialog.getLatestDialog() is com.google.android.material.bottomsheet.BottomSheetDialog)
+                ShadowDialog.getLatestDialog().dismiss()
+                panel!!.dismiss()
+            }
+        }
+    }
+
+    @Test
+    fun swipingToReplyToAReplyKeepsTheNewMessageInTheSameThread() {
+        directMode()
+        replyChat()
+        launch(ALICE_DIRECT).use { scenario ->
+            scenario.waitFor("the replies") { shownTexts(it).contains("Perfect, I'll bring the poles") && it.phoneStyle }
+            scenario.onActivity { activity ->
+                activity.onReply(rowItem(activity, "Perfect, I'll bring the poles").row)
+                activity.findViewById<EditText>(R.id.input).setText("Poles are in the shed")
+                activity.findViewById<View>(R.id.send).performClick()
+            }
+            two.waitUntil("sent to Apple") { sentRequests.any { it.optString("text") == "Poles are in the shed" } }
+            assertEquals("R3", sentRequests.first { it.optString("text") == "Poles are in the shed" }.getString("replyGuid"))
+            // A reply to a message in no thread answers that message.
+            scenario.onActivity { activity ->
+                activity.onReply(rowItem(activity, "8 works").row)
+                activity.findViewById<EditText>(R.id.input).setText("Or 7:30")
+                activity.findViewById<View>(R.id.send).performClick()
+            }
+            two.waitUntil("sent to Apple") { sentRequests.any { it.optString("text") == "Or 7:30" } }
+            assertEquals("R9", sentRequests.first { it.optString("text") == "Or 7:30" }.getString("replyGuid"))
+        }
+    }
+
+    @Test
+    @Config(qualifiers = "w390dp-h1400dp-xhdpi")
+    fun withTheSettingOffRepliesKeepTheirQuoteAsBefore() {
+        directMode()
+        replyChat()
+        DirectPrefs.setPhoneStyleOn(two.app, false)
+        launch(ALICE_DIRECT).use { scenario ->
+            scenario.waitFor("the replies") { rowOf(it, "Tent is in my car") != null }
+            scenario.onActivity { activity ->
+                assertFalse(activity.phoneStyle)
+                val row = rowOf(activity, "Tent is in my car")!!
+                assertEquals(View.VISIBLE, row.findViewById<View>(R.id.quote).visibility)
+                assertEquals("Who's bringing the tent?", row.findViewById<TextView>(R.id.quoteText).text.toString())
+                assertEquals(View.GONE, row.findViewById<View>(R.id.threadQuote).visibility)
+                assertEquals(View.GONE, rowOf(activity, "Who's bringing the tent?")!!.findViewById<View>(R.id.replyCount).visibility)
+                assertTrue(items(activity).filterIsInstance<ThreadItem.Message>().all { it.thread == null })
+                assertEquals(0, linesDrawn(activity.findViewById(R.id.messages)))
+                activity.openThread("imsg:R3")
+                assertNull("no thread view", activity.threadPanel)
+            }
+        }
+    }
+
     // --- screenshots for review --------------------------------------------------------------
 
     /**
@@ -614,6 +852,24 @@ class PhoneStyleScreenTest {
                 scenario.onActivity { shoot(it, File(out, "chat-background-${if (night) "dark" else "light"}.png")) }
             }
         }
+        // Inline replies: in the chat, and a thread opened over it.
+        replyChat(chat = REPLY_CHAT)
+        for (night in listOf(false, true)) {
+            RuntimeEnvironment.setQualifiers(if (night) "+night" else "+notnight")
+            val suffix = if (night) "dark" else "light"
+            launch(REPLY_CHAT).use { scenario ->
+                scenario.waitFor("the replies") { rowOf(it, "Turkey or ham, by the way?") != null }
+                two.settle()
+                scenario.onActivity { shoot(it, File(out, "reply-chain-$suffix.png")) }
+                scenario.onActivity { it.openThread("imsg:R3") }
+                two.settle()
+                scenario.onActivity { activity ->
+                    val panel = activity.threadPanel!!
+                    shoot(activity, File(out, "reply-thread-panel-$suffix.png"), panel.dialog.window!!.decorView)
+                    panel.dismiss()
+                }
+            }
+        }
         // The same chat with the setting off, to compare.
         RuntimeEnvironment.setQualifiers("+notnight")
         ChatBackgrounds.dir(two.app).deleteRecursively()
@@ -624,11 +880,20 @@ class PhoneStyleScreenTest {
         }
     }
 
-    private fun shoot(activity: AppCompatActivity, file: File) {
+    /** The screen to [file]; with [over] (a dialog's window, full screen) drawn on top of it. */
+    private fun shoot(activity: AppCompatActivity, file: File, over: View? = null) {
         ShadowLooper.idleMainLooper()
         val root = activity.window.decorView
         val bitmap = Bitmap.createBitmap(root.width, root.height, Bitmap.Config.ARGB_8888)
-        root.draw(Canvas(bitmap))
+        val canvas = Canvas(bitmap)
+        root.draw(canvas)
+        if (over != null) {
+            // The chat is blurred behind it on a phone (a RenderEffect, which drawing to a bitmap leaves out): about so.
+            val small = Bitmap.createScaledBitmap(bitmap, maxOf(1, bitmap.width / 16), maxOf(1, bitmap.height / 16), true)
+            val blurred = Bitmap.createScaledBitmap(Bitmap.createScaledBitmap(small, small.width * 2, small.height * 2, true), bitmap.width, bitmap.height, true)
+            canvas.drawBitmap(blurred, 0f, 0f, null)
+            over.draw(canvas)
+        }
         file.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
     }
 
@@ -636,6 +901,7 @@ class PhoneStyleScreenTest {
         const val IM_DB = "phone-style-test.db"
         const val ALICE_DIRECT = "imsg:tel:+15551234567"
         const val GROUP = "imsg:group:11111111-2222-3333-4444-555555555555"
+        const val REPLY_CHAT = "imsg:tel:+15551230000"
         const val SHOTS_PROPERTY = "lightdecoder.uiShots"
     }
 }

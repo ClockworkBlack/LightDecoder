@@ -92,6 +92,8 @@ class DirectWordingTest {
             R.string.imessage_direct_unschedule_refused,
             R.string.imessage_phone_style, R.string.imessage_phone_style_help, R.string.imessage_phone_hint_text,
             R.string.imessage_phone_header, R.string.imessage_phone_add, R.string.imessage_attach_stickers,
+            R.string.imessage_thread_quote_description, R.string.imessage_thread_open, R.string.imessage_thread_title,
+            R.string.imessage_thread_reply_hint, R.string.imessage_thread_close, R.string.imessage_thread_send,
         )
         for (res in direct) {
             val text = context.getString(res)
@@ -100,7 +102,14 @@ class DirectWordingTest {
         for (count in listOf(1, 2)) {
             val text = context.resources.getQuantityString(R.plurals.imessage_group_not_on_imessage, count, "Bob")
             assertFalse(text, text.contains("OpenBubbles"))
+            for (plural in listOf(R.plurals.imessage_thread_replies, R.plurals.imessage_thread_open_replies)) {
+                val words = context.resources.getQuantityString(plural, count, count)
+                assertFalse(words, words.contains("OpenBubbles"))
+            }
         }
+        assertEquals("1 Reply", context.resources.getQuantityString(R.plurals.imessage_thread_replies, 1, 1))
+        assertEquals("3 Replies", context.resources.getQuantityString(R.plurals.imessage_thread_replies, 3, 3))
+        assertEquals("Reply to Alice: Lunch?", context.getString(R.string.imessage_thread_quote_description, "Alice", "Lunch?"))
         assertEquals("Sent with Slam", context.getString(R.string.imessage_sent_with, context.getString(R.string.imessage_effect_slam)))
         assertEquals(
             "GamePigeon can only be opened on an iPhone, iPad or Mac.",

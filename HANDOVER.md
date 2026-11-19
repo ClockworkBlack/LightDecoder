@@ -8,6 +8,13 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
    had earlier chosen "build with a warning", then "pause on Discord", and has now asked for
    the web-view tab only, with no bridge). **Instagram: skipped** (ban risk, like Messenger).
 
+## 0.5.64 (versionCode 75) - iPhone-style inline replies and reply threads
+- In iPhone-style chats: faded copy of the answered message above a reply, connector lines
+  (`ReplyLines` ItemDecoration), "N Replies" under the original, and a blurred thread panel
+  (`ReplyThreadPanel`) with the root and every reply; panel and swipe replies target the thread root
+  (as OpenBubbles, threadOriginatorGuid). Pure model in `ReplyThreads`. Not yet seen on a device.
+- Unit tests: 1121 (1 skipped: screenshots), all passing. Next version: 0.5.65 / 76.
+
 ## 0.5.63 (versionCode 74) - iPhone-style iMessage chats
 - Owner asked for an iPhone-like thread in iMessage chats. `ui/chat/PhoneStyle.kt` (pure rules + tail
   and typing-dot views): blue/green/grey bubbles with tails and runs, centred time headers, tapback
@@ -17,7 +24,7 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
   DirectPrefs) on the iMessage screen. Other threads are unchanged.
 - Preview PNGs: `./gradlew :app:testDebugUnitTest --tests 'com.lightdecoder.ui.PhoneStyleScreenTest'
   -Dlightdecoder.uiShots=<folder>`. Not yet seen on a device. Unit tests: 1106 (1 skipped: the
-  screenshot test), all passing. Next version: 0.5.64 / 75.
+  screenshot test), all passing.
 
 ## 0.5.62 (versionCode 73) - stock chat backgrounds
 - Owner asked for Messenger-like stock backgrounds plus iPhone's own. Picker (`BackgroundPicker`) with

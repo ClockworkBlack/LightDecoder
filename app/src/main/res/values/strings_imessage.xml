@@ -396,4 +396,23 @@
     <string name="imessage_send_later_not_cancellable">This message is no longer waiting to be sent.</string>
     <string name="imessage_direct_unschedule_not_confirmed">Apple did not confirm within %1$d seconds that the message will not be sent. It may still go.</string>
     <string name="imessage_direct_unschedule_refused">Apple refused to take the message back: %1$s</string>
+
+    <!-- Inline replies in iPhone-style chats (iOS 14): "N Replies" under a message, a reply's faded copy of it, and the thread view. -->
+    <plurals name="imessage_thread_replies">
+        <item quantity="one">%d Reply</item>
+        <item quantity="other">%d Replies</item>
+    </plurals>
+    <!-- What TalkBack says a tap on "N Replies" does ("Double-tap to open 3 replies"). -->
+    <plurals name="imessage_thread_open_replies">
+        <item quantity="one">open %d reply</item>
+        <item quantity="other">open %d replies</item>
+    </plurals>
+    <!-- A reply's faded copy of the message it answers, read by TalkBack. %1$s: who sent that message ("You" for the user); %2$s: its first line. -->
+    <string name="imessage_thread_quote_description">Reply to %1$s: %2$s</string>
+    <!-- What TalkBack says a tap on a faded copy does ("Double-tap to open the thread"). -->
+    <string name="imessage_thread_open">open the thread</string>
+    <string name="imessage_thread_title">Thread</string>
+    <string name="imessage_thread_reply_hint">Reply</string>
+    <string name="imessage_thread_close">Close the thread</string>
+    <string name="imessage_thread_send">Send reply</string>
 </resources>

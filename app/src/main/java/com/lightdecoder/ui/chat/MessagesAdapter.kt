@@ -98,6 +98,9 @@ class MessagesAdapter(
 
         /** Its text tapped: its text effects play again. */
         fun onTextEffectsTap(row: MessageRow, text: TextEffectView) = Unit
+
+        /** iPhone-style chats: "N Replies" or a reply's faded copy tapped: the thread rooted at [rootId] opens. */
+        fun onOpenThread(rootId: String) = Unit
     }
 
     /** Messages whose invisible ink was tapped away, by id: their text shows. */
@@ -163,6 +166,15 @@ class MessagesAdapter(
         val phoneIncoming = androidx.core.content.ContextCompat.getColor(view.context, R.color.phone_incoming)
         val phoneOnIncoming = androidx.core.content.ContextCompat.getColor(view.context, R.color.phone_on_incoming)
         val phoneMeta = androidx.core.content.ContextCompat.getColor(view.context, R.color.phone_meta)
+        val phoneScreen = androidx.core.content.ContextCompat.getColor(view.context, R.color.phone_screen)
+
+        /** A reply's faded copy of what it answers: an outline, filled only over a picture ([onPicture]). */
+        val quoteOutline by lazy {
+            android.graphics.drawable.GradientDrawable().apply {
+                cornerRadius = PHONE_QUOTE_RADIUS_DP * density
+                setStroke(maxOf(1, density.toInt()), androidx.core.content.ContextCompat.getColor(view.context, R.color.phone_thread_line))
+            }
+        }
         val phoneBubble by lazy { PhoneBubbleDrawable(density) }
         val rootPadding = intArrayOf(view.paddingStart, view.paddingTop, view.paddingEnd, view.paddingBottom)
         val senderColor = binding.sender.currentTextColor
@@ -286,9 +298,13 @@ class MessagesAdapter(
         b.sender.visibility = if (item.showSender) View.VISIBLE else View.GONE
         b.sender.text = row.senderName.ifBlank { context.getString(R.string.chat_unknown_sender) }
 
-        // Reply quote.
+        // Reply quote; in iPhone-style chats a faded copy above the bubble instead ([bindThread]).
         val quote = item.quote
-        if (quote == null) {
+        if (phone) {
+            b.quote.visibility = View.GONE
+            b.quote.setOnClickListener(null)
+            b.quote.isClickable = false
+        } else if (quote == null) {
             b.quote.visibility = if (row.replyToId.isNotEmpty()) View.VISIBLE else View.GONE
             b.quoteSender.text = context.getString(R.string.chat_reply_unavailable)
             b.quoteText.text = ""
@@ -302,6 +318,8 @@ class MessagesAdapter(
             b.quoteText.visibility = if (quote.text.isEmpty()) View.GONE else View.VISIBLE
             b.quote.setOnClickListener { callbacks.onQuoteTap(quote.messageId) }
         }
+
+        bindThread(holder, item)
 
         b.subject.visibility = if (row.subject.isNotBlank()) View.VISIBLE else View.GONE
         b.subject.text = row.subject
@@ -469,6 +487,65 @@ class MessagesAdapter(
     }
 
     /**
+     * Inline replies in iPhone-style chats ([ThreadItem.Message.thread]): a reply's faded copy of the
+     * message it answers, above it on that message's side (a grey outline, smaller text, at most
+     * two lines), and "N Replies" in blue under a message others answered. A tap on either opens
+     * the thread ([Callbacks.onOpenThread]). Elsewhere both are hidden.
+     */
+    private fun bindThread(holder: MessageHolder, item: ThreadItem.Message) {
+        val b = holder.binding
+        val context = b.root.context
+        val mark = if (phoneStyle) item.thread else null
+        val copy = b.threadQuote
+        if (mark != null && mark.fadedQuote) {
+            val quote = item.quote
+            val outgoing = item.row.isOutgoing || item.row.direction == "out"
+            // On the side of whoever sent what it answers (unknown: the reply's own side).
+            val mine = quote?.outgoing ?: outgoing
+            val text = quote?.text?.ifEmpty { null } ?: context.getString(R.string.chat_reply_unavailable)
+            copy.visibility = View.VISIBLE
+            copy.text = text
+            copy.setTextColor(if (onPicture) holder.phoneOnIncoming else holder.phoneMeta)
+            copy.maxWidth = (context.resources.displayMetrics.widthPixels * PHONE_QUOTE_MAX_WIDTH_FRACTION).toInt()
+            val outline = holder.quoteOutline
+            outline.setColor(if (onPicture) (holder.phoneScreen and 0x00FFFFFF) or (PHONE_QUOTE_FILL_ALPHA shl 24) else Color.TRANSPARENT)
+            copy.background = outline
+            val params = copy.layoutParams as FrameLayout.LayoutParams
+            params.gravity = Gravity.TOP or if (mine) Gravity.END else Gravity.START
+            val gutter = holder.phoneBubble.gutter
+            params.marginStart = if (mine) 0 else gutter + if (item.besideAvatar) holder.dp(PHONE_AVATAR_ROOM_DP) else 0
+            params.marginEnd = if (mine) gutter else 0
+            params.bottomMargin = holder.dp(PHONE_QUOTE_GAP_DP)
+            copy.layoutParams = params
+            val sender = quote?.sender ?: context.getString(R.string.chat_unknown_sender)
+            copy.contentDescription = context.getString(R.string.imessage_thread_quote_description, sender, text)
+            copy.setOnClickListener { callbacks.onOpenThread(mark.root) }
+            ViewCompat.replaceAccessibilityAction(copy, AccessibilityActionCompat.ACTION_CLICK, context.getString(R.string.imessage_thread_open), null)
+        } else {
+            copy.visibility = View.GONE
+            copy.setOnClickListener(null)
+        }
+        val count = mark?.replyCount ?: 0
+        val replies = b.replyCount
+        if (count > 0) {
+            replies.visibility = View.VISIBLE
+            replies.text = context.resources.getQuantityString(R.plurals.imessage_thread_replies, count, count)
+            underBubble(replies, holder.phoneBlue)
+            val side = holder.dp(PHONE_FOOTER_SIDE_DP)
+            replies.setPaddingRelative(side, 0, side, 0)
+            val root = item.row.id
+            replies.setOnClickListener { callbacks.onOpenThread(root) }
+            ViewCompat.replaceAccessibilityAction(
+                replies, AccessibilityActionCompat.ACTION_CLICK,
+                context.resources.getQuantityString(R.plurals.imessage_thread_open_replies, count, count), null,
+            )
+        } else {
+            replies.visibility = View.GONE
+            replies.setOnClickListener(null)
+        }
+    }
+
+    /**
      * An iMessage app's card ([app], none: hidden): the lines its app gave it
      * ([IMessageBubbles.appLines]), the app's name small under them.
      */
@@ -527,8 +604,9 @@ class MessagesAdapter(
      */
     private fun isBare(item: ThreadItem.Message): Boolean {
         val row = item.row
+        // iPhone-style chats draw a reply's quote outside its bubble: a picture that replies has none either.
         return row.media.isNotEmpty() && row.media.all(::isVisual) && row.text.isEmpty() &&
-            row.subject.isBlank() && item.quote == null && row.replyToId.isEmpty()
+            row.subject.isBlank() && (phoneStyle || (item.quote == null && row.replyToId.isEmpty()))
     }
 
     /** The bubble's background, padding and the time's place: a bubble, or none for a [bare] picture. */
@@ -963,6 +1041,10 @@ class MessagesAdapter(
         const val PHONE_TAPBACK_OVERLAP_DP = 18f
         const val PHONE_FOOTER_SIDE_DP = 8f
         const val PENDING_ALPHA = 0.6f
+        const val PHONE_QUOTE_RADIUS_DP = 16f
+        const val PHONE_QUOTE_MAX_WIDTH_FRACTION = 0.66f
+        const val PHONE_QUOTE_GAP_DP = 3f
+        const val PHONE_QUOTE_FILL_ALPHA = 0xCC
         const val SHADOW = 0xB3000000.toInt()
 
         /** Longest side of a picture in a bubble (decoded at this size or the bubble's width, shown up to it). */

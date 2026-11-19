@@ -23,4 +23,9 @@
     <color name="phone_plus">#FFE9E9EB</color>
     <color name="phone_on_plus">#FF3C3C43</color>
     <color name="phone_typing_dot">#FF8E8E93</color>
+    <!-- iPhone-style chats: the thin line joining an inline reply to the message it answers, and a faded copy's outline. -->
+    <color name="phone_thread_line">#FFC7C7CC</color>
+    <!-- The thread view: what covers the chat behind it (over its blur, where there is one). -->
+    <color name="phone_thread_scrim">#D9FFFFFF</color>
+    <color name="phone_thread_scrim_solid">#F2F2F2F7</color>
 </resources>

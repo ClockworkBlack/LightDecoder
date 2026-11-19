@@ -1,10 +1,30 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- One message bubble. Side (start/end) and colours are set in code from the theme. -->
-<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<com.lightdecoder.ui.chat.ReplyRowLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:paddingHorizontal="12dp"
     android:paddingVertical="2dp">
+
+    <!--
+        iPhone-style chats: a reply's faded copy of the message it answers, above it on that
+        message's side, as an iPhone shows it. Tapped, the thread opens. Its row makes room above
+        the bubble for it ([ReplyRowLayout]).
+    -->
+    <TextView
+        android:id="@+id/threadQuote"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|start"
+        android:ellipsize="end"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:maxLines="2"
+        android:minHeight="32dp"
+        android:paddingHorizontal="12dp"
+        android:paddingVertical="6dp"
+        android:textSize="14sp"
+        android:visibility="gone" />
 
     <!-- iPhone-style group chats: who sent it, beside the last bubble of their run. -->
     <TextView
@@ -254,6 +274,19 @@
             android:layout_marginTop="-8dp"
             android:visibility="gone" />
 
+        <!-- iPhone-style chats: "1 Reply" / "3 Replies" under a message others answered inline; tapped, its thread opens. -->
+        <TextView
+            android:id="@+id/replyCount"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:background="?attr/selectableItemBackground"
+            android:gravity="center_vertical"
+            android:minHeight="32dp"
+            android:paddingHorizontal="8dp"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
+
         <!-- "Sent with Slam · Replay" under an iMessage sent with an effect, as an iPhone shows it; Replay plays it again. -->
         <LinearLayout
             android:id="@+id/effectRow"
@@ -313,4 +346,4 @@
             android:textColor="?attr/colorError"
             android:visibility="gone" />
     </com.lightdecoder.ui.chat.BubbleLayout>
-</FrameLayout>
+</com.lightdecoder.ui.chat.ReplyRowLayout>

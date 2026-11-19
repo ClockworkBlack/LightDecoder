@@ -194,6 +194,18 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private var highlightId: String? = null
 
     private var replyTarget: MessageRow? = null
+
+    /**
+     * iPhone-style chats: who is in which inline-reply thread among the messages shown
+     * ([ReplyThreads.threads]), as the last render worked it out; and the messages replied to
+     * that are not shown, read from the archives ([quotesFor]).
+     */
+    private var threads: ReplyThreads.Threads = ReplyThreads.Threads.NONE
+    private var knownRows: Map<String, MessageRow> = emptyMap()
+
+    /** The thread view open now ([openThread]), if any. */
+    @VisibleForTesting
+    internal var threadPanel: ReplyThreadPanel? = null
     /** What the next message carries: pictures (several at once), a video or a voice message. */
     private var attachments: List<Uri> = emptyList()
 
@@ -461,6 +473,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             confirmDialog?.dismiss()
             gamesSheet?.dismiss()
             gamesSheet = null
+            threadPanel?.dismiss()
+            threadPanel = null
+            threads = ReplyThreads.Threads.NONE
+            knownRows = emptyMap()
             closeOptionsMenu()
             // Leaving the thread: stop reading its messages; the next one's are new from its first read.
             readerInstance?.stop()
@@ -557,6 +573,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         // The extension app is told its picker closed, and let go.
         gamesSheet?.dismiss()
         gamesSheet = null
+        threadPanel?.dismiss()
+        threadPanel = null
         cancelRecording(quietly = true)
         voicePlayer.release()
         readerInstance?.shutdown()
@@ -654,6 +672,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             }
         })
         ItemTouchHelper(SwipeToReply()).attachToRecyclerView(binding.messages)
+        // iPhone-style chats: the lines joining inline replies to what they answer.
+        binding.messages.addItemDecoration(ReplyLines(this))
     }
 
     /**
@@ -745,6 +765,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val participants: List<ParticipantRow>,
         val rows: List<MessageRow>,
         val quotes: Map<String, Quote>,
+        /** Messages replied to that are not shown, read for their quotes and threads ([quotesFor]). */
+        val known: Map<String, MessageRow>,
         val historyComplete: Boolean,
         /** Blue Bubbles: the companion iMessage chat, its messages in the window, and whether it is unread. */
         val companion: String? = null,
@@ -828,12 +850,15 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             val background = backgroundChat?.let { chat ->
                 runCatching { com.lightdecoder.imessage.direct.ChatBackgrounds(applicationContext).of(chat) }.getOrNull()
             }
+            // Replies among the person's iMessages shown here quote from the iMessage archive.
+            val known = HashMap<String, MessageRow>()
+            val quotes = quotesFor(listOfNotNull(repo, imRepo), shown, known)
             Snapshot(
                 conversation = conversation,
                 participants = people,
                 rows = rows,
-                // Replies among the person's iMessages shown here quote from the iMessage archive.
-                quotes = quotesFor(listOfNotNull(repo, imRepo), shown),
+                quotes = quotes,
+                known = known,
                 historyComplete = repo.syncState(id)?.historyComplete == true,
                 companion = companion,
                 companionRows = companionRows,
@@ -883,6 +908,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val scrollTo = target?.takeIf { t -> snapshot.rows.any { it.id == t } }
         if (target != null) targetMessageId = null
         if (scrollTo != null) highlight(scrollTo)
+        knownRows = snapshot.known
         submit(snapshot.quotes, scrollTo)
         // submit() suspends while it builds the list: a notification tap may have switched
         // threads meanwhile. The reload onNewIntent queued handles the new conversation.
@@ -948,16 +974,36 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
     }
 
-    /** Quoted messages: from the window, else from the archives its messages come from ([repos]). Runs on IO. */
-    private fun quotesFor(repos: List<ArchiveRepository>, rows: List<MessageRow>): Map<String, Quote> {
+    /**
+     * Quoted messages: from the window, else from the archives its messages come from ([repos]).
+     * Those read from an archive go into [known], and so (iPhone-style chats) do the messages up
+     * their chains of replies, for their threads' roots ([ReplyThreads.roots]). Runs on IO.
+     */
+    private fun quotesFor(repos: List<ArchiveRepository>, rows: List<MessageRow>, known: MutableMap<String, MessageRow>): Map<String, Quote> {
         val byId = rows.associateBy { it.id }
         val mediaLabel = getString(R.string.chat_media_picture)
         val quotes = HashMap<String, Quote>()
+        fun lookUp(id: String): MessageRow? =
+            byId[id] ?: known[id] ?: repos.firstNotNullOfOrNull { runCatching { it.message(id) }.getOrNull() }?.also { known[id] = it }
         for (replyId in rows.mapNotNull { it.replyToId.takeIf(String::isNotEmpty) }.distinct().take(MAX_QUOTE_LOOKUPS)) {
-            val quoted = byId[replyId] ?: repos.firstNotNullOfOrNull { runCatching { it.message(replyId) }.getOrNull() } ?: continue
+            val quoted = lookUp(replyId) ?: continue
             val sender = if (quoted.isOutgoing) getString(R.string.chat_you)
             else quoted.senderName.ifBlank { getString(R.string.chat_unknown_sender) }
-            quotes[replyId] = Quote(replyId, sender, ThreadItems.preview(quoted, mediaLabel, IMessageBubbles.inkedLabel(this)))
+            quotes[replyId] = Quote(
+                replyId, sender, ThreadItems.preview(quoted, mediaLabel, IMessageBubbles.inkedLabel(this)),
+                outgoing = quoted.isOutgoing || quoted.direction == "out",
+            )
+        }
+        // A reply to a reply that is not shown: up its chain (a few steps at most), to the thread's first message.
+        if (phoneStyle) {
+            var budget = MAX_QUOTE_LOOKUPS
+            for (start in known.values.toList()) {
+                var parent = start.replyToId
+                var steps = 0
+                while (parent.isNotEmpty() && parent !in byId && parent !in known && steps++ < ReplyThreads.MAX_DEPTH && budget-- > 0) {
+                    parent = lookUp(parent)?.replyToId.orEmpty()
+                }
+            }
         }
         return quotes
     }
@@ -988,10 +1034,14 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val phone = phoneStyle
         lastQuotes = quotes
         val context = applicationContext
+        val known = knownRows
+        var shownThreads = ReplyThreads.Threads.NONE
         val items = withContext(Dispatchers.Default) {
+            // An iPhone's reactions arrive as texts ("Loved an image"): shown on their message instead.
+            val rows = Tapbacks.apply(shown)
+            if (phone) shownThreads = ReplyThreads.threads(rows, known)
             ThreadItems.build(
-                // An iPhone's reactions arrive as texts ("Loved an image"): shown on their message instead.
-                messages = Tapbacks.apply(shown),
+                messages = rows,
                 isGroup = isGroup,
                 quotes = quotes,
                 header = header,
@@ -1001,9 +1051,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 receipts = shownReceipts,
                 phone = phone,
                 clock = { TimeFormat.clock(context, it) },
+                threads = shownThreads,
             )
         }
         if (seq != submitSeq) return
+        threads = shownThreads
+        renderThreadPanel()
         val scrollTo = pendingScrollTo
         pendingScrollTo = null
         val atBottom = isAtBottom() || scrollToBottomNext
@@ -1279,6 +1332,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         phoneStyle = want
         adapter.phoneStyle = want
         adapter.notifyDataSetChanged()
+        if (!want) threadPanel?.dismiss()
         renderPhoneChrome()
         return true
     }
@@ -1673,7 +1727,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 return
             }
             if (chat != id) logRoute(chat, "voice message, through the iMessage library")
-            val replyTo = replyTarget?.takeIf { it.conversationId == chat }?.id
+            val replyTo = replyIdFor(chat)
             clearReply()
             scrollToBottomNext = true
             lifecycleScope.launch {
@@ -1686,7 +1740,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             handOffToOpenBubbles(iMessageLink, chat, "", listOf(uri), clearComposer = false)
             return
         }
-        val replyTo = replyTarget?.takeIf { it.conversationId == id }?.id
+        val replyTo = replyIdFor(id)
         clearReply()
         scrollToBottomNext = true
         val link = manager
@@ -2355,7 +2409,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             )
             val im = iMessageLink
             // An inline reply to one of the iMessages shown here (threads under it through the iMessage library).
-            val replyTo = replyTarget?.takeIf { it.conversationId == companion }?.id
+            val replyTo = replyIdFor(companion)
             scrollToBottomNext = true
             if (effect != null) sentEffect = effect to System.currentTimeMillis()
             clearComposerForSend()
@@ -2396,7 +2450,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             )
         }
         // Only ever a message of this conversation (onReply checks too).
-        val replyTo = replyTarget?.takeIf { it.conversationId == id }?.id
+        val replyTo = replyIdFor(id)
         scrollToBottomNext = true
         if (effect != null) sentEffect = effect to System.currentTimeMillis()
         clearComposerForSend()
@@ -2899,6 +2953,118 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private fun clearReply() {
         replyTarget = null
         binding.replyBar.visibility = View.GONE
+    }
+
+    /**
+     * The message a reply sent to [chat] now answers: the one picked ([replyTarget], only one of
+     * [chat]'s); in iPhone-style chats the first message of its thread instead, as an iPhone
+     * (and OpenBubbles) sends it, so a reply to a reply stays in the same thread ([threadRootFor]).
+     */
+    private fun replyIdFor(chat: String): String? {
+        val row = replyTarget?.takeIf { it.conversationId == chat } ?: return null
+        return threadRootFor(row) ?: row.id
+    }
+
+    /**
+     * iPhone-style chats: the root of the thread [row] is a reply in, when a reply to it can go
+     * there (an iMessage Apple knows, of [row]'s own chat). Null otherwise: a reply then answers [row].
+     */
+    private fun threadRootFor(row: MessageRow): String? {
+        if (!phoneStyle) return null
+        val root = threads.rootOf[row.id] ?: return null
+        if (!com.lightdecoder.imessage.direct.DirectArchive.isImessage(root)) return null
+        val rootRow = messages.firstOrNull { it.id == root } ?: knownRows[root]
+        if (rootRow != null && rootRow.conversationId != row.conversationId) return null
+        return root
+    }
+
+    // --- inline-reply threads (iPhone-style chats) ---------------------------
+
+    override fun onOpenThread(rootId: String) = openThread(rootId)
+
+    /** Opens the thread view for the thread whose first message is [rootId] ([ReplyThreadPanel]). */
+    internal fun openThread(rootId: String) {
+        if (!phoneStyle) return
+        threadPanel?.dismiss()
+        val panel = ReplyThreadPanel(
+            activity = this,
+            behind = binding.root,
+            media = media,
+            callbacks = this,
+            rootId = rootId,
+            configure = {
+                it.blueOutgoing = manager.service == ChatService.IMESSAGE
+                it.blueFor = { row -> row.id in iMessageIds }
+                it.appleReceipts = { row -> appleReceipts(row, manager.service, iMessageIds) }
+                it.voiceDuration = voicePlayer::durationOf
+                it.voiceState = voicePlayer.state.value
+            },
+            send = { text -> sendThreadReply(rootId, text) },
+            onClosed = { panel -> if (threadPanel === panel) threadPanel = null },
+        )
+        threadPanel = panel
+        renderThreadPanel()
+        panel.show()
+    }
+
+    /** The open thread view, as the chat now is: its root and every reply in it, new ones too. */
+    private fun renderThreadPanel() {
+        val panel = threadPanel ?: return
+        if (!phoneStyle) {
+            panel.dismiss()
+            return
+        }
+        val rows = Tapbacks.apply(messages)
+        val members = ReplyThreads.members(panel.rootId, rows, threads, knownRows)
+        // Its messages all gone (deleted, unsent): nothing left to show.
+        if (members.isEmpty()) {
+            panel.dismiss()
+            return
+        }
+        val context = applicationContext
+        val items = ThreadItems.build(
+            messages = members,
+            isGroup = conversation?.isGroup == true,
+            quotes = emptyMap(),
+            header = null,
+            highlightId = null,
+            dayStart = { TimeFormat.startOfDay(it) },
+            dayLabel = { TimeFormat.dayLabel(context, it) },
+            receipts = receipts,
+            phone = true,
+            clock = { TimeFormat.clock(context, it) },
+            panelRoot = panel.rootId,
+        )
+        panel.update(items)
+    }
+
+    /**
+     * Sends [text] from the thread view into the thread rooted at [rootId]: an inline reply to its
+     * first message, as an iPhone sends one, through the iMessage library. False (with why) when it cannot go.
+     */
+    @VisibleForTesting
+    internal fun sendThreadReply(rootId: String, text: String): Boolean {
+        val members = ReplyThreads.members(rootId, messages, threads, knownRows)
+        val chat = (messages.firstOrNull { it.id == rootId } ?: knownRows[rootId] ?: members.lastOrNull())?.conversationId ?: return false
+        val im = when {
+            manager.service == ChatService.MESSAGES && chat in iMessageChats -> iMessageLink
+            manager.service == ChatService.IMESSAGE && chat == conversationId -> manager as? com.lightdecoder.imessage.IMessageManager
+            else -> null
+        } ?: return false
+        if (!directMode() || !im.canReply(chat, text)) {
+            toast(errorText(im, com.lightdecoder.imessage.IMessageErrors.NO_REPLY_BUTTON))
+            return false
+        }
+        // Into the thread: to its first message (an older one Apple does not know: to the newest reply it can).
+        val replyTo = rootId.takeIf { com.lightdecoder.imessage.direct.DirectArchive.isImessage(it) }
+            ?: members.lastOrNull { com.lightdecoder.imessage.direct.DirectArchive.isImessage(it.id) }?.id
+        if (chat != conversationId) logRoute(chat, "a reply in a thread, through the iMessage library")
+        scrollToBottomNext = true
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) { relayAttempt { im.sendText(chat, text, replyTo, null, emptyList(), null) } }
+                .onFailure { toast(errorText(im, it)) }
+        }
+        return true
     }
 
     /**

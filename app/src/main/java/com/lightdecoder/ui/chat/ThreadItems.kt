@@ -3,8 +3,11 @@ package com.lightdecoder.ui.chat
 import com.lightdecoder.archive.MediaRow
 import com.lightdecoder.archive.MessageRow
 
-/** The quoted message shown above a reply. [text] is already a one-line preview. */
-data class Quote(val messageId: String, val sender: String, val text: String)
+/**
+ * The quoted message shown above a reply. [text] is already a one-line preview; [outgoing]: it is
+ * one of the user's own (iPhone-style chats draw its faded copy on that side).
+ */
+data class Quote(val messageId: String, val sender: String, val text: String, val outgoing: Boolean = false)
 
 /** One row of a thread: the history header, a day separator, or a message. */
 sealed class ThreadItem {
@@ -45,6 +48,8 @@ sealed class ThreadItem {
         val place: PhoneStyle.Place? = null,
         /** iPhone-style group chats: someone else's message, which leaves room at its side for the sender's picture. */
         val besideAvatar: Boolean = false,
+        /** iPhone-style chats: its inline-reply thread ([ReplyThreads.Mark]: "N Replies", a faded copy, a line); null otherwise. */
+        val thread: ReplyThreads.Mark? = null,
     ) : ThreadItem() {
         /**
          * For DiffUtil. MessageRow's byte arrays compare by reference, so a
@@ -59,6 +64,7 @@ sealed class ThreadItem {
                 receipt == other.receipt &&
                 place == other.place &&
                 besideAvatar == other.besideAvatar &&
+                thread == other.thread &&
                 row.copy(media = emptyList()) == other.row.copy(media = emptyList()) &&
                 row.media.map(::mediaSignature) == other.row.media.map(::mediaSignature)
     }
@@ -117,6 +123,10 @@ object ThreadItems {
         phone: Boolean = false,
         /** The clock time of a time header ([phone]). */
         clock: (Long) -> String = { "" },
+        /** iPhone-style chats ([phone]): who is in which inline-reply thread ([ReplyThreads.threads] of [messages]). */
+        threads: ReplyThreads.Threads = ReplyThreads.Threads.NONE,
+        /** The thread view: [messages] are one thread, each joined to the one before it ([ReplyThreads.panelMarks]). */
+        panelRoot: String? = null,
     ): List<ThreadItem> {
         val items = ArrayList<ThreadItem>(messages.size + 16)
         if (header != null) items.add(header)
@@ -124,6 +134,11 @@ object ThreadItems {
         var lastDay = Long.MIN_VALUE
         var previous: MessageRow? = null
         val places = if (phone) PhoneStyle.places(messages, dayStart) else emptyList()
+        val marks = when {
+            !phone -> emptyMap()
+            panelRoot != null -> ReplyThreads.panelMarks(messages, panelRoot)
+            else -> ReplyThreads.marks(messages, threads) { i -> PhoneStyle.timeHeader(messages.getOrNull(i - 1), messages[i], dayStart) }
+        }
         for ((index, row) in messages.withIndex()) {
             val day = dayStart(row.timestampMs)
             val newDay = day != lastDay
@@ -161,6 +176,7 @@ object ThreadItems {
                     receipt = receipts[row.id],
                     place = place,
                     besideAvatar = phone && isGroup && incoming,
+                    thread = marks[row.id],
                 )
             )
             previous = row

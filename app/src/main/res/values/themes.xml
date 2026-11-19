@@ -16,6 +16,23 @@
         <item name="android:navigationBarColor">@android:color/black</item>
     </style>
 
+    <!--
+        The thread view of iPhone-style chats: over the whole chat, which shows through it (blurred
+        where Android can), edge to edge; it draws its own veil.
+    -->
+    <style name="Theme.LightDecoder.ThreadPanel" parent="Theme.LightDecoder">
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="windowNoTitle">true</item>
+        <item name="windowActionBar">false</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowAnimationStyle">@android:style/Animation.Dialog</item>
+    </style>
+
     <style name="ThemeOverlay.LightDecoder.MenuPopup" parent="ThemeOverlay.Material3">
         <item name="colorControlNormal">?attr/colorOnSurface</item>
         <item name="colorControlActivated">?attr/colorOnSurface</item>
