@@ -23,6 +23,13 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.36 (versionCode 44) - Check iMessage keeps running when closed
+- The running check lives in `imessage/IMessageChecks` (app-wide, one at a time), not in its dialog. "Close
+  (keeps checking)" hides it; "Stop check" ends it; the thread menu reads "Check iMessage (checking...)" and
+  reopens it. It polls every 1 s for 10 min, then every 5 s, and gives up after 2 h (logged). A verdict
+  while the dialog is closed comes as a notification (alerts channel) that opens the conversation; the log
+  marks it "(seen in the background)". Lost if Android kills the app's process.
+
 ## 0.5.35 (versionCode 43) - OpenBubbles fixes from the first real-phone try
 - **"OpenBubbles is not installed" when it is** (Send iMessage): the new-chat screen was opened only with an
   `imessage://` link, and a failed start was reported as not installed. `OpenBubbles.openNewChat` now tries

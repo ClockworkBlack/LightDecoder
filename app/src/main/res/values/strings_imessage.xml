@@ -45,12 +45,17 @@
     <string name="imessage_would_not_open">OpenBubbles is installed but would not open. Open it once by itself, then try again.</string>
     <string name="imessage_address_label">Number for iMessage</string>
     <string name="imessage_check_close">Close</string>
+    <string name="imessage_check_hide">Close (keeps checking)</string>
+    <string name="imessage_check_stop">Stop check</string>
+    <string name="imessage_check_running">Check iMessage (checking\u2026)</string>
+    <string name="imessage_check_done_title">iMessage check for %1$s</string>
+    <string name="imessage_check_ended">No reply from %1$s. The check has ended; a reply that comes later still shows in the conversation (a blue bubble from them means iMessage).</string>
     <string name="imessage_check_step_handed">Handed to OpenBubbles</string>
     <string name="imessage_check_step_tap_send">Tap send in OpenBubbles</string>
     <string name="imessage_check_step_openbubbles">In OpenBubbles\u2019 iMessage chat (sent to Apple)</string>
     <string name="imessage_check_step_reply">%1$s replied</string>
     <string name="imessage_check_waiting">Waiting for %1$s to reply\u2026</string>
-    <string name="imessage_check_still_waiting">Still waiting for %1$s to reply. You can close this: a reply that comes later shows in the conversation (blue bubble from them = iMessage).</string>
+    <string name="imessage_check_still_waiting">Still waiting for %1$s to reply. You can close this: it keeps checking, and you get a notification when they reply.</string>
     <string name="imessage_check_blue">Blue. %1$s replied by iMessage, so your messages show blue on their iPhone.</string>
     <string name="imessage_check_green">Green. %1$s replied by text, so on their iPhone this conversation is green (or they replied from a phone that is not an iPhone). On the iPhone: delete the conversation with you, or turn iMessage off and on in Settings &gt; Messages, then check again.</string>
     <string name="imessage_check_went_as_text">The check also went out as a text through Google Messages. That should not happen: please send a problem report.</string>

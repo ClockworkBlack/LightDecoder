@@ -62,10 +62,12 @@ class BlueBubblesScreenTest {
         iMessage = IMessageManager.installForTesting(two.app, imRepo)
         IMessagePrefs.setEnabled(two.app, false)
         com.lightdecoder.imessage.IMessageLog.clear(two.app)
+        com.lightdecoder.imessage.IMessageChecks.resetForTesting()
     }
 
     @After
     fun tearDown() {
+        com.lightdecoder.imessage.IMessageChecks.resetForTesting()
         IMessagePrefs.setEnabled(two.app, false)
         IMessageManager.resetForTesting()
         two.tearDown()
@@ -384,13 +386,13 @@ class BlueBubblesScreenTest {
     fun checkIMessageSaysBlueWhenTheyReplyByIMessage() = runCheck(replyByIMessage = true)
 
     @Test
-    fun checkIMessageSaysGreenWhenTheyReplyByText() = runCheck(replyByIMessage = false)
+    fun checkIMessageSaysGreenWhenTheyReplyByTextEvenWithItsDialogClosed() = runCheck(replyByIMessage = false, closeFirst = true)
 
     /**
      * Check iMessage in Alice's Messages conversation: it goes through OpenBubbles' Reply button,
      * OpenBubbles shows it back, and Alice's reply (by iMessage, or by text) gives the verdict.
      */
-    private fun runCheck(replyByIMessage: Boolean) {
+    private fun runCheck(replyByIMessage: Boolean, closeFirst: Boolean = false) {
         two.env.pairedManager()
         IMessagePrefs.setEnabled(two.app, true)
         two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
@@ -436,6 +438,20 @@ class BlueBubblesScreenTest {
                     live = true,
                 )
                 scenario.waitFor("step 2 ticked") { steps(it).lines()[1].startsWith("\u2713") }
+                if (closeFirst) {
+                    shadowOf(two.app).grantPermissions(android.Manifest.permission.POST_NOTIFICATIONS)
+                    // Closed while waiting: it keeps checking, and the menu says so.
+                    scenario.onActivity { activity ->
+                        assertEquals(activity.getString(R.string.imessage_check_hide),
+                            activity.checkDialog!!.getButton(AlertDialog.BUTTON_POSITIVE).text.toString())
+                        activity.checkDialog!!.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+                    }
+                    org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                    scenario.onActivity { activity ->
+                        assertEquals(null, activity.checkDialog)
+                        assertEquals(activity.getString(R.string.imessage_check_running), menu(activity).findItem(R.id.action_check_imessage).title.toString())
+                    }
+                }
                 // Alice answers from her iPhone.
                 if (replyByIMessage) {
                     iMessage.record(
@@ -450,8 +466,21 @@ class BlueBubblesScreenTest {
                     it.onActivity { a -> text = a.getString(if (replyByIMessage) R.string.imessage_check_blue else R.string.imessage_check_green, "Alice") }
                     text
                 }
-                scenario.waitFor("the verdict") { verdict(it) == expected }
-                scenario.onActivity { assertTrue(steps(it).lines()[2].startsWith("\u2713")) }
+                if (closeFirst) {
+                    // The verdict comes as a notification; the menu reopens the finished check.
+                    val notifications = shadowOf(two.app.getSystemService(NotificationManager::class.java))
+                    scenario.waitFor("the verdict notification") {
+                        notifications.allNotifications.any { n -> n.extras.getCharSequence(android.app.Notification.EXTRA_TEXT)?.toString() == expected }
+                    }
+                    scenario.onActivity { activity ->
+                        assertEquals(activity.getString(R.string.imessage_check), menu(activity).findItem(R.id.action_check_imessage).title.toString())
+                    }
+                    assertTrue(com.lightdecoder.imessage.IMessageLog.read(two.app).any { it.contains("still checking in the background") })
+                    assertTrue(com.lightdecoder.imessage.IMessageLog.read(two.app).any { it.contains("(seen in the background)") })
+                } else {
+                    scenario.waitFor("the verdict") { verdict(it) == expected }
+                    scenario.onActivity { assertTrue(steps(it).lines()[2].startsWith("\u2713")) }
+                }
 
                 // The log tells the same story, with nothing of who or what.
                 val log = com.lightdecoder.imessage.IMessageLog.read(two.app).reversed()
