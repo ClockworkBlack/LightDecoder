@@ -2414,6 +2414,139 @@ class BlueBubblesScreenTest {
         }
     }
 
+    /** The iMessage library set up as Apple would answer sends, Alice's Messages conversation with her iMessage chat. */
+    private fun effectsSetUp() {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        val answer = appleSends()
+        directMode(asked)
+        com.lightdecoder.imessage.direct.DirectLink.installForTesting(two.app) { what, request, _ ->
+            if (what == com.lightdecoder.imessage.direct.DirectWire.SEND) asked += what to request
+            answer(what, request)
+        }
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+    }
+
+    private fun plays(activity: Activity) = (activity as ThreadActivity).effectPlayer.plays
+
+    private fun overlayShown(activity: Activity): Boolean {
+        val content = activity.findViewById<android.view.ViewGroup>(android.R.id.content)
+        return (0 until content.childCount).any { content.getChildAt(it) is com.lightdecoder.ui.chat.EffectOverlayView }
+    }
+
+    @Test
+    fun sendingWithSlamPlaysItOnceOnTheNewBubble() {
+        effectsSetUp()
+        directMessageWith("E1", "Hello", System.currentTimeMillis() - 60_000, com.lightdecoder.imessage.direct.IMessageExtra())
+        val slam = "com.apple.MobileSMS.expressivesend.impact"
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("her iMessage") { shownTexts(it).contains("Hello") }
+            scenario.onActivity { activity ->
+                assertTrue("nothing plays for a message without an effect", plays(activity).isEmpty())
+                activity.findViewById<EditText>(R.id.input).setText("Kaboom")
+                assertTrue(activity.findViewById<View>(R.id.send).performLongClick())
+            }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val picker = effectSheet()
+            picker.findViewById<android.widget.RadioGroup>(R.id.effectBubbleList)!!.getChildAt(0).performClick()
+            picker.findViewById<View>(R.id.effectSend)!!.performClick()
+            scenario.waitFor("Slam played on the sent bubble") { plays(it).isNotEmpty() }
+            scenario.onActivity { activity ->
+                val play = plays(activity).single()
+                assertEquals(slam, play.effect)
+                assertEquals(com.lightdecoder.ui.chat.EffectPlayer.Reason.SENT, play.reason)
+                assertFalse("a bubble effect", play.screen)
+                assertTrue(play.animated)
+            }
+            // Confirmed by Apple (another row, the same message): not again.
+            two.waitUntil("stored with it") { imRepo.message("imsg:S1") != null }
+            scenario.waitFor("the confirmed row") { a -> bubbleOf(a, "Kaboom") != null && shownTexts(a).count { it == "Kaboom" } == 1 }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper(500, java.util.concurrent.TimeUnit.MILLISECONDS)
+            scenario.onActivity { activity -> assertEquals(1, plays(activity).size) }
+        }
+    }
+
+    @Test
+    fun anIncomingConfettiSeenTheFirstTimePlaysButNotWhenOpenedAgain() {
+        effectsSetUp()
+        val confetti = "com.apple.messages.effect.CKConfettiEffect"
+        directMessageWith("C1", "Party!", System.currentTimeMillis() - 60_000, com.lightdecoder.imessage.direct.IMessageExtra(effect = confetti))
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("the confetti played") { plays(it).isNotEmpty() }
+            scenario.onActivity { activity ->
+                val play = plays(activity).single()
+                assertEquals("imsg:C1", play.messageId)
+                assertEquals(confetti, play.effect)
+                assertEquals(com.lightdecoder.ui.chat.EffectPlayer.Reason.RECEIVED, play.reason)
+                assertTrue("over the screen", play.screen)
+                assertEquals(1, (activity as ThreadActivity).effectPlayer.overlaysShown)
+            }
+            // One that arrives while the thread is open plays too.
+            val balloons = "com.apple.messages.effect.CKHappyBirthdayEffect"
+            directMessageWith("C2", "Happy birthday", System.currentTimeMillis(), com.lightdecoder.imessage.direct.IMessageExtra(effect = balloons))
+            scenario.waitFor("the balloons played") { plays(it).size == 2 }
+            scenario.onActivity { activity -> assertEquals("imsg:C2", plays(activity).last().messageId) }
+            scenario.waitFor("the effect over") { !overlayShown(it) }
+        }
+        // Opened again: seen already, nothing plays.
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("her iMessages") { shownTexts(it).containsAll(listOf("Party!", "Happy birthday")) }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper(500, java.util.concurrent.TimeUnit.MILLISECONDS)
+            scenario.onActivity { activity ->
+                assertTrue(plays(activity).isEmpty())
+                assertFalse(overlayShown(activity))
+            }
+        }
+    }
+
+    @Test
+    fun replayUnderTheBubblePlaysTheEffectAgain() {
+        effectsSetUp()
+        val slam = "com.apple.MobileSMS.expressivesend.impact"
+        // Read long ago: it does not play by itself.
+        directMessageWith("R1", "Boom", System.currentTimeMillis() - 3 * 60 * 60_000L, com.lightdecoder.imessage.direct.IMessageExtra(effect = slam))
+        directMessageWith("R2", "Later", System.currentTimeMillis() - 2 * 60 * 60_000L, com.lightdecoder.imessage.direct.IMessageExtra())
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("her iMessages") { shownTexts(it).containsAll(listOf("Boom", "Later")) }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper(300, java.util.concurrent.TimeUnit.MILLISECONDS)
+            scenario.onActivity { activity ->
+                assertTrue(plays(activity).isEmpty())
+                val boom = bubbleOf(activity, "Boom")!!
+                assertEquals("Sent with Slam", boom.findViewById<android.widget.TextView>(R.id.effect).text.toString())
+                val replay = boom.findViewById<android.widget.TextView>(R.id.effectReplay)
+                assertEquals(View.VISIBLE, replay.visibility)
+                assertEquals(activity.getString(R.string.imessage_effect_replay), replay.text.toString())
+                assertEquals("Replay Slam", replay.contentDescription.toString())
+                assertEquals(View.GONE, bubbleOf(activity, "Later")!!.findViewById<View>(R.id.effectReplay).visibility)
+                replay.performClick()
+                assertEquals(com.lightdecoder.ui.chat.EffectPlayer.Reason.REPLAY, plays(activity).single().reason)
+                replay.performClick()
+                assertEquals("as often as tapped", 2, plays(activity).size)
+            }
+        }
+    }
+
+    @Test
+    fun withAnimationsRemovedAnEffectDoesNotMoveButItsCaptionStays() {
+        effectsSetUp()
+        Settings.Global.putFloat(two.app.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 0f)
+        try {
+            val confetti = "com.apple.messages.effect.CKConfettiEffect"
+            directMessageWith("A1", "Party!", System.currentTimeMillis() - 60_000, com.lightdecoder.imessage.direct.IMessageExtra(effect = confetti))
+            ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+                scenario.waitFor("its turn") { plays(it).isNotEmpty() }
+                scenario.onActivity { activity ->
+                    assertFalse("skipped", plays(activity).single().animated)
+                    assertEquals(0, (activity as ThreadActivity).effectPlayer.overlaysShown)
+                    assertEquals("Sent with Confetti", bubbleOf(activity, "Party!")!!.findViewById<android.widget.TextView>(R.id.effect).text.toString())
+                }
+            }
+        } finally {
+            Settings.Global.putFloat(two.app.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f)
+        }
+    }
+
     @Test
     fun withoutAnIMessageChatSendHeldDownSaysEffectsAreForIMessageAndSendsNothing() {
         two.env.pairedManager()

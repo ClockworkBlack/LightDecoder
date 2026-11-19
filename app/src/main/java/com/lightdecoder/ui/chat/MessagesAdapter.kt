@@ -79,6 +79,9 @@ class MessagesAdapter(
 
         /** An iMessage app's card tapped (a game, a poll). */
         fun onAppCardTap(row: MessageRow) = Unit
+
+        /** "Replay" beside "Sent with Slam" tapped: play the message's effect again ([EffectPlayer]). */
+        fun onReplayEffect(row: MessageRow) = Unit
     }
 
     /** Messages whose invisible ink was tapped away, by id: their text shows. */
@@ -231,6 +234,17 @@ class MessagesAdapter(
         val effect = IMessageBubbles.effectCaption(context, extra)
         b.effect.visibility = if (effect == null) View.GONE else View.VISIBLE
         b.effect.text = effect.orEmpty()
+        b.effectRow.visibility = b.effect.visibility
+        // Replay: an effect this app can play again (all it names).
+        val replayable = effect != null && EffectKind.of(extra.effect) != null
+        b.effectReplay.visibility = if (replayable) View.VISIBLE else View.GONE
+        if (replayable) {
+            b.effectReplay.contentDescription =
+                context.getString(R.string.imessage_effect_replay_action, context.getString(IMessageExtra.effectName(extra.effect)!!))
+            b.effectReplay.setOnClickListener { callbacks.onReplayEffect(row) }
+        } else {
+            b.effectReplay.setOnClickListener(null)
+        }
 
         // Time and delivery status.
         b.time.text = TimeFormat.clock(context, row.timestampMs)
@@ -569,7 +583,11 @@ class MessagesAdapter(
 
     /** A row scrolled out of view: its pictures stop loading. */
     override fun onViewRecycled(holder: RecyclerView.ViewHolder) {
-        if (holder is MessageHolder) cancelMedia(holder.binding.mediaContainer)
+        if (holder is MessageHolder) {
+            cancelMedia(holder.binding.mediaContainer)
+            // An effect still playing on it is not carried over to the next message it shows.
+            EffectPlayer.settle(holder.binding.bubble)
+        }
     }
 
     private fun cancelMedia(container: ViewGroup) {

@@ -240,17 +240,39 @@
             android:layout_marginTop="-8dp"
             android:visibility="gone" />
 
-        <!-- "Sent with Slam" under an iMessage sent with an effect, as an iPhone shows it. -->
-        <TextView
-            android:id="@+id/effect"
+        <!-- "Sent with Slam · Replay" under an iMessage sent with an effect, as an iPhone shows it; Replay plays it again. -->
+        <LinearLayout
+            android:id="@+id/effectRow"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginHorizontal="8dp"
-            android:layout_marginTop="2dp"
-            android:importantForAccessibility="no"
-            android:textAppearance="?attr/textAppearanceLabelSmall"
-            android:textColor="?attr/colorOnSurfaceVariant"
-            android:visibility="gone" />
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/effect"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:importantForAccessibility="no"
+                android:textAppearance="?attr/textAppearanceLabelSmall"
+                android:textColor="?attr/colorOnSurfaceVariant"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/effectReplay"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="?attr/selectableItemBackground"
+                android:minHeight="32dp"
+                android:gravity="center_vertical"
+                android:paddingHorizontal="6dp"
+                android:text="@string/imessage_effect_replay"
+                android:textAppearance="?attr/textAppearanceLabelSmall"
+                android:textColor="?attr/colorPrimary"
+                android:visibility="gone" />
+        </LinearLayout>
 
         <!-- "Delivered" or "Read 9:41" under the user's latest iMessages, as an iPhone shows them. -->
         <TextView

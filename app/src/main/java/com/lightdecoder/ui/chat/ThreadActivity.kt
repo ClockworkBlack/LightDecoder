@@ -24,6 +24,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.VisibleForTesting
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
+import androidx.core.view.doOnLayout
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
@@ -269,6 +270,24 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private var readAloudSince: Long? = null
     private val readAloudSeen = HashSet<String>()
 
+    // --- message effects ---
+
+    /** Plays the effects messages were sent with ("Sent with Slam"): on send, on arrival, on Replay. */
+    @VisibleForTesting
+    internal lateinit var effectPlayer: EffectPlayer
+
+    /** Which incoming effects play by themselves: one newly seen in this thread ([EffectWatch]). */
+    private val effectWatch = EffectWatch()
+
+    /** The messages whose effect has played by itself, kept across openings. */
+    private val effectPlays by lazy { EffectPlays(applicationContext) }
+
+    /** An effect the user just sent, played once its message shows: Apple's id and when it was sent. */
+    private var sentEffect: Pair<String, Long>? = null
+
+    /** An incoming message whose effect plays as soon as its bubble is on screen. */
+    private var arrivedEffect: String? = null
+
     private val onArchiveChange: (ArchiveChange) -> Unit = { change ->
         // The same id can be a conversation of the other service: only this one's archive counts.
         val mine = change.service == manager.service &&
@@ -307,6 +326,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
 
         setUpList()
+        effectPlayer = EffectPlayer(this, binding.messages)
         setUpComposer()
         lifecycleScope.launch { voicePlayer.state.collect { adapter.updateVoiceViews(binding.messages, it) } }
         if (VoicePrefs.readNewAloud(this) && !reader.isAvailable) noteReaderUnavailable()
@@ -404,6 +424,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             readerInstance?.stop()
             readAloudSince = null
             dictationFor = null
+            effectWatch.reset()
+            effectPlayer.cancel()
+            sentEffect = null
+            arrivedEffect = null
             windowSize = PAGE
             growWindow = false
             growPending = false
@@ -495,6 +519,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         voicePlayer.release()
         readerInstance?.shutdown()
         readerInstance = null
+        if (::effectPlayer.isInitialized) effectPlayer.cancel()
         super.onDestroy()
     }
 
@@ -556,6 +581,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         // Status and reaction changes rebind in place; a cross-fade on each would flicker.
         (binding.messages.itemAnimator as? SimpleItemAnimator)?.supportsChangeAnimations = false
         binding.messages.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            // An arrived message's effect waits until it is scrolled to.
+            override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                if (newState == RecyclerView.SCROLL_STATE_IDLE && arrivedEffect != null) playWaitingEffects()
+            }
+
             override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
                 if (dy < 0 && layoutManager.findFirstVisibleItemPosition() <= LOAD_OLDER_THRESHOLD) loadOlder()
             }
@@ -774,6 +804,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         historyComplete = snapshot.historyComplete
         renderConversation()
         readNewAloud(messages)
+        val unreadAtOpen = snapshot.conversation?.unread == true || snapshot.companionUnread
+        effectWatch.arrived(messages, unreadAtOpen, System.currentTimeMillis(), effectPlays::contains)?.let { arrivedEffect = it.id }
 
         val scrollTo = target?.takeIf { t -> snapshot.rows.any { it.id == t } }
         if (target != null) targetMessageId = null
@@ -907,6 +939,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 scrollTo != null -> scrollToMessage(scrollTo)
                 atBottom -> if (items.isNotEmpty()) binding.messages.scrollToPosition(items.lastIndex)
                 anchor != null -> restoreAnchor(anchor)
+            }
+            // Once the rows are laid out where they now go: an effect waiting for its bubble plays.
+            if (sentEffect != null || arrivedEffect != null) {
+                binding.messages.doOnLayout { list -> list.post { playWaitingEffects() } }
             }
         }
     }
@@ -1484,6 +1520,54 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
     }
 
+    /**
+     * Plays the effect of the message the user just sent ([sentEffect]) and of one that arrived
+     * ([arrivedEffect]) once their bubbles are on screen; each at most once by itself ([effectPlays]).
+     */
+    private fun playWaitingEffects() {
+        if (isFinishing || isDestroyed) return
+        sentEffect?.let { (effect, sinceMs) ->
+            if (System.currentTimeMillis() - sinceMs > SENT_EFFECT_WAIT_MS) {
+                sentEffect = null
+            } else {
+                val row = EffectWatch.sentRow(messages, effect, sinceMs - SENT_EFFECT_CLOCK_SLACK_MS, effectPlays::contains)
+                if (row != null && playEffect(row, EffectPlayer.Reason.SENT)) sentEffect = null
+            }
+        }
+        arrivedEffect?.let { id ->
+            val row = messages.firstOrNull { it.id == id }
+            if (row == null || playEffect(row, EffectPlayer.Reason.RECEIVED)) arrivedEffect = null
+        }
+    }
+
+    /**
+     * Plays [row]'s effect on its bubble or over the thread; false (nothing played) while its bubble
+     * is not on screen. Sent and arrived effects play once ([effectPlays]); Replay as often as tapped.
+     */
+    private fun playEffect(row: MessageRow, reason: EffectPlayer.Reason): Boolean {
+        val effect = EffectWatch.effectOf(row) ?: return true
+        val auto = reason != EffectPlayer.Reason.REPLAY
+        if (auto && row.id in effectPlays) return true
+        val bubble = bubbleOnScreen(row.id) ?: return false
+        if (auto) effectPlays.add(row.id)
+        effectPlayer.play(row.id, effect, reason, bubble, row.text)
+        return true
+    }
+
+    /** The bubble of message [messageId] when its row is on screen; else null. */
+    private fun bubbleOnScreen(messageId: String): View? {
+        val index = adapter.currentList.indexOfFirst { it is ThreadItem.Message && it.row.id == messageId }
+        if (index < 0) return null
+        val row = layoutManager.findViewByPosition(index) ?: return null
+        if (row.bottom <= 0 || row.top >= binding.messages.height) return null
+        return row.findViewById<View>(R.id.bubble)?.takeIf { it.isShown }
+    }
+
+    /** "Replay" beside "Sent with Slam": the effect again. */
+    override fun onReplayEffect(row: MessageRow) {
+        playEffect(row, EffectPlayer.Reason.REPLAY)
+    }
+
     /** No text-to-speech: said once per app run, and the options go. */
     private fun noteReaderUnavailable() {
         if (!readerUnavailableShown) {
@@ -1639,6 +1723,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             // An inline reply to one of the iMessages shown here (threads under it through the iMessage library).
             val replyTo = replyTarget?.takeIf { it.conversationId == companion }?.id
             scrollToBottomNext = true
+            if (effect != null) sentEffect = effect to System.currentTimeMillis()
             clearComposerForSend()
             clearReply()
             clearAttachment()
@@ -1675,6 +1760,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         // Only ever a message of this conversation (onReply checks too).
         val replyTo = replyTarget?.takeIf { it.conversationId == id }?.id
         scrollToBottomNext = true
+        if (effect != null) sentEffect = effect to System.currentTimeMillis()
         clearComposerForSend()
         clearReply()
         clearAttachment()
@@ -3445,6 +3531,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
         /** How far behind this phone's clock a message may be stamped and still count as arriving now. */
         private const val READ_ALOUD_CLOCK_SLACK_MS = 2 * 60_000L
+
+        /** A sent effect not shown by then (the send failed early, the thread was left) is let go. */
+        private const val SENT_EFFECT_WAIT_MS = 2 * 60_000L
+
+        /** How long before the send tap its message may be stamped (the clock moved) and still be the one sent. */
+        private const val SENT_EFFECT_CLOCK_SLACK_MS = 5_000L
 
         /** The most new messages read out from one batch of arrivals (the newest ones). */
         private const val MAX_READ_AT_ONCE = 5

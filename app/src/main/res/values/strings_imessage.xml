@@ -212,6 +212,10 @@
     <string name="imessage_event_app_updated_unnamed">%1$s updated an iMessage app.</string>
     <!-- Under a message sent with an effect. %1$s: the effect (imessage_effect_*). -->
     <string name="imessage_sent_with">Sent with %1$s</string>
+    <!-- Beside "Sent with Slam": plays the effect again. -->
+    <string name="imessage_effect_replay">· Replay</string>
+    <!-- What TalkBack reads for Replay. %1$s: the effect (imessage_effect_*). -->
+    <string name="imessage_effect_replay_action">Replay %1$s</string>
     <string name="imessage_effect_pick_title">Send with effect</string>
     <!-- "Send with effect"'s two kinds, as on an iPhone: the bubble moves, or the whole screen. -->
     <string name="imessage_effect_tab_bubble">Bubble</string>
