@@ -23,6 +23,15 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.53 (versionCode 63) - back on main: the wrapper is set aside
+- The user found the OpenBubbles accessibility wrapper (branch ccr-4fee5e9f-jrrlhu-wrapper, last 0.5.52-wrapper,
+  versionCode 62) not working well and asked to go back to main. 0.5.53 is 0.5.49 with only the version raised,
+  so it installs over the wrapper builds (Android refuses a lower versionCode without an uninstall, which would
+  wipe the archives). The wrapper's accessibility service goes away with it; its rows in the iMessage archive
+  (sent "ld:wrap-" rows, "You unsent a message" lines) are ordinary rows and stay readable.
+- Unsend, Edit and reactions on iMessages are back to opening OpenBubbles on the chat. The wrapper branch is
+  kept as it was, with its notes (0.5.46-wrapper to 0.5.52-wrapper), in case it is picked up again.
+
 ## 0.5.49 (versionCode 58) - videos play in LightDecoder
 - `ui/chat/VideoPlayerActivity`: a conversation's video plays here, full screen, from its own file as it came
   (iPhone .mov in HEVC or H.264, MP4), with Media3 ExoPlayer + PlayerView (androidx.media3 1.5.1,
