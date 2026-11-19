@@ -121,6 +121,12 @@ object DirectArchive {
             val groupOnly: Boolean = false,
             /** The group was renamed: [conversation]'s name is its new one, even blank (the name taken off). */
             val renamed: Boolean = false,
+            /**
+             * Whether the user is in the group after this: false when they were removed from it or
+             * left it (on another device), true when they are in its members again; null when this
+             * says nothing about it (most messages).
+             */
+            val member: Boolean? = null,
         ) : Update()
 
         /** A message to take out of the archive. */
@@ -148,8 +154,11 @@ object DirectArchive {
         /** The sender unsent part [part] of a message ([fromMe]: the user, from another device). */
         data class Unsent(val messageId: String, val part: Int, val fromMe: Boolean, val senderName: String) : Update()
 
-        /** [participantId] (an address without its scheme) started or stopped typing. */
-        data class Typing(val conversationId: String, val participantId: String, val typing: Boolean) : Update()
+        /**
+         * [participantId] (an address without its scheme) started or stopped typing, in the chat
+         * whose guid is [groupGuid] if it has one (a group down to one other person is still that group).
+         */
+        data class Typing(val conversationId: String, val participantId: String, val typing: Boolean, val groupGuid: String? = null) : Update()
 
         /** The user read this message on another of their devices. */
         data class ReadElsewhere(val messageId: String) : Update()
@@ -227,7 +236,7 @@ object DirectArchive {
                 val conversation = inst.conversation
                 if (sender == null || fromMe || conversation == null) return Update.Ignore
                 val id = conversationId((conversation.participants + sender).distinct(), me, conversation.senderGuid)
-                Update.Typing(id, Handles.display(sender), m.v1)
+                Update.Typing(id, Handles.display(sender), m.v1, conversation.senderGuid?.takeIf { it.isNotBlank() })
             }
             is PushChatMessage.RenameMessage -> {
                 val conversation = inst.conversation ?: return Update.Ignore
@@ -238,7 +247,9 @@ object DirectArchive {
                 val conversation = inst.conversation ?: return Update.Ignore
                 val text = participantsText(conversation.participants, m.v1.newParticipants, sender, fromMe, me, nameOf, texts)
                     ?: return Update.Ignore
-                groupEvent(inst, conversation, m.v1.newParticipants, conversation.cvName, me, nameOf, text)
+                val event = groupEvent(inst, conversation, m.v1.newParticipants, conversation.cvName, me, nameOf, text)
+                // Removed from it, left it, or added back: whether the user can still write in it.
+                (event as? Update.Upsert)?.copy(member = m.v1.newParticipants.any { it in me }) ?: event
             }
             is PushChatMessage.IconChange -> {
                 val conversation = inst.conversation ?: return Update.Ignore
@@ -624,7 +635,9 @@ object DirectArchive {
 
     private fun linkOf(meta: LinkMeta?): IMessageExtra.Link? {
         val d = meta?.data ?: return null
-        val url = listOfNotNull(d.url, d.originalUrl).map { it.relative }.firstOrNull { it.isNotBlank() } ?: return null
+        val urls = listOfNotNull(d.url, d.originalUrl).map { it.relative }.filter { it.isNotBlank() }
+        // A web page's address before any other (which the card does not open).
+        val url = urls.firstOrNull(IMessageExtra::isWebAddress) ?: urls.firstOrNull() ?: return null
         val site = try {
             java.net.URI(url).host.orEmpty().removePrefix("www.")
         } catch (e: java.net.URISyntaxException) {

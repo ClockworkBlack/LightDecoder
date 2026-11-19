@@ -110,4 +110,15 @@ class IMessageExtraTest {
         assertFalse(app.copy(url = "data:game-state").opensInBrowser)
         assertFalse(app.copy(url = "").opensInBrowser)
     }
+
+    @Test
+    fun aLinksCardOpensOnlyAWebPage() {
+        assertTrue(IMessageExtra.Link("https://example.com/a", "A page").opensInBrowser)
+        assertTrue(IMessageExtra.Link("HTTP://example.com").opensInBrowser)
+        // The sender chooses the address: one of any other kind, behind a title of theirs, is not opened.
+        for (other in listOf("tel:+15551234567", "sms:+15551234567", "market://details?id=x", "content://x/y", "intent://x#Intent;end", "javascript:alert(1)", "")) {
+            assertFalse(other, IMessageExtra.Link(other, "Your bank").opensInBrowser)
+            assertFalse(other, IMessageExtra.isWebAddress(other))
+        }
+    }
 }

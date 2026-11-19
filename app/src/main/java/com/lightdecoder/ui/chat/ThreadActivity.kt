@@ -852,7 +852,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             val quoted = byId[replyId] ?: repos.firstNotNullOfOrNull { runCatching { it.message(replyId) }.getOrNull() } ?: continue
             val sender = if (quoted.isOutgoing) getString(R.string.chat_you)
             else quoted.senderName.ifBlank { getString(R.string.chat_unknown_sender) }
-            quotes[replyId] = Quote(replyId, sender, ThreadItems.preview(quoted, mediaLabel))
+            quotes[replyId] = Quote(replyId, sender, ThreadItems.preview(quoted, mediaLabel, IMessageBubbles.inkedLabel(this)))
         }
         return quotes
     }
@@ -1192,7 +1192,15 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         // The phone deleted it: there is nothing on the phone to send into any more.
         val deleted = conversation?.folderEnum == Folder.DELETED
         val readOnly = conversation?.readOnly == true || deleted
-        binding.readOnlyText.setText(if (deleted) R.string.chat_deleted_banner else R.string.chat_read_only)
+        // An iMessage group the user was removed from or left says so, as an iPhone does.
+        val left = !deleted && conversation?.let { it.readOnly && it.isGroup && com.lightdecoder.imessage.direct.DirectArchive.isGroup(it.id) } == true
+        binding.readOnlyText.setText(
+            when {
+                deleted -> R.string.chat_deleted_banner
+                left -> R.string.imessage_not_in_group
+                else -> R.string.chat_read_only
+            },
+        )
         binding.readOnlyText.visibility = if (readOnly) View.VISIBLE else View.GONE
         // While recording, the recording bar stands in for the composer.
         binding.composer.visibility = if (readOnly || recorder != null) View.GONE else View.VISIBLE
@@ -2188,7 +2196,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             // Through the iMessage library a reply to an iMessage threads under it, as on an iPhone.
             !com.lightdecoder.imessage.direct.DirectLink.get(this).repliesInline(row)
         binding.replySender.text = getString(if (asIMessage) R.string.imessage_replying_to else R.string.chat_replying_to, who)
-        binding.replyText.text = ThreadItems.preview(row, getString(R.string.chat_media_picture))
+        binding.replyText.text = ThreadItems.preview(row, getString(R.string.chat_media_picture), IMessageBubbles.inkedLabel(this))
         binding.input.requestFocus()
         // Ready to type the reply, with the message replied to still in its place above.
         androidx.core.view.WindowCompat.getInsetsController(window, binding.input)
@@ -2218,7 +2226,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             // An iMessage through the library: Apple's six tapbacks (and the user's own if it is another
             // emoji). Otherwise five quick ones (the user's own in the last place if it is another
             // emoji). Then "+" for any emoji.
-            val quick = if (directIMessage) tapbacks(mine) else quickReactions(mine)
+            val quick = if (directIMessage) tapbacks(mine.takeUnless { it == com.lightdecoder.imessage.direct.DirectArchive.STICKER_TAPBACK }) else quickReactions(mine)
             for (emoji in quick) {
                 val view = layoutInflater.inflate(R.layout.item_quick_reaction, b.reactionRow, false) as TextView
                 view.text = emoji
@@ -2237,7 +2245,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             }
             b.reactionRow.addView(more)
         }
-        b.actionRemoveReaction.visibility = if (reacts && mine != null) View.VISIBLE else View.GONE
+        // A sticker the user put on it (on another device) is not a tapback that can be taken back from here.
+        val removable = mine != null && !(directIMessage && mine == com.lightdecoder.imessage.direct.DirectArchive.STICKER_TAPBACK)
+        b.actionRemoveReaction.visibility = if (reacts && removable) View.VISIBLE else View.GONE
         b.actionRemoveReaction.setOnClickListener {
             sheet.dismiss()
             if (mine != null && isShown(row)) react(row, mine, remove = true)
@@ -2562,10 +2572,18 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     /** An iMessage's link preview tapped: the page opens in the browser. */
+    /** Opens a web page a message links to; an address of any other kind (the sender chose it) is not opened. */
     override fun onOpenLink(url: String) {
+        if (!com.lightdecoder.imessage.direct.IMessageExtra.isWebAddress(url)) {
+            toast(getString(R.string.chat_no_app))
+            return
+        }
         try {
             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE))
         } catch (e: ActivityNotFoundException) {
+            toast(getString(R.string.chat_no_app))
+        } catch (e: RuntimeException) {
+            // A handler that refuses to be opened (SecurityException), or an address it cannot take.
             toast(getString(R.string.chat_no_app))
         }
     }

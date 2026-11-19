@@ -52,6 +52,7 @@ class DirectWireTest {
             DirectArchive.Update.Unsent("imsg:G1", 0, true, ""),
             DirectArchive.Update.Typing("imsg:tel:+15550000002", "+15550000002", true),
             DirectArchive.Update.Typing("imsg:group:G", "a@b.c", false),
+            DirectArchive.Update.Typing("imsg:tel:+15550000002", "+15550000002", true, groupGuid = "G-S"),
             DirectArchive.Update.ReadElsewhere("imsg:G1"),
             DirectArchive.Update.Failed("imsg:G1", "Not delivered"),
         )
@@ -85,6 +86,116 @@ class DirectWireTest {
         assertEquals(DirectWire.encode(small).toString(), DirectWire.encodeUpdate(small).toString())
         val receipt = DirectArchive.Update.Receipt(listOf("imsg:G9"), DirectArchive.STATUS_RECEIVED)
         assertEquals(DirectWire.encode(receipt).toString(), DirectWire.encodeUpdate(receipt).toString())
+    }
+
+    @Test
+    fun aMessageStillTooLargeWithoutDescriptionsHasItsTextCutUntilItFitsAndNeverGoesOverTheLimit() {
+        val conv = ConversationDto(id = "imsg:tel:+15550000002", type = DirectArchive.TRANSPORT)
+        val text = "long pasted text ".repeat(20_000)
+        val msg = MessageDto(
+            id = "imsg:GT", conversationId = conv.id, timestampMs = 1, direction = "in", transport = DirectArchive.TRANSPORT,
+            text = text, parts = listOf(PartDto("0", "text", text)), extra = IMessageExtra(parts = mapOf(0 to text)).toJson(),
+        )
+        val big = DirectArchive.Update.Upsert(conv, msg)
+        assertTrue(DirectWire.encode(big).toString().length > 3 * DirectWire.MAX_UPDATE_CHARS)
+        val json = DirectWire.encodeUpdate(big)
+        assertTrue(json.toString().length <= DirectWire.MAX_UPDATE_CHARS)
+        val fitted = DirectWire.decode(JSONObject(json.toString())) as DirectArchive.Update.Upsert
+        // Stored, with the start of what was said.
+        assertEquals("imsg:GT", fitted.message.id)
+        assertTrue(fitted.message.text.length > 1_000)
+        assertTrue(text.startsWith(fitted.message.text.removeSuffix("…")))
+        assertTrue(fitted.message.text.endsWith("…"))
+        assertTrue(text.startsWith(fitted.message.parts.single().text.removeSuffix("…")))
+        // An app's card whose own state is huge: it goes, as a card without it.
+        val app = IMessageExtra(app = IMessageExtra.App(name = "Game", url = "https://example.com/?" + "x".repeat(300_000)))
+        val card = DirectArchive.Update.Upsert(conv, msg.copy(text = "", parts = emptyList(), extra = app.toJson()))
+        val cardJson = DirectWire.encodeUpdate(card)
+        assertTrue(cardJson.toString().length <= DirectWire.MAX_UPDATE_CHARS)
+        assertEquals("imsg:GT", (DirectWire.decode(cardJson) as DirectArchive.Update.Upsert).message.id)
+        // Nothing left to cut (thousands of members): taken as nothing, rather than handed over for ever.
+        val crowd = conv.copy(participants = (1..20_000).map { ParticipantDto(id = "tel:+1555$it", name = "Person $it") })
+        val tooMany = DirectWire.encodeUpdate(DirectArchive.Update.Upsert(crowd, msg.copy(text = "hi", parts = emptyList(), extra = "")))
+        assertTrue(tooMany.toString().length <= DirectWire.MAX_UPDATE_CHARS)
+        assertEquals(DirectArchive.Update.Ignore, DirectWire.decode(tooMany))
+    }
+
+    @Test
+    fun anUpdateTheMainProcessCanNeverStoreIsGivenUpOnAndOneItCannotReachIsNot() {
+        // The main process's answers.
+        assertEquals(Delivery.STORED, Delivery.of(DirectWire.ok()))
+        assertEquals(Delivery.REJECTED, Delivery.of(DirectWire.rejected(IllegalStateException("bad row"))))
+        assertEquals(Delivery.REJECTED, Delivery.of(DirectWire.error(DirectIpc.Client.TOO_LARGE)))
+        assertEquals(Delivery.UNREACHABLE, Delivery.of(DirectWire.error(DirectIpc.Client.UNREACHABLE)))
+        assertEquals(Delivery.FAILED, Delivery.of(DirectWire.error(DirectIpc.Client.DIED)))
+        assertEquals(Delivery.FAILED, Delivery.of(DirectWire.error(DirectIpc.Client.NO_ANSWER)))
+        assertEquals(Delivery.FAILED, Delivery.of(DirectWire.failure(android.database.sqlite.SQLiteFullException("full"))))
+        var clock = 0L
+        val pauses = ArrayList<Long>()
+        fun run(answers: Iterator<Delivery>): Pair<Boolean, Int> {
+            var tries = 0
+            val stored = kotlinx.coroutines.runBlocking {
+                UpdateDelivery.untilSettled({ tries++; answers.next() }, { pauses.add(it); clock += it }, { clock })
+            }
+            return stored to tries
+        }
+        // Stored on a later try, after waits that grow and stop growing at about a minute.
+        assertEquals(true to 9, run((List(8) { Delivery.UNREACHABLE } + Delivery.STORED).iterator()))
+        assertEquals(listOf(1_000L, 2_000L, 4_000L, 8_000L, 16_000L, 32_000L, 64_000L, 64_000L), pauses)
+        // One that can never be stored: a few tries, then given up on.
+        assertEquals(false to UpdateDelivery.MAX_REJECTED_TRIES, run(generateSequence { Delivery.REJECTED }.iterator()))
+        // A main process that keeps failing at it: given up on after a while.
+        clock = 0
+        val (stored, tries) = run(generateSequence { Delivery.FAILED }.iterator())
+        assertFalse(stored)
+        assertTrue(clock >= UpdateDelivery.GIVE_UP_MS && clock < UpdateDelivery.GIVE_UP_MS + 65_000)
+        assertTrue(tries > 3)
+        // A main process that cannot be reached: never given up on (nothing after it could be stored either).
+        clock = 0
+        val unreachable = generateSequence { Delivery.UNREACHABLE }.take(1_000).iterator()
+        val ended = kotlinx.coroutines.runBlocking {
+            UpdateDelivery.untilSettled({ if (unreachable.hasNext()) unreachable.next() else Delivery.STORED }, { clock += it }, { clock })
+        }
+        assertTrue(ended)
+        assertFalse(unreachable.hasNext())
+        // A delivery that throws counts as failed, and is tried again.
+        var thrown = false
+        assertTrue(
+            kotlinx.coroutines.runBlocking {
+                UpdateDelivery.untilSettled({ if (!thrown) { thrown = true; throw IllegalStateException("x") } else Delivery.STORED }, { }, { 0 })
+            },
+        )
+    }
+
+    @Test
+    fun theMainProcessRejectsAnUpdateItCanNeverStoreAndAsksAgainForOneItCouldNotStoreForNow() {
+        val good = DirectWire.encode(DirectArchive.Update.Remove("imsg:G1"))
+        val stored = ArrayList<DirectArchive.Update>()
+        assertEquals(Delivery.STORED, Delivery.of(DirectSinkService.take(good) { stored.add(it) }))
+        assertEquals(listOf<DirectArchive.Update>(DirectArchive.Update.Remove("imsg:G1")), stored)
+        // Unreadable: never stored, whatever the tries.
+        val unreadable = JSONObject().put("kind", "remove")
+        assertEquals(Delivery.REJECTED, Delivery.of(DirectSinkService.take(unreadable) { stored.add(it) }))
+        // Storing it fails as it would every time.
+        assertEquals(Delivery.REJECTED, Delivery.of(DirectSinkService.take(good) { throw IllegalArgumentException("bad") }))
+        // The storage full or busy: for now only.
+        assertEquals(Delivery.FAILED, Delivery.of(DirectSinkService.take(good) { throw android.database.sqlite.SQLiteFullException("full") }))
+        assertEquals(
+            Delivery.FAILED,
+            Delivery.of(DirectSinkService.take(good) { throw android.database.sqlite.SQLiteDatabaseLockedException("busy") }),
+        )
+    }
+
+    @Test
+    fun aRequestThatWasNeverHandedOverDidNotGoAndIsNotAskedAboutAgain() {
+        val dead = DirectIpc.Client.notHandedOver(android.os.DeadObjectException())
+        assertEquals(DirectIpc.Client.UNREACHABLE, DirectWire.errorOf(dead))
+        assertFalse(DirectWire.unconfirmed(dead))
+        val tooLarge = DirectIpc.Client.notHandedOver(android.os.TransactionTooLargeException())
+        assertEquals(DirectIpc.Client.TOO_LARGE, DirectWire.errorOf(tooLarge))
+        assertFalse(DirectWire.unconfirmed(tooLarge))
+        // Handed over, then the other process stopped: it may have gone.
+        assertTrue(DirectWire.unconfirmed(DirectWire.error(DirectIpc.Client.DIED)))
     }
 
     @Test

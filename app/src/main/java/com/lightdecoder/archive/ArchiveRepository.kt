@@ -220,7 +220,7 @@ class ArchiveRepository private constructor(
      *  5. The conversation's latest-message summary moves forward if this
      *     message is newer.
      */
-    fun upsertMessage(dto: MessageDto): UpsertResult = write { writeMessage(it, dto) }
+    fun upsertMessage(dto: MessageDto, snippet: String? = null): UpsertResult = write { writeMessage(it, dto, snippet) }
 
     /**
      * Stores a page of messages in one transaction, by the same rules.
@@ -302,7 +302,7 @@ class ArchiveRepository private constructor(
      * conversation's snippet when this is its latest message. False if
      * there is no such message.
      */
-    fun editText(messageId: String, text: String, editedAtMs: Long, extra: String?): Boolean = write { b ->
+    fun editText(messageId: String, text: String, editedAtMs: Long, extra: String?, snippet: String? = null): Boolean = write { b ->
         val found = query(b.db, "SELECT rowid, conversation_id, subject FROM messages WHERE message_id = ?", arrayOf(messageId)) {
             Triple(it.getLong(0), it.getString(1).orEmpty(), it.getString(2).orEmpty())
         }.firstOrNull() ?: return@write false
@@ -314,7 +314,7 @@ class ArchiveRepository private constructor(
             put("updated_at", b.now)
         }, "message_id = ?", arrayOf(messageId))
         indexForSearch(b.db, rowId, messageId, conversationId, subject, text)
-        followSnippet(b, conversationId, messageId, text)
+        followSnippet(b, conversationId, messageId, snippet ?: text)
         b.changed(Kind.MESSAGES, conversationId)
         true
     }
@@ -532,6 +532,25 @@ class ArchiveRepository private constructor(
             put("updated_at", b.now)
         }, "message_id IN (?, ?)", ids)
         b.changed(Kind.MESSAGES, conversationId)
+    }
+
+    /**
+     * Moves the message being sent [tmpOrMessageId] from local state [from] to [to] (its error
+     * cleared), only if it is still at [from]: of two callers at once, one gets true. False when
+     * it is not at [from] (or there is no such message).
+     */
+    fun setLocalStateIf(tmpOrMessageId: String, from: String, to: String): Boolean = write { b ->
+        val ids = arrayOf(MessageRow.tmpMessageId(tmpOrMessageId), tmpOrMessageId)
+        val conversationId = query(
+            b.db, "SELECT conversation_id FROM messages WHERE message_id IN (?, ?) AND local_state = ?", ids + from,
+        ) { it.getString(0) }.firstOrNull() ?: return@write false
+        val changed = b.db.update("messages", ContentValues().apply {
+            put("local_state", to)
+            put("error_text", "")
+            put("updated_at", b.now)
+        }, "message_id IN (?, ?) AND local_state = ?", ids + from)
+        if (changed > 0) b.changed(Kind.MESSAGES, conversationId)
+        changed > 0
     }
 
     // --- outbox -----------------------------------------------------------------
@@ -947,6 +966,14 @@ class ArchiveRepository private constructor(
         query(b.db, "SELECT media_local_path FROM outbox_queue WHERE conversation_id = ?", args) {
             b.outboxFiles.add(it.getString(0) ?: "")
         }
+        // Copies kept for sends with no queue entry (iMessage's, waiting or failed), unless
+        // another conversation's queued send uses the same one.
+        query(
+            b.db,
+            "SELECT local_path FROM media m WHERE m.message_id IN (SELECT message_id FROM messages WHERE conversation_id = ?) " +
+                "AND NOT EXISTS (SELECT 1 FROM outbox_queue q WHERE q.media_local_path = m.local_path AND q.conversation_id != ?)",
+            arrayOf(conversationId, conversationId),
+        ) { c -> (c.getString(0) ?: "").takeIf { outboxFileOrNull(it) != null }?.let { b.outboxFiles.add(it) } }
         b.db.execSQL(
             "DELETE FROM messages_fts WHERE docid IN (SELECT rowid FROM messages WHERE conversation_id = ?)",
             args,
@@ -960,7 +987,8 @@ class ArchiveRepository private constructor(
     }
 
     /** Returns [SKIPPED] for a message that was not stored (deleted or malformed). */
-    private fun writeMessage(b: Batch, dto: MessageDto): UpsertResult {
+    /** [snippet], when given, is what the conversation list shows for it instead of its text. */
+    private fun writeMessage(b: Batch, dto: MessageDto, snippet: String? = null): UpsertResult {
         if (dto.id.isEmpty()) return SKIPPED
         // A deletion needs only the message id; it may arrive without a conversation.
         if (dto.isDeleted) {
@@ -1056,7 +1084,7 @@ class ArchiveRepository private constructor(
         // A row of the conversation's own ("You named the conversation …") already says who.
         val system = dto.direction == "system"
         advanceConversation(
-            b, dto.conversationId, dto.id, dto.timestampMs, dto.text,
+            b, dto.conversationId, dto.id, dto.timestampMs, snippet ?: dto.text,
             dto.fromMe && !system, if (system) "" else dto.senderName,
         )
         b.changed(Kind.MESSAGES, dto.conversationId)
@@ -1070,6 +1098,8 @@ class ArchiveRepository private constructor(
         media(b.db, messageId).forEach {
             b.maybeOrphaned.add(it.localPath)
             b.maybeOrphaned.add(it.thumbPath)
+            // The copy kept for a send with no queue entry (iMessage's): nothing else has it.
+            if (outboxFileOrNull(it.localPath) != null && !outboxUses(b.db, it.localPath)) b.outboxFiles.add(it.localPath)
         }
         b.db.execSQL("DELETE FROM messages_fts WHERE docid = ?", arrayOf<Any>(found.first))
         b.db.delete("messages", "message_id = ?", arrayOf(messageId)) // cascades to media
@@ -1245,6 +1275,10 @@ class ArchiveRepository private constructor(
             require(!foreign) { "a file in $other's directory cannot belong to $service's archive" }
         }
     }
+
+    /** Whether a queued send's attachment copy is [path]. */
+    private fun outboxUses(db: SQLiteDatabase, path: String): Boolean =
+        query(db, "SELECT 1 FROM outbox_queue WHERE media_local_path = ? LIMIT 1", arrayOf(path)) { true }.isNotEmpty()
 
     private fun fileInside(path: String, dir: File): File? {
         if (path.isEmpty()) return null

@@ -147,4 +147,25 @@ class MadridSessionsTest {
         assertTrue(s.takeMoveSlot(1, 2_100))
         assertFalse("a handle not known", s.takeMoveSlot(9, 5_000))
     }
+
+    @Test
+    fun aHandleNeverHandedToTheAppIsForgottenWithItsSessionUnlessAnotherHasIt() {
+        val s = MadridSessions()
+        s.engage(MadridSessions.Handle(1, "S1", "imsg:R1", "imsg:c", "pkg"), 0)
+        // The app could not be reached: nothing of it is kept.
+        s.forget(1)
+        assertNull(s.handle(1))
+        assertNull(s.pkgOf("S1"))
+        assertFalse(s.isEngaged("S1", 1))
+        // Opened again meanwhile: the session stays, with the handle given out since.
+        s.engage(MadridSessions.Handle(2, "S2", "imsg:R2", "imsg:c", "pkg"), 0)
+        s.engage(MadridSessions.Handle(3, "S2", "imsg:R2", "imsg:c", "pkg"), 10)
+        s.forget(2)
+        assertNull(s.handle(2))
+        assertEquals("S2", s.handle(3)!!.session)
+        assertTrue(s.isEngaged("S2", 20))
+        // A handle not known: nothing happens.
+        s.forget(9)
+        assertEquals("pkg", s.pkgOf("S2"))
+    }
 }

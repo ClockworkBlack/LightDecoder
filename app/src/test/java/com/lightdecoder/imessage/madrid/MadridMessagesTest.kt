@@ -113,4 +113,26 @@ class MadridMessagesTest {
         val huge = ByteArray(MadridMessages.MAX_IMAGE_BYTES + 1).also { it[0] = 0xFF.toByte(); it[1] = 0xD8.toByte() }
         assertNull(MadridMessages.jpegOf(Base64.getEncoder().encodeToString(huge)))
     }
+
+    @Test
+    fun anExtensionsPictureIsDecodedSmallHoweverLargeItSaysItIs() {
+        // A picture that says it is 16000 by 16000 (about 1 GB decoded) is cut down to the screen's width.
+        val sample = MadridMessages.sampleSizeFor(16_000, 16_000, 1080)
+        assertEquals(16, sample)
+        assertTrue(16_000 / sample <= 1080)
+        assertEquals(1, MadridMessages.sampleSizeFor(800, 600, 1080))
+        assertEquals(2, MadridMessages.sampleSizeFor(600, 2000, 1080))
+        // A screen said to be tiny still gets a picture worth seeing.
+        assertEquals(1, MadridMessages.sampleSizeFor(400, 300, 0))
+        // A real one, decoded at a quarter of its size.
+        val jpeg = java.io.ByteArrayOutputStream().also {
+            android.graphics.Bitmap.createBitmap(2000, 1000, android.graphics.Bitmap.Config.ARGB_8888)
+                .compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, it)
+        }.toByteArray()
+        val decoded = MadridMessages.decodePicture(jpeg, 500)!!
+        assertEquals(500, decoded.width)
+        assertEquals(250, decoded.height)
+        // Not a picture: nothing, and no crash.
+        assertNull(MadridMessages.decodePicture(byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 1, 2, 3), 1080))
+    }
 }

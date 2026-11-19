@@ -4,7 +4,6 @@ import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
-import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Binder
 import android.os.Handler
@@ -176,7 +175,11 @@ class MadridHost private constructor(private val app: Context) : IMessageApps.Ho
         sessions.engage(MadridSessions.Handle(handle.id, balloon.session, root, row.conversationId, ext.pkg), now())
         scope.launch {
             val conn = connection(ext)
-            val api = conn.acquire() ?: return@launch toast(app.getString(R.string.imessage_app_no_answer, ext.label))
+            val api = conn.acquire() ?: run {
+                // Never handed to the app: neither the handle nor its session is kept.
+                sessions.forget(handle.id)
+                return@launch toast(app.getString(R.string.imessage_app_no_answer, ext.label))
+            }
             try {
                 api.didTapTemplate(MadridMessages.toMadridMessage(guid, balloon), handle, userCount(row.conversationId))
                 IMessageLog.add(app, "${IMessageLog.chatRef(row.conversationId)}: an iMessage app's card opened in ${ext.label}")
@@ -516,7 +519,7 @@ class MadridHost private constructor(private val app: Context) : IMessageApps.Ho
     /** "Send this GamePigeon game?", with its picture and caption; Send sends it as a new card. */
     private fun confirmCard(activity: Activity, ext: MadridApps.MadridApp, conversationId: String, card: IMessageExtra.App, jpeg: ByteArray?): android.app.Dialog? {
         if (activity.isFinishing || activity.isDestroyed) return null
-        val picture = jpeg?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }?.let { bitmap ->
+        val picture = jpeg?.let { MadridMessages.decodePicture(it, activity.resources.displayMetrics.widthPixels) }?.let { bitmap ->
             ImageView(activity).apply {
                 setImageBitmap(bitmap)
                 adjustViewBounds = true

@@ -85,7 +85,7 @@ class DirectService : Service() {
         sinkClient = DirectIpc.Client(this, DirectSinkService::class.java)
         engine.sink = DirectEngine.Sink { update ->
             val reply = sinkClient.call(DirectWire.UPDATE, DirectWire.encodeUpdate(update), SINK_TIMEOUT_MS)
-            DirectWire.errorOf(reply) == null
+            Delivery.of(reply)
         }
         scope.launch { engine.status.collect { update(it) } }
         // Bound by the main process for a send or unsend, even before a start command.

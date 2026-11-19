@@ -82,9 +82,9 @@ class DirectEngine private constructor(private val app: Context) {
     /** Apple did not answer in time: what was asked may have gone through all the same. */
     class Unconfirmed(message: String) : ImessageError(message)
 
-    /** Stores an archive change in the main process; true once it is stored. */
+    /** Stores an archive change in the main process: how it was taken. */
     fun interface Sink {
-        suspend fun deliver(update: DirectArchive.Update): Boolean
+        suspend fun deliver(update: DirectArchive.Update): Delivery
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -175,20 +175,20 @@ class DirectEngine private constructor(private val app: Context) {
         }
     }
 
-    /** Hands [update] to the main process until it is stored. */
+    /**
+     * Hands [update] to the main process until it is stored, or given up on ([UpdateDelivery]: one
+     * the main process can never store does not hold up every later one).
+     */
     private suspend fun store(update: DirectArchive.Update) {
-        var attempt = 0
-        while (true) {
-            val stored = try {
-                sink?.deliver(update) == true
+        val stored = UpdateDelivery.untilSettled({
+            try {
+                sink?.deliver(update) ?: Delivery.UNREACHABLE
             } catch (e: Exception) {
                 Log.w(TAG, "main process did not take an update", e)
-                false
+                Delivery.FAILED
             }
-            if (stored) return
-            delay((1000L shl attempt.coerceAtMost(6)))
-            attempt++
-        }
+        })
+        if (!stored) Log.w(TAG, "an update the main process could not store was skipped: ${update::class.simpleName}")
     }
 
     /**

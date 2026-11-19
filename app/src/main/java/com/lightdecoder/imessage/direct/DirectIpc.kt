@@ -12,6 +12,7 @@ import android.os.IBinder
 import android.os.Message
 import android.os.Messenger
 import android.os.RemoteException
+import android.os.TransactionTooLargeException
 import android.util.Log
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -117,8 +118,10 @@ object DirectIpc {
 
             override fun onServiceDisconnected(name: ComponentName?) {
                 // The other process died: every open request fails now (the caller retries or
-                // shows the error); the next request binds again once Android restarts it.
+                // shows the error); the next request binds again once Android restarts it. The
+                // connection made before is done with: the next request waits for the new one.
                 remote = null
+                connecting = null
                 pending.keys.toList().forEach { pending.remove(it)?.complete(DirectWire.error(DIED)) }
             }
 
@@ -146,6 +149,8 @@ object DirectIpc {
                     connecting = null
                     d.complete(null)
                 }
+                // Connected again while this was set up.
+                remote?.let { d.complete(it) }
             }
             withTimeoutOrNull(BIND_TIMEOUT_MS) { wait.await() }
         }
@@ -167,9 +172,15 @@ object DirectIpc {
                     },
                 )
             } catch (e: RemoteException) {
+                // Not handed over at all (a one-way send throws only then): it certainly did not
+                // go, so it is never reported as one that may have ([DIED]).
                 pending.remove(id)
-                remote = null
-                return DirectWire.error(DIED)
+                if (e !is TransactionTooLargeException) {
+                    // The other process is gone: the next request binds again.
+                    remote = null
+                    bindLock.withLock { connecting = null }
+                }
+                return notHandedOver(e)
             }
             return withTimeoutOrNull(timeoutMs) { answer.await() } ?: run {
                 pending.remove(id)
@@ -189,8 +200,19 @@ object DirectIpc {
 
         companion object {
             private const val BIND_TIMEOUT_MS = 15_000L
+
+            /** The other process could not be reached, or the request could not be handed to it: it did not go. */
             const val UNREACHABLE = "LightDecoder's iMessage part could not be reached."
+
+            /** The request was too large to be handed to the other process: it did not go, and never will as it is. */
+            const val TOO_LARGE = "This is too large to send to LightDecoder's iMessage part."
+
+            /** The other process stopped after the request was handed to it: it may have gone through. */
             const val DIED = "LightDecoder's iMessage part stopped while working on this."
+
+            /** The answer to a request whose send threw [e]: it was never handed over. */
+            fun notHandedOver(e: RemoteException): JSONObject =
+                DirectWire.error(if (e is TransactionTooLargeException) TOO_LARGE else UNREACHABLE)
             const val NO_ANSWER = "LightDecoder's iMessage part did not answer in time."
         }
     }

@@ -141,6 +141,16 @@ class MadridSessions(
         return true
     }
 
+    /**
+     * Handle [id] was never handed to the app (it could not be reached): it goes, and its session
+     * with it unless another handle was given out for it since.
+     */
+    @Synchronized
+    fun forget(id: Int) {
+        val handle = handles.remove(id) ?: return
+        if (handles.values.none { it.session == handle.session }) sessions.remove(handle.session)
+    }
+
     private fun sessionOf(id: Int): Session? = handles[id]?.let { sessions[it.session] }
 
     companion object {

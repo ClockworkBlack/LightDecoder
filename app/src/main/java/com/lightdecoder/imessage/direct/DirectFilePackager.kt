@@ -60,19 +60,7 @@ class DirectFilePackager(context: Context) : KotlinFilePackager {
     }
 
     /** A JPEG of a video's first frame, at most [STILL_PX] on its longer side; null if there is none. */
-    private fun still(r: MediaMetadataRetriever): ByteArray? {
-        val frame = r.frameAtTime ?: return null
-        val scale = STILL_PX.toFloat() / maxOf(frame.width, frame.height)
-        val small = if (scale < 1f) {
-            Bitmap.createScaledBitmap(frame, (frame.width * scale).toInt().coerceAtLeast(1), (frame.height * scale).toInt().coerceAtLeast(1), true)
-        } else {
-            frame
-        }
-        return ByteArrayOutputStream().use { out ->
-            small.compress(Bitmap.CompressFormat.JPEG, 80, out)
-            out.toByteArray()
-        }
-    }
+    private fun still(r: MediaMetadataRetriever): ByteArray? = r.frameAtTime?.let { jpegOf(it, STILL_PX) }
 
     /** A picture, by its size as it is shown; null for anything else. */
     private fun picture(path: String): PackagedFile? {
@@ -83,6 +71,45 @@ class DirectFilePackager(context: Context) : KotlinFilePackager {
     companion object {
         private const val TAG = "DirectFilePackager"
         private const val STILL_PX = 320
+
+        /** The still a video's bubble shows, at most this on its longer side. */
+        const val BUBBLE_STILL_PX = 720
+
+        /**
+         * A JPEG of the first frame of the video at [path], at most [maxPx] on its longer side, as
+         * its bubble shows it; null when it has none or cannot be read.
+         */
+        fun videoStill(path: String, maxPx: Int = BUBBLE_STILL_PX): ByteArray? {
+            val r = MediaMetadataRetriever()
+            return try {
+                r.setDataSource(path)
+                val frame = r.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: r.frameAtTime ?: return null
+                jpegOf(frame, maxPx)
+            } catch (e: RuntimeException) {
+                null
+            } catch (e: OutOfMemoryError) {
+                null
+            } finally {
+                try {
+                    r.release()
+                } catch (e: Exception) {
+                    // Nothing to release.
+                }
+            }
+        }
+
+        private fun jpegOf(frame: Bitmap, maxPx: Int): ByteArray {
+            val scale = maxPx.toFloat() / maxOf(frame.width, frame.height)
+            val small = if (scale < 1f) {
+                Bitmap.createScaledBitmap(frame, (frame.width * scale).toInt().coerceAtLeast(1), (frame.height * scale).toInt().coerceAtLeast(1), true)
+            } else {
+                frame
+            }
+            return ByteArrayOutputStream().use { out ->
+                small.compress(Bitmap.CompressFormat.JPEG, 80, out)
+                out.toByteArray()
+            }
+        }
 
         /** A picture's width and height as it is shown (turned as its EXIF says); null for anything else. */
         fun pictureSize(path: String): Pair<Int, Int>? {

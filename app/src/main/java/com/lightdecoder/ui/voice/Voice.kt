@@ -17,7 +17,11 @@ object ReadAloudText {
      * message that only carries media. Null when there is nothing to say.
      */
     fun sentence(context: Context, row: MessageRow): String? {
-        val body = row.text.trim().ifEmpty {
+        // Invisible ink is not read out: it says only how it was sent.
+        val text = com.lightdecoder.imessage.direct.IMessageExtra.shownText(
+            row.text, row.extra, com.lightdecoder.ui.chat.IMessageBubbles.inkedLabel(context),
+        )
+        val body = text.trim().ifEmpty {
             when {
                 row.media.isEmpty() -> return null
                 row.media.any { it.mime.isEmpty() || it.mime.startsWith("image/") } ->

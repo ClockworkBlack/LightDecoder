@@ -59,6 +59,8 @@ object IMessageLight {
         val link = com.lightdecoder.imessage.direct.DirectLink.get(context)
         if (link.active) {
             if (companion == null) return Reading(State.OFF, if (isGroup) R.string.imessage_light_group_direct else R.string.imessage_light_no_chat)
+            // A group the user was removed from or left: as on an iPhone, nothing goes to it.
+            if (link.isLeft(companion)) return Reading(State.OFF, R.string.imessage_light_left)
             return if (link.canSend(companion)) Reading(State.ACTIVE, R.string.imessage_light_direct)
             else Reading(State.PROBLEM, R.string.imessage_light_unreachable)
         }

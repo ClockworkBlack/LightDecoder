@@ -790,6 +790,27 @@ class DirectLinkTest {
     }
 
     @Test
+    fun aStickerTheUserPutOnElsewhereIsNotTakenBackAsAnEmojiTapback() {
+        val asked = Collections.synchronizedList(ArrayList<Pair<Int, JSONObject>>())
+        val link = fakeLink(asked) { _, _ -> DirectWire.guid("T-OWN") }
+        link.apply(incoming("TS1", bob, "nice"))
+        // From the user's iPhone: a sticker on it.
+        link.apply(DirectArchive.Update.Reaction("imsg:TS1", "me", DirectArchive.STICKER_TAPBACK, true, true, 7))
+        try {
+            runBlocking { link.react("imsg:TS1", DirectArchive.STICKER_TAPBACK, remove = true) }
+            fail("a sticker taken back as an emoji tapback")
+        } catch (e: DirectEngine.ImessageError) {
+            assertEquals("A sticker can only be taken off on an iPhone, iPad or Mac.", e.message)
+        }
+        // Nothing asked of Apple, and it still shows, as it does on everyone's iPhone.
+        assertTrue(asked.none { it.first == DirectWire.REACT })
+        assertEquals(DirectArchive.STICKER_TAPBACK, repo.message("imsg:TS1")!!.reactions.single { it.fromMe }.emoji)
+        // A tapback can still be put on it.
+        runBlocking { link.react("imsg:TS1", "❤️", remove = false) }
+        assertEquals("❤️", asked.single { it.first == DirectWire.REACT }.second.getString("emoji"))
+    }
+
+    @Test
     fun aRefusedTapbackLeavesOneChosenSinceOnAnotherDevice() {
         val asked = Collections.synchronizedList(ArrayList<Pair<Int, JSONObject>>())
         // The tapback the user puts on it on their iPhone while Apple is asked.
@@ -1260,7 +1281,40 @@ class DirectLinkTest {
         assertEquals(id, repo.message("imsg:GN4")!!.conversationId)
         // Events without a name (members changed) leave it as it was.
         assertEquals("Ski trip", repo.conversation(id)!!.name)
+        // No longer in it: as on an iPhone, nothing goes to it (no composer, tapbacks, edits) and it says why.
+        assertTrue(repo.conversation(id)!!.readOnly)
+        assertTrue(link.isLeft(id))
+        assertNull(link.targetOf(id))
+        directModeOn()
+        assertFalse(link.canSend(id))
+        IMessagePrefs.setEnabled(context, true)
+        assertEquals(
+            IMessageLight.Reading(IMessageLight.State.OFF, com.lightdecoder.R.string.imessage_light_left),
+            IMessageLight.forConversation(context, id, isGroup = true),
+        )
+        // A message from someone still in it changes nothing about that.
+        link.apply(event("GN5", alice, says("bye then"), listOf(bob, alice), "G-N", ts = 1_700_000_013_000L))
+        assertEquals(id, repo.message("imsg:GN5")!!.conversationId)
+        assertTrue(link.isLeft(id))
+        // Added back: in it again.
+        link.apply(
+            event(
+                "GN6", bob, PushChatMessage.ChangeParticipants(uniffi.rust_bridge.ChangeParticipantMessage(listOf(me, bob, alice), 4UL)), listOf(bob, alice), "G-N",
+                ts = 1_700_000_014_000L,
+            ),
+        )
+        assertFalse(link.isLeft(id))
+        assertFalse(repo.conversation(id)!!.readOnly)
         assertEquals("Ski trip", link.targetOf(id)!!.groupName)
+        assertTrue(link.canSend(id))
+        // Left on the user's other device: the same.
+        link.apply(
+            event(
+                "GN7", me, PushChatMessage.ChangeParticipants(uniffi.rust_bridge.ChangeParticipantMessage(listOf(bob, alice), 5UL)), listOf(me, bob, alice), "G-N",
+                ts = 1_700_000_015_000L,
+            ),
+        )
+        assertTrue(link.isLeft(id))
     }
 
     private fun says(text: String) = PushChatMessage.Message(
@@ -1328,6 +1382,12 @@ class DirectLinkTest {
         assertNull(repo.conversation("imsg:$bob"))
         assertTrue(repo.conversation(id)!!.isGroup)
         assertEquals("Pair", repo.conversation(id)!!.name)
+        // Bob typing in it shows there, not in a chat with him; and his message there ends it.
+        val manager = IMessageManager.get(context)
+        link.apply(event("GST", bob, PushChatMessage.Typing(true, null), listOf(me, bob), "G-S"))
+        assertEquals(mapOf(id to setOf("+15559876543")), manager.typing.value)
+        link.apply(event("GS3b", bob, says("still us"), listOf(me, bob), "G-S", ts = 1_700_000_010_500L))
+        assertTrue(manager.typing.value.isEmpty())
         // Someone added back to it: the group's event.
         link.apply(
             event("GS4", bob, PushChatMessage.ChangeParticipants(uniffi.rust_bridge.ChangeParticipantMessage(listOf(me, bob, alice), 3UL)), listOf(me, bob), "G-S", ts = 1_700_000_011_000L),
@@ -1377,6 +1437,57 @@ class DirectLinkTest {
     }
 
     @Test
+    fun aMessageHandedOverAgainLeavesAChatTheUserReadAsRead() {
+        val link = DirectLink.get(context)
+        link.apply(incoming("UR1", bob, "hi"))
+        assertTrue(repo.conversation("imsg:$bob")!!.unread)
+        runBlocking { link.markRead("imsg:$bob") }
+        assertFalse(repo.conversation("imsg:$bob")!!.unread)
+        // Apple's journal hands it over again after a restart.
+        link.apply(incoming("UR1", bob, "hi"))
+        assertFalse(repo.conversation("imsg:$bob")!!.unread)
+        // A new one does make it unread.
+        link.apply(incoming("UR2", bob, "again", ts = 1_700_000_001_000L))
+        assertTrue(repo.conversation("imsg:$bob")!!.unread)
+    }
+
+    @Test
+    fun aFailedMessageRetriedTwiceOrRetriedWhileItGoesGoesOnce() {
+        DirectLink.get(context).apply(incoming("B0", bob, "hi"))
+        directModeOn()
+        val asked = Collections.synchronizedList(ArrayList<Pair<Int, JSONObject>>())
+        val release = java.util.concurrent.CountDownLatch(1)
+        val refuse = java.util.concurrent.atomic.AtomicBoolean(true)
+        val link = fakeLink(asked) { what, _ ->
+            when {
+                what != DirectWire.SEND -> DirectWire.ok()
+                refuse.get() -> DirectWire.error("Apple refused the message: no")
+                else -> { release.await(5, java.util.concurrent.TimeUnit.SECONDS); DirectWire.sent("RT-1", NOW) }
+            }
+        }
+        val tmpId = link.sendText("imsg:$bob", "once", null)
+        fun local() = repo.message(MessageRow.tmpMessageId(tmpId))
+        waitFor("refused") { local()?.localState == com.lightdecoder.archive.LocalState.FAILED }
+        refuse.set(false)
+        // Two taps on the failed bubble before the list redraws.
+        assertTrue(link.retry(tmpId))
+        assertTrue(link.retry(tmpId))
+        waitFor("going again") { synchronized(asked) { asked.count { it.first == DirectWire.SEND } } == 2 }
+        // A tap on a bubble shown before it went again: nothing more goes.
+        assertTrue(link.retry(tmpId))
+        release.countDown()
+        waitFor("sent") { repo.message("imsg:RT-1") != null }
+        Thread.sleep(200)
+        assertEquals(2, synchronized(asked) { asked.count { it.first == DirectWire.SEND } })
+        // Only one of two at once moves it from failed.
+        repo.insertLocalOutgoing("t-cas", "imsg:$bob", "x", null, null, null, null, NOW)
+        repo.setLocalState("t-cas", com.lightdecoder.archive.LocalState.FAILED, "no")
+        assertTrue(repo.setLocalStateIf("t-cas", com.lightdecoder.archive.LocalState.FAILED, com.lightdecoder.archive.LocalState.PENDING))
+        assertFalse(repo.setLocalStateIf("t-cas", com.lightdecoder.archive.LocalState.FAILED, com.lightdecoder.archive.LocalState.PENDING))
+        assertEquals(com.lightdecoder.archive.LocalState.PENDING, repo.message(MessageRow.tmpMessageId("t-cas"))!!.localState)
+    }
+
+    @Test
     fun invisibleInkStaysHiddenInTheNotification() {
         IMessagePrefs.setEnabled(context, true)
         IMessagePrefs.setNotifyMessages(context, true)
@@ -1398,6 +1509,19 @@ class DirectLinkTest {
         )
         assertEquals(listOf("Sent with Invisible Ink"), said())
         assertEquals("the secret", repo.message("imsg:INK1")!!.text)
+        // Nor anywhere else outside its bubble: the conversation list, a reply's quote, read aloud.
+        assertEquals("Sent with Invisible Ink", repo.conversation("imsg:$bob")!!.snippet)
+        val row = repo.message("imsg:INK1")!!
+        assertEquals("Sent with Invisible Ink", com.lightdecoder.ui.chat.ThreadItems.preview(row, "Picture", "Sent with Invisible Ink"))
+        assertEquals("Bob said: Sent with Invisible Ink", com.lightdecoder.ui.voice.ReadAloudText.sentence(context, row.copy(senderName = "Bob")))
+        // Edited: still hidden there.
+        link.apply(DirectArchive.Update.Edit("imsg:INK1", "the new secret", 0, 1_700_000_020_000L))
+        assertEquals("the new secret", repo.message("imsg:INK1")!!.text)
+        assertEquals("Sent with Invisible Ink", repo.conversation("imsg:$bob")!!.snippet)
+        // Text without it shows as it is.
+        link.apply(incoming("INK2", bob, "plain words", ts = 1_700_000_030_000L))
+        assertEquals("plain words", repo.conversation("imsg:$bob")!!.snippet)
+        assertEquals("plain words", com.lightdecoder.ui.chat.ThreadItems.preview(repo.message("imsg:INK2")!!, "Picture", "Sent with Invisible Ink"))
     }
 
     @Test

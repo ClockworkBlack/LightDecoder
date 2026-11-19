@@ -34,7 +34,14 @@ data class IMessageExtra(
     val unsent: Set<Int> = emptySet(),
 ) {
     /** A link preview: the address, the page's title and summary, and the site it is on. */
-    data class Link(val url: String, val title: String = "", val summary: String = "", val site: String = "")
+    data class Link(val url: String, val title: String = "", val summary: String = "", val site: String = "") {
+        /**
+         * Whether a tap may open it: a web page only. The sender chooses the address, so one of any
+         * other kind (a phone number to call, another app's link) behind a title of their choosing
+         * is not opened.
+         */
+        val opensInBrowser: Boolean get() = isWebAddress(url)
+    }
 
     /**
      * An iMessage app's balloon. [root] is the archive id of the message that started its session
@@ -66,8 +73,7 @@ data class IMessageExtra(
         fun summary(): String = cardCaption.ifBlank { shownName }
 
         /** Whether a tap can open it in the browser (an app that keeps its state in a web address, as a Mac opens it). */
-        val opensInBrowser: Boolean
-            get() = url.startsWith("https://", ignoreCase = true) || url.startsWith("http://", ignoreCase = true)
+        val opensInBrowser: Boolean get() = isWebAddress(url)
 
         /** As stored with the message (and as it crosses to the ":imessage" process, [DirectWire]). */
         fun toJson(): JSONObject = JSONObject()
@@ -159,8 +165,20 @@ data class IMessageExtra(
         @StringRes
         fun effectName(id: String?): Int? = EFFECTS.firstOrNull { it.first == id }?.second
 
+        /** Whether [url] is a web page's address (http or https). */
+        fun isWebAddress(url: String): Boolean =
+            url.startsWith("https://", ignoreCase = true) || url.startsWith("http://", ignoreCase = true)
+
         /** Whether [id] is the invisible ink effect. */
         fun isInvisibleInk(id: String?): Boolean = id == INVISIBLE_INK
+
+        /**
+         * A message's [text] wherever it shows outside its bubble (the conversation list, a reply's
+         * quote, a notification, read aloud): [inkedLabel] ("Sent with Invisible Ink") for a text
+         * sent with invisible ink ([extraJson] is its stored extra), as on an iPhone; else [text].
+         */
+        fun shownText(text: String, extraJson: String, inkedLabel: String): String =
+            if (text.isNotEmpty() && extraJson.isNotEmpty() && isInvisibleInk(parse(extraJson).effect)) inkedLabel else text
 
         /** Reads what [toJson] wrote; anything unreadable gives an empty one. */
         fun parse(json: String): IMessageExtra {

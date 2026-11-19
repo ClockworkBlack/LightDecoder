@@ -164,9 +164,13 @@ object ThreadItems {
     /** Pictures sent together arrive within this of each other. */
     const val STACK_GAP_MS = 3 * 60 * 1000L
 
-    /** A one-line preview of a message for quotes and the reply bar; [mediaLabel] when it has no text. */
-    fun preview(row: MessageRow, mediaLabel: String): String {
-        val text = row.text.lineSequence().firstOrNull { it.isNotBlank() }?.trim().orEmpty()
+    /**
+     * A one-line preview of a message for quotes and the reply bar; [mediaLabel] when it has no
+     * text, [inkedLabel] (when given) for a text sent with invisible ink, which shows only in its bubble.
+     */
+    fun preview(row: MessageRow, mediaLabel: String, inkedLabel: String = ""): String {
+        val shown = if (inkedLabel.isEmpty()) row.text else com.lightdecoder.imessage.direct.IMessageExtra.shownText(row.text, row.extra, inkedLabel)
+        val text = shown.lineSequence().firstOrNull { it.isNotBlank() }?.trim().orEmpty()
         return when {
             text.isNotEmpty() -> text.take(PREVIEW_CHARS)
             row.media.isNotEmpty() -> mediaLabel

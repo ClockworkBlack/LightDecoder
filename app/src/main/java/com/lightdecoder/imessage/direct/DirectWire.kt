@@ -256,10 +256,24 @@ object DirectWire {
 
     private const val KEY_UNCONFIRMED = "unconfirmed"
 
+    /**
+     * The answer to an [UPDATE] the main process can never store, whatever the number of tries
+     * (it cannot be read, or storing it fails): the ":imessage" process gives up on it, after a few
+     * tries ([UpdateDelivery]), instead of holding every later one behind it.
+     */
+    fun rejected(e: Throwable): JSONObject = error(DirectEngine.readable(e)).put(KEY_REJECTED, true)
+
+    /** Whether [o] says the [UPDATE] can never be stored: [rejected], or too large for the other process to be handed. */
+    fun isRejected(o: JSONObject): Boolean =
+        errorOf(o) != null && (o.optBoolean(KEY_REJECTED) || errorOf(o) == DirectIpc.Client.TOO_LARGE)
+
+    private const val KEY_REJECTED = "rejected"
+
     fun encode(u: DirectArchive.Update): JSONObject = when (u) {
         is DirectArchive.Update.Upsert -> JSONObject().put("kind", "upsert")
             .put("conversation", u.conversation.toJson()).put("message", u.message.toJson())
             .apply { u.groupGuid?.let { put("groupGuid", it).put("groupName", u.groupName) } }.put("groupOnly", u.groupOnly).put("renamed", u.renamed)
+            .apply { u.member?.let { put("member", it) } }
         is DirectArchive.Update.Remove -> JSONObject().put("kind", "remove").put("messageId", u.messageId)
         is DirectArchive.Update.Receipt -> JSONObject().put("kind", "receipt")
             .put("messageIds", JSONArray(u.messageIds)).put("status", u.status)
@@ -271,7 +285,7 @@ object DirectWire {
         is DirectArchive.Update.Unsent -> JSONObject().put("kind", "unsent").put("messageId", u.messageId).put("part", u.part)
             .put("fromMe", u.fromMe).put("senderName", u.senderName)
         is DirectArchive.Update.Typing -> JSONObject().put("kind", "typing").put("conversationId", u.conversationId)
-            .put("participantId", u.participantId).put("typing", u.typing)
+            .put("participantId", u.participantId).put("typing", u.typing).apply { u.groupGuid?.let { put("groupGuid", it) } }
         is DirectArchive.Update.ReadElsewhere -> JSONObject().put("kind", "readElsewhere").put("messageId", u.messageId)
         is DirectArchive.Update.Failed -> JSONObject().put("kind", "failed").put("messageId", u.messageId).put("error", u.error)
         DirectArchive.Update.Ignore -> JSONObject().put("kind", "ignore")
@@ -285,10 +299,13 @@ object DirectWire {
     const val MAX_UPDATE_CHARS = 100_000
 
     /**
-     * [u] as it crosses to the main process ([UPDATE]): [encode]d, small enough for one Binder
-     * transaction. A message that is not ([MAX_UPDATE_CHARS]) drops its attachments' largest
-     * descriptions, one at a time, until it is: those attachments then cannot be downloaded, but
-     * the message is stored, instead of being handed over again and again, ahead of every later one.
+     * [u] as it crosses to the main process ([UPDATE]): [encode]d, never more than
+     * [MAX_UPDATE_CHARS]. A message that is larger drops, one step at a time until it fits: its
+     * attachments' largest descriptions (those attachments then cannot be downloaded), then the
+     * per-part copy of its text kept in its extra, then halves of its longest text (or its extra,
+     * when that is longest). Only one that still does not fit with all of that cut (a conversation
+     * of thousands of members) becomes [DirectArchive.Update.Ignore]. Either way it is taken,
+     * instead of being handed over again and again, ahead of every later one.
      */
     fun encodeUpdate(u: DirectArchive.Update): JSONObject {
         var update = u
@@ -296,10 +313,38 @@ object DirectWire {
             val json = encode(update)
             val upsert = update as? DirectArchive.Update.Upsert ?: return json
             if (json.toString().length <= MAX_UPDATE_CHARS) return json
-            val largest = upsert.message.parts.filter { it.key.isNotEmpty() }.maxByOrNull { it.key.size } ?: return json
-            val parts = upsert.message.parts.map { if (it === largest) it.copy(key = ByteArray(0)) else it }
-            update = upsert.copy(message = upsert.message.copy(parts = parts))
+            update = smaller(upsert) ?: return encode(DirectArchive.Update.Ignore)
         }
+    }
+
+    /** [u] one step smaller (see [encodeUpdate]), or null when nothing is left to cut. */
+    private fun smaller(u: DirectArchive.Update.Upsert): DirectArchive.Update.Upsert? {
+        val m = u.message
+        m.parts.filter { it.key.isNotEmpty() }.maxByOrNull { it.key.size }?.let { largest ->
+            return u.copy(message = m.copy(parts = m.parts.map { if (it === largest) it.copy(key = ByteArray(0)) else it }))
+        }
+        val extra = IMessageExtra.parse(m.extra)
+        if (extra.parts.isNotEmpty()) return u.copy(message = m.copy(extra = extra.copy(parts = emptyMap()).toJson()))
+        val longestPart = m.parts.filter { !it.isMedia }.maxByOrNull { it.text.length }
+        val longest = listOf(m.text.length, m.extra.length, longestPart?.text?.length ?: 0).max()
+        if (longest < MIN_CUT_CHARS) return null
+        return u.copy(
+            message = when (longest) {
+                m.text.length -> m.copy(text = halved(m.text))
+                m.extra.length -> m.copy(extra = "")
+                else -> m.copy(parts = m.parts.map { if (it === longestPart) it.copy(text = halved(it.text)) else it })
+            },
+        )
+    }
+
+    /** Below this many characters a text is not cut any further. */
+    private const val MIN_CUT_CHARS = 64
+
+    /** The first half of [s], with no half of a character pair left at its end, then "…". */
+    private fun halved(s: String): String {
+        var end = s.length / 2
+        if (end > 0 && Character.isHighSurrogate(s[end - 1])) end--
+        return s.substring(0, end) + "…"
     }
 
     fun decode(o: JSONObject): DirectArchive.Update = when (o.optString("kind")) {
@@ -310,6 +355,7 @@ object DirectWire {
             groupName = o.optString("groupName"),
             groupOnly = o.optBoolean("groupOnly"),
             renamed = o.optBoolean("renamed"),
+            member = if (o.has("member")) o.optBoolean("member") else null,
         )
         "remove" -> DirectArchive.Update.Remove(o.getString("messageId"))
         "receipt" -> DirectArchive.Update.Receipt(
@@ -322,7 +368,10 @@ object DirectWire {
             o.optBoolean("fromMe"), o.optLong("atMs"),
         )
         "unsent" -> DirectArchive.Update.Unsent(o.getString("messageId"), o.optInt("part"), o.optBoolean("fromMe"), o.optString("senderName"))
-        "typing" -> DirectArchive.Update.Typing(o.getString("conversationId"), o.optString("participantId"), o.optBoolean("typing"))
+        "typing" -> DirectArchive.Update.Typing(
+            o.getString("conversationId"), o.optString("participantId"), o.optBoolean("typing"),
+            o.optString("groupGuid").takeIf { it.isNotEmpty() },
+        )
         "readElsewhere" -> DirectArchive.Update.ReadElsewhere(o.getString("messageId"))
         "failed" -> DirectArchive.Update.Failed(o.getString("messageId"), o.optString("error"))
         else -> DirectArchive.Update.Ignore

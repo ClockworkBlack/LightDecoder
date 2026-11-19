@@ -172,6 +172,76 @@ class DirectAttachmentsTest {
     }
 
     @Test
+    fun aSmallFileThatCameInsideTheMessageGoesWithItEvenIfNeverShown() {
+        val link = link { _, _ -> DirectWire.ok() }
+        val bytes = byteArrayOf(71, 73, 70, 56, 57, 97, 2)
+        fun gif() = MessageAttachment(AttachmentType.Inline(bytes), 0UL, "com.compuserve.gif", "image/gif", "a.gif", false)
+        // Written by the ":imessage" process before it hands the message over.
+        fun written(guid: String) = MediaCache.fileFor(context, "$guid/p0", DirectMedia.extensionFor("image/gif", "a.gif"), ChatService.IMESSAGE)
+            .also { MediaCache.writeAtomically(it, bytes) }
+        val file = written("G5")
+        link.apply(incoming("G5", gif()))
+        // The part's file from the start.
+        assertEquals(file.path, repo.mediaPart("imsg:G5", "p0")!!.localPath)
+        // Unsent before it was ever shown: the file goes with it.
+        link.apply(DirectArchive.Update.Unsent("imsg:G5", 0, false, "Bob"))
+        assertEquals("system", repo.message("imsg:G5")!!.direction)
+        assertFalse(file.exists())
+        // Apple handing it over again (its file written again): it stays unsent, and the file goes.
+        written("G5")
+        link.apply(incoming("G5", gif()))
+        assertEquals("system", repo.message("imsg:G5")!!.direction)
+        assertFalse(file.exists())
+        // Deleted before it was shown: the same.
+        val deleted = written("G6")
+        link.apply(incoming("G6", gif()))
+        link.apply(DirectArchive.Update.Remove("imsg:G6"))
+        assertNull(repo.message("imsg:G6"))
+        assertFalse(deleted.exists())
+        // A message for a group that is not stored is not kept: nor is its file.
+        val dropped = written("G7")
+        val part = com.lightdecoder.relay.PartDto("p0", "media", mediaId = "G7/p0", mime = "image/gif", fileName = "a.gif")
+        link.apply(
+            DirectArchive.Update.Upsert(
+                com.lightdecoder.relay.ConversationDto(id = "imsg:group:G-X", isGroup = true, type = DirectArchive.TRANSPORT),
+                com.lightdecoder.relay.MessageDto(
+                    id = "imsg:G7", conversationId = "imsg:group:G-X", senderId = bob, timestampMs = 1, direction = "in",
+                    transport = DirectArchive.TRANSPORT, parts = listOf(part),
+                ),
+                groupGuid = "G-X", groupOnly = true,
+            ),
+        )
+        assertNull(repo.message("imsg:G7"))
+        assertFalse(dropped.exists())
+    }
+
+    @Test
+    fun aVideosBubbleShowsItsFirstFrameOnceItsFileIsHere() {
+        val link = link(downloads(byteArrayOf(0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70)))
+        link.apply(incoming("VD1", mmcs("clip.mov", "com.apple.quicktime-movie")))
+        val waiting = repo.mediaPart("imsg:VD1", "p0")!!
+        assertTrue(waiting.mime, waiting.mime.startsWith("video/"))
+        assertEquals("", waiting.thumbPath)
+        val path = repo.mediaFileFor("VD1/p0", DirectMedia.extensionFor(waiting.mime, waiting.fileName)).path
+        org.robolectric.shadows.ShadowMediaMetadataRetriever.addFrame(
+            path, 0, android.graphics.Bitmap.createBitmap(1280, 720, android.graphics.Bitmap.Config.ARGB_8888),
+        )
+        try {
+            val file = runBlocking { link.mediaFile("imsg:VD1", "p0") }!!
+            assertEquals(path, file.path)
+            val part = repo.mediaPart("imsg:VD1", "p0")!!
+            assertEquals(path, part.localPath)
+            // Its still, as the bubble's picture, kept beside it (and going with it).
+            assertTrue(part.thumbPath.isNotEmpty() && part.thumbPath != path)
+            assertTrue(File(part.thumbPath).length() > 0)
+            link.apply(DirectArchive.Update.Remove("imsg:VD1"))
+            assertFalse(File(part.thumbPath).exists())
+        } finally {
+            org.robolectric.shadows.ShadowMediaMetadataRetriever.reset()
+        }
+    }
+
+    @Test
     fun withNothingToDownloadItByThereIsNoFile() {
         val link = link(downloads(byteArrayOf(1)))
         val gif = MessageAttachment(AttachmentType.Inline(byteArrayOf(1)), 0UL, "com.compuserve.gif", "image/gif", "b.gif", false)
@@ -391,6 +461,29 @@ class DirectAttachmentsTest {
         IMessageManager.get(context).discardFailed(tmpId)
         assertNull(repo.message(MessageRow.tmpMessageId(tmpId)))
         assertFalse(repo.outboxFileFor(tmpId).exists())
+    }
+
+    @Test
+    fun deletingAChatDropsTheCopiesOfItsFilesThatDidNotGo() {
+        val link = link(sends("S6", failFirst = 1))
+        bobsChat(link)
+        val tmpId = link.sendMedia(chat, fileToSend("doc.pdf", byteArrayOf(37, 80, 68, 70)), null, null)
+        waitFor("the failure") { repo.message(MessageRow.tmpMessageId(tmpId))?.localState == LocalState.FAILED }
+        val copy = repo.outboxFileFor(tmpId)
+        assertTrue(copy.exists())
+        // Another chat's queued send keeps its own copy.
+        val queued = repo.outboxFileFor("t-other").apply { parentFile?.mkdirs(); writeBytes(byteArrayOf(1)) }
+        repo.insertLocalOutgoing("t-other", "imsg:tel:+15550002222", "", queued.path, "image/png", "a.png", null, 1)
+        repo.enqueueOutbox(
+            com.lightdecoder.archive.OutboxRow(
+                idempotencyKey = "t-other", conversationId = "imsg:tel:+15550002222", mediaLocalPath = queued.path,
+                mediaMime = "image/png", createdAt = 1,
+            ),
+        )
+        runBlocking { IMessageManager.get(context).deleteConversation(chat) }
+        assertNull(repo.conversation(chat))
+        assertFalse(copy.exists())
+        assertTrue(queued.exists())
     }
 
     @Test

@@ -101,6 +101,34 @@ object MadridMessages {
     }
 
     /**
+     * The picture [jpeg] (from the extension app, so not trusted to be sensible) decoded to at most
+     * about [maxSide] pixels on its longer side, however many it says it has; null when it is not
+     * one or memory is short.
+     */
+    fun decodePicture(jpeg: ByteArray, maxSide: Int): android.graphics.Bitmap? {
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        val options = android.graphics.BitmapFactory.Options().apply { inSampleSize = sampleSizeFor(bounds.outWidth, bounds.outHeight, maxSide) }
+        return try {
+            android.graphics.BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, options)
+        } catch (e: OutOfMemoryError) {
+            null
+        }
+    }
+
+    /** The power of two to divide a [width] by [height] picture by so its longer side is at most [maxSide] (never under 1). */
+    fun sampleSizeFor(width: Int, height: Int, maxSide: Int): Int {
+        val longer = maxOf(width, height)
+        val limit = maxSide.coerceAtLeast(MIN_PICTURE_SIDE)
+        var sample = 1
+        while (longer / sample > limit && sample < (1 shl 16)) sample *= 2
+        return sample
+    }
+
+    private const val MIN_PICTURE_SIDE = 480
+
+    /**
      * The JPEG an extension app sent as base64 ([MadridMessage.imageBase64]); null when there is
      * none, or it is not a JPEG, or it is over [MAX_IMAGE_BYTES].
      */

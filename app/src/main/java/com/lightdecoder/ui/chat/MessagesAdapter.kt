@@ -361,7 +361,7 @@ class MessagesAdapter(
         line(b.appName, lines.appName, metaColor)
     }
 
-    /** A link's preview card under the text ([link], none: hidden); a tap opens the page. */
+    /** A link's preview card under the text ([link], none: hidden); a tap opens the page (a web page only). */
     private fun bindLinkCard(holder: MessageHolder, link: IMessageExtra.Link?, textColor: Int, metaColor: Int) {
         val b = holder.binding
         if (link == null || link.url.isBlank()) {
@@ -380,7 +380,13 @@ class MessagesAdapter(
         b.linkSite.visibility = if (lines.site.isBlank()) View.GONE else View.VISIBLE
         b.linkSite.setTextColor(metaColor)
         b.linkCard.contentDescription = b.root.context.getString(R.string.imessage_link_preview, lines.title)
-        b.linkCard.setOnClickListener { callbacks.onOpenLink(link.url) }
+        // Only a web page opens: the sender chose the address.
+        if (link.opensInBrowser) {
+            b.linkCard.setOnClickListener { callbacks.onOpenLink(link.url) }
+        } else {
+            b.linkCard.setOnClickListener(null)
+            b.linkCard.isClickable = false
+        }
     }
 
     /**

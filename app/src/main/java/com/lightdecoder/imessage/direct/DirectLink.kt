@@ -110,6 +110,8 @@ class DirectLink private constructor(
     /** The library's addresses for a stored chat's members, the user's own left to the library. */
     fun targetOf(conversationId: String): DirectWire.Target? {
         val row = repo.conversation(conversationId) ?: return null
+        // A group the user is no longer in ([isLeft]): nothing goes to it, as on an iPhone.
+        if (row.readOnly && row.isGroup) return null
         val others = repo.participants(conversationId).filter { !it.isMe }
             .mapNotNull { Handles.normalize(it.number.ifBlank { it.id }) }
             .distinct()
@@ -124,6 +126,10 @@ class DirectLink private constructor(
         val name = if (group) ownName(conversationId).ifBlank { null } else null
         return DirectWire.Target(others, name, guid, row.defaultOutgoingId, after)
     }
+
+    /** Whether [conversationId] is an iMessage group the user was removed from or left (on another device). */
+    fun isLeft(conversationId: String): Boolean =
+        DirectArchive.isGroup(conversationId) && runCatching { repo.conversation(conversationId) }.getOrNull()?.let { it.isGroup && it.readOnly } == true
 
     /** Whether a reply to [row] threads under it on iPhones (sent through the library, to a message with a GUID). */
     fun repliesInline(row: MessageRow): Boolean = DirectArchive.isImessage(row.id) && canSend(row.conversationId)
@@ -237,7 +243,7 @@ class DirectLink private constructor(
     /** A group here that the library can send to, with exactly the people [keys] ([IMessageAddress.key]) and, when given, [name]. */
     private fun sameGroup(keys: Set<String>, name: String?): String? =
         repo.conversations(null)
-            .filter { it.isGroup && it.folderEnum != Folder.DELETED && DirectArchive.groupGuid(it.id) != null }
+            .filter { it.isGroup && !it.readOnly && it.folderEnum != Folder.DELETED && DirectArchive.groupGuid(it.id) != null }
             .firstOrNull { row ->
                 (name == null || row.name == name) &&
                     repo.participants(row.id).filter { !it.isMe }.mapNotNull { IMessageAddress.key(it.number.ifBlank { it.id }) }.toSet() == keys
@@ -411,7 +417,7 @@ class DirectLink private constructor(
                 extra = IMessageExtra(app = balloon).toJson(),
             )
             synchronized(this) {
-                repo.upsertMessage(stored)
+                repo.upsertMessage(stored, snippetOf(stored.text, stored.extra))
                 kept?.let { (part, f) -> if (f != null) record(messageId, part.partId, part.mediaId, f, part.mime) }
                 reused?.let { (part, f) -> if (record(messageId, part.partId, part.mediaId, f, part.mime) == null) f.delete() }
                 replayHeld(messageId)
@@ -502,13 +508,20 @@ class DirectLink private constructor(
             ?: DirectMedia.OCTET_STREAM
     }
 
-    /** Sends a failed message again, from its local copy (which survives restarts), its file and effect included. */
+    /**
+     * Sends a failed message again, from its local copy (which survives restarts), its file and
+     * effect included. Only one still failed: a second tap (or a tap on a bubble shown before the
+     * send went again) sends nothing, so it never goes twice. Retrying a message that was not
+     * failed counts as handled (true), as the send it asks for is under way.
+     */
     fun retry(tmpId: String): Boolean {
         val row = repo.message(MessageRow.tmpMessageId(tmpId)) ?: return false
         if (!canSend(row.conversationId)) return false
+        if (row.localState != LocalState.FAILED) return true
         val extra = IMessageExtra.parse(row.extra)
         val media = row.media.firstOrNull()?.let { Outgoing(File(it.localPath), it.mime, it.fileName, extra.voice) }
-        repo.setLocalState(tmpId, LocalState.PENDING)
+        // From failed to waiting, once: of two retries at once only one goes.
+        if (!repo.setLocalStateIf(tmpId, LocalState.FAILED, LocalState.PENDING)) return true
         inTurn(row.conversationId) {
             deliver(tmpId, row.conversationId, row.text, row.replyToId.ifEmpty { null }, media, extra.effect, extra.app)
         }
@@ -683,7 +696,7 @@ class DirectLink private constructor(
             DirectWire.errorOf(reply)?.let { throw DirectEngine.ImessageError(it) }
             if (file.length() <= 0) return null
         }
-        val playable = if (part.mime == CafAudio.MIME || part.fileName.endsWith(".caf", ignoreCase = true)) playable(part, file) else null
+        val playable = if (isCaf(part.mime, part.fileName)) playable(part, file) else null
         // Not while Apple's copy of the message is stored again ([apply]): that keeps what is recorded here.
         return synchronized(this) {
             if (playable == null) return@synchronized record(messageId, part.partId, part.mediaId, file, part.mime)
@@ -725,8 +738,56 @@ class DirectLink private constructor(
         if (!repo.setMediaLocalPath(messageId, partId, mediaId, file.path, thumbnail = false)) return@withMediaFileLock null
         val (width, height) = sizeOf(file, mime)
         repo.setMediaDetails(messageId, partId, mime, file.length(), width, height)
+        if (mime.startsWith("video/")) keepStill(messageId, partId, mediaId, file)
         file
     }
+
+    /**
+     * A video's bubble shows its first frame, as on an iPhone: taken from [video] (part
+     * [partId]'s file, of media [mediaId]) and kept as the part's thumbnail, unless it has one.
+     */
+    private fun keepStill(messageId: String, partId: String, mediaId: String, video: File) {
+        val part = repo.mediaPart(messageId, partId) ?: return
+        if (part.thumbPath.isNotEmpty() && File(part.thumbPath).length() > 0) return
+        val bytes = DirectFilePackager.videoStill(video.path) ?: return
+        val still = repo.mediaFileFor(mediaId + STILL, "jpg")
+        try {
+            MediaCache.writeAtomically(still, bytes)
+        } catch (e: java.io.IOException) {
+            Log.w(TAG, "video still not written", e)
+            return
+        }
+        repo.setMediaLocalPath(messageId, partId, still.path, thumbnail = true)
+    }
+
+    /**
+     * The files the ":imessage" process wrote for [message]'s small attachments, which come inside
+     * the message ([DirectEngine]), become its parts' files at once, so they go with the message
+     * (unsent, deleted) even if never shown. One whose part is not stored (the message dropped, or
+     * that part unsent since) is deleted. An iPhone's voice message is made playable only when it
+     * is played: its original is kept as the part's second file meanwhile.
+     */
+    private fun claimInlineFiles(message: MessageDto) {
+        for (part in message.mediaParts) {
+            if (part.mediaId.isEmpty()) continue
+            val file = repo.mediaFileFor(part.mediaId, DirectMedia.extensionFor(part.mime, part.fileName))
+            if (file.length() <= 0) continue
+            try {
+                val stored = repo.mediaPart(message.id, part.partId)?.takeIf { it.mediaId == part.mediaId }
+                if (stored != null && (stored.localPath == file.path || stored.thumbPath == file.path)) continue
+                if (stored != null && isCaf(part.mime, part.fileName)) {
+                    if (stored.localPath.isEmpty()) repo.setMediaLocalPath(message.id, part.partId, file.path, thumbnail = true)
+                    continue
+                }
+                // Not stored: setting its path deletes it (ArchiveRepository.setMediaLocalPath).
+                record(message.id, part.partId, part.mediaId, file, part.mime)
+            } catch (e: RuntimeException) {
+                Log.w(TAG, "inline attachment not recorded", e)
+            }
+        }
+    }
+
+    private fun isCaf(mime: String, fileName: String): Boolean = mime == CafAudio.MIME || fileName.endsWith(".caf", ignoreCase = true)
 
     /** A picture's or video's width and height as it is shown; 0 and 0 for anything else or when it cannot be read. */
     private fun sizeOf(file: File, mime: String): Pair<Int, Int> = try {
@@ -807,7 +868,7 @@ class DirectLink private constructor(
                 val extra = IMessageExtra.parse(current.extra)
                 if (current.direction == "system" || 0 in extra.unsent) return@withContext
                 val next = extra.copy(parts = extra.parts + (0 to text), edits = extra.edits + 1)
-                repo.editText(messageId, next.text(), System.currentTimeMillis(), next.toJson())
+                repo.editText(messageId, next.text(), System.currentTimeMillis(), next.toJson(), snippetOf(next.text(), current.extra))
             }
         }
         IMessageLog.add(app, "${IMessageLog.chatRef(row.conversationId)}: edited through the iMessage library (Apple confirmed)")
@@ -832,6 +893,9 @@ class DirectLink private constructor(
         val guid = DirectArchive.guidOf(messageId)
         if (guid == null || !reactable(row)) throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_react_not_possible))
         val target = targetOf(row.conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
+        // A sticker shows as this, but is no tapback: taking back an emoji tapback of it would
+        // change nothing on Apple's side while it went here.
+        if (remove && emoji == DirectArchive.STICKER_TAPBACK) throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_sticker_stays))
         val enable = !remove
         val now = System.currentTimeMillis()
         // Shown at once, under the lock every archive write here takes; the user's tapback before
@@ -975,7 +1039,7 @@ class DirectLink private constructor(
      * The archive's form of a conversation the library describes: the person's stored chat if
      * there is one (one-to-one), `me` for the user, addresses without their scheme, contact names.
      */
-    private fun toArchive(c: ConversationDto, groupId: String? = null, groupName: String? = null): ConversationDto {
+    private fun toArchive(c: ConversationDto, groupId: String? = null, groupName: String? = null, member: Boolean? = null): ConversationDto {
         val others = c.participants.filter { !it.isMe }
         val group = c.isGroup || groupId != null
         val existingId = if (!group && others.size == 1) manager.conversationWith(Handles.display(others[0].id)) else null
@@ -995,6 +1059,9 @@ class DirectLink private constructor(
             folder = existing?.folder?.takeIf { it.isNotEmpty() && it != Folder.DELETED.wire } ?: Folder.INBOX.wire,
             unread = existing?.unread == true,
             pinned = existing?.pinned == true,
+            // A group the user was removed from or left: read only, as on an iPhone, until they are
+            // in it again ([DirectArchive.Update.Upsert.member]).
+            readOnly = if (group && member != null) !member else existing?.readOnly == true,
             muted = existing?.muted == true,
             avatarColor = existing?.avatarColor.orEmpty(),
             // A chat's latest message (time, id, snippet) moves with its messages only
@@ -1031,7 +1098,9 @@ class DirectLink private constructor(
             is DirectArchive.Update.Reaction -> reaction(update)
             is DirectArchive.Update.Unsent -> unsent(update)
             is DirectArchive.Update.Typing -> {
-                val id = archiveConversationId(update.conversationId, update.participantId)
+                // A group down to one other person is still that group, as for its messages ([upsert]).
+                val id = update.groupGuid?.let(DirectArchive::groupConversationId)?.takeIf { repo.conversation(it)?.isGroup == true }
+                    ?: archiveConversationId(update.conversationId, update.participantId)
                 manager.noteTyping(id, update.participantId, nameOf(update.participantId), update.typing)
             }
             is DirectArchive.Update.ReadElsewhere -> readElsewhere(update)
@@ -1052,18 +1121,23 @@ class DirectLink private constructor(
     private fun upsert(update: DirectArchive.Update.Upsert) {
         // A group down to one other person is still that group, when it is stored as one.
         val groupId = update.groupGuid?.let(DirectArchive::groupConversationId)?.takeIf { repo.conversation(it)?.isGroup == true }
-        if (update.groupOnly && groupId == null) return
+        if (update.groupOnly && groupId == null) return claimInlineFiles(update.message)
         val id = groupId ?: update.conversation.id
-        val conversation = toArchive(update.conversation, groupId, if (DirectArchive.isGroup(id)) groupNameAfter(id, update) else null)
-        val onScreen = MessageNotifier.visibleConversationId(ChatService.IMESSAGE) == conversation.id
         // A group's event (renamed, someone added) is shown, but is not a message to read.
         val system = update.message.direction == "system"
+        // Whether the user is in the group: a change of its members says; so does a message the
+        // user wrote in it on another device.
+        val member = update.member ?: true.takeIf { update.message.fromMe && !system }
+        val conversation = toArchive(update.conversation, groupId, if (DirectArchive.isGroup(id)) groupNameAfter(id, update) else null, member)
+        val onScreen = MessageNotifier.visibleConversationId(ChatService.IMESSAGE) == conversation.id
         val incoming = !update.message.fromMe && !system
         val existing = repo.message(update.message.id)
         // Unsent since: it stays unsent.
-        if (existing != null && existing.direction == "system" && !system) return
+        if (existing != null && existing.direction == "system" && !system) return claimInlineFiles(update.message)
         // The message moves the chat's latest message, time and snippet (see toArchive).
-        repo.upsertConversation(conversation.copy(unread = (conversation.unread || incoming) && !onScreen, lastMessageTs = 0))
+        // Only a message not stored before makes the chat unread: Apple handing one over again
+        // (after a restart) leaves a chat the user read as read.
+        repo.upsertConversation(conversation.copy(unread = (conversation.unread || (incoming && existing == null)) && !onScreen, lastMessageTs = 0))
         val fresh = update.message.copy(
             conversationId = conversation.id,
             senderId = if (update.message.fromMe) "" else Handles.display(update.message.senderId),
@@ -1071,7 +1145,8 @@ class DirectLink private constructor(
             transport = IMessageManager.TRANSPORT,
         )
         val message = existing?.let { merged(fresh, it) } ?: fresh
-        val result = repo.upsertMessage(message)
+        val result = repo.upsertMessage(message, snippetOf(message.text, message.extra))
+        claimInlineFiles(update.message)
         if (incoming) manager.noteTyping(conversation.id, message.senderId, "", typing = false)
         // What came for it first (read on another device, unsent, edited) applies before it is
         // announced, so a message already read or unsent makes no sound.
@@ -1129,6 +1204,16 @@ class DirectLink private constructor(
         }
     }
 
+    /** What stands for a text sent with invisible ink outside its bubble: "Sent with Invisible Ink". */
+    private fun inkedLabel(): String = app.getString(R.string.imessage_sent_with, app.getString(R.string.imessage_effect_invisible_ink))
+
+    /**
+     * What the conversation list shows for a message whose text is [text] and stored extra
+     * [extraJson]: null (its text) unless it was sent with invisible ink, which shows only in its bubble.
+     */
+    private fun snippetOf(text: String, extraJson: String): String? =
+        IMessageExtra.shownText(text, extraJson, inkedLabel()).takeIf { it != text }
+
     /**
      * A notification for [message], just stored, unless it was unsent or its chat read since; with
      * its text as it now is. Invisible ink stays hidden there too: it says only how it was sent.
@@ -1139,9 +1224,7 @@ class DirectLink private constructor(
         if (repo.conversation(row.conversationId)?.unread != true) return
         // A game is open in an extension app, which asked for quiet.
         if (appEvents?.silences(row.conversationId) == true) return
-        val inked = IMessageExtra.isInvisibleInk(IMessageExtra.parse(row.extra).effect)
-        val text = if (inked) app.getString(R.string.imessage_sent_with, app.getString(R.string.imessage_effect_invisible_ink)) else row.text
-        MessageNotifier.onIncoming(app, repo, message.copy(text = text))
+        MessageNotifier.onIncoming(app, repo, message.copy(text = IMessageExtra.shownText(row.text, row.extra, inkedLabel())))
     }
 
     /**
@@ -1156,7 +1239,7 @@ class DirectLink private constructor(
         repo.applyReaction(update.messageId, who, update.emoji, update.enable, update.fromMe, update.atMs)
         if (update.fromMe || !update.enable || known || !row.isOutgoing || row.direction != "out") return
         if (appEvents?.silences(row.conversationId) == true) return
-        val quoted = tapbackText(row.text).takeIf { it.isNotBlank() }?.let { app.getString(R.string.imessage_tapback_quote, it) }
+        val quoted = tapbackText(IMessageExtra.shownText(row.text, row.extra, inkedLabel())).takeIf { it.isNotBlank() }?.let { app.getString(R.string.imessage_tapback_quote, it) }
             ?: app.getString(R.string.imessage_tapback_a_message)
         MessageNotifier.onIncoming(
             app, repo,
@@ -1185,7 +1268,7 @@ class DirectLink private constructor(
         val parts = partsOf(row, extra)
         if (parts[update.part] == update.text && update.atMs <= row.editedAtMs) return
         val next = extra.copy(parts = parts + (update.part to update.text), edits = extra.edits + 1)
-        repo.editText(row.id, next.text(), update.atMs, next.toJson())
+        repo.editText(row.id, next.text(), update.atMs, next.toJson(), snippetOf(next.text(), row.extra))
     }
 
     /**
@@ -1213,7 +1296,7 @@ class DirectLink private constructor(
         }
         if (partId in media) repo.removeMediaPart(row.id, partId)
         val next = extra.copy(parts = textLeft, unsent = extra.unsent + update.part)
-        repo.editText(row.id, next.text(), row.editedAtMs, next.toJson())
+        repo.editText(row.id, next.text(), row.editedAtMs, next.toJson(), snippetOf(next.text(), row.extra))
     }
 
     /** The user read [update]'s message on another device: the chat is read here too, unless something newer came since. */
@@ -1407,6 +1490,9 @@ class DirectLink private constructor(
 
         /** Added to a voice message's media id for the file it is played from. */
         private const val PLAYABLE = "#playable"
+
+        /** Added to a video's media id for the file of its still ([keepStill]). */
+        private const val STILL = "#still"
 
         /** The name an iPhone gives a voice message's file (before its extension). */
         private const val VOICE_NAME = "Audio Message"

@@ -22,6 +22,10 @@ internal object IMessageBubbles {
     fun hidden(extra: IMessageExtra, text: String, revealed: Boolean): Boolean =
         !revealed && text.isNotEmpty() && IMessageExtra.isInvisibleInk(extra.effect)
 
+    /** What stands for a text sent with invisible ink outside its bubble: "Sent with Invisible Ink". */
+    fun inkedLabel(context: Context): String =
+        context.getString(R.string.imessage_sent_with, context.getString(R.string.imessage_effect_invisible_ink))
+
     /** [text] under invisible ink: every character but spaces and line breaks a block, so its shape shows but not its words. */
     fun inked(text: String): String = buildString {
         text.codePoints().forEach { c -> if (Character.isWhitespace(c)) appendCodePoint(c) else append(INK) }

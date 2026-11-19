@@ -61,6 +61,7 @@ class DirectWordingTest {
             R.string.imessage_app_still_sending, R.string.imessage_app_move_too_soon, R.string.imessage_app_move_invalid,
             R.string.imessage_games, R.string.imessage_games_help, R.string.imessage_games_not_installed,
             R.string.imessage_games_get, R.string.imessage_games_ready,
+            R.string.imessage_direct_sticker_stays, R.string.imessage_not_in_group, R.string.imessage_light_left,
         )
         for (res in direct) {
             val text = context.getString(res)

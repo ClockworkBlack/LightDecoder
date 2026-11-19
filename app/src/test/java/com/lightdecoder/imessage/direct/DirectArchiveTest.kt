@@ -350,6 +350,13 @@ class DirectArchiveTest {
         assertEquals("com.apple.MobileSMS.expressivesend.impact", extra.effect)
         assertTrue(extra.voice)
         assertEquals(IMessageExtra.Link("https://www.example.com/a", "A page", "About it", "example.com"), extra.link)
+        // A preview whose own address is no web page's: the web address it came with, if it has one.
+        val odd = LinkMeta(
+            LpLinkMetadata(null, 1u, null, NsUrl("\$null", "tel:+15551234567"), NsUrl("\$null", "https://www.example.com/b"), "Call", "", null, null, null, null, null, null, null, null, null),
+            emptyList(),
+        )
+        val oddMessage = m.copy(message = PushChatMessage.Message(normal(listOf(text("x")), link = odd)))
+        assertEquals("https://www.example.com/b", IMessageExtra.parse((map(oddMessage) as DirectArchive.Update.Upsert).message.extra).link!!.url)
         val a = extra.app!!
         assertEquals("GamePigeon", a.name)
         assertEquals(1124197642L, a.appId)
@@ -493,6 +500,11 @@ class DirectArchiveTest {
         )
         assertEquals(DirectArchive.Update.Typing("imsg:$bob", "+15550000002", true), map(inst("X", bob, PushChatMessage.Typing(true, null))))
         assertEquals(DirectArchive.Update.Typing("imsg:$bob", "+15550000002", false), map(inst("X", bob, PushChatMessage.Typing(false, null))))
+        // In a group down to one other person: its guid goes with it, so the group is found.
+        assertEquals(
+            DirectArchive.Update.Typing("imsg:$bob", "+15550000002", true, "G-S"),
+            map(inst("X", bob, PushChatMessage.Typing(true, null), groupGuid = "G-S")),
+        )
         // The user's own devices never show as typing.
         assertEquals(DirectArchive.Update.Ignore, map(inst("X", me, PushChatMessage.Typing(true, null))))
         assertEquals(DirectArchive.Update.Ignore, map(inst("X", bob, PushChatMessage.MarkUnread)))
