@@ -8,6 +8,14 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
    had earlier chosen "build with a warning", then "pause on Discord", and has now asked for
    the web-view tab only, with no bridge). **Instagram: skipped** (ban risk, like Messenger).
 
+## iMessage via OpenBubbles (2026-11-19, branch ccr-ffe9dbd4-xu00fq): design only
+- Plan, findings and decisions: `docs/imessage-openbubbles.md`. No app code yet.
+- `tools/openbubbles-inspect/inspect.py` reads an OpenBubbles APK and says whether its
+  `librust_lib_bluebubbles.so` matches public source (frb content hash). Waiting on the
+  owner's OpenBubbles 2.0.0 APK files (mirror downloads were blocked here).
+- Owner accepted rustpush's SSPL-1.0 with the iMessage part kept separate; the official
+  library is never committed or bundled.
+
 ## Releases and signing
 - Latest: **0.4.2** (versionCode 6), signed with the permanent release key (CN=LightDecoder,
   SHA-256 63:b0:da:cf:...:36:9f:d1). The user holds the keystore and its password; it is NOT in the
