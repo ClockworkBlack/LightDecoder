@@ -65,6 +65,11 @@
     <string name="wrapper_cover_reply">Sending inline reply through OpenBubbles\u2026</string>
     <string name="wrapper_cover_unsend">Undoing send in OpenBubbles\u2026</string>
     <string name="wrapper_cover_edit">Editing in OpenBubbles\u2026</string>
+    <string name="imessage_unsent_note">You unsent a message</string>
+    <string name="wrapper_off_title">The wrapper is off</string>
+    <string name="wrapper_off_body">The OpenBubbles wrapper is switched on in LightDecoder, but its accessibility permission is off, so it cannot do this for you. Android can turn it off when LightDecoder updates.\n\nTurn on \u201cLightDecoder: OpenBubbles wrapper (beta)\u201d in Android\u2019s accessibility settings, then try again.</string>
+    <string name="wrapper_off_use_openbubbles">Do it in OpenBubbles</string>
+    <string name="wrapper_receipts_setting">Read receipts (wrapper)</string>
     <string name="wrapper_failed_send">It could not be sent for you. OpenBubbles is open with it ready: tap send there.</string>
     <string name="wrapper_cover_react">Reacting in OpenBubbles\u2026</string>
     <string name="wrapper_failed_edit">The edit could not be finished. OpenBubbles is open with the chat; the new text is copied.</string>

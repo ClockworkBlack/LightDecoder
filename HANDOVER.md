@@ -23,6 +23,29 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.48-wrapper (versionCode 57) - BRANCH ccr-4fee5e9f-jrrlhu-wrapper: receipts, tapbacks, unsent, wrapper-off prompt
+- On the user's phone, Unsend and Edit fell back to OpenBubbles. In 0.5.46 that happens when the wrapper is
+  switched on but its accessibility service is not running: Android (Samsung especially) can turn it off on
+  an app update. Now `ThreadActivity.wrapperIsOff` says so, with "Open accessibility settings" or "Do it in
+  OpenBubbles", instead of silently opening OpenBubbles. This applies to Unsend, Edit, reactions, and picture
+  and hand-off sends. Logged.
+- **Unsent:** after the wrapper's Undo Send, the message becomes a system line "You unsent a message"
+  (`IMessageManager.recordUnsent`; a picture message is removed). Its id stays in `IMessagePrefs.deletedMessages`,
+  so OpenBubbles' notification never brings it back.
+- **Read receipts:** OpenBubbles shows "Read …", "Delivered …" or "Sent …" under the newest message of one's
+  own (`delivered_indicator.dart`), and `WrapperNodes.receipt` reads it.
+  - After every wrapper job (still in OpenBubbles' chat), and in a `Kind.STATUS` look, silent behind the
+    still, when a conversation opens. The look only happens when one's newest iMessage there is not read, is
+    under 48 h old, and that chat has not been looked at in the last 90 s.
+  - `IMessageManager.recordReceipt` gives one's messages in the chat OUTGOING_DELIVERED / OUTGOING_DISPLAYED,
+    so the usual ticks show.
+  - Option: Messages menu → "Read receipts (wrapper)", on by default.
+- **Tapbacks from them:** OpenBubbles' notification words a tapback as `loved “…”`, `liked`, `disliked`,
+  `laughed at`, `emphasized`, `questioned`, `reacted 🔥 to “…”` or `removed a heart from “…”`
+  (`MessageHelper.getNotificationText`, `reactionToVerb`). `IMessageCapture.reactionOf` reads it, and
+  `applyReaction` puts it on the message with those words (replacing their earlier one), instead of storing a
+  line. Their tapbacks reach LightDecoder only with OpenBubbles' "Notify for Reactions" on.
+
 ## 0.5.47-wrapper (versionCode 56) - BRANCH ccr-4fee5e9f-jrrlhu-wrapper: silent wrapper, replies direct, quotes fixed
 - User: a regular reply went through the wrapper (inline, via OpenBubbles' screen). Replies now go straight
   through OpenBubbles' Reply button again. Inline replies through the wrapper are a separate option, off by

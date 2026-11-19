@@ -203,6 +203,9 @@ class IMessageManager private constructor(
                     continue
                 }
             }
+            // A tapback OpenBubbles described in words ("loved “…”"): a reaction on that message, not a line of its own.
+            val tapback = IMessageCapture.reactionOf(message.text)
+            if (tapback != null && applyReaction(id, tapback, message.fromMe, message.senderHandle.ifEmpty { message.sender })) continue
             // A picture or video OpenBubbles described in words: a picture slot, filled from its Auto-save copy.
             val kinds = IMessageCapture.attachmentKinds(message.text)
             added += MessageDto(
@@ -377,6 +380,81 @@ class IMessageManager private constructor(
             }
         }
         return id
+    }
+
+    /** [row] stored again with some of it changed (texts only: a picture's parts are not rewritten). */
+    private fun rewrite(
+        row: MessageRow,
+        text: String = row.text,
+        status: String = row.status,
+        direction: String = row.direction,
+        reactions: List<com.lightdecoder.relay.ReactionDto> = row.reactions,
+    ) {
+        if (row.media.isNotEmpty()) return
+        repo.upsertMessage(
+            MessageDto(
+                id = row.id, conversationId = row.conversationId, fromMe = row.isOutgoing, direction = direction,
+                senderId = row.senderId, senderName = row.senderName, status = status, transport = TRANSPORT,
+                text = text, replyToId = row.replyToId, timestampMs = row.timestampMs, reactions = reactions, isOld = true,
+            ),
+        )
+    }
+
+    /**
+     * Puts [tapback] on the message of [conversationId] it names (by its words), from them or (another device
+     * of the user's) from the user. False when no such message is here: the line is kept as text then.
+     */
+    private fun applyReaction(conversationId: String, tapback: IMessageCapture.Tapback, fromMe: Boolean, who: String): Boolean {
+        val target = repo.messages(conversationId, limit = 200)
+            .lastOrNull { it.direction != "system" && it.text.trim() == tapback.quoted && it.media.isEmpty() } ?: return false
+        val them = if (fromMe) ME else who.ifEmpty { "them" }
+        val kept = target.reactions.filter { r -> if (fromMe) !r.fromMe else r.fromMe || them !in r.participantIds }
+        val now = if (tapback.removed || tapback.emoji == null) kept
+        else kept + com.lightdecoder.relay.ReactionDto(tapback.emoji, participantIds = listOf(them), fromMe = fromMe)
+        if (now == target.reactions) return true
+        rewrite(target, reactions = now)
+        IMessageLog.add(
+            appContext,
+            "${IMessageLog.chatRef(conversationId)}: tapback ${if (tapback.removed) "removed" else "added"} by ${if (fromMe) "me" else "them"} (from OpenBubbles' notification)",
+        )
+        return true
+    }
+
+    /** The user's newest iMessage in [conversationId] (for a look at its receipt), or null. */
+    fun newestOwnIMessage(conversationId: String): MessageRow? =
+        repo.messages(conversationId, limit = 50).lastOrNull { it.isOutgoing && it.direction == "out" }
+
+    /**
+     * What OpenBubbles says under the newest message ("READ", "DELIVERED", "SENT"): the user's messages in
+     * [conversationId] up to it get the ticks (an iPhone reads a conversation up to a point).
+     */
+    fun recordReceipt(conversationId: String, receipt: String) {
+        val status = when (receipt) {
+            "READ" -> STATUS_READ
+            "DELIVERED" -> STATUS_DELIVERED
+            else -> return
+        }
+        val rank = mapOf(STATUS_SENT to 0, STATUS_DELIVERED to 1, STATUS_READ to 2)
+        val mine = repo.messages(conversationId, limit = 50).filter { it.isOutgoing && it.direction == "out" && !it.isLocal }
+        var changed = 0
+        for (row in mine) {
+            if ((rank[row.status] ?: 0) < rank.getValue(status)) {
+                rewrite(row, status = status)
+                changed++
+            }
+        }
+        if (changed > 0) IMessageLog.add(appContext, "${IMessageLog.chatRef(conversationId)}: ${receipt.lowercase()} (from OpenBubbles' screen), $changed message(s)")
+    }
+
+    /** A message the user unsent: in its place, "You unsent a message", as an iPhone shows it. */
+    fun recordUnsent(id: String) {
+        val row = repo.message(id) ?: return
+        IMessagePrefs.addDeletedMessage(appContext, id)
+        if (row.media.isNotEmpty()) {
+            repo.applyDeletion(id)
+            return
+        }
+        rewrite(row, text = appContext.getString(com.lightdecoder.R.string.imessage_unsent_note), direction = "system", reactions = emptyList())
     }
 
     /** A message of the user's, edited through the wrapper: its new text here too. */
@@ -577,6 +655,8 @@ class IMessageManager private constructor(
 
         /** The status of the user's messages once OpenBubbles has them. */
         internal const val STATUS_SENT = "OUTGOING_COMPLETE"
+        const val STATUS_DELIVERED = "OUTGOING_DELIVERED"
+        const val STATUS_READ = "OUTGOING_DISPLAYED"
 
         /** Id prefix of a message sent from here (the rest is its tmpId). */
         /** The same unused notification is logged again at most this often. */

@@ -130,6 +130,25 @@ object WrapperNodes {
 
     private fun bareEmoji(s: String) = s.trim().replace("\uFE0F", "").replace("\uFE0E", "")
 
+    /** What OpenBubbles says under the user's newest message: "Read …", "Delivered …" or "Sent …". */
+    enum class Receipt { SENT, DELIVERED, READ }
+
+    /** The strongest receipt on screen (OpenBubbles shows it under the newest message of one's own), or null. */
+    fun receipt(root: UiNode): Receipt? {
+        var best: Receipt? = null
+        for (n in all(root)) {
+            val words = norm(said(n))
+            val r = when {
+                words == "read" || words.startsWith("read ") -> Receipt.READ
+                words == "delivered" || words.startsWith("delivered ") -> Receipt.DELIVERED
+                words == "sent" || words.startsWith("sent ") && words.length < 24 -> Receipt.SENT
+                else -> null
+            } ?: continue
+            if (best == null || r.ordinal > best.ordinal) best = r
+        }
+        return best
+    }
+
     /** A list that can scroll back to older messages. */
     fun scrollable(root: UiNode): UiNode? = all(root).filter { it.scrollable }.maxByOrNull { it.bounds.height() }
 

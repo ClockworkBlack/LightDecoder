@@ -655,6 +655,10 @@ class ConversationsActivity : AppCompatActivity() {
             item.isVisible = backend.service == ChatService.MESSAGES && blueBubbles.isOn()
             item.isChecked = com.lightdecoder.wrapper.Wrapper.enabled(this) && com.lightdecoder.wrapper.Wrapper.serviceOn()
         }
+        menu.findItem(R.id.action_wrapper_receipts)?.let { item ->
+            item.isVisible = backend.service == ChatService.MESSAGES && blueBubbles.isOn() && com.lightdecoder.wrapper.Wrapper.available(this)
+            item.isChecked = com.lightdecoder.wrapper.Wrapper.receipts(this)
+        }
         menu.findItem(R.id.action_wrapper_inline)?.let { item ->
             item.isVisible = backend.service == ChatService.MESSAGES && blueBubbles.isOn() && com.lightdecoder.wrapper.Wrapper.available(this)
             item.isChecked = com.lightdecoder.wrapper.Wrapper.inlineReplies(this)
@@ -676,6 +680,10 @@ class ConversationsActivity : AppCompatActivity() {
             android.R.id.home -> finish()
             R.id.action_refresh -> refreshFromPhone()
             R.id.action_wrapper -> toggleWrapper()
+            R.id.action_wrapper_receipts -> {
+                com.lightdecoder.wrapper.Wrapper.setReceipts(this, !com.lightdecoder.wrapper.Wrapper.receipts(this))
+                invalidateOptionsMenu()
+            }
             R.id.action_wrapper_inline -> {
                 com.lightdecoder.wrapper.Wrapper.setInlineReplies(this, !com.lightdecoder.wrapper.Wrapper.inlineReplies(this))
                 invalidateOptionsMenu()

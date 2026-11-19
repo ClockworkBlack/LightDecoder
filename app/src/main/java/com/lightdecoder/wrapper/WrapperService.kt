@@ -108,11 +108,36 @@ class WrapperService : AccessibilityService() {
     }
 
     @Volatile
-    private var busy = false
+    internal var busy = false
 
     /** The steps; null when all went, else the step it stopped at. */
     private suspend fun perform(job: Wrapper.Job, mark: (String) -> Unit): String? {
-        if (job.kind == Wrapper.Kind.SEND) return send(job, mark)
+        val failed = when (job.kind) {
+            Wrapper.Kind.SEND -> send(job, mark)
+            Wrapper.Kind.STATUS -> status(job, mark)
+            else -> act(job, mark)
+        }
+        // Whatever was done, OpenBubbles' chat is on screen: what it says under the newest message.
+        if (failed == null && job.kind != Wrapper.Kind.STATUS) {
+            waitFor(RECEIPT_MS) { root -> if (WrapperNodes.receipt(root) != null) root else null }
+                ?.let(WrapperNodes::receipt)?.let { Wrapper.receipt(this, job.chatGuid, it) }
+        }
+        return failed
+    }
+
+    /** Only a look: the chat opened, the receipt under the newest message read. */
+    private suspend fun status(job: Wrapper.Job, mark: (String) -> Unit): String? {
+        if (!Wrapper.openChat(this, job.chatGuid)) return "open"
+        waitFor(OPEN_MS) { root -> WrapperNodes.field(root) } ?: return "chat"
+        mark("chat")
+        val receipt = waitFor(RECEIPT_MS) { root -> if (WrapperNodes.receipt(root) != null) root else null }
+            ?.let(WrapperNodes::receipt) ?: return "no receipt shown"
+        Wrapper.receipt(this, job.chatGuid, receipt)
+        mark("receipt ${receipt.name.lowercase()}")
+        return null
+    }
+
+    private suspend fun act(job: Wrapper.Job, mark: (String) -> Unit): String? {
         if (!Wrapper.openChat(this, job.chatGuid)) return "open"
         // 1. The chat is open: its message field is there.
         waitFor(OPEN_MS) { root -> WrapperNodes.field(root) } ?: return "chat"
@@ -390,6 +415,10 @@ class WrapperService : AccessibilityService() {
         private const val MAX_SCROLLS = 8
         private const val SHOT_MS = 700L
         private const val ATTACH_MS = 600L
+        private const val RECEIPT_MS = 900L
+
+        /** A job under way (a look for receipts is not started then). */
+        fun isBusy(): Boolean = running?.busy == true
         private const val RETURN_MS = 250L
     }
 }

@@ -104,6 +104,16 @@ class IMessageCaptureTest {
     }
 
     @Test
+    fun tapbackLinesAreReadAsReactions() {
+        assertEquals(IMessageCapture.Tapback("\u2764\uFE0F", "Dinner at 7?", false), IMessageCapture.reactionOf("loved \u201cDinner at 7?\u201d"))
+        assertEquals(IMessageCapture.Tapback("\uD83D\uDE02", "lol", false), IMessageCapture.reactionOf("Laughed at \u201clol\u201d"))
+        assertEquals(IMessageCapture.Tapback("\uD83D\uDD25", "We won", false), IMessageCapture.reactionOf("reacted \uD83D\uDD25 to \u201cWe won\u201d"))
+        assertEquals(IMessageCapture.Tapback(null, "We won", true), IMessageCapture.reactionOf("removed a heart from \u201cWe won\u201d"))
+        assertNull(IMessageCapture.reactionOf("I loved the movie"))
+        assertNull(IMessageCapture.reactionOf("Dinner at 7?"))
+    }
+
+    @Test
     fun aChatNamedByANumberHasThatNumberAsItsAddress() {
         // Someone not in the contacts, and no handle on the person.
         val captured = parse(chat(context, listOf(Line("Hello?", 1_000_000_000_000L, sender("+1 (555) 222-3333")))))!!

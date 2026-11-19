@@ -86,4 +86,12 @@ class WrapperNodesTest {
         assertSame(editing, WrapperNodes.editField(screen2))
         assertSame("the edit's arrow, right of its field", arrow, WrapperNodes.send(screen2, editing))
     }
+
+    @Test
+    fun theReceiptUnderTheNewestMessageIsRead() {
+        val read = N(kids = listOf(N(text = "Read"), N(text = "10:23 PM")))
+        assertEquals(WrapperNodes.Receipt.READ, WrapperNodes.receipt(N(kids = listOf(N(text = "Delivered"), read))))
+        assertEquals(WrapperNodes.Receipt.DELIVERED, WrapperNodes.receipt(N(kids = listOf(N(text = "Delivered Quietly")))))
+        assertNull("a message about reading is no receipt", WrapperNodes.receipt(N(kids = listOf(N(description = "Have you read the book I sent?")))))
+    }
 }

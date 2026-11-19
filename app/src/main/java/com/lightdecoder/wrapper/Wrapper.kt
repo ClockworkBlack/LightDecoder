@@ -26,6 +26,9 @@ object Wrapper {
 
         /** Pictures, a voice message, stickers, or a text to a chat with no Reply button: sent from OpenBubbles' composer. */
         SEND,
+
+        /** Only a look at the chat: what OpenBubbles says under the newest message (Delivered, Read). */
+        STATUS,
     }
 
     /**
@@ -59,6 +62,40 @@ object Wrapper {
     fun setInlineReplies(context: Context, on: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_INLINE, on).apply()
         IMessageLog.add(context, "Wrapper: inline replies ${if (on) "on" else "off"}")
+    }
+
+    private const val KEY_RECEIPTS = "receipts"
+
+    /** Read receipts: a quick look in OpenBubbles when a conversation opens (on by default with the wrapper). */
+    fun receipts(context: Context): Boolean = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_RECEIPTS, true)
+
+    fun setReceipts(context: Context, on: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_RECEIPTS, on).apply()
+    }
+
+    /** Chats looked at for receipts, and when: at most every [RECEIPT_EVERY_MS] each. */
+    private val lookedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private const val RECEIPT_EVERY_MS = 90_000L
+
+    /**
+     * Looks in OpenBubbles for whether the user's newest iMessage in [chatGuid] was delivered or read, when it
+     * is worth it (receipts on, one not yet read, not looked at lately). Silent: behind a still of the screen.
+     */
+    fun checkReceipts(context: Context, chatGuid: String, returnTo: Intent) {
+        if (!available(context) || !receipts(context) || WrapperService.isBusy()) return
+        val now = System.currentTimeMillis()
+        if ((lookedAt[chatGuid] ?: 0L) > now - RECEIPT_EVERY_MS) return
+        val newest = runCatching { IMessageManager.get(context).newestOwnIMessage(chatGuid) }.getOrNull() ?: return
+        if (newest.status == IMessageManager.STATUS_READ || now - newest.timestampMs > RECEIPT_LOOK_BACK_MS) return
+        lookedAt[chatGuid] = now
+        start(context, Job(Kind.STATUS, chatGuid, "", "", returnTo))
+    }
+
+    private const val RECEIPT_LOOK_BACK_MS = 48 * 60 * 60 * 1000L
+
+    /** What the wrapper read under the newest message of [chatGuid]. */
+    internal fun receipt(context: Context, chatGuid: String, receipt: WrapperNodes.Receipt) {
+        runCatching { IMessageManager.get(context.applicationContext).recordReceipt(chatGuid, receipt.name) }
     }
 
     /** Whether a reply to an iMessage goes inline through the wrapper. */
@@ -119,14 +156,9 @@ object Wrapper {
                 when (job.kind) {
                     Kind.EDIT -> IMessageManager.get(app).recordEdited(job.targetId, job.text)
                     Kind.REACT -> IMessageManager.get(app).recordOwnReaction(job.targetId, job.text)
+                    Kind.UNSEND -> IMessageManager.get(app).recordUnsent(job.targetId)
                     else -> Unit
                 }
-            }
-        }
-        if (result.ok && job.kind == Kind.UNSEND && job.targetId != null) {
-            runCatching {
-                com.lightdecoder.imessage.IMessagePrefs.addDeletedMessage(app, job.targetId)
-                IMessageManager.get(app).forgetSentElsewhere(job.targetId)
             }
         }
         if (!result.ok) {
@@ -141,6 +173,8 @@ object Wrapper {
             job.kind == Kind.EDIT -> app.getString(R.string.wrapper_failed_edit)
             job.kind == Kind.REACT -> app.getString(R.string.wrapper_failed_react, job.text)
             job.kind == Kind.SEND -> app.getString(R.string.wrapper_failed_send)
+            // A look for receipts that did not work says nothing.
+            job.kind == Kind.STATUS -> null
             else -> app.getString(R.string.wrapper_failed_unsend)
         }
         if (words != null) Handler(Looper.getMainLooper()).post { Toast.makeText(app, words, Toast.LENGTH_LONG).show() }
