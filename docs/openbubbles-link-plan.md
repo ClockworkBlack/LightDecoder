@@ -212,6 +212,40 @@ always-on service is needed.
 - **Effort:** Phase 0 is one session. Phases 1–2 are about 3–5 sessions (Flutter/Dart plus Kotlin
   on both sides, and tests). Then the re-registration on the phone.
 
+## Option B (asked 2026-11-19): OpenBubbles inside LightDecoder, as a hidden tab
+
+The user asked whether OpenBubbles' own screens could be a hidden tab of LightDecoder, with its data
+merged into the Messages tab.
+
+**Not as two apps.** Android does not let one app show another app's screens inside its own.
+Activity embedding only works within one app, and the system-only `ActivityView` is not for ordinary
+apps. A "hidden tab" that just *opens* OpenBubbles is easy, but it would still be a separate app,
+with the same limits as now.
+
+**As one app, it is possible:** build OpenBubbles into LightDecoder. That means:
+- OpenBubbles' Flutter UI as a Flutter "add-to-app" module shown in a hidden tab;
+- its Kotlin services (the APN push service, notifications, FaceTime) and its Rust `rustpush`
+  library, all in LightDecoder's APK and process.
+
+Then full sync is free, since one process holds one database. The Messages tab reads iMessages
+straight from OpenBubbles' ObjectBox store, or a bridge that mirrors it into the iMessage archive.
+
+What it costs, compared with the link in this plan:
+
+| | Link (this plan) | One app (Option B) |
+| --- | --- | --- |
+| FairPlay gate (Phase 0.1) | applies | applies the same way |
+| Work | a small fork diff plus LightDecoder's side | merging two large apps: Gradle builds, Flutter engine and Rust/NDK in LightDecoder's build, manifest merge (OpenBubbles declares SMS, FaceTime, autofill, credential, Firebase and UnifiedPush services and permissions) |
+| APK | LightDecoder unchanged, plus a second APK | LightDecoder gains the Flutter engine and `rustpush` (tens of MB more on top of the current 320 MB) |
+| Upstream updates | rebase a small patch | re-merge OpenBubbles' whole app each release |
+| Licence | OpenBubbles fork is GPL-3; LightDecoder unaffected | LightDecoder becomes a combined GPL-3 work |
+| On the phone | uninstall OpenBubbles, install the fork, re-register | uninstall OpenBubbles, re-register inside LightDecoder |
+
+**Recommendation:** keep the link (Phases 0–4). It gives the same result in the Messages tab, with
+far less to build and maintain, and LightDecoder's own licence is left alone. Option B is worth it only
+if OpenBubbles' own screens are wanted inside LightDecoder for their own sake, and even then Phase 0
+must pass first. On hold with the rest of this plan.
+
 ## The alternative that changes nothing on the phone
 
 Ask OpenBubbles' developers to add this link (or any exported, permission-guarded API) upstream.
