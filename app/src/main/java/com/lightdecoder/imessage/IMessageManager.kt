@@ -203,6 +203,9 @@ class IMessageManager private constructor(
                     continue
                 }
             }
+            // A tapback OpenBubbles described in words ("loved “…”"): a reaction on that message, not a line of its own.
+            val tapback = IMessageCapture.reactionOf(message.text)
+            if (tapback != null && applyReaction(id, tapback, message.fromMe, message.senderHandle.ifEmpty { message.sender })) continue
             // A picture or video OpenBubbles described in words: a picture slot, filled from its Auto-save copy.
             val kinds = IMessageCapture.attachmentKinds(message.text)
             added += MessageDto(
@@ -352,6 +355,204 @@ class IMessageManager private constructor(
                 false
             }
         }
+
+    /**
+     * A message the wrapper sent from OpenBubbles' own screen (an inline reply to [replyToId]): OpenBubbles
+     * never notifies its own messages, so it is shown from here. Returns its id.
+     */
+    fun recordSentElsewhere(conversationId: String, text: String, replyToId: String?, files: List<Pair<File, String>> = emptyList()): String {
+        val id = SENT_PREFIX + "wrap-" + UUID.randomUUID()
+        repo.upsertMessage(
+            MessageDto(
+                id = id, conversationId = conversationId, fromMe = true, direction = "out", status = STATUS_SENT,
+                transport = TRANSPORT, text = text, replyToId = replyToId.orEmpty(),
+                timestampMs = System.currentTimeMillis(), isOld = true,
+                parts = files.mapIndexed { i, (_, mime) -> com.lightdecoder.relay.PartDto(partId = i.toString(), kind = "media", mime = mime) },
+            ),
+        )
+        // Its pictures, from copies of its own (the hand-off copies are cleared after a day).
+        val dir = com.lightdecoder.archive.MediaCache.mediaDir(appContext, ChatService.IMESSAGE).apply { mkdirs() }
+        files.forEachIndexed { i, (file, _) ->
+            runCatching {
+                val copy = File(dir, "sent-${UUID.randomUUID()}-${file.name}")
+                file.copyTo(copy, overwrite = true)
+                repo.setMediaLocalPath(id, i.toString(), copy.path, thumbnail = false)
+            }
+        }
+        return id
+    }
+
+    /** A message read off OpenBubbles' chat screen (the history import): its words and whose it is. */
+    data class SeenMessage(val text: String, val fromMe: Boolean)
+
+    /**
+     * Keeps the messages of [seen] (the chat as OpenBubbles shows it, oldest first) that are not here yet;
+     * how many that was, or -1 for a group (its screen does not say who wrote what). Those already here are
+     * found by their words and side, in order (the longest run both share), so nothing is kept twice.
+     * OpenBubbles' screen gives no times: a new message takes one between its neighbours here, or a minute
+     * apart before the oldest known.
+     */
+    fun importHistory(conversationId: String, seen: List<SeenMessage>): Int {
+        val conversation = repo.conversation(conversationId) ?: return -1
+        if (conversation.isGroup) return -1
+        val have = repo.messages(conversationId, limit = HISTORY_KNOWN).filter { it.text.isNotBlank() }
+        fun same(a: SeenMessage, b: MessageRow) = a.fromMe == b.isOutgoing && a.text.trim() == b.text.trim()
+        // The longest common run, back to front.
+        val n = seen.size
+        val m = have.size
+        val run = Array(n + 1) { IntArray(m + 1) }
+        for (i in n - 1 downTo 0) for (j in m - 1 downTo 0) {
+            run[i][j] = if (same(seen[i], have[j])) run[i + 1][j + 1] + 1 else maxOf(run[i + 1][j], run[i][j + 1])
+        }
+        val known = arrayOfNulls<Long>(n)
+        var i = 0
+        var j = 0
+        while (i < n && j < m) {
+            when {
+                same(seen[i], have[j]) -> { known[i] = have[j].timestampMs; i++; j++ }
+                run[i + 1][j] >= run[i][j + 1] -> i++
+                else -> j++
+            }
+        }
+        val other = runCatching { repo.participants(conversationId) }.getOrDefault(emptyList()).firstOrNull { !it.isMe }
+        val now = System.currentTimeMillis()
+        var added = 0
+        var at = 0
+        while (at < n) {
+            if (known[at] != null) { at++; continue }
+            // A run of new messages between two known ones (or before the first, or after the last).
+            var end = at
+            while (end < n && known[end] == null) end++
+            val before = if (at > 0) known[at - 1] else null
+            val after = if (end < n) known[end] else null
+            val count = end - at
+            for (k in 0 until count) {
+                val time = when {
+                    before != null && after != null -> before + (after - before) * (k + 1) / (count + 1)
+                    after != null -> after - (count - k) * HISTORY_STEP_MS
+                    before != null -> minOf(now, before + (k + 1) * 1_000L)
+                    else -> now - (count - k) * HISTORY_STEP_MS
+                }
+                val message = seen[at + k]
+                repo.upsertMessage(
+                    MessageDto(
+                        id = HISTORY_PREFIX + UUID.randomUUID(), conversationId = conversationId, fromMe = message.fromMe,
+                        direction = if (message.fromMe) "out" else "in", status = if (message.fromMe) STATUS_SENT else "",
+                        senderId = if (message.fromMe) "" else other?.id.orEmpty(),
+                        senderName = if (message.fromMe) "" else other?.name.orEmpty(),
+                        transport = TRANSPORT, text = message.text.trim(), timestampMs = time, isOld = true,
+                    ),
+                )
+                added++
+            }
+            at = end
+        }
+        return added
+    }
+
+    /** [row] stored again with some of it changed (texts only: a picture's parts are not rewritten). */
+    private fun rewrite(
+        row: MessageRow,
+        text: String = row.text,
+        status: String = row.status,
+        direction: String = row.direction,
+        reactions: List<com.lightdecoder.relay.ReactionDto> = row.reactions,
+    ) {
+        if (row.media.isNotEmpty()) return
+        repo.upsertMessage(
+            MessageDto(
+                id = row.id, conversationId = row.conversationId, fromMe = row.isOutgoing, direction = direction,
+                senderId = row.senderId, senderName = row.senderName, status = status, transport = TRANSPORT,
+                text = text, replyToId = row.replyToId, timestampMs = row.timestampMs, reactions = reactions, isOld = true,
+            ),
+        )
+    }
+
+    /**
+     * Puts [tapback] on the message of [conversationId] it names (by its words), from them or (another device
+     * of the user's) from the user. False when no such message is here: the line is kept as text then.
+     */
+    private fun applyReaction(conversationId: String, tapback: IMessageCapture.Tapback, fromMe: Boolean, who: String): Boolean {
+        val target = repo.messages(conversationId, limit = 200)
+            .lastOrNull { it.direction != "system" && it.text.trim() == tapback.quoted && it.media.isEmpty() } ?: return false
+        val them = if (fromMe) ME else who.ifEmpty { "them" }
+        val kept = target.reactions.filter { r -> if (fromMe) !r.fromMe else r.fromMe || them !in r.participantIds }
+        val now = if (tapback.removed || tapback.emoji == null) kept
+        else kept + com.lightdecoder.relay.ReactionDto(tapback.emoji, participantIds = listOf(them), fromMe = fromMe)
+        if (now == target.reactions) return true
+        rewrite(target, reactions = now)
+        IMessageLog.add(
+            appContext,
+            "${IMessageLog.chatRef(conversationId)}: tapback ${if (tapback.removed) "removed" else "added"} by ${if (fromMe) "me" else "them"} (from OpenBubbles' notification)",
+        )
+        return true
+    }
+
+    /** The user's newest iMessage in [conversationId] (for a look at its receipt), or null. */
+    fun newestOwnIMessage(conversationId: String): MessageRow? =
+        repo.messages(conversationId, limit = 50).lastOrNull { it.isOutgoing && it.direction == "out" }
+
+    /**
+     * What OpenBubbles says under the newest message ("READ", "DELIVERED", "SENT"): the user's messages in
+     * [conversationId] up to it get the ticks (an iPhone reads a conversation up to a point).
+     */
+    fun recordReceipt(conversationId: String, receipt: String) {
+        val status = when (receipt) {
+            "READ" -> STATUS_READ
+            "DELIVERED" -> STATUS_DELIVERED
+            else -> return
+        }
+        val rank = mapOf(STATUS_SENT to 0, STATUS_DELIVERED to 1, STATUS_READ to 2)
+        val mine = repo.messages(conversationId, limit = 50).filter { it.isOutgoing && it.direction == "out" && !it.isLocal }
+        var changed = 0
+        for (row in mine) {
+            if ((rank[row.status] ?: 0) < rank.getValue(status)) {
+                rewrite(row, status = status)
+                changed++
+            }
+        }
+        if (changed > 0) IMessageLog.add(appContext, "${IMessageLog.chatRef(conversationId)}: ${receipt.lowercase()} (from OpenBubbles' screen), $changed message(s)")
+    }
+
+    /** A message the user unsent: in its place, "You unsent a message", as an iPhone shows it. */
+    fun recordUnsent(id: String) {
+        val row = repo.message(id) ?: return
+        IMessagePrefs.addDeletedMessage(appContext, id)
+        if (row.media.isNotEmpty()) {
+            repo.applyDeletion(id)
+            return
+        }
+        rewrite(row, text = appContext.getString(com.lightdecoder.R.string.imessage_unsent_note), direction = "system", reactions = emptyList())
+    }
+
+    /** A message of the user's, edited through the wrapper: its new text here too. */
+    fun recordEdited(id: String, text: String) {
+        val row = repo.message(id)?.takeIf { it.media.isEmpty() } ?: return
+        repo.upsertMessage(
+            MessageDto(
+                id = row.id, conversationId = row.conversationId, fromMe = row.isOutgoing, direction = row.direction,
+                senderId = row.senderId, senderName = row.senderName, status = row.status, transport = TRANSPORT,
+                text = text, replyToId = row.replyToId, timestampMs = row.timestampMs, reactions = row.reactions, isOld = true,
+            ),
+        )
+    }
+
+    /** The user's tapback on [id], done through the wrapper: shown on it here (one reaction of one's own). */
+    fun recordOwnReaction(id: String, emoji: String) {
+        val row = repo.message(id)?.takeIf { it.media.isEmpty() } ?: return
+        val others = row.reactions.filter { !it.fromMe }
+        repo.upsertMessage(
+            MessageDto(
+                id = row.id, conversationId = row.conversationId, fromMe = row.isOutgoing, direction = row.direction,
+                senderId = row.senderId, senderName = row.senderName, status = row.status, transport = TRANSPORT,
+                text = row.text, replyToId = row.replyToId, timestampMs = row.timestampMs, isOld = true,
+                reactions = others + com.lightdecoder.relay.ReactionDto(emoji, participantIds = listOf(ME), fromMe = true),
+            ),
+        )
+    }
+
+    /** Takes back a [recordSentElsewhere] row whose send did not go through. */
+    fun forgetSentElsewhere(id: String) = repo.applyDeletion(id)
 
     /** Pictures and files go through OpenBubbles' own screen ([handOff]). */
     override fun sendMedia(conversationId: String, uri: Uri, caption: String?, replyToId: String?): String =
@@ -522,11 +723,18 @@ class IMessageManager private constructor(
 
         /** The status of the user's messages once OpenBubbles has them. */
         internal const val STATUS_SENT = "OUTGOING_COMPLETE"
+        const val STATUS_DELIVERED = "OUTGOING_DELIVERED"
+        const val STATUS_READ = "OUTGOING_DISPLAYED"
 
         /** Id prefix of a message sent from here (the rest is its tmpId). */
         /** The same unused notification is logged again at most this often. */
         private const val UNUSED_LOG_EVERY_MS = 10 * 60 * 1000L
         private const val SENT_PREFIX = "ld:"
+
+        /** Rows the history import read off OpenBubbles' screen (their times are placed, not known). */
+        const val HISTORY_PREFIX = "hist:"
+        private const val HISTORY_KNOWN = 3_000
+        private const val HISTORY_STEP_MS = 60_000L
         private const val ME = "me"
         private const val ECHO_LOOKBACK = 40
         /** How far apart a message sent from here and OpenBubbles' line for it may be (it sends when it can). */

@@ -94,6 +94,36 @@ object IMessageCapture {
         return kinds.takeIf { it.isNotEmpty() }
     }
 
+    /** A tapback as OpenBubbles words it in a notification: [emoji] on the message reading [quoted]; [removed] for "removed …". */
+    data class Tapback(val emoji: String?, val quoted: String, val removed: Boolean)
+
+    /**
+     * A tapback line ("loved “Dinner at 7?”", "reacted 🔥 to “…”", "removed a heart from “…”"; OpenBubbles'
+     * `getNotificationText` with its verbs), or null for any other line.
+     */
+    fun reactionOf(text: String): Tapback? {
+        val m = TAPBACK.matchEntire(text.trim()) ?: return null
+        val verb = m.groupValues[1].lowercase()
+        val quoted = m.groupValues[2].trim()
+        if (quoted.isEmpty()) return null
+        if (verb.startsWith("removed")) return Tapback(null, quoted, removed = true)
+        val emoji = when {
+            verb == "loved" -> "\u2764\uFE0F"
+            verb == "liked" -> "\uD83D\uDC4D"
+            verb == "disliked" -> "\uD83D\uDC4E"
+            verb == "laughed at" -> "\uD83D\uDE02"
+            verb == "emphasized" -> "\u203C\uFE0F"
+            verb == "questioned" -> "\u2753"
+            verb.startsWith("reacted ") -> verb.removePrefix("reacted ").removeSuffix(" to").trim().ifEmpty { null }
+            else -> null
+        } ?: return null
+        return Tapback(emoji, quoted, removed = false)
+    }
+
+    private val TAPBACK = Regex(
+        "(?is)(loved|liked|disliked|laughed at|emphasized|questioned|reacted \\S+ to|removed an? .{1,20}? from)\\s+[\u201C\"](.*)[\u201D\"]",
+    )
+
     const val IMAGE = "image/*"
     const val VIDEO = "video/*"
     private val ATTACHMENTS = Regex("(?i)attachments?:\\s*(.+)")

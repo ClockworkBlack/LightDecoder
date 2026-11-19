@@ -23,6 +23,24 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.54 (versionCode 64) - main with a trimmed wrapper: inline replies, read receipts, history import
+- The user chose (asked, after going back to main in 0.5.53): the wrapper back on main, but only the parts
+  that worked on their phone. The wrapper branch is merged in; `Wrapper.full` (no switch, off) gates its
+  button pressing: Unsend, Edit, reactions and pictures open OpenBubbles for the user as on 0.5.49.
+  Tests turn `setFull` on to keep covering those paths.
+- **Inline replies** on by default with the wrapper (`KEY_INLINE` default true): only a reply to one
+  iMessage (a reply target) goes inline; a plain send still uses the notification Reply button.
+- **Read receipts**: the 0.5.50-wrapper receipt look (2.5 s idle, 5 min a chat, a tap stops it).
+- **History import** (new, `Kind.HISTORY`, conversation menu "Import iMessage history"): the wrapper opens the
+  chat, reads its messages screen by screen (`WrapperNodes.bubbles`: lines of words in the list, minus
+  receipts, date lines, unsent lines; the user's are nearer the right edge), scrolls back up to 40 screens
+  (`mergeOlder` joins screens; the other scroll direction is tried once if the first goes nowhere), behind a
+  plain cover that says so (tap stops, what was read is kept). `IMessageManager.importHistory` keeps what is
+  not here (longest common run by words and side), ids `hist:`, times placed between known neighbours or a
+  minute apart (OpenBubbles' screen shows none). Not groups, not pictures. NOT tried on a phone: the log
+  line "history import read N ... M new" and "Wrapper history ... read N on S screens" tell how it went.
+- Menu wording: "Inline replies, read receipts & history (wrapper, beta)".
+
 ## 0.5.53 (versionCode 63) - back on main: the wrapper is set aside
 - The user found the OpenBubbles accessibility wrapper (branch ccr-4fee5e9f-jrrlhu-wrapper, last 0.5.52-wrapper,
   versionCode 62) not working well and asked to go back to main. 0.5.53 is 0.5.49 with only the version raised,
@@ -43,6 +61,124 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - Pictures were already shown from the original file, decoded at the bubble's size, and full resolution and
   zoomable in the gallery (HEIC included).
 - versionCode 55–57 were wrapper-branch builds, so main jumps to 58 to install over them.
+## 0.5.52-wrapper (versionCode 62) - BRANCH ccr-4fee5e9f-jrrlhu-wrapper: menus closed after a failed job
+- User's log: an Unsend "done", 5 s later a second Unsend on the same (already unsent) message stopped at
+  menu (only the reaction row was there: OpenBubbles offered no Undo Send), and the next send "stopped at
+  chat in 5037ms": the failed job had left OpenBubbles' message menu open, so the composer never showed.
+- `perform` presses Back when a job fails after its long press (`menuUp`); `chatField` presses Back once if
+  no message field shows within 1.5 s. A menu with reactions but no action now stops at "Undo Send is not
+  offered for that message in OpenBubbles" (shown in the dialog). `WrapperNodes.message` prefers a bubble
+  saying exactly the text over one only containing it.
+
+## 0.5.51-wrapper (versionCode 61) - BRANCH ccr-4fee5e9f-jrrlhu-wrapper: no false "Not finished", no stutter
+- 0.5.50 bug: `Wrapper.finish` showed the "Not finished in OpenBubbles" dialog after every job, done or not
+  (the `result.ok` check was lost when the toast became a dialog). The user's log: both Unsends and sends
+  "done", yet dialogs. Fixed, with `WrapperFinishTest`.
+- The freeze: "Try again" on an already-unsent message hunted 8 scrolls back (7 s behind the still). Unsend
+  and Edit (recent messages, near the bottom) now scroll back at most once.
+- Stutter: the wrapper read OpenBubbles' screen (accessibility calls every 40 ms) on LightDecoder's main
+  thread. `perform` now runs on `Dispatchers.Default`; only the still (add, remove, touch-through) is on Main;
+  `Wrapper.finish` (database writes) on IO.
+
+## 0.5.50-wrapper (versionCode 60) - BRANCH ccr-4fee5e9f-jrrlhu-wrapper: wrapper faster and steadier
+- User report: laggy, Unsend took two presses then "could not be finished", sometimes left in OpenBubbles.
+  Causes found: the receipt look (`Kind.STATUS`) ran as soon as a conversation opened, behind a
+  touch-eating still, so the first tap was lost and a job started meanwhile failed as "busy"; a failed
+  job left OpenBubbles in front; Flutter icon buttons ("Undo Send", "Show menu") name themselves in
+  `tooltipText`, which was not read.
+- `WrapperService.run` queues jobs (main thread): the user's job stops a running receipt look (`stop`,
+  checked in `waitFor`) and others wait their turn; receipt looks are dropped while anything is under way.
+  Queued jobs run behind the same still with no trip back between.
+- LightDecoder is always brought back, done or not. A failure is kept in `Wrapper.takeFailure()` and the
+  conversation shows it (`ThreadActivity.showWrapperFailure`): Try again (Unsend, Edit, react) or Do it in
+  OpenBubbles (`Wrapper.doInOpenBubbles`: the composer for pictures, else the chat); a toast if no
+  conversation takes it within 2.5 s.
+- `UiNode.tooltip` (API 28+) is read by `WrapperNodes.said`. Unsend/Edit pick the user's own bubble (right
+  half) among alike ones. Undo Send now counts as done only when one more "You unsent a message" shows.
+- Receipt looks: only after the conversation is untouched for 2.5 s (`onUserInteraction` resets it), at
+  most every 5 min a chat, never right after a job in that chat; a tap on the still stops a look. No more
+  900 ms receipt wait after each job (one read of what is on screen).
+- The user's log (OpenBubbles **2.0.0**, not the 1.15 source the labels came from): five Unsends all
+  "stopped at menu" (message found, then neither "Undo Send" nor "more"). Now `WrapperNodes.action` takes
+  several titles (Undo Send / Unsend / ...) and matches text, description, tooltip, each line of a merged
+  label; with no menu after the accessibility long press, a real long-press gesture and a second wait; on
+  failure the log lists the buttons OpenBubbles shows (`WrapperNodes.buttonNames`), to fix the labels.
+- "iMessage history gone after updating to the wrapper build": nothing in either branch deletes the
+  iMessage archive (only "Delete local archive" with Blue Bubbles off), same applicationId and key, DB
+  version unchanged. The 200-line log starts after the loss. Leading guesses: an uninstall before install,
+  or history that LightDecoder never had (it only knows what OpenBubbles' notifications showed). Possible
+  next step offered to the user: a wrapper "import history" that reads older messages off OpenBubbles' chat.
+
+## 0.5.48-wrapper (versionCode 57) - BRANCH ccr-4fee5e9f-jrrlhu-wrapper: receipts, tapbacks, unsent, wrapper-off prompt
+- On the user's phone, Unsend and Edit fell back to OpenBubbles. In 0.5.46 that happens when the wrapper is
+  switched on but its accessibility service is not running: Android (Samsung especially) can turn it off on
+  an app update. Now `ThreadActivity.wrapperIsOff` says so, with "Open accessibility settings" or "Do it in
+  OpenBubbles", instead of silently opening OpenBubbles. This applies to Unsend, Edit, reactions, and picture
+  and hand-off sends. Logged.
+- **Unsent:** after the wrapper's Undo Send, the message becomes a system line "You unsent a message"
+  (`IMessageManager.recordUnsent`; a picture message is removed). Its id stays in `IMessagePrefs.deletedMessages`,
+  so OpenBubbles' notification never brings it back.
+- **Read receipts:** OpenBubbles shows "Read …", "Delivered …" or "Sent …" under the newest message of one's
+  own (`delivered_indicator.dart`), and `WrapperNodes.receipt` reads it.
+  - After every wrapper job (still in OpenBubbles' chat), and in a `Kind.STATUS` look, silent behind the
+    still, when a conversation opens. The look only happens when one's newest iMessage there is not read, is
+    under 48 h old, and that chat has not been looked at in the last 90 s.
+  - `IMessageManager.recordReceipt` gives one's messages in the chat OUTGOING_DELIVERED / OUTGOING_DISPLAYED,
+    so the usual ticks show.
+  - Option: Messages menu → "Read receipts (wrapper)", on by default.
+- **Tapbacks from them:** OpenBubbles' notification words a tapback as `loved “…”`, `liked`, `disliked`,
+  `laughed at`, `emphasized`, `questioned`, `reacted 🔥 to “…”` or `removed a heart from “…”`
+  (`MessageHelper.getNotificationText`, `reactionToVerb`). `IMessageCapture.reactionOf` reads it, and
+  `applyReaction` puts it on the message with those words (replacing their earlier one), instead of storing a
+  line. Their tapbacks reach LightDecoder only with OpenBubbles' "Notify for Reactions" on.
+
+## 0.5.47-wrapper (versionCode 56) - BRANCH ccr-4fee5e9f-jrrlhu-wrapper: silent wrapper, replies direct, quotes fixed
+- User: a regular reply went through the wrapper (inline, via OpenBubbles' screen). Replies now go straight
+  through OpenBubbles' Reply button again. Inline replies through the wrapper are a separate option, off by
+  default: Messages menu → "Replies as inline replies (wrapper)", shown once the wrapper is on (`Wrapper.inlineReplies`,
+  `repliesInline`). The main switch is now "Unsend, Edit & reactions (wrapper, beta)".
+- Silent:
+  - Before switching apps, the service takes a screenshot (`takeScreenshot`, Android 11+,
+    `canTakeScreenshot` in its config) and shows it full screen as a TYPE_ACCESSIBILITY_OVERLAY that takes
+    touches (so nothing lands in OpenBubbles). Older Android shows a plain cover.
+  - OpenBubbles opens with no animation (`IMessageReplies.open(quiet = true)`, a zero custom animation),
+    and LightDecoder comes back with FLAG_ACTIVITY_NO_ANIMATION.
+  - The still goes 250 ms after the return, once LightDecoder is drawn.
+  - For a gesture fallback, touches go through the still for that moment only.
+- Quotes: a reply to an iMessage showed "Reply to an earlier message". Quotes were looked up only among the
+  conversation's own texts. Now `quotesFor` covers the shown iMessages too, and falls back to the iMessage archive.
+  Tapping a quote of an older iMessage reloads back to its time (the texts' window grows until it reaches it, and
+  that chat's iMessages are read back to it), then highlights it.
+- **What the wrapper does, at the user's request, is only what cannot be done directly:**
+  - Unsend, Edit, reactions;
+  - `Kind.SEND`: everything that used to open OpenBubbles for the user to tap send. That is pictures,
+    several pictures, voice messages, stickers, and texts to a chat with no Reply button yet.
+
+  For SEND, `handOffToOpenBubbles` starts OpenBubbles' composer for the chat with the files (the same
+  share intent as before) behind the still. The wrapper waits for the field and 600 ms for the files to
+  load, then clicks the send button right of the field. The message shows here at once with its pictures
+  (`recordSentElsewhere(files)`, copied into the iMessage media folder). On a failure it is taken back,
+  and OpenBubbles is left open with it ready.
+
+  Plain replies go through the Reply button, and inline replies only with their option on. "Send iMessage"
+  to a new person still opens OpenBubbles (it needs the address typed).
+- The quote fix and the reply routing are only on this branch so far. Merge into main when the wrapper is kept.
+
+## 0.5.46-wrapper (versionCode 55) - BRANCH ccr-4fee5e9f-jrrlhu-wrapper: Edit and reactions through the wrapper
+- Main's 0.5.46 (every emoji as a reaction) merged in.
+- **Edit:** the new text is asked in LightDecoder (the usual edit dialog). The wrapper then:
+  1. long-presses the message and taps "Edit";
+  2. fills the field OpenBubbles opens over it (hint "Edited Message", `message_holder.dart`);
+  3. taps the send arrow to its right (`WrapperNodes.editField` + `send`);
+  4. waits for the field to close.
+
+  The text is updated here (`IMessageManager.recordEdited`).
+- **Reactions** (quick row or full picker): the wrapper long-presses the message and taps that emoji in
+  OpenBubbles' reaction row. The row holds ❤️ 👍 👎 😂 ❗ ❓, then recent and filler emoji, up to 16, and
+  is scrolled along up to 3 times; matching ignores U+FE0F. The tapback is shown here
+  (`recordOwnReaction`). An emoji OpenBubbles' row does not offer ends as "reaction not offered":
+  OpenBubbles is left open, and a notice says to react there. "Remove reaction" is hidden for iMessages.
+- Both are only for messages with text (they are found by it), and are logged with timings like replies.
 
 ## 0.5.46 (versionCode 54) - every emoji as a reaction
 - Long-press sheet: five quick reactions (👍 ❤️ 😂 😮 😢; the user's own reaction takes the last place
@@ -54,6 +190,37 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - The picker brings Guava (Apache-2.0, added to `bundleLicenses`' Apache list and NOTICE). Its
   annotation-only dependencies (jsr305, checker-qual, j2objc-annotations) are excluded, not shipped.
 - versionCode 53 was the wrapper branch's 0.5.45-wrapper. Main continues at 54, so it installs over it.
+## 0.5.45-wrapper (versionCode 53) - BRANCH ccr-4fee5e9f-jrrlhu-wrapper: the OpenBubbles wrapper (beta)
+- An experimental option, on its own branch at the user's request; main stays at 0.5.44. Off by default.
+  Switch: Messages tab menu → "Inline replies & Undo Send (wrapper, beta)", which leads to Android's
+  accessibility settings for "LightDecoder: OpenBubbles wrapper (beta)".
+- `wrapper/WrapperService`: an AccessibilityService limited to OpenBubbles' packages (`res/xml/wrapper_service.xml`,
+  `packageNames`). For an inline reply:
+  1. it opens the chat (OpenBubbles' own notification intent, else its share screen for the chat);
+  2. it waits for the message field;
+  3. it finds the bubble by the message's first 40 characters, the lowest on screen, scrolling back up to 8
+     times;
+  4. it long-presses it (ACTION_LONG_CLICK, else a gesture);
+  5. it clicks "Reply" or "Undo Send" (tooltip and title from OpenBubbles 1.15 `details_menu_action.dart`),
+     else "Show menu" / "More" first;
+  6. it sets the text (ACTION_SET_TEXT) and clicks send. Send has no label, so it is found by place: the
+     clickable node right of the field on its row.
+  7. it waits for the field to empty, then brings LightDecoder's conversation back (REORDER_TO_FRONT).
+
+  Polling every 40 ms, with timeouts per step (chat 5 s, other steps 0.6–2 s). The pure finding is in
+  `WrapperNodes` (tested on made-up trees).
+- A LightDecoder-coloured cover (TYPE_ACCESSIBILITY_OVERLAY, not touchable) hides OpenBubbles while it works.
+- Each run is logged with the time per step and in total ("Wrapper reply chat#xxxx: done in 1840ms (chat …, message …,
+  menu …, typed …, sent …)"), or where it stopped. On a failure, OpenBubbles is left open on the chat, a
+  reply's text is copied and LightDecoder's own row is taken back.
+- LightDecoder side:
+  - `ThreadActivity.send` routes a reply to an iMessage with text through the wrapper when it is available,
+    and shows the reply at once with its quote (`IMessageManager.recordSentElsewhere`, an `ld:` row).
+    OpenBubbles never notifies its own sends.
+  - Unsend uses the wrapper inside the 2 minutes, and removes the message here once it is done.
+  - The reply bar says "(inline, through OpenBubbles)".
+- Not verified against a real OpenBubbles yet (no device here): labels and layout come from its source.
+  Edit and tapbacks are not automated (Edit's confirm button and the reaction icons have no labels to find).
 
 ## 0.5.44 (versionCode 52) - received iMessage pictures in their bubbles
 - OpenBubbles' notification carries only a description ("Image", "Attachments: 2 images, 1 movie"), never

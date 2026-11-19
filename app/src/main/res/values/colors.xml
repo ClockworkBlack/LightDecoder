@@ -10,4 +10,6 @@
     <color name="imessage_light_amber">#FFFFB300</color>
     <color name="imessage_light_red">#FFE53935</color>
     <color name="imessage_light_grey">#FF8E8E93</color>
+    <!-- The wrapper's cover while it works in OpenBubbles. -->
+    <color name="wrapper_cover">#F0101418</color>
 </resources>

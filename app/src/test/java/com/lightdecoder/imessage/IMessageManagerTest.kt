@@ -115,6 +115,26 @@ class IMessageManagerTest {
     }
 
     @Test
+    fun historyReadOffOpenBubblesScreenIsKeptOnceInOrder() {
+        capture(Line("Hi there", 1_700_000_000_000L, alice), Line("Lunch?", 1_700_000_600_000L, alice))
+        val seen = listOf(
+            IMessageManager.SeenMessage("Long time", false),
+            IMessageManager.SeenMessage("Yes it has", true),
+            IMessageManager.SeenMessage("Hi there", false),
+            IMessageManager.SeenMessage("Hello", true),
+            IMessageManager.SeenMessage("Lunch?", false),
+        )
+        assertEquals("the three that were not here", 3, manager.importHistory(ALICE_GUID, seen))
+        assertEquals(listOf("Long time", "Yes it has", "Hi there", "Hello", "Lunch?"), messages().sortedBy { it.timestampMs }.map { it.text })
+        val mine = messages().filter { it.isOutgoing }.map { it.text }
+        assertEquals(listOf("Hello", "Yes it has"), mine.sorted())
+        val hello = messages().single { it.text == "Hello" }
+        assertTrue("between its neighbours", hello.timestampMs in 1_700_000_000_001L until 1_700_000_600_000L)
+        assertEquals("again: nothing twice", 0, manager.importHistory(ALICE_GUID, seen))
+        assertEquals(5, messages().size)
+    }
+
+    @Test
     fun aReplyGoesThroughTheReplyButtonAndIsKeptOnce() {
         capture(Line("Hi there", 1_700_000_000_000L, alice))
         val tmpId = manager.sendText(ALICE_GUID, "  On my way  ")
@@ -267,7 +287,7 @@ class IMessageManagerTest {
         try {
             listener.onNotificationPosted(posted(chat(context, listOf(Line("Hi there", 1_700_000_000_000L, alice)))))
             val deadline = System.currentTimeMillis() + 5_000
-            while (repo.conversation(ALICE_GUID) == null && System.currentTimeMillis() < deadline) {
+            while (messages().isEmpty() && System.currentTimeMillis() < deadline) {
                 idle()
                 Thread.sleep(20)
             }

@@ -1,0 +1,239 @@
+package com.lightdecoder.wrapper
+
+import android.graphics.Rect
+
+/**
+ * One element of OpenBubbles' screen as Android's accessibility service
+ * sees it (its Flutter semantics). An interface so the finding below can be
+ * tested with made-up screens.
+ */
+interface UiNode {
+    val text: String
+    val description: String
+
+    /** A tooltip (Android 9+): Flutter puts an icon button's name ("Undo Send", "Show menu") here. */
+    val tooltip: String get() = ""
+    val hint: String
+    val className: String
+    val bounds: Rect
+    val clickable: Boolean
+    val longClickable: Boolean
+    val editable: Boolean
+    val scrollable: Boolean
+    val children: List<UiNode>
+    val parent: UiNode?
+}
+
+/** Finding things on OpenBubbles' screen (labels from its source, 1.15). Pure: no Android calls. */
+object WrapperNodes {
+
+    /** Every node under [root], depth first. */
+    fun all(root: UiNode): Sequence<UiNode> = sequence {
+        val stack = ArrayDeque<UiNode>()
+        stack.addLast(root)
+        while (stack.isNotEmpty()) {
+            val n = stack.removeLast()
+            yield(n)
+            for (i in n.children.indices.reversed()) stack.addLast(n.children[i])
+        }
+    }
+
+    private fun norm(s: String) = s.lowercase().replace(Regex("\\s+"), " ").trim()
+
+    /** What a node says: its text, else its description (a Flutter label), else its tooltip. */
+    fun said(n: UiNode): String = n.text.ifBlank { n.description.ifBlank { n.tooltip } }
+
+    /**
+     * The bubble of the message that reads [text]: the lowest one on screen (the newest) whose words
+     * contain the message's first words. Null if it is not on screen.
+     */
+    fun message(root: UiNode, text: String, mine: Boolean = false): UiNode? {
+        val want = norm(text).take(MATCH_CHARS)
+        if (want.isEmpty()) return null
+        val holding = all(root).filter { !it.editable && norm(said(it)).contains(want) }.toList()
+        // A bubble that says exactly this, over one that only has it among other words ("Hi" in "This").
+        val found = holding.filter { norm(said(it)).take(MATCH_CHARS) == want }.ifEmpty { holding }
+        // The user's own messages sit on the right: with several alike ("Test", "Test"), one of theirs.
+        val middle = boundsOf(root).centerX()
+        val pick = if (mine && middle > 0) found.filter { boundsOf(it).centerX() > middle }.ifEmpty { found } else found
+        return pick.maxByOrNull { boundsOf(it).bottom }
+    }
+
+    /** Where a node is on screen: its own bounds, or (a label with none) its nearest ancestor's. */
+    private fun boundsOf(n: UiNode): Rect {
+        var cur: UiNode? = n
+        while (cur != null) {
+            if (!cur.bounds.isEmpty) return cur.bounds
+            cur = cur.parent
+        }
+        return Rect()
+    }
+
+    /** The node to long-press for [n]: itself or the nearest ancestor that takes a long press. */
+    fun longPressTarget(n: UiNode): UiNode? {
+        var cur: UiNode? = n
+        while (cur != null) {
+            if (cur.longClickable) return cur
+            cur = cur.parent
+        }
+        return null
+    }
+
+    /** The node to click for [n]: itself or the nearest clickable ancestor. */
+    fun clickTarget(n: UiNode): UiNode? {
+        var cur: UiNode? = n
+        while (cur != null) {
+            if (cur.clickable) return cur
+            cur = cur.parent
+        }
+        return null
+    }
+
+    /** Every name a node has (text, description, tooltip), each line on its own, normalised. */
+    private fun names(n: UiNode): List<String> =
+        listOf(n.text, n.description, n.tooltip).flatMap { it.split('\n') }.map(::norm).filter { it.isNotEmpty() }
+
+    /**
+     * A menu action by one of its [titles] ("Undo Send" or "Unsend"): exactly that, any case, in the node's
+     * text, description or tooltip (Flutter can put "Undo Send" in any of them, or on a line of a merged label).
+     */
+    fun action(root: UiNode, vararg titles: String): UiNode? {
+        val want = titles.map(::norm).toSet()
+        return all(root).firstOrNull { n -> names(n).any { it in want } }
+    }
+
+    /** The popup's "more" button: Material's "Show menu" tooltip, or the other skins' "More". */
+    fun more(root: UiNode): UiNode? =
+        all(root).firstOrNull { n -> names(n).any { it in MORE_LABELS } }
+
+    /** The short names of the buttons on screen, for the log when a step finds nothing (what OpenBubbles shows). */
+    fun buttonNames(root: UiNode, max: Int = 24): String =
+        all(root).filter { clickTarget(it) != null || it.longClickable }.flatMap { names(it).asSequence() }
+            .filter { it.length <= 24 }.distinct().take(max).joinToString(" | ").ifEmpty { "none named" }
+
+    /** The message field: the editable node, preferring the one hinted "iMessage". */
+    fun field(root: UiNode): UiNode? {
+        val editable = all(root).filter { it.editable }.toList()
+        return editable.firstOrNull { norm(it.hint).startsWith("imessage") || norm(it.hint).startsWith("text") }
+            ?: editable.maxByOrNull { it.bounds.bottom }
+    }
+
+    /**
+     * The send button: it has no label (an icon), so it is found by place: the clickable node on the
+     * field's row, to the right of it, furthest right.
+     */
+    fun send(root: UiNode, field: UiNode): UiNode? {
+        val f = field.bounds
+        return all(root).filter { n ->
+            n !== field && n.clickable && !n.editable &&
+                n.bounds.left >= f.right - SLACK_PX && n.bounds.top < f.bottom && n.bounds.bottom > f.top
+        }.maxByOrNull { it.bounds.right }
+    }
+
+    /** The field OpenBubbles opens over a message being edited (hint "Edited Message"). */
+    fun editField(root: UiNode): UiNode? =
+        all(root).firstOrNull { it.editable && norm(it.hint).startsWith("edited message") }
+
+    /**
+     * A reaction in OpenBubbles' reaction row: drawn as the emoji itself (❤️ 👍 👎 😂 ❗ ❓, then recent
+     * ones). Compared without the emoji presentation marks, so ❤ and ❤️ are the same.
+     */
+    fun reaction(root: UiNode, emoji: String): UiNode? {
+        val want = bareEmoji(emoji)
+        if (want.isEmpty()) return null
+        return all(root).firstOrNull { !it.editable && bareEmoji(said(it)) == want }
+    }
+
+    /** Short scrolling rows (the reaction row), widest first, to look further along for an emoji. */
+    fun rows(root: UiNode): List<UiNode> =
+        all(root).filter { it.scrollable && it.bounds.height() in 1 until it.bounds.width() / 3 }.sortedByDescending { it.bounds.width() }.toList()
+
+    private fun bareEmoji(s: String) = s.trim().replace("\uFE0F", "").replace("\uFE0E", "")
+
+    /** What OpenBubbles says under the user's newest message: "Read …", "Delivered …" or "Sent …". */
+    enum class Receipt { SENT, DELIVERED, READ }
+
+    /** The strongest receipt on screen (OpenBubbles shows it under the newest message of one's own), or null. */
+    fun receipt(root: UiNode): Receipt? {
+        var best: Receipt? = null
+        for (n in all(root)) {
+            val words = norm(said(n))
+            val r = when {
+                words == "read" || words.startsWith("read ") -> Receipt.READ
+                words == "delivered" || words.startsWith("delivered ") -> Receipt.DELIVERED
+                words == "sent" || words.startsWith("sent ") && words.length < 24 -> Receipt.SENT
+                else -> null
+            } ?: continue
+            if (best == null || r.ordinal > best.ordinal) best = r
+        }
+        return best
+    }
+
+    /** How many "You unsent a message" lines are on screen (one more shows once Undo Send has gone). */
+    fun unsentCount(root: UiNode): Int = all(root).count { norm(said(it)).contains("unsent a message") }
+
+    /** One message as OpenBubbles' chat shows it: its words, and whose it is (the user's sit on the right). */
+    data class Bubble(val text: String, val mine: Boolean)
+
+    /**
+     * The messages on OpenBubbles' chat screen, oldest (top) first, for the history import: the lines of words in
+     * its list that are not a receipt, a date line, an "unsent" line or a button. Pictures have no words and
+     * are not read.
+     */
+    fun bubbles(root: UiNode): List<Bubble> {
+        val list = scrollable(root) ?: return emptyList()
+        val screen = boundsOf(root)
+        // A line of words: a node that says something while nothing under it does (a merged label's parts).
+        val lines = all(list).filter { n ->
+            !n.editable && said(n).isNotBlank() && all(n).none { it !== n && said(it).isNotBlank() }
+        }.toList()
+        // The bubbles take a long press; where OpenBubbles does not say so, every line that is not a button.
+        val pressable = lines.filter { longPressTarget(it) != null }
+        val candidates = pressable.ifEmpty { lines.filter { clickTarget(it) == null } }
+        val seen = HashSet<Pair<String, Int>>()
+        return candidates.mapNotNull { n ->
+            val words = said(n).trim()
+            if (!isMessageText(words)) return@mapNotNull null
+            val b = boundsOf(n)
+            if (b.isEmpty || !seen.add(words to b.top)) return@mapNotNull null
+            Triple(b.top, words, screen.right - b.right < b.left - screen.left)
+        }.sortedBy { it.first }.map { Bubble(it.second, it.third) }
+    }
+
+    /** Whether [words] in the chat list are a message (not what OpenBubbles writes around messages). */
+    internal fun isMessageText(words: String): Boolean {
+        val w = norm(words)
+        if (w.isEmpty() || w.contains("unsent a message")) return false
+        if (w in NOT_MESSAGES || NOT_MESSAGE_STARTS.any { w.startsWith(it) } && w.length < 40) return false
+        return !DATE_LINE.matches(w)
+    }
+
+    /**
+     * [screen] (an older part of the chat, read after scrolling back) put in front of [newer] (what was read
+     * so far), without what both hold: the end of the one is the start of the other. A screen that holds
+     * nothing new (the top of the chat, or a scroll that went nowhere) leaves [newer] as it is.
+     */
+    fun mergeOlder(screen: List<Bubble>, newer: List<Bubble>): List<Bubble> {
+        if (newer.isEmpty()) return screen
+        if (screen.isEmpty() || java.util.Collections.indexOfSubList(newer, screen) >= 0) return newer
+        for (k in minOf(screen.size, newer.size) downTo 1) {
+            if (screen.subList(screen.size - k, screen.size) == newer.subList(0, k)) return screen.subList(0, screen.size - k) + newer
+        }
+        return screen + newer
+    }
+
+    private val NOT_MESSAGES = setOf("delivered", "read", "sent", "edited", "imessage", "text message", "not delivered", "sending", "sending...")
+    private val NOT_MESSAGE_STARTS = listOf("delivered ", "read ", "sent ", "edited ", "delivered quietly")
+    private val DATE_LINE = Regex(
+        "^((today|yesterday|mon|tue|wed|thu|fri|sat|sun|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[ ,.]*)?" +
+            "([a-z]{3,9}\\.? \\d{1,2},?( \\d{4})?,? ?|\\d{1,2}/\\d{1,2}(/\\d{2,4})?,? ?)?(at )?\\d{1,2}:\\d{2} ?(am|pm)?$",
+    )
+
+    /** A list that can scroll back to older messages. */
+    fun scrollable(root: UiNode): UiNode? = all(root).filter { it.scrollable }.maxByOrNull { it.bounds.height() }
+
+    /** Words from the start of a message used to find its bubble. */
+    const val MATCH_CHARS = 40
+    private const val SLACK_PX = 8
+    private val MORE_LABELS = setOf("show menu", "more", "more options", "more actions", "show more", "options")
+}
