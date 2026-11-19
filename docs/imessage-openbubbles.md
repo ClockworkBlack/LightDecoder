@@ -3,6 +3,33 @@
 Status: **built in 0.5.28 (see "What is built"); not yet tried on a phone.** The older
 Flutter-based analysis further down applies to OpenBubbles 1.15.x only and is kept as history.
 
+## iPhone-level iMessage in the Messages tab (0.5.58)
+With the bundled library set up ("direct mode"), nothing hands off to OpenBubbles; every feature runs
+here through the `:imessage` process (`DirectEngine`/`DirectService`) and the main process
+(`DirectLink`), joined by `DirectIpc`/`DirectWire`. Archive schema v3 adds `edited_at` and `extra_json`
+(`IMessageExtra`: parts, edits, effect, voice, link, app, sticker, unsent).
+- **Receipts:** delivery acks (OpenBubbles' markCertified), read receipts out (setting, off by default),
+  iPhone-style "Delivered" / "Read <time>" footer. Updates are acked to the library only after storage;
+  undeliverable updates are skipped after capped retries instead of blocking the queue.
+- **Edit / Unsend / tapbacks:** native, with iPhone windows (edit 15 min, 5 times; unsend 2 min, whole
+  message); unsent messages leave "You unsent a message."; six tapbacks plus any emoji, both ways.
+- **Typing** both ways (throttled; stops 5 s after the last keystroke or on send).
+- **Attachments** both ways (MMCS upload/download in `:imessage`, 100 MB limit, sends serialized per
+  chat through `DirectLink.inTurn`), Live Photo stills, stickers, video stills, voice notes.
+  iPhone CAF voice messages are remuxed by `media/CafAudio` (Opus to Ogg, AAC to ADTS, AMR, LPCM to
+  WAV); other codecs open in another app.
+- **Groups:** renames, members, shrunk groups stay groups, read-only once the user is removed; "New
+  iMessage group" in the Messages menu (every address checked with Apple first).
+- **Effects** (incoming caption, invisible ink, outgoing picker on long-press of Send), link previews
+  (web addresses only), app cards and moves.
+- **Games:** `imessage/madrid/` hosts iMessage-app extensions through the BlueBubbles "Madrid" AIDL
+  (copied unchanged, Apache-2.0, see NOTICE). The only registered extension is OpenPigeon
+  (`com.openbubbles.openpigeon`, installed separately from Google Play, signing cert pinned and checked
+  before every bind). LightDecoder carries the messages and contains no game logic. Setting "iMessage
+  games" (on by default; file `imessage/games-off` when off) on the iMessage screen, with "Get games".
+- **Not verified on a real phone/iPhone from the build environment:** everything above runs in JVM and
+  Robolectric tests only (1015 tests).
+
 ## Current design (0.5.54): the library powers Blue Bubbles
 LightDecoder 0.5.53 already had iMessage in the Messages tab ("Blue Bubbles": an iMessage archive
 filled from OpenBubbles' notifications, sent through their Reply button, merged in blue into the

@@ -8,6 +8,21 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
    had earlier chosen "build with a warning", then "pause on Discord", and has now asked for
    the web-view tab only, with no bridge). **Instagram: skipped** (ban risk, like Messenger).
 
+## 0.5.58 (versionCode 69; 0.5.58-beta1 was 68) - iPhone-level iMessage, games through OpenPigeon
+- Owner asked for native Edit and Unsend (no "in OpenBubbles"), iPhone parity in the Messages tab, full
+  integration with the bundled library, and games with iPhone users. Spec and phase reports were kept
+  in the session scratchpad; the design summary is in `docs/imessage-openbubbles.md` ("0.5.58").
+- Phases (commits): 1 foundations, schema v3, receipts, engine correctness (3d26f62); 2 edit, unsend,
+  tapbacks (24f822d); 3 typing, read receipts, footer, no hand-offs (8a539c8); 4 attachments, CAF voice
+  (9361921); 5 groups, effects, links, app cards (d21a630); 6 games host (a6b325a); games setting
+  (093dc99); final review fixes (3d35a12). Each phase was reviewed adversarially and fixed.
+- Owner asked to bundle OpenPigeon: declined (it recreates GamePigeon; Play-only, no redistribution
+  licence). Instead: "iMessage games" setting on by default, "Get games" opens its Play page.
+- Unit tests: 1015, all passing. **Nothing here has been seen on a real phone with an iPhone yet**; the
+  owner has the beta1 checklist. Live views, upload/download progress, AMR-WB, and iCloud history
+  import are not built.
+- Next version: 0.5.59 / 70.
+
 ## 0.5.57 (versionCode 67) - the ADB pairing step is gone; inline replies through the library
 - On the owner's phone the built-in pairing failed ("Could not exchange peer info") while number
   verification worked without it, so `AdbGrant`, `AdbPairService`, their test, the
