@@ -31,7 +31,23 @@ internal object BlueBubblesLinks {
     /** The iMessage chat to show inside the Messages conversation [conversation], if Blue Bubbles is on and there is one. */
     fun iMessageFor(context: Context, conversation: ConversationRow?, participants: List<ParticipantRow>): String? {
         if (!IMessagePrefs.enabled(context) || conversation == null || conversation.isGroup) return null
-        return pairs(context).entries.firstOrNull { it.value.messagesId == conversation.id }?.key
+        val pairs = pairs(context)
+        pairs.entries.firstOrNull { it.value.messagesId == conversation.id && it.value.how != IMessageLinks.How.SAME_PERSON }?.key?.let { return it }
+        // As before 0.5.38: any conversation with the person's number shows their iMessage chat, also when
+        // another conversation with the same number was paired with it first (two threads for one person).
+        val other = participants.filter { !it.isMe }.singleOrNull() ?: return null
+        val address = other.number.ifBlank { other.formattedNumber }.takeIf { IMessageAddress.key(it) != null } ?: return null
+        val chat = runCatching { IMessageManager.get(context).conversationWith(address) }.getOrNull() ?: return null
+        // Never one the user unlinked by hand.
+        if (IMessageLinks.manual(context)[chat] == "") return null
+        logOnce(context, "Links: ${com.lightdecoder.imessage.IMessageLog.chatRef(chat)} also shown in a second conversation with the same number")
+        return chat
+    }
+
+    /** The person's other iMessage chats shown in [conversationId] besides its own ([iMessageFor]): their history. */
+    fun alsoShown(context: Context, conversationId: String): List<String> {
+        if (!IMessagePrefs.enabled(context)) return emptyList()
+        return pairs(context).filter { it.value.messagesId == conversationId && it.value.how == IMessageLinks.How.SAME_PERSON }.keys.toList()
     }
 
     /** The Messages conversation iMessage chat [iMessageId] belongs inside, if there is one. */
@@ -75,7 +91,16 @@ internal object BlueBubblesLinks {
             IMessageLinks.pair(messages, iMessages, IMessageLinks.manual(context)).also { pairs ->
                 val byName = pairs.count { it.value.how == IMessageLinks.How.NAME }
                 val alone = iMessages.count { it.id !in pairs }
-                if (byName + alone > 0) logOnce(context, "Links: ${pairs.size} iMessage chat(s) inside Messages conversations ($byName by name), $alone on their own")
+                // One person with several iMessage chats (OpenBubbles registered again, or a phone and an email chat):
+                // only one can be inside their conversation; the others stay rows of their own.
+                val sameKey = iMessages.mapNotNull { it.addressKey }.groupingBy { it }.eachCount().count { it.value > 1 }
+                val sharedNumbers = messages.mapNotNull { it.addressKey }.groupingBy { it }.eachCount().count { it.value > 1 }
+                if (byName + alone + sameKey + sharedNumbers > 0) logOnce(
+                    context,
+                    "Links: ${pairs.size} iMessage chat(s) inside Messages conversations ($byName by name), $alone on their own" +
+                        (if (sameKey > 0) "; $sameKey person(s) with more than one iMessage chat" else "") +
+                        (if (sharedNumbers > 0) "; $sharedNumbers number(s) with more than one Messages conversation" else ""),
+                )
             }
         }
     }

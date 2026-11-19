@@ -23,6 +23,25 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.42 (versionCode 50) - iMessage history back in every conversation
+- User report after updating: "removed history of already linked and working" chats. Nothing was deleted (no
+  schema change since v2), but 0.5.38's one-to-one pairing hid iMessages in two ways. Both fixed:
+  1. **Two conversations with one number:** an iMessage chat showed in only one Messages conversation per
+     number. Before 0.5.38, every conversation with the person's number showed it. `iMessageFor` now falls
+     back to the number lookup, except for a chat unlinked by hand.
+  2. **A person with several iMessage chats** (OpenBubbles set up again gives new chat ids; or a phone and an
+     email chat): only one was paired, and the older history sat in a row of its own. New pairing step 4,
+     `How.SAME_PERSON`: the person's other chats with the same number or email show in the same conversation.
+     The thread merges their rows (replies still go through the first chat), and the list folds them all into
+     one row with the newest preview.
+- Logged: "Links: ... person(s) with more than one iMessage chat; ... number(s) with more than one Messages
+  conversation", and when a chat is also shown in a second conversation.
+- Pictures over iMessage (user's next request, not built yet): OpenBubbles' notification carries only text
+  ("Image" / "Attachment: 1 image"), no picture. Plan: with OpenBubbles' Settings → Attachments →
+  "Auto-save Attachments" on, it saves received media at full quality to Pictures through MediaStore. Find
+  it there by `OWNER_PACKAGE_NAME` = OpenBubbles and the time (READ_MEDIA_IMAGES/VIDEO), copy it into the
+  iMessage media folder, and attach it to the placeholder message.
+
 ## 0.5.41 (versionCode 49) - Check iMessage sees the reply
 - The user saw a check not update when the person replied in iMessage. Three causes, fixed:
   1. **Finding the chat:** a check started before the person had an iMessage chat in LightDecoder

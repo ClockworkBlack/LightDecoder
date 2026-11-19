@@ -824,22 +824,23 @@ class ConversationsActivity : AppCompatActivity() {
             iMessages: List<ConversationItem>,
             pairs: Map<String, com.lightdecoder.imessage.IMessageLinks.Pair>,
         ): List<ConversationItem> {
-            // Messages conversation id -> the iMessage chat shown inside it.
-            val byConversation = HashMap<String, ConversationItem>()
+            // Messages conversation id -> the iMessage chats shown inside it (the person may have more than one).
+            val byConversation = HashMap<String, MutableList<ConversationItem>>()
             for (item in iMessages) {
                 val to = pairs[item.row.id]?.messagesId ?: continue
-                byConversation.putIfAbsent(to, item)
+                byConversation.getOrPut(to) { ArrayList() } += item
             }
             if (byConversation.isEmpty()) return mergeByTime(own, iMessages)
             val folded = HashSet<String>()
             val merged = own.map { item ->
                 if (item.row.isGroup) return@map item
-                val im = byConversation[item.row.id] ?: return@map item
-                folded += im.row.id
+                val chats = byConversation[item.row.id] ?: return@map item
+                chats.forEach { folded += it.row.id }
+                val im = chats.maxBy { it.row.lastMessageTs }
                 val newer = im.row.lastMessageTs > item.row.lastMessageTs
                 item.copy(
                     row = item.row.copy(
-                        unread = item.row.unread || im.row.unread,
+                        unread = item.row.unread || chats.any { it.row.unread },
                         lastMessageTs = maxOf(item.row.lastMessageTs, im.row.lastMessageTs),
                         snippet = if (newer) im.row.snippet else item.row.snippet,
                         snippetFromMe = if (newer) im.row.snippetFromMe else item.row.snippetFromMe,

@@ -22,7 +22,12 @@ object IMessageLinks {
     /** One side of a pair: its id, its phone number or email key ([IMessageAddress.key]), and its name. */
     data class Chat(val id: String, val addressKey: String?, val name: String)
 
-    enum class How { BY_HAND, NUMBER, NAME }
+    enum class How {
+        BY_HAND, NUMBER, NAME,
+
+        /** Another iMessage chat of the same person (same number or email): its history shows too; replies go to the first. */
+        SAME_PERSON,
+    }
 
     data class Pair(val messagesId: String, val how: How)
 
@@ -64,6 +69,18 @@ object IMessageLinks {
             if (im.addressKey != null && !im.addressKey.contains('@')) continue
             out[im.id] = Pair(m.id, How.NAME)
             usedMessages += m.id
+        }
+        // 4. The same person's other chats (OpenBubbles registered again, or a chat per address):
+        //    shown in the same conversation, so no history goes missing.
+        val byPerson = HashMap<String, String>()
+        for (im in iMessages) {
+            val key = im.addressKey ?: continue
+            out[im.id]?.takeIf { it.how != How.SAME_PERSON }?.let { byPerson.putIfAbsent(key, it.messagesId) }
+        }
+        for (im in iMessages) {
+            if (!free(im)) continue
+            val to = im.addressKey?.let(byPerson::get) ?: continue
+            out[im.id] = Pair(to, How.SAME_PERSON)
         }
         return out
     }

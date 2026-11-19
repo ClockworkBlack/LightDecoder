@@ -551,6 +551,41 @@ class BlueBubblesScreenTest {
     }
 
     @Test
+    fun everyConversationWithTheNumberKeepsShowingTheIMessages() {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        // Two Messages conversations with the same number (an old text thread and a newer one).
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 2_000, number = "+1 555-123-4567")
+        two.seedConversation(ChatService.MESSAGES, "c2", "Alice", lastTs = 1_000, number = "+15551234567")
+        seedIMessage("An iMessage", ts = 5_000)
+        for (id in listOf("c1", "c2")) {
+            ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, id).setFlags(0)).use { scenario ->
+                scenario.waitFor("her iMessage in $id") { shownTexts(it).contains("An iMessage") }
+            }
+        }
+    }
+
+    @Test
+    fun thePersonsOlderIMessageChatKeepsItsHistoryInTheConversation() {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        // Before OpenBubbles was set up again: one chat; after it: a new chat for the same person.
+        iMessage.record(
+            CapturedIMessageChat("OLD-CHAT-GUID-0000-000000000001", "m0", "Alice", false, "+15551234567",
+                listOf(CapturedIMessage("Alice", "tel:+15551234567", false, "From before", 3_000))),
+            live = false,
+        )
+        seedIMessage("After setting up again", ts = 9_000)
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("both chats' iMessages") { shownTexts(it).containsAll(listOf("From before", "After setting up again")) }
+        }
+        launchList().use { scenario ->
+            scenario.waitFor("one row for Alice") { titles(it) == listOf("Alice") }
+        }
+    }
+
+    @Test
     fun anIMessageChatCanBeLinkedByHand() {
         two.env.pairedManager()
         IMessagePrefs.setEnabled(two.app, true)

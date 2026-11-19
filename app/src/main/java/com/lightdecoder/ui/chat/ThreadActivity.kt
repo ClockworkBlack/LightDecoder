@@ -644,7 +644,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             val companion = if (link.service == ChatService.MESSAGES) BlueBubblesLinks.iMessageFor(applicationContext, conversation, people) else null
             val imRepo = companion?.let { iMessageLink.repo }
             val ownFull = rows.size >= wanted
-            val companionRows = if (imRepo == null) emptyList() else runCatching { imRepo.messages(companion, limit = wanted) }.getOrDefault(emptyList())
+            // With the person's other iMessage chats (from before OpenBubbles was set up again), so their history stays.
+            val chats = if (companion == null) emptyList() else listOf(companion) + BlueBubblesLinks.alsoShown(applicationContext, id)
+            val companionRows = if (imRepo == null) emptyList() else chats.flatMap { chat ->
+                runCatching { imRepo.messages(chat, limit = wanted) }.getOrDefault(emptyList())
+            }.distinctBy { it.id }
                 .let { im -> if (ownFull && rows.isNotEmpty()) im.filter { it.timestampMs >= rows.first().timestampMs } else im }
             val moveTo = if (link.service == ChatService.IMESSAGE) BlueBubblesLinks.messagesFor(applicationContext, id) else null
             Snapshot(
