@@ -111,6 +111,17 @@
                 android:importantForAccessibility="noHideDescendants"
                 android:orientation="horizontal">
 
+                <!-- The sender changed the text since (iMessage), as an iPhone marks it; a tap says when. -->
+                <TextView
+                    android:id="@+id/edited"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="6dp"
+                    android:text="@string/imessage_edited"
+                    android:textAppearance="?attr/textAppearanceLabelSmall"
+                    android:textStyle="bold"
+                    android:visibility="gone" />
+
                 <TextView
                     android:id="@+id/time"
                     android:layout_width="wrap_content"

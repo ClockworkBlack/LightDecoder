@@ -123,6 +123,21 @@
     <string name="imessage_you_unsent">You unsent a message.</string>
     <string name="imessage_unsent">%1$s unsent a message.</string>
 
+    <!-- Direct mode: edits and tapbacks, as an iPhone words them. -->
+    <string name="imessage_edit_note">They see the new text, marked Edited. You can edit up to 5 times within 15 minutes.</string>
+    <string name="imessage_edited">Edited</string>
+    <string name="imessage_edited_at">Edited at %1$s</string>
+    <!-- Someone's tapback on the user's message, in its notification. %1$s: the message (imessage_tapback_quote or imessage_tapback_a_message). -->
+    <string name="imessage_tapback_loved">Loved %1$s</string>
+    <string name="imessage_tapback_liked">Liked %1$s</string>
+    <string name="imessage_tapback_disliked">Disliked %1$s</string>
+    <string name="imessage_tapback_laughed">Laughed at %1$s</string>
+    <string name="imessage_tapback_emphasized">Emphasized %1$s</string>
+    <string name="imessage_tapback_questioned">Questioned %1$s</string>
+    <string name="imessage_tapback_emoji">Reacted %1$s to %2$s</string>
+    <string name="imessage_tapback_quote">“%1$s”</string>
+    <string name="imessage_tapback_a_message">a message</string>
+
     <!-- Apple's message effects, named as on an iPhone ("Sent with Slam"). -->
     <string name="imessage_effect_slam">Slam</string>
     <string name="imessage_effect_loud">Loud</string>
@@ -149,6 +164,13 @@
     <string name="imessage_direct_edit_refused">Apple refused the edit: %1$s</string>
     <string name="imessage_direct_reaction_not_confirmed">Apple did not confirm the reaction within %1$d seconds. It may not have gone through.</string>
     <string name="imessage_direct_reaction_refused">Apple refused the reaction: %1$s</string>
+    <string name="imessage_direct_not_stored">This message is not in the archive any more.</string>
+    <string name="imessage_direct_unreachable">This chat cannot be reached through iMessage.</string>
+    <string name="imessage_direct_edit_not_editable">Only the text of your own iMessages can be edited.</string>
+    <string name="imessage_direct_react_not_possible">Tapbacks only go on iMessages that came or went through LightDecoder\'s iMessage.</string>
+    <string name="imessage_direct_unsend_no_guid">Only iMessages that went through LightDecoder\'s iMessage can be unsent here.</string>
+    <string name="imessage_direct_unsend_not_yours">Only your own messages can be unsent.</string>
+    <string name="imessage_direct_unsend_too_late">Too late to unsend: Apple only allows it within 2 minutes of sending.</string>
 
     <!-- Errors. -->
     <string name="imessage_error_not_enabled">Blue Bubbles is off. Tick it in the Messages menu.</string>

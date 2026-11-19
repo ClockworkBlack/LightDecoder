@@ -75,6 +75,8 @@ class BlueBubblesScreenTest {
         }
         com.lightdecoder.imessage.IMessageChecks.resetForTesting()
         IMessagePrefs.setEnabled(two.app, false)
+        com.lightdecoder.imessage.direct.DirectPrefs.setRegistered(two.app, false)
+        com.lightdecoder.imessage.direct.DirectLink.resetForTesting()
         IMessageManager.resetForTesting()
         two.tearDown()
         imDb.close()
@@ -718,7 +720,7 @@ class BlueBubblesScreenTest {
     }
 
     @Test
-    fun myIMessageCanBeEditedAndReactedToThroughOpenBubbles() {
+    fun withoutTheLibraryMyIMessageIsEditedAndReactedToInOpenBubbles() {
         two.env.pairedManager()
         installOpenBubbles()
         IMessagePrefs.setEnabled(two.app, true)
@@ -742,6 +744,10 @@ class BlueBubblesScreenTest {
             org.robolectric.shadows.ShadowLooper.idleMainLooper()
             val row = ShadowDialog.getLatestDialog().findViewById<android.view.ViewGroup>(R.id.reactionRow)
             assertEquals(View.VISIBLE, row.visibility)
+            // The usual quick reactions, as before the library: Apple's tapbacks are the library's.
+            val quick = ThreadActivity.QUICK_REACTIONS.indices.map { (row.getChildAt(it) as android.widget.TextView).text.toString() }
+            assertEquals(ThreadActivity.QUICK_REACTIONS, quick)
+            assertNotNull("then any emoji", row.getChildAt(ThreadActivity.QUICK_REACTIONS.size).findViewById<View>(R.id.reactionMore))
             row.getChildAt(0).performClick()
             scenario.onActivity { activity -> assertEquals(OpenBubbles.PACKAGES.first(), shadowOf(activity).nextStartedActivity?.`package`) }
             assertTrue(com.lightdecoder.imessage.IMessageLog.read(two.app).any { it.contains(": react: OpenBubbles opened on the chat") })
@@ -803,7 +809,7 @@ class BlueBubblesScreenTest {
     }
 
     @Test
-    fun myIMessageCanBeUnsentInOpenBubblesWithinTwoMinutes() {
+    fun withoutTheLibraryMyIMessageIsUnsentInOpenBubblesWithinTwoMinutes() {
         two.env.pairedManager()
         installOpenBubbles()
         IMessagePrefs.setEnabled(two.app, true)
@@ -826,8 +832,9 @@ class BlueBubblesScreenTest {
             scenario.onActivity { activity -> activity.onMessageLongPress(rowOf(activity, "Oops, wrong one")) }
             org.robolectric.shadows.ShadowLooper.idleMainLooper()
             val sheet = ShadowDialog.getLatestDialog()
-            val unsend = sheet.findViewById<View>(R.id.actionUnsend)
+            val unsend = sheet.findViewById<android.widget.TextView>(R.id.actionUnsend)
             assertEquals(View.VISIBLE, unsend.visibility)
+            assertEquals(two.app.getString(R.string.imessage_unsend), unsend.text.toString())
             unsend.performClick()
             scenario.onActivity { activity ->
                 val opened = shadowOf(activity).nextStartedActivity
@@ -847,6 +854,283 @@ class BlueBubblesScreenTest {
             scenario.onActivity { activity -> activity.onMessageLongPress(rowOf(activity, "An iMessage")) }
             org.robolectric.shadows.ShadowLooper.idleMainLooper()
             assertEquals(View.GONE, ShadowDialog.getLatestDialog().findViewById<View>(R.id.actionUnsend).visibility)
+        }
+    }
+
+    // --- with the iMessage library (direct mode) ---------------------------------------------
+
+    /**
+     * The iMessage library set up, its requests to the other process kept in [asked] and answered
+     * as Apple would (or by [answer]); Alice's iMessage chat as the library stores it.
+     */
+    private fun directMode(
+        asked: MutableList<Pair<Int, org.json.JSONObject>>,
+        answer: (Int) -> org.json.JSONObject = { what ->
+            if (what == com.lightdecoder.imessage.direct.DirectWire.REACT) com.lightdecoder.imessage.direct.DirectWire.guid("T-OWN")
+            else com.lightdecoder.imessage.direct.DirectWire.ok()
+        },
+    ) {
+        com.lightdecoder.imessage.direct.DirectPrefs.setRegistered(two.app, true)
+        com.lightdecoder.imessage.direct.DirectLibrary.REQUIRED.forEach {
+            java.io.File(com.lightdecoder.imessage.direct.DirectLibrary.dir(two.app), it).apply { parentFile?.mkdirs(); writeText("") }
+        }
+        com.lightdecoder.imessage.direct.DirectLink.installForTesting(two.app) { what, request, _ ->
+            asked += what to request
+            answer(what)
+        }
+        imRepo.upsertConversation(
+            com.lightdecoder.relay.ConversationDto(
+                id = ALICE_DIRECT, type = IMessageManager.TRANSPORT,
+                participants = listOf(
+                    com.lightdecoder.relay.ParticipantDto(id = "me", isMe = true),
+                    com.lightdecoder.relay.ParticipantDto(id = "+15551234567", name = "Alice", number = "+15551234567", formattedNumber = "+15551234567"),
+                ),
+            ),
+        )
+    }
+
+    private fun directMessage(guid: String, text: String, ts: Long, mine: Boolean) {
+        imRepo.upsertMessage(
+            com.lightdecoder.relay.MessageDto(
+                id = "imsg:$guid", conversationId = ALICE_DIRECT, fromMe = mine,
+                senderId = if (mine) "" else "+15551234567", senderName = if (mine) "" else "Alice",
+                timestampMs = ts, direction = if (mine) "out" else "in", status = if (mine) "OUTGOING_COMPLETE" else "INCOMING_COMPLETE",
+                transport = IMessageManager.TRANSPORT, text = text, parts = listOf(com.lightdecoder.relay.PartDto("0", "text", text)), isOld = true,
+            ),
+        )
+    }
+
+    private fun firstEditText(view: View): EditText? = when (view) {
+        is EditText -> view
+        is android.view.ViewGroup -> (0 until view.childCount).firstNotNullOfOrNull { firstEditText(view.getChildAt(it)) }
+        else -> null
+    }
+
+    /** The bubble on screen whose text is [text]. */
+    private fun bubbleOf(activity: Activity, text: String): View? {
+        val list = activity.findViewById<RecyclerView>(R.id.messages)
+        return (0 until list.childCount).map { list.getChildAt(it) }
+            .firstOrNull { it.findViewById<android.widget.TextView>(R.id.body)?.text?.toString() == text }
+    }
+
+    @Test
+    fun withTheLibraryMyIMessageIsEditedAndTappedBackHereNotInOpenBubbles() {
+        two.env.pairedManager()
+        installOpenBubbles()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        directMode(asked)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        val now = System.currentTimeMillis()
+        directMessage("H1", "Hers", now - 120_000, mine = false)
+        directMessage("M1", "Mine, with a tpyo", now - 60_000, mine = true)
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("my iMessage") { shownTexts(it).contains("Mine, with a tpyo") }
+            scenario.onActivity { activity -> activity.onMessageLongPress(rowOf(activity, "Mine, with a tpyo")) }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val sheet = ShadowDialog.getLatestDialog()
+            val editItem = sheet.findViewById<android.widget.TextView>(R.id.actionEdit)
+            assertEquals(View.VISIBLE, editItem.visibility)
+            assertEquals("Edit", editItem.text.toString())
+            val unsend = sheet.findViewById<android.widget.TextView>(R.id.actionUnsend)
+            assertEquals(View.VISIBLE, unsend.visibility)
+            assertEquals("Unsend", unsend.text.toString())
+            editItem.performClick()
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val dialog = latestDialog()
+            assertEquals(two.app.getString(R.string.imessage_edit_note), dialog.findViewById<android.widget.TextView>(android.R.id.message)?.text?.toString())
+            firstEditText(dialog.window!!.decorView)!!.setText("Mine, with a typo")
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+            scenario.waitFor("the edit, sent to Apple and shown") { activity ->
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                bubbleOf(activity, "Mine, with a typo")?.findViewById<View>(R.id.edited)?.visibility == View.VISIBLE
+            }
+            val (what, request) = asked.single()
+            assertEquals(com.lightdecoder.imessage.direct.DirectWire.EDIT, what)
+            assertEquals("M1", request.getString("guid"))
+            assertEquals("Mine, with a typo", request.getString("text"))
+            assertTrue(imRepo.message("imsg:M1")!!.editedAtMs > 0)
+            // Her iMessage: Apple's six tapbacks, and a tap sends one.
+            scenario.onActivity { activity -> activity.onMessageLongPress(rowOf(activity, "Hers")) }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val row = ShadowDialog.getLatestDialog().findViewById<android.view.ViewGroup>(R.id.reactionRow)
+            assertEquals(View.VISIBLE, row.visibility)
+            assertEquals(ThreadActivity.TAPBACKS, (0 until 6).map { (row.getChildAt(it) as android.widget.TextView).text.toString() })
+            assertNotNull("then any emoji", row.getChildAt(6).findViewById<View>(R.id.reactionMore))
+            // Not hers to edit or unsend.
+            assertEquals(View.GONE, ShadowDialog.getLatestDialog().findViewById<View>(R.id.actionEdit).visibility)
+            assertEquals(View.GONE, ShadowDialog.getLatestDialog().findViewById<View>(R.id.actionUnsend).visibility)
+            row.getChildAt(0).performClick()
+            scenario.waitFor("the tapback, sent to Apple") {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                asked.size == 2 && imRepo.message("imsg:H1")!!.reactions.any { it.fromMe && it.emoji == "❤️" }
+            }
+            assertEquals(com.lightdecoder.imessage.direct.DirectWire.REACT, asked[1].first)
+            assertEquals("H1", asked[1].second.getString("guid"))
+            assertTrue(asked[1].second.getBoolean("enable"))
+            // Nothing opened OpenBubbles.
+            scenario.onActivity { activity -> assertEquals(null, shadowOf(activity).nextStartedActivity) }
+            assertFalse(com.lightdecoder.imessage.IMessageLog.read(two.app).any { it.contains("OpenBubbles opened") })
+            // She edits hers: "Edited" by its time as well, and a tap says when.
+            val editedAt = System.currentTimeMillis()
+            com.lightdecoder.imessage.direct.DirectLink.get(two.app)
+                .apply(com.lightdecoder.imessage.direct.DirectArchive.Update.Edit("imsg:H1", "Hers, changed", 0, editedAt))
+            scenario.waitFor("her edit, marked") { activity ->
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                bubbleOf(activity, "Hers, changed")?.findViewById<View>(R.id.edited)?.visibility == View.VISIBLE
+            }
+            scenario.onActivity { activity -> bubbleOf(activity, "Hers, changed")!!.findViewById<View>(R.id.edited).performClick() }
+            assertEquals(
+                two.app.getString(R.string.imessage_edited_at, com.lightdecoder.ui.chat.TimeFormat.clock(two.app, editedAt)),
+                org.robolectric.shadows.ShadowToast.getTextOfLatestToast(),
+            )
+        }
+    }
+
+    @Test
+    fun withTheLibraryEveryWayToATapbackStaysHereAndALateUnsendIsTooLate() {
+        two.env.pairedManager()
+        installOpenBubbles()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        directMode(asked)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        val now = System.currentTimeMillis()
+        directMessage("H2", "Hers again", now - 120_000, mine = false)
+        directMessage("M4", "Mine just now", now - 20_000, mine = true)
+        imRepo.applyReaction("imsg:H2", "+15551234567", "👍", enable = true, fromMe = false, atMs = now - 60_000)
+        fun mine() = imRepo.message("imsg:H2")!!.reactions.firstOrNull { it.fromMe }?.emoji
+        fun lastReact() = asked.last().also { assertEquals(com.lightdecoder.imessage.direct.DirectWire.REACT, it.first) }.second
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("her iMessage") { shownTexts(it).contains("Hers again") }
+            // A tap on her 👍 puts the user's on too.
+            scenario.onActivity { activity ->
+                val row = rowOf(activity, "Hers again")
+                activity.onReactionTap(row, row.reactions.single())
+            }
+            two.waitUntil("👍 sent to Apple") { mine() == "👍" && asked.size == 1 }
+            assertEquals("👍", lastReact().getString("emoji"))
+            assertTrue(lastReact().getBoolean("enable"))
+            // Remove reaction takes it back.
+            scenario.waitFor("👍 shown") { rowOf(it, "Hers again").reactions.any { r -> r.fromMe } }
+            scenario.onActivity { activity -> activity.onMessageLongPress(rowOf(activity, "Hers again")) }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val remove = ShadowDialog.getLatestDialog().findViewById<View>(R.id.actionRemoveReaction)
+            assertEquals(View.VISIBLE, remove.visibility)
+            remove.performClick()
+            two.waitUntil("taken back at Apple") { mine() == null && asked.size == 2 }
+            assertEquals("👍", lastReact().getString("emoji"))
+            assertFalse(lastReact().getBoolean("enable"))
+            // Any emoji from "+": sent as it is, and offered after the six tapbacks from then on.
+            scenario.waitFor("taken back here") { rowOf(it, "Hers again").reactions.none { r -> r.fromMe } }
+            scenario.onActivity { activity -> activity.reactionPicked(rowOf(activity, "Hers again"), "🎉", mine = null, isIMessage = true) }
+            two.waitUntil("🎉 sent to Apple") { mine() == "🎉" && asked.size == 3 }
+            assertEquals("🎉", lastReact().getString("emoji"))
+            assertTrue(lastReact().getBoolean("enable"))
+            scenario.waitFor("🎉 shown") { rowOf(it, "Hers again").reactions.any { r -> r.fromMe } }
+            scenario.onActivity { activity -> activity.onMessageLongPress(rowOf(activity, "Hers again")) }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val quick = ShadowDialog.getLatestDialog().findViewById<android.view.ViewGroup>(R.id.reactionRow)
+            val offered = (0 until 7).map { quick.getChildAt(it) as android.widget.TextView }
+            assertEquals(ThreadActivity.TAPBACKS + "🎉", offered.map { it.text.toString() })
+            assertTrue(offered.last().isSelected)
+            assertNotNull("then any emoji", quick.getChildAt(7).findViewById<View>(R.id.reactionMore))
+            ShadowDialog.getLatestDialog().dismiss()
+            // Who reacted: by the names of the iMessage chat's people.
+            scenario.onActivity { activity ->
+                val row = rowOf(activity, "Hers again")
+                activity.onReactionDetails(row, row.reactions.first { !it.fromMe })
+            }
+            two.waitUntil("the reactions' details") {
+                (ShadowDialog.getLatestDialog() as? AlertDialog)?.let { two.hasText(it.window!!.decorView, "Alice") } == true
+            }
+            // Unsend tapped after Apple's 2 minutes (a sheet left open): too late, and nothing asked.
+            scenario.onActivity { activity -> activity.unsendIMessage(rowOf(activity, "Mine just now").copy(timestampMs = now - 3 * 60_000L)) }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val tooLate = latestDialog()
+            assertTrue("titled Unsend", two.hasText(tooLate.window!!.decorView, two.app.getString(R.string.imessage_action_unsend)))
+            assertEquals(two.app.getString(R.string.imessage_unsend_too_late), tooLate.findViewById<android.widget.TextView>(android.R.id.message)?.text?.toString())
+            assertEquals(3, asked.size)
+            scenario.onActivity { activity -> assertEquals(null, shadowOf(activity).nextStartedActivity) }
+            assertFalse(com.lightdecoder.imessage.IMessageLog.read(two.app).any { it.contains("OpenBubbles opened") })
+        }
+    }
+
+    @Test
+    fun withTheLibraryAnUnsendGoesOnWhenTheScreenClosesAndShowsNothingThere() {
+        two.env.pairedManager()
+        installOpenBubbles()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        // Apple's answer comes only once the screen is gone.
+        val answer = java.util.concurrent.CountDownLatch(1)
+        directMode(asked) { what ->
+            if (what == com.lightdecoder.imessage.direct.DirectWire.UNSEND) answer.await(10, java.util.concurrent.TimeUnit.SECONDS)
+            com.lightdecoder.imessage.direct.DirectWire.ok()
+        }
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        directMessage("M5", "Wrong chat", System.currentTimeMillis() - 20_000, mine = true)
+        val scenario = ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0))
+        scenario.waitFor("my iMessage") { shownTexts(it).contains("Wrong chat") }
+        scenario.onActivity { activity -> activity.onMessageLongPress(rowOf(activity, "Wrong chat")) }
+        org.robolectric.shadows.ShadowLooper.idleMainLooper()
+        ShadowDialog.getLatestDialog().findViewById<View>(R.id.actionUnsend).performClick()
+        two.waitUntil("Apple asked") { asked.isNotEmpty() }
+        scenario.close()
+        val shown = ShadowDialog.getLatestDialog()
+        answer.countDown()
+        two.waitUntil("unsent all the same") { imRepo.message("imsg:M5")?.direction == "system" }
+        var rounds = 0
+        two.waitUntil("the closed screen's turn") { ++rounds > 5 }
+        assertTrue("no dialog for a closed screen", ShadowDialog.getLatestDialog() === shown)
+        assertEquals(com.lightdecoder.imessage.direct.DirectWire.UNSEND, asked.single().first)
+    }
+
+    @Test
+    fun withTheLibraryMyIMessageIsUnsentHereAndSaysSo() {
+        two.env.pairedManager()
+        installOpenBubbles()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        directMode(asked)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        val now = System.currentTimeMillis()
+        directMessage("M2", "Oops, wrong one", now - 30_000, mine = true)
+        directMessage("M3", "An old one", now - 10 * 60_000, mine = true)
+        // One OpenBubbles' notification showed before the library: no GUID for Apple to know it by.
+        imRepo.upsertMessage(
+            com.lightdecoder.relay.MessageDto(
+                id = "ld:old", conversationId = ALICE_DIRECT, fromMe = true, timestampMs = now - 20_000, direction = "out",
+                status = "OUTGOING_COMPLETE", transport = IMessageManager.TRANSPORT, text = "From OpenBubbles' days", isOld = true,
+            ),
+        )
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("my iMessages") { shownTexts(it).contains("Oops, wrong one") }
+            // Within two minutes: unsent through the library, and "You unsent a message." takes its place.
+            scenario.onActivity { activity -> activity.onMessageLongPress(rowOf(activity, "Oops, wrong one")) }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            ShadowDialog.getLatestDialog().findViewById<View>(R.id.actionUnsend).performClick()
+            scenario.waitFor("the placeholder") { activity ->
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                shownTexts(activity).contains(activity.getString(R.string.imessage_you_unsent))
+            }
+            assertEquals(com.lightdecoder.imessage.direct.DirectWire.UNSEND, asked.single().first)
+            assertEquals("M2", asked.single().second.getString("guid"))
+            assertEquals("system", imRepo.message("imsg:M2")!!.direction)
+            // Too late for Apple: no Unsend, but still Edit (15 minutes).
+            scenario.onActivity { activity -> activity.onMessageLongPress(rowOf(activity, "An old one")) }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            assertEquals(View.GONE, ShadowDialog.getLatestDialog().findViewById<View>(R.id.actionUnsend).visibility)
+            assertEquals(View.VISIBLE, ShadowDialog.getLatestDialog().findViewById<View>(R.id.actionEdit).visibility)
+            // No GUID: no Edit, Unsend or tapbacks, and no OpenBubbles.
+            scenario.onActivity { activity -> activity.onMessageLongPress(rowOf(activity, "From OpenBubbles' days")) }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val sheet = ShadowDialog.getLatestDialog()
+            assertEquals(View.GONE, sheet.findViewById<View>(R.id.actionUnsend).visibility)
+            assertEquals(View.GONE, sheet.findViewById<View>(R.id.actionEdit).visibility)
+            assertEquals(View.GONE, sheet.findViewById<View>(R.id.reactionRow).visibility)
+            scenario.onActivity { activity -> assertEquals(null, shadowOf(activity).nextStartedActivity) }
+            assertEquals(1, asked.size)
         }
     }
 
@@ -1009,5 +1293,8 @@ class BlueBubblesScreenTest {
     private companion object {
         const val IM_DB = "imessage-screen-test.db"
         const val ALICE = "5D2B5A4C-1F0E-4C3B-9A7D-2E6F1B0C9D11"
+
+        /** Alice's iMessage chat as the library names it. */
+        const val ALICE_DIRECT = "imsg:tel:+15551234567"
     }
 }

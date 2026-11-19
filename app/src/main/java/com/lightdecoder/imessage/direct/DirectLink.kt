@@ -15,13 +15,18 @@ import com.lightdecoder.relay.MessageDto
 import com.lightdecoder.relay.MessageNotifier
 import com.lightdecoder.relay.ParticipantDto
 import com.lightdecoder.relay.PartDto
+import com.lightdecoder.relay.RelayException
 import com.lightdecoder.relay.RelayManager
+import com.lightdecoder.ui.chat.EditRule
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import uniffi.rust_bridge.Reaction
 
 /**
  * The direct iMessage link, main-process side: OpenBubbles' library (in the ":imessage" process,
@@ -34,7 +39,7 @@ import org.json.JSONObject
  * reused, so its history and the new messages stay together. New chats get `imsg:` ids
  * ([DirectArchive]); messages sent or received here are `imsg:<GUID>`, the GUID Apple knows them by.
  *
- * [IMessageManager] hands sends, retries and unsends here while [active]; [DirectSinkService]
+ * [IMessageManager] hands sends, retries, unsends, edits and tapbacks here while [active]; [DirectSinkService]
  * hands over what Apple sent ([apply]). What arrives for a message that is not stored yet (a
  * receipt for a message whose send has not returned yet) is held for a while ([HeldUpdates]) and
  * applied once it is.
@@ -121,7 +126,7 @@ class DirectLink private constructor(private val app: Context, requests: Request
     private suspend fun deliver(tmpId: String, conversationId: String, text: String, replyToId: String?) {
         try {
             repo.setLocalState(tmpId, LocalState.SENDING)
-            val target = targetOf(conversationId) ?: throw DirectEngine.ImessageError("This chat cannot be reached directly.")
+            val target = targetOf(conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
             // An inline reply needs the GUID Apple knows the answered message by: messages the
             // library sent or received have it (imsg:<GUID>); older Blue Bubbles rows do not, and
             // a reply to one goes as a message of its own.
@@ -160,28 +165,135 @@ class DirectLink private constructor(private val app: Context, requests: Request
         }
     }
 
-    /** Whether [messageId] is one of the user's iMessages the library can unsend, and still in time. */
-    fun canUnsend(row: MessageRow, now: Long = System.currentTimeMillis()): Boolean =
-        active && row.isOutgoing && row.direction == "out" && DirectArchive.isImessage(row.id) && UnsendWindow.canUnsend(row.timestampMs, now)
+    /**
+     * Whether [row] is one of the user's iMessages the library can unsend now: [unsendable], within
+     * Apple's 2 minutes, in a chat it can reach. A caller that already knows whether the chat can be
+     * reached ([canSend]) passes it as [reachable], so the archive is not read again.
+     */
+    fun canUnsend(row: MessageRow, now: Long = System.currentTimeMillis(), reachable: Boolean? = null): Boolean =
+        active && unsendable(row) && UnsendWindow.canUnsend(row.timestampMs, now) && (reachable ?: canSend(row.conversationId))
 
     /**
-     * Retracts one of the user's iMessages within Apple's 2-minute window. Who it went to comes from
-     * the archive, so this works after a restart of either process. Throws
-     * [DirectEngine.ImessageError] saying why when it does not go through.
+     * Retracts one part of one of the user's iMessages within Apple's 2-minute window. Who it went
+     * to comes from the archive, so this works after a restart of either process. Here that part
+     * then goes, as when it is unsent on another device: with nothing left the message reads "You
+     * unsent a message.", as on an iPhone. Throws [DirectEngine.ImessageError] saying why when it
+     * does not go through.
      */
     suspend fun unsend(messageId: String, part: Int = 0) {
-        val guid = DirectArchive.guidOf(messageId) ?: throw DirectEngine.ImessageError("Only messages sent through the iMessage library can be unsent here.")
-        val row = repo.message(messageId) ?: throw DirectEngine.ImessageError("This message is not in the archive any more.")
+        val guid = DirectArchive.guidOf(messageId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unsend_no_guid))
+        val row = repo.message(messageId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_not_stored))
         // An unsent message's or a group event's row is the user's too, but there is nothing to unsend.
-        if (!row.isOutgoing || row.direction != "out") throw DirectEngine.ImessageError("Only your own messages can be unsent.")
+        if (!row.isOutgoing || row.direction != "out") throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unsend_not_yours))
         if (!UnsendWindow.canUnsend(row.timestampMs, System.currentTimeMillis())) {
-            throw DirectEngine.ImessageError("Too late to unsend: Apple only allows it within 2 minutes of sending.")
+            throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unsend_too_late))
         }
-        val target = targetOf(row.conversationId) ?: throw DirectEngine.ImessageError("This chat cannot be reached directly.")
-        val reply = requests.call(DirectWire.UNSEND, DirectWire.unsend(target, guid, part), SEND_TIMEOUT_MS)
-        DirectWire.errorOf(reply)?.let { throw DirectEngine.ImessageError(it) }
-        repo.applyDeletion(messageId)
+        val target = targetOf(row.conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
+        // Once asked, Apple's answer is waited for and stored even if the screen that asked closes.
+        withContext(NonCancellable) {
+            val reply = requests.call(DirectWire.UNSEND, DirectWire.unsend(target, guid, part), SEND_TIMEOUT_MS)
+            DirectWire.errorOf(reply)?.let { throw DirectEngine.ImessageError(it) }
+            apply(DirectArchive.Update.Unsent(messageId, part, fromMe = true, senderName = ""))
+        }
         IMessageLog.add(app, "${IMessageLog.chatRef(row.conversationId)}: unsent through the iMessage library (Apple confirmed)")
+    }
+
+    // --- edits and tapbacks ---------------------------------------------------------------------
+
+    /**
+     * Whether [row] is one of the user's iMessages the library can edit now: text only, sent with
+     * a GUID, younger than 15 minutes, edited fewer than 5 times, in a chat it can reach. A caller
+     * that already knows whether the chat can be reached ([canSend]) passes it as [reachable].
+     */
+    fun canEdit(row: MessageRow, now: Long = System.currentTimeMillis(), reachable: Boolean? = null): Boolean =
+        active && editable(row) && inEditWindow(row, now) && (reachable ?: canSend(row.conversationId))
+
+    /**
+     * Changes the text of one of the user's iMessages ([canEdit]): Apple's answer is waited for,
+     * then the message reads [text] here too, marked edited. Throws a [RelayException] with
+     * [RelayException.INVALID_ARGUMENT] when it is too late (15 minutes, or 5 edits), else
+     * [DirectEngine.ImessageError] saying why when it does not go through.
+     */
+    suspend fun edit(messageId: String, text: String) {
+        val row = repo.message(messageId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_not_stored))
+        val guid = DirectArchive.guidOf(messageId)
+        if (guid == null || !editable(row)) throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_edit_not_editable))
+        if (!inEditWindow(row, System.currentTimeMillis())) throw RelayException(RelayException.INVALID_ARGUMENT, "too late to edit")
+        val target = targetOf(row.conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
+        // Once asked, Apple's answer is waited for and stored even if the screen that asked closes.
+        withContext(NonCancellable) {
+            val reply = requests.call(DirectWire.EDIT, DirectWire.edit(target, guid, 0, text), SEND_TIMEOUT_MS)
+            DirectWire.errorOf(reply)?.let { throw DirectEngine.ImessageError(it) }
+            synchronized(this@DirectLink) {
+                // Read again: a tapback or a receipt may have come in while Apple was asked, or it
+                // may have been unsent meanwhile (here or on another device), and then it stays so.
+                val current = repo.message(messageId) ?: return@withContext
+                val extra = IMessageExtra.parse(current.extra)
+                if (current.direction == "system" || 0 in extra.unsent) return@withContext
+                val next = extra.copy(parts = extra.parts + (0 to text), edits = extra.edits + 1)
+                repo.editText(messageId, next.text(), System.currentTimeMillis(), next.toJson())
+            }
+        }
+        IMessageLog.add(app, "${IMessageLog.chatRef(row.conversationId)}: edited through the iMessage library (Apple confirmed)")
+    }
+
+    /**
+     * Whether the user can put a tapback on [row] through the library: an iMessage with its GUID, in
+     * a chat it can reach. A caller that already knows whether the chat can be reached ([canSend])
+     * passes it as [reachable].
+     */
+    fun canReact(row: MessageRow, reachable: Boolean? = null): Boolean =
+        active && reactable(row) && (reachable ?: canSend(row.conversationId))
+
+    /**
+     * Puts the user's tapback [emoji] on [messageId], or takes it back ([remove]). As on an iPhone
+     * a person has one tapback per message: a new one replaces the user's earlier one. It shows
+     * at once, and the message is put back as it was if Apple does not take it. Throws
+     * [DirectEngine.ImessageError] saying why when it does not go through.
+     */
+    suspend fun react(messageId: String, emoji: String, remove: Boolean) {
+        val row = repo.message(messageId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_not_stored))
+        val guid = DirectArchive.guidOf(messageId)
+        if (guid == null || !reactable(row)) throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_react_not_possible))
+        val target = targetOf(row.conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
+        val enable = !remove
+        val now = System.currentTimeMillis()
+        // Shown at once, under the lock every archive write here takes; the user's tapback before
+        // and after are kept, to put it back if Apple does not take it.
+        val (before, after) = synchronized(this) {
+            val was = myTapback(messageId)
+            repo.applyReaction(messageId, ME, emoji, enable, fromMe = true, atMs = now)
+            was to myTapback(messageId)
+        }
+        // Once asked, Apple's answer is waited for, and a refusal undone, even if the screen that asked closes.
+        withContext(NonCancellable) {
+            try {
+                val reply = requests.call(
+                    DirectWire.REACT, DirectWire.react(target, guid, 0, emoji, enable, tapbackText(row.text)), SEND_TIMEOUT_MS,
+                )
+                DirectWire.errorOf(reply)?.let { throw DirectEngine.ImessageError(it) }
+            } catch (e: Exception) {
+                synchronized(this@DirectLink) { undoTapback(messageId, before, after, now) }
+                throw e
+            }
+        }
+        IMessageLog.add(app, "${IMessageLog.chatRef(row.conversationId)}: tapback ${if (remove) "taken back" else "sent"} through the iMessage library (Apple confirmed)")
+    }
+
+    /** The user's tapback on [messageId], if any. */
+    private fun myTapback(messageId: String): String? = repo.message(messageId)?.reactions?.firstOrNull { it.fromMe }?.emoji
+
+    /**
+     * Apple did not take the change of the user's tapback on [messageId] from [before] to [after]:
+     * it is put back to [before] (the earlier tapback, or none). Only while it is still [after]: one
+     * chosen since, here or on another of the user's devices, stays.
+     */
+    private fun undoTapback(messageId: String, before: String?, after: String?, atMs: Long) {
+        if (before == after || myTapback(messageId) != after) return
+        when {
+            before != null -> repo.applyReaction(messageId, ME, before, enable = true, fromMe = true, atMs = atMs)
+            after != null -> repo.applyReaction(messageId, ME, after, enable = false, fromMe = true, atMs = atMs)
+        }
     }
 
     /** Local copies a previous run was still sending: Apple's answer was lost with it. */
@@ -247,12 +359,7 @@ class DirectLink private constructor(private val app: Context, requests: Request
                 for (id in update.messageIds - stored) hold(id, DirectArchive.Update.Receipt(listOf(id), update.status))
             }
             is DirectArchive.Update.Edit -> edit(update)
-            is DirectArchive.Update.Reaction -> {
-                val who = if (update.fromMe) ME else update.participantId
-                if (!repo.applyReaction(update.messageId, who, update.emoji, update.enable, update.fromMe, update.atMs)) {
-                    hold(update.messageId, update)
-                }
-            }
+            is DirectArchive.Update.Reaction -> reaction(update)
             is DirectArchive.Update.Unsent -> unsent(update)
             is DirectArchive.Update.Typing -> {
                 val id = archiveConversationId(update.conversationId, update.participantId)
@@ -312,6 +419,34 @@ class DirectLink private constructor(private val app: Context, requests: Request
         if (row.direction != "in") return
         if (repo.conversation(row.conversationId)?.unread != true) return
         MessageNotifier.onIncoming(app, repo, message.copy(text = row.text))
+    }
+
+    /**
+     * Someone put a tapback on a message or took it back. A new one on one of the user's messages
+     * is announced, as an iPhone does ("Loved “See you at 6”"), unless its chat is on screen.
+     */
+    private fun reaction(update: DirectArchive.Update.Reaction) {
+        val row = repo.message(update.messageId) ?: return hold(update.messageId, update)
+        val who = if (update.fromMe) ME else update.participantId
+        // Apple's journal hands a tapback over again after a restart: one already shown is not announced again.
+        val known = row.reactions.any { it.emoji == update.emoji && who in it.participantIds }
+        repo.applyReaction(update.messageId, who, update.emoji, update.enable, update.fromMe, update.atMs)
+        if (update.fromMe || !update.enable || known || !row.isOutgoing || row.direction != "out") return
+        val quoted = tapbackText(row.text).takeIf { it.isNotBlank() }?.let { app.getString(R.string.imessage_tapback_quote, it) }
+            ?: app.getString(R.string.imessage_tapback_a_message)
+        MessageNotifier.onIncoming(
+            app, repo,
+            MessageDto(
+                id = update.messageId,
+                conversationId = row.conversationId,
+                senderId = update.participantId,
+                senderName = nameOf(update.participantId),
+                timestampMs = update.atMs,
+                direction = "in",
+                transport = IMessageManager.TRANSPORT,
+                text = tapbackNotice(app, update.emoji, quoted),
+            ),
+        )
     }
 
     /**
@@ -442,6 +577,72 @@ class DirectLink private constructor(private val app: Context, requests: Request
                 editedAtMs = if (changed) stored.editedAtMs else fresh.editedAtMs,
                 extra = if (changed) stored.extra else fresh.extra,
             )
+        }
+
+        /**
+         * Whether [row] is the kind of message an iPhone lets its sender edit: one of the user's own
+         * iMessages (with its GUID), sent and not failed, text alone in its first part (no media,
+         * no iMessage app), not a row of the conversation's own. The time and the number of edits
+         * are [inEditWindow]'s.
+         */
+        internal fun editable(row: MessageRow): Boolean {
+            if (!row.isOutgoing || row.direction != "out" || row.isLocal || !DirectArchive.isImessage(row.id)) return false
+            if (row.localState == LocalState.FAILED || DirectArchive.statusRank(row.status) < 0) return false
+            if (row.text.isBlank() || row.media.isNotEmpty()) return false
+            val extra = IMessageExtra.parse(row.extra)
+            return extra.app == null && extra.parts.keys.all { it == 0 }
+        }
+
+        /**
+         * Whether [row] is the kind of message the library unsends whole: one of the user's own
+         * iMessages (with its GUID), sent and not failed, all of it in its first part. An unsend takes
+         * back one part, so a message with more (a caption and an attachment sent from an iPhone) is
+         * not offered: unsending part 0 would leave the rest with the people it went to. The time is
+         * [UnsendWindow]'s.
+         */
+        internal fun unsendable(row: MessageRow): Boolean {
+            if (!row.isOutgoing || row.direction != "out" || row.isLocal || !DirectArchive.isImessage(row.id)) return false
+            if (row.localState == LocalState.FAILED || DirectArchive.statusRank(row.status) < 0) return false
+            val extra = IMessageExtra.parse(row.extra)
+            if (0 in extra.unsent) return false
+            return extra.parts.keys.all { it == 0 } && row.media.all { it.partId == DirectArchive.partId(0) }
+        }
+
+        /** Whether [row] is still young enough to edit (15 minutes) and was edited fewer than 5 times. */
+        internal fun inEditWindow(row: MessageRow, now: Long): Boolean =
+            now - row.timestampMs < EditRule.WINDOW_MS &&
+                IMessageExtra.parse(row.extra).edits < IMessageExtra.MAX_EDITS
+
+        /** Whether [row] can take a tapback: a message (not a row of the conversation's own) Apple knows by its GUID. */
+        internal fun reactable(row: MessageRow): Boolean =
+            DirectArchive.isImessage(row.id) && !row.isLocal && row.direction != "system"
+
+        /** At most this much of a message's text goes with a tapback (for the other side's notification). */
+        private const val TAPBACK_TEXT_MAX = 100
+
+        /** A message's text as a tapback carries it: at most [TAPBACK_TEXT_MAX] characters, never half an emoji. */
+        internal fun tapbackText(text: String): String {
+            if (text.length <= TAPBACK_TEXT_MAX) return text
+            val end = if (Character.isHighSurrogate(text[TAPBACK_TEXT_MAX - 1])) TAPBACK_TEXT_MAX - 1 else TAPBACK_TEXT_MAX
+            return text.substring(0, end)
+        }
+
+        /**
+         * The words of the notification for someone's tapback [emoji] on the user's message, as an
+         * iPhone puts them ("Loved “See you at 6”"). [quoted] is the message as the notification
+         * names it (its text in quotes, or "a message").
+         */
+        internal fun tapbackNotice(context: Context, emoji: String, quoted: String): String {
+            val verb = when (DirectArchive.reactionOf(emoji)) {
+                Reaction.Heart -> R.string.imessage_tapback_loved
+                Reaction.Like -> R.string.imessage_tapback_liked
+                Reaction.Dislike -> R.string.imessage_tapback_disliked
+                Reaction.Laugh -> R.string.imessage_tapback_laughed
+                Reaction.Emphasize -> R.string.imessage_tapback_emphasized
+                Reaction.Question -> R.string.imessage_tapback_questioned
+                else -> return context.getString(R.string.imessage_tapback_emoji, emoji, quoted)
+            }
+            return context.getString(verb, quoted)
         }
 
         /** A send waits for Apple's confirmation (up to 45 s) plus the session coming up. */

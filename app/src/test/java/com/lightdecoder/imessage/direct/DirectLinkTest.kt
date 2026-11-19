@@ -335,6 +335,7 @@ class DirectLinkTest {
         DirectLibrary.REQUIRED.forEach { File(DirectLibrary.dir(context), it).apply { parentFile?.mkdirs(); writeText("") } }
         val link = DirectLink.get(context)
         val now = System.currentTimeMillis()
+        link.apply(incoming("B0", bob, "hi"))
         sentHere("V1", "oops", ts = now)
         assertTrue(link.canUnsend(repo.message("imsg:V1")!!, now))
         // Unsent on the user's iPhone: the placeholder is the user's, but there is nothing to unsend.
@@ -525,6 +526,412 @@ class DirectLinkTest {
         assertTrue(DirectPrefs.sendReadReceipts(context))
     }
 
+    // --- edits, tapbacks and unsends from here ------------------------------------------------
+
+    /** Direct mode on: registered, with the library's files. */
+    private fun directModeOn() {
+        DirectPrefs.setRegistered(context, true)
+        DirectLibrary.REQUIRED.forEach { File(DirectLibrary.dir(context), it).apply { parentFile?.mkdirs(); writeText("") } }
+    }
+
+    /** A link whose requests to the other process are [asked], answered by [answer]. */
+    private fun fakeLink(asked: MutableList<Pair<Int, JSONObject>>, answer: (Int, JSONObject) -> JSONObject = { _, _ -> DirectWire.ok() }) =
+        DirectLink.installForTesting(context) { what, request, _ ->
+            asked += what to request
+            answer(what, request)
+        }
+
+    private fun row(
+        id: String = "imsg:E",
+        text: String = "on my way",
+        ageMs: Long = 60_000,
+        now: Long = NOW,
+        outgoing: Boolean = true,
+        direction: String = if (outgoing) "out" else "in",
+        status: String = DirectArchive.STATUS_SENT,
+        localState: String = com.lightdecoder.archive.LocalState.SYNCED,
+        media: List<com.lightdecoder.archive.MediaRow> = emptyList(),
+        extra: IMessageExtra = IMessageExtra(),
+    ) = MessageRow(
+        id = id, conversationId = "imsg:$bob", tmpId = "", senderId = "", senderName = "", isOutgoing = outgoing,
+        timestampMs = now - ageMs, direction = direction, status = status, statusCode = 1, errorText = "",
+        transport = IMessageManager.TRANSPORT, text = text, subject = "", replyToId = "", reactions = emptyList(),
+        localState = localState, media = media, updatedAt = 0, extra = extra.toJson(),
+    )
+
+    /** A picture of the message `imsg:E`, at [partId]. */
+    private fun picture(partId: String) = com.lightdecoder.archive.MediaRow(
+        "imsg:E", partId, "E/$partId", ByteArray(0), "", ByteArray(0), "image/jpeg", "a.jpg", 1, 0, 0, ByteArray(0), false, "", "", false, false,
+    )
+
+    @Test
+    fun onlyAWholeMessageOfTheUsersCanBeUnsent() {
+        assertTrue(DirectLink.unsendable(row()))
+        assertTrue("a picture alone", DirectLink.unsendable(row(text = "", media = listOf(picture("p0")))))
+        // Not someone else's, not a row of the conversation's own, not one Apple does not know by a GUID.
+        assertFalse(DirectLink.unsendable(row(outgoing = false)))
+        assertFalse(DirectLink.unsendable(row(direction = "system")))
+        assertFalse(DirectLink.unsendable(row(id = "ld:t1")))
+        assertFalse(DirectLink.unsendable(row(id = MessageRow.tmpMessageId("t1"))))
+        // Not one that failed (here, or as Apple said).
+        assertFalse(DirectLink.unsendable(row(localState = com.lightdecoder.archive.LocalState.FAILED)))
+        assertFalse(DirectLink.unsendable(row(status = DirectArchive.STATUS_FAILED)))
+        // An unsend takes back one part: a message with more (sent from an iPhone) is not offered.
+        assertFalse(DirectLink.unsendable(row(extra = IMessageExtra(parts = mapOf(0 to "look", 1 to "a.jpg")))))
+        assertFalse(DirectLink.unsendable(row(media = listOf(picture("p1")))))
+        assertFalse(DirectLink.unsendable(row(extra = IMessageExtra(parts = mapOf(1 to "a.jpg"), unsent = setOf(0)))))
+    }
+
+    @Test
+    fun onlyTheUsersOwnTextIMessagesCanBeEditedAsOnAnIphone() {
+        assertTrue(DirectLink.editable(row()))
+        assertTrue(DirectLink.inEditWindow(row(), NOW))
+        // Not someone else's, not a row of the conversation's own, not one sent before the library (no GUID).
+        assertFalse(DirectLink.editable(row(outgoing = false)))
+        assertFalse(DirectLink.editable(row(direction = "system")))
+        assertFalse(DirectLink.editable(row(id = "ld:t1")))
+        assertFalse(DirectLink.editable(row(id = MessageRow.tmpMessageId("t1"))))
+        // Not one that failed, nor one without text, with a picture, or an iMessage app's.
+        assertFalse(DirectLink.editable(row(localState = com.lightdecoder.archive.LocalState.FAILED)))
+        assertFalse(DirectLink.editable(row(status = DirectArchive.STATUS_FAILED)))
+        assertFalse(DirectLink.editable(row(text = " ")))
+        assertFalse(DirectLink.editable(row(media = listOf(picture("p1")))))
+        assertFalse(DirectLink.editable(row(extra = IMessageExtra(app = IMessageExtra.App(name = "GamePigeon")))))
+        // Text in another part than the first: an edit of part 0 would not say which.
+        assertFalse(DirectLink.editable(row(extra = IMessageExtra(parts = mapOf(0 to "a", 1 to "b")))))
+        assertTrue(DirectLink.editable(row(extra = IMessageExtra(parts = mapOf(0 to "on my way"), edits = 2))))
+        // 15 minutes, 5 edits.
+        assertTrue(DirectLink.inEditWindow(row(ageMs = 15 * 60_000L - 1), NOW))
+        assertFalse(DirectLink.inEditWindow(row(ageMs = 15 * 60_000L), NOW))
+        assertTrue(DirectLink.inEditWindow(row(extra = IMessageExtra(edits = 4)), NOW))
+        assertFalse(DirectLink.inEditWindow(row(extra = IMessageExtra(edits = 5)), NOW))
+    }
+
+    @Test
+    fun tapbacksGoOnMessagesAppleKnowsByTheirGuid() {
+        assertTrue(DirectLink.reactable(row()))
+        assertTrue(DirectLink.reactable(row(outgoing = false)))
+        assertFalse(DirectLink.reactable(row(direction = "system")))
+        assertFalse(DirectLink.reactable(row(id = "ld:t1")))
+        assertFalse(DirectLink.reactable(row(id = MessageRow.tmpMessageId("t1"))))
+        // The text a tapback carries: 100 characters at most, never half an emoji.
+        assertEquals("short", DirectLink.tapbackText("short"))
+        assertEquals("a".repeat(100), DirectLink.tapbackText("a".repeat(150)))
+        assertEquals("a".repeat(99), DirectLink.tapbackText("a".repeat(99) + "😀" + "tail"))
+    }
+
+    @Test
+    fun theGatesAskForDirectModeAndAChatItCanReach() {
+        val link = DirectLink.get(context)
+        link.apply(incoming("B0", bob, "hi"))
+        val now = System.currentTimeMillis()
+        sentHere("G1", "mine", ts = now - 60_000)
+        val mine = repo.message("imsg:G1")!!
+        assertFalse("not without the library", link.canEdit(mine, now))
+        assertFalse(link.canReact(mine))
+        assertFalse(link.canUnsend(mine, now))
+        directModeOn()
+        assertTrue(link.canEdit(mine, now))
+        assertTrue(link.canReact(mine))
+        assertTrue(link.canUnsend(mine, now))
+        assertTrue(link.canReact(repo.message("imsg:B0")!!))
+        assertFalse("someone else's", link.canEdit(repo.message("imsg:B0")!!, now))
+        assertFalse("someone else's", link.canUnsend(repo.message("imsg:B0")!!, now))
+        assertFalse("too late", link.canEdit(mine, now + 15 * 60_000L))
+        assertFalse("too late", link.canUnsend(mine, now + 60_000L))
+        assertFalse("Apple said it failed", link.canUnsend(mine.copy(status = DirectArchive.STATUS_FAILED), now))
+        // A Blue Bubbles group has no iMessage group id: nothing can reach it.
+        val group = mine.copy(id = "imsg:G2", conversationId = "imsg:group:members:a,b")
+        assertFalse(link.canEdit(group, now))
+        assertFalse(link.canReact(group))
+        assertFalse(link.canUnsend(group, now))
+        // What a screen already found of the chat is taken as it is.
+        assertFalse(link.canEdit(mine, now, reachable = false))
+        assertFalse(link.canReact(mine, reachable = false))
+        assertFalse(link.canUnsend(mine, now, reachable = false))
+        assertTrue(link.canReact(group, reachable = true))
+    }
+
+    @Test
+    fun anEditGoesToAppleThenReadsEditedHere() {
+        val asked = Collections.synchronizedList(ArrayList<Pair<Int, JSONObject>>())
+        val link = fakeLink(asked)
+        link.apply(incoming("B0", bob, "hi"))
+        sentHere("E5", "on my wya", ts = System.currentTimeMillis() - 60_000)
+        link.apply(DirectArchive.Update.Reaction("imsg:E5", "+15559876543", "❤️", true, false, 5))
+        runBlocking { link.edit("imsg:E5", "on my way") }
+        val (what, request) = asked.single()
+        assertEquals(DirectWire.EDIT, what)
+        assertEquals("E5", request.getString("guid"))
+        assertEquals(0, request.getInt("part"))
+        assertEquals("on my way", request.getString("text"))
+        assertEquals(listOf("tel:+15559876543"), DirectWire.Target.fromJson(request.getJSONObject("target")).participants)
+        val row = repo.message("imsg:E5")!!
+        assertEquals("on my way", row.text)
+        assertTrue(row.editedAtMs > 0)
+        assertEquals(IMessageExtra(parts = mapOf(0 to "on my way"), edits = 1), IMessageExtra.parse(row.extra))
+        assertEquals("the tapback stays", "❤️", row.reactions.single().emoji)
+        assertEquals(DirectArchive.STATUS_SENT, row.status)
+    }
+
+    @Test
+    fun anEditAppleConfirmsAfterTheMessageWasUnsentLeavesItUnsent() {
+        val asked = Collections.synchronizedList(ArrayList<Pair<Int, JSONObject>>())
+        lateinit var link: DirectLink
+        link = fakeLink(asked) { what, _ ->
+            // Unsent on the user's Mac while Apple was asked to edit it.
+            if (what == DirectWire.EDIT) link.apply(DirectArchive.Update.Unsent("imsg:E8", 0, fromMe = true, senderName = ""))
+            DirectWire.ok()
+        }
+        link.apply(incoming("B0", bob, "hi"))
+        sentHere("E8", "frist", ts = System.currentTimeMillis() - 30_000)
+        runBlocking { link.edit("imsg:E8", "first") }
+        assertEquals(DirectWire.EDIT, asked.single().first)
+        val row = repo.message("imsg:E8")!!
+        assertEquals("system", row.direction)
+        assertEquals("You unsent a message.", row.text)
+        assertEquals(0L, row.editedAtMs)
+        assertEquals("You unsent a message.", repo.conversation("imsg:$bob")!!.snippet)
+    }
+
+    @Test
+    fun anEditAppleRefusesOrTooLateChangesNothing() {
+        val asked = Collections.synchronizedList(ArrayList<Pair<Int, JSONObject>>())
+        val link = fakeLink(asked) { _, _ -> DirectWire.error("Apple refused the edit: no") }
+        link.apply(incoming("B0", bob, "hi"))
+        val now = System.currentTimeMillis()
+        sentHere("E6", "first", ts = now - 60_000)
+        try {
+            runBlocking { link.edit("imsg:E6", "second") }
+            fail("refused, yet edited")
+        } catch (e: DirectEngine.ImessageError) {
+            assertEquals("Apple refused the edit: no", e.message)
+            // The screen shows it in those words.
+            assertEquals("Apple refused the edit: no", com.lightdecoder.ui.chat.ChatErrors.message(context, ChatService.IMESSAGE, e))
+        }
+        assertEquals("first", repo.message("imsg:E6")!!.text)
+        assertEquals(0L, repo.message("imsg:E6")!!.editedAtMs)
+        // Too late (16 minutes): not even asked, and the screen says so in its own words.
+        asked.clear()
+        sentHere("E7", "old", ts = now - 16 * 60_000L)
+        try {
+            runBlocking { link.edit("imsg:E7", "new") }
+            fail("edited too late")
+        } catch (e: com.lightdecoder.relay.RelayException) {
+            assertEquals(com.lightdecoder.relay.RelayException.INVALID_ARGUMENT, e.code)
+        }
+        assertTrue(asked.isEmpty())
+        // Someone else's: not the user's to edit.
+        try {
+            runBlocking { link.edit("imsg:B0", "hijacked") }
+            fail("edited someone else's message")
+        } catch (e: DirectEngine.ImessageError) {
+            assertEquals(context.getString(com.lightdecoder.R.string.imessage_direct_edit_not_editable), e.message)
+        }
+        assertTrue(asked.isEmpty())
+    }
+
+    @Test
+    fun aTapbackShowsAtOnceReplacesTheUsersEarlierOneAndIsTakenBackIfAppleRefusesIt() {
+        val asked = Collections.synchronizedList(ArrayList<Pair<Int, JSONObject>>())
+        var refuse = false
+        // The user's tapback as the archive has it while Apple is being asked.
+        val whileAsked = ArrayList<String?>()
+        val link = fakeLink(asked) { _, _ ->
+            whileAsked += repo.message("imsg:T5")?.reactions?.firstOrNull { it.fromMe }?.emoji
+            if (refuse) DirectWire.error("Apple refused the reaction: no") else DirectWire.guid("T-OWN")
+        }
+        link.apply(incoming("T5", bob, "we won"))
+        runBlocking { link.react("imsg:T5", "❤️", remove = false) }
+        assertEquals("shown before Apple answered", listOf<String?>("❤️"), whileAsked)
+        assertEquals(listOf(com.lightdecoder.relay.ReactionDto("❤️", listOf("me"), fromMe = true)), repo.message("imsg:T5")!!.reactions)
+        val (what, request) = asked.single()
+        assertEquals(DirectWire.REACT, what)
+        assertEquals("T5", request.getString("guid"))
+        assertEquals(0, request.getInt("part"))
+        assertEquals("❤️", request.getString("emoji"))
+        assertTrue(request.getBoolean("enable"))
+        assertEquals("we won", request.getString("targetText"))
+        // Another one replaces it (Apple does the same on the other side).
+        runBlocking { link.react("imsg:T5", "😂", remove = false) }
+        assertEquals(listOf(com.lightdecoder.relay.ReactionDto("😂", listOf("me"), fromMe = true)), repo.message("imsg:T5")!!.reactions)
+        assertTrue(asked.last().second.getBoolean("enable"))
+        // Refused: back to how it was.
+        refuse = true
+        try {
+            runBlocking { link.react("imsg:T5", "👍", remove = false) }
+            fail("refused, yet kept")
+        } catch (e: DirectEngine.ImessageError) {
+            assertEquals("Apple refused the reaction: no", e.message)
+        }
+        assertEquals(listOf(com.lightdecoder.relay.ReactionDto("😂", listOf("me"), fromMe = true)), repo.message("imsg:T5")!!.reactions)
+        try {
+            runBlocking { link.react("imsg:T5", "😂", remove = true) }
+            fail("refused, yet taken back")
+        } catch (e: DirectEngine.ImessageError) {
+            // As expected.
+        }
+        assertEquals("😂", repo.message("imsg:T5")!!.reactions.single().emoji)
+        // Taken back: enable false, for that emoji.
+        refuse = false
+        runBlocking { link.react("imsg:T5", "😂", remove = true) }
+        assertTrue(repo.message("imsg:T5")!!.reactions.isEmpty())
+        assertEquals("😂", asked.last().second.getString("emoji"))
+        assertFalse(asked.last().second.getBoolean("enable"))
+        // A first one refused leaves none.
+        refuse = true
+        runCatching { runBlocking { link.react("imsg:T5", "‼️", remove = false) } }
+        assertTrue(repo.message("imsg:T5")!!.reactions.isEmpty())
+    }
+
+    @Test
+    fun aRefusedTapbackLeavesOneChosenSinceOnAnotherDevice() {
+        val asked = Collections.synchronizedList(ArrayList<Pair<Int, JSONObject>>())
+        // The tapback the user puts on it on their iPhone while Apple is asked.
+        var meanwhile = ""
+        lateinit var link: DirectLink
+        link = fakeLink(asked) { _, _ ->
+            link.apply(DirectArchive.Update.Reaction("imsg:T6", "me", meanwhile, true, true, 7))
+            DirectWire.error("Apple refused the reaction: no")
+        }
+        link.apply(incoming("T6", bob, "dinner?"))
+        link.apply(DirectArchive.Update.Reaction("imsg:T6", "me", "😂", true, true, 5))
+        fun mine() = repo.message("imsg:T6")!!.reactions
+        // ❤️ for 😂 refused, 👍 chosen meanwhile: 👍 stays (not 😂 again).
+        meanwhile = "👍"
+        assertTrue(runCatching { runBlocking { link.react("imsg:T6", "❤️", remove = false) } }.isFailure)
+        assertEquals(listOf(com.lightdecoder.relay.ReactionDto("👍", listOf("me"), fromMe = true)), mine())
+        // 👍 taken back, refused, ‼️ chosen meanwhile: ‼️ stays (not 👍 again).
+        meanwhile = "‼️"
+        assertTrue(runCatching { runBlocking { link.react("imsg:T6", "👍", remove = true) } }.isFailure)
+        assertEquals(listOf(com.lightdecoder.relay.ReactionDto("‼️", listOf("me"), fromMe = true)), mine())
+    }
+
+    @Test
+    fun anUnsendFromHereLeavesYouUnsentAMessage() {
+        val asked = Collections.synchronizedList(ArrayList<Pair<Int, JSONObject>>())
+        val link = fakeLink(asked)
+        link.apply(incoming("B0", bob, "hi"))
+        sentHere("V2", "wrong chat", ts = System.currentTimeMillis() - 10_000)
+        runBlocking { link.unsend("imsg:V2") }
+        assertEquals(DirectWire.UNSEND, asked.single().first)
+        val row = repo.message("imsg:V2")!!
+        assertEquals("system", row.direction)
+        assertEquals("You unsent a message.", row.text)
+        assertEquals("You unsent a message.", repo.conversation("imsg:$bob")!!.snippet)
+        // One part of a message with more (a caption and an attachment, sent from the user's iPhone):
+        // only that part goes, as Apple does. Unsend is not offered on such a message.
+        directModeOn()
+        val now = System.currentTimeMillis()
+        val attachment = DirectArchive.ATTACHMENT_LINE + "a.jpg"
+        repo.upsertMessage(
+            com.lightdecoder.relay.MessageDto(
+                id = "imsg:V3", conversationId = "imsg:$bob", fromMe = true, timestampMs = now - 10_000, direction = "out",
+                status = DirectArchive.STATUS_SENT, statusCode = 1, transport = IMessageManager.TRANSPORT, text = "look\n$attachment",
+                parts = listOf(com.lightdecoder.relay.PartDto("0", "text", "look\n$attachment")),
+                extra = IMessageExtra(parts = mapOf(0 to "look", 1 to attachment)).toJson(),
+            ),
+        )
+        assertFalse(link.canUnsend(repo.message("imsg:V3")!!, now))
+        runBlocking { link.unsend("imsg:V3", part = 0) }
+        val partly = repo.message("imsg:V3")!!
+        assertEquals("out", partly.direction)
+        assertEquals(attachment, partly.text)
+        assertEquals(setOf(0), IMessageExtra.parse(partly.extra).unsent)
+        // A chat the library cannot reach: it says so, in words.
+        repo.upsertMessage(
+            com.lightdecoder.relay.MessageDto(
+                id = "imsg:V4", conversationId = "imsg:group:members:a,b", fromMe = true, timestampMs = now, direction = "out",
+                status = DirectArchive.STATUS_SENT, statusCode = 1, transport = IMessageManager.TRANSPORT, text = "hi all",
+            ),
+        )
+        try {
+            runBlocking { link.unsend("imsg:V4") }
+            fail("unsent where it cannot reach")
+        } catch (e: DirectEngine.ImessageError) {
+            assertEquals(context.getString(com.lightdecoder.R.string.imessage_direct_unreachable), e.message)
+        }
+        assertEquals(listOf(DirectWire.UNSEND, DirectWire.UNSEND), asked.map { it.first })
+    }
+
+    @Test
+    fun aTapbackOnTheUsersMessageIsAnnouncedOnce() {
+        IMessagePrefs.setEnabled(context, true)
+        IMessagePrefs.setNotifyMessages(context, true)
+        val link = DirectLink.get(context)
+        link.apply(incoming("B0", bob, "hi"))
+        sentHere("A1", "see you at 6")
+        val notifications = shadowOf(context.getSystemService(NotificationManager::class.java))
+        fun lines() = notifications.activeNotifications.filter { it.tag?.startsWith("im:") == true }
+            .flatMap { androidx.core.app.NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(it.notification)?.messages.orEmpty() }
+            .map { it.text.toString() }
+        MessageNotifier.cancelAll(context, ChatService.IMESSAGE)
+        val love = event("R1", bob, PushChatMessage.React(ReactMessage("A1", 0UL, ReactMessageType.React(Reaction.Heart, true), "see you at 6", null)), participants = listOf(me, bob))
+        link.apply(love)
+        assertEquals(listOf("Loved “see you at 6”"), lines())
+        // The same tapback handed over again (a restart) is not announced again.
+        MessageNotifier.cancelAll(context, ChatService.IMESSAGE)
+        link.apply(love)
+        assertTrue(lines().isEmpty())
+        // Nor one taken back, one on someone else's message, or the user's own from another device.
+        link.apply(event("R2", bob, PushChatMessage.React(ReactMessage("A1", 0UL, ReactMessageType.React(Reaction.Heart, false), "", null)), participants = listOf(me, bob)))
+        link.apply(event("R3", bob, PushChatMessage.React(ReactMessage("B0", 0UL, ReactMessageType.React(Reaction.Like, true), "", null)), participants = listOf(me, bob)))
+        link.apply(event("R4", me, PushChatMessage.React(ReactMessage("A1", 0UL, ReactMessageType.React(Reaction.Laugh, true), "", null)), participants = listOf(me, bob)))
+        assertTrue(lines().isEmpty())
+        // Another emoji, as an iPhone words it.
+        link.apply(event("R5", bob, PushChatMessage.React(ReactMessage("A1", 0UL, ReactMessageType.React(Reaction.Emoji("🔥"), true), "", null)), participants = listOf(me, bob)))
+        assertEquals(listOf("Reacted 🔥 to “see you at 6”"), lines())
+    }
+
+    @Test
+    fun theIMessageBackendEditsAndReactsOnlyThroughTheLibrary() {
+        val asked = Collections.synchronizedList(ArrayList<Pair<Int, JSONObject>>())
+        val link = fakeLink(asked)
+        val manager = IMessageManager.get(context)
+        link.apply(incoming("B1", bob, "hi"))
+        sentHere("M1", "mine", ts = System.currentTimeMillis() - 30_000)
+        // Through OpenBubbles' notifications: neither.
+        assertFalse(com.lightdecoder.chat.Capability.EDIT in manager.capabilities)
+        fun unsupported(block: suspend () -> Unit) = try {
+            runBlocking { block() }
+            fail("went through without the library")
+        } catch (e: com.lightdecoder.relay.RelayException) {
+            assertEquals("unsupported", e.code)
+        }
+        unsupported { manager.react("imsg:B1", "👍", remove = false) }
+        unsupported { manager.editMessage("imsg:M1", "changed") }
+        assertTrue(asked.isEmpty())
+        // Through the library: both, to Apple.
+        directModeOn()
+        assertTrue(com.lightdecoder.chat.Capability.EDIT in manager.capabilities)
+        runBlocking { manager.react("imsg:B1", "👍", remove = false) }
+        runBlocking { manager.editMessage("imsg:M1", "  changed  ") }
+        assertEquals(listOf(DirectWire.REACT, DirectWire.EDIT), asked.map { it.first })
+        assertEquals("changed", repo.message("imsg:M1")!!.text)
+        // Nothing left of the text: not an edit Apple is asked for.
+        try {
+            runBlocking { manager.editMessage("imsg:M1", "   ") }
+            fail("edited to nothing")
+        } catch (e: com.lightdecoder.relay.RelayException) {
+            assertEquals(com.lightdecoder.relay.RelayException.INVALID_ARGUMENT, e.code)
+        }
+        assertEquals(2, asked.size)
+        // A message known only from OpenBubbles' notifications has no GUID to put a tapback on.
+        unsupported { manager.react("ld:t1", "👍", remove = false) }
+    }
+
+    @Test
+    fun aTapbacksNoticeReadsAsOnAnIphone() {
+        val quoted = "“hi”"
+        assertEquals("Loved “hi”", DirectLink.tapbackNotice(context, "❤️", quoted))
+        assertEquals("Liked “hi”", DirectLink.tapbackNotice(context, "👍", quoted))
+        assertEquals("Disliked “hi”", DirectLink.tapbackNotice(context, "👎", quoted))
+        assertEquals("Laughed at “hi”", DirectLink.tapbackNotice(context, "😂", quoted))
+        assertEquals("Emphasized “hi”", DirectLink.tapbackNotice(context, "‼️", quoted))
+        assertEquals("Questioned “hi”", DirectLink.tapbackNotice(context, "❓", quoted))
+        assertEquals("Reacted 🎉 to a message", DirectLink.tapbackNotice(context, "🎉", "a message"))
+    }
+
     /** Polls, for work the link does on its own threads. */
     private fun waitFor(what: String, timeoutMs: Long = 5_000, condition: () -> Boolean) {
         val deadline = System.currentTimeMillis() + timeoutMs
@@ -536,5 +943,6 @@ class DirectLinkTest {
 
     companion object {
         private const val DB = "direct-link-test.db"
+        private const val NOW = 1_700_000_100_000L
     }
 }

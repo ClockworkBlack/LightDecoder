@@ -58,7 +58,9 @@ class IMessageManager private constructor(
     private val appContext: Context = context.applicationContext
 
     override val service: ChatService get() = ChatService.IMESSAGE
-    override val capabilities: Set<Capability> = emptySet()
+
+    /** Through the iMessage library the user's iMessages can be edited ([editMessage]); through OpenBubbles' notifications nothing more. */
+    override val capabilities: Set<Capability> get() = if (direct.active) DIRECT_CAPABILITIES else emptySet()
 
     private val _state = MutableStateFlow(currentState())
     override val state: StateFlow<RelayState> = _state.asStateFlow()
@@ -472,8 +474,29 @@ class IMessageManager private constructor(
         if (visible) refreshState()
     }
 
-    override suspend fun react(messageId: String, emoji: String, remove: Boolean): Unit =
-        throw RelayException(WA_UNSUPPORTED, "no reactions through OpenBubbles' notifications")
+    /**
+     * A tapback on an iMessage, through the iMessage library ([com.lightdecoder.imessage.direct.DirectLink.react]):
+     * one per person, so another emoji replaces the user's earlier one. Messages known only from
+     * OpenBubbles' notifications (no GUID) cannot take one.
+     */
+    override suspend fun react(messageId: String, emoji: String, remove: Boolean): Unit = withContext(Dispatchers.IO) {
+        if (!direct.active || !com.lightdecoder.imessage.direct.DirectArchive.isImessage(messageId)) {
+            throw RelayException(WA_UNSUPPORTED, "no reactions through OpenBubbles' notifications")
+        }
+        direct.react(messageId, emoji, remove)
+    }
+
+    /**
+     * Changes the text of one of the user's iMessages, through the iMessage library
+     * ([com.lightdecoder.imessage.direct.DirectLink.edit]): Apple allows it for 15 minutes, 5 times.
+     * Too late is a [RelayException] with [RelayException.INVALID_ARGUMENT].
+     */
+    suspend fun editMessage(messageId: String, text: String): Unit = withContext(Dispatchers.IO) {
+        if (!direct.active) throw RelayException(WA_UNSUPPORTED, "no editing through OpenBubbles' notifications")
+        val body = text.trim()
+        if (body.isEmpty()) throw RelayException(RelayException.INVALID_ARGUMENT, "empty message")
+        direct.edit(messageId, body)
+    }
 
     /** Marks it read here and, through OpenBubbles' Mark As Read button, in OpenBubbles (which then tells the sender if it is set to). */
     override suspend fun markRead(conversationId: String): Unit = withContext(Dispatchers.IO) {
@@ -567,6 +590,9 @@ class IMessageManager private constructor(
         private const val ECHO_WINDOW_MS = 30 * 60 * 1000L
         private const val MAX_DELETED_SENT = 50
         private const val WA_UNSUPPORTED = "unsupported"
+
+        /** What the iMessage library adds. */
+        private val DIRECT_CAPABILITIES = setOf(Capability.EDIT)
 
         @Volatile
         private var instance: IMessageManager? = null

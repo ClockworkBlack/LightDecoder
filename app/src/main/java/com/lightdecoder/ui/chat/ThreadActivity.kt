@@ -47,6 +47,7 @@ import com.lightdecoder.chat.ChatBackend
 import com.lightdecoder.chat.ChatService
 import com.lightdecoder.databinding.ActivityThreadBinding
 import com.lightdecoder.databinding.SheetMessageActionsBinding
+import com.lightdecoder.imessage.direct.UnsendWindow
 import com.lightdecoder.relay.Folder
 import com.lightdecoder.relay.MessageNotifier
 import com.lightdecoder.relay.ReactionDto
@@ -123,6 +124,13 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      */
     private var companionId: String? = null
     private var iMessageIds: Set<String> = emptySet()
+
+    /**
+     * The iMessage chats on screen the iMessage library can reach ([com.lightdecoder.imessage.direct.DirectLink.canSend]),
+     * as the last load found them: the long-press sheet offers tapbacks, Edit and Unsend by it
+     * without reading the archive on the main thread. Empty without the library.
+     */
+    private var directReachable: Set<String> = emptySet()
     private val iMessageLink: com.lightdecoder.imessage.IMessageManager
         get() = ScreenBackends.get(this, ChatService.IMESSAGE) as com.lightdecoder.imessage.IMessageManager
 
@@ -366,6 +374,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             companionId?.let { if (MessageNotifier.visibleConversationId(ChatService.IMESSAGE) == it) MessageNotifier.setVisibleConversationId(ChatService.IMESSAGE, null) }
             companionId = null
             iMessageIds = emptySet()
+            directReachable = emptySet()
             // Until the new conversation's own rows are read, nothing pages it from the phone.
             localRowsFor = null
             historyComplete = false
@@ -606,6 +615,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val companionUnread: Boolean = false,
         /** An iMessage chat opened by itself that belongs inside this Messages conversation. */
         val moveTo: String? = null,
+        /** The iMessage chats shown that the iMessage library can reach ([directReachable]). */
+        val directReachable: Set<String> = emptySet(),
     )
 
     /**
@@ -655,6 +666,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             }.distinctBy { it.id }
                 .let { im -> if (ownFull && rows.isNotEmpty()) im.filter { it.timestampMs >= rows.first().timestampMs } else im }
             val moveTo = if (link.service == ChatService.IMESSAGE) BlueBubblesLinks.messagesFor(applicationContext, id) else null
+            val iMessageChats = if (link.service == ChatService.IMESSAGE) listOf(id) else chats
+            val direct = if (iMessageChats.isEmpty()) null else com.lightdecoder.imessage.direct.DirectLink.get(applicationContext)
+            val reachable = if (direct?.active != true) emptySet() else iMessageChats.filterTo(HashSet()) { direct.canSend(it) }
             Snapshot(
                 conversation = conversation,
                 participants = people,
@@ -665,6 +679,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 companionRows = companionRows,
                 companionUnread = companion != null && runCatching { imRepo!!.conversation(companion)?.unread == true }.getOrDefault(false),
                 moveTo = moveTo,
+                directReachable = reachable,
             )
         }
         if (grow) growPending = false
@@ -679,6 +694,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
         companionId = snapshot.companion
         iMessageIds = snapshot.companionRows.mapTo(HashSet()) { it.id }
+        directReachable = snapshot.directReachable
         markCompanionVisible()
         val localExhausted = snapshot.rows.size < wanted
         windowSize = maxOf(PAGE, snapshot.rows.size)
@@ -1866,15 +1882,24 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val b = SheetMessageActionsBinding.inflate(layoutInflater)
         val real = !row.isLocal
         val mine = row.reactions.firstOrNull { it.fromMe }?.emoji
+        val link = backendFor(row)
+        val isIMessage = link.service == ChatService.IMESSAGE
+        // Through the iMessage library, tapbacks, edits and unsends go to Apple: only for messages
+        // it knows by their GUID (not ones taken from OpenBubbles' notifications), in chats it can reach.
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(this)
+        val directIMessage = isIMessage && direct.active
+        // Whether the library reaches the row's chat, as the last load found (not read on this thread).
+        val reachable = row.conversationId in directReachable
 
         // Email has no reactions.
-        // Email has no reactions, and iMessages here are answered through OpenBubbles' notifications, which take text only.
-        val isIMessage = backendFor(row).service == ChatService.IMESSAGE
-        val reacts = real && manager.service != ChatService.GMAIL
+        val reacts = real && manager.service != ChatService.GMAIL && (!directIMessage || direct.canReact(row, reachable))
         b.reactionRow.visibility = if (reacts) View.VISIBLE else View.GONE
         if (reacts) {
-            // Five quick ones (the user's own reaction in the last place if it is another emoji), then "+" for any emoji.
-            for (emoji in quickReactions(mine)) {
+            // An iMessage through the library: Apple's six tapbacks (and the user's own if it is another
+            // emoji). Otherwise five quick ones (the user's own in the last place if it is another
+            // emoji). Then "+" for any emoji.
+            val quick = if (directIMessage) tapbacks(mine) else quickReactions(mine)
+            for (emoji in quick) {
                 val view = layoutInflater.inflate(R.layout.item_quick_reaction, b.reactionRow, false) as TextView
                 view.text = emoji
                 view.isSelected = emoji == mine
@@ -1892,7 +1917,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             }
             b.reactionRow.addView(more)
         }
-        b.actionRemoveReaction.visibility = if (real && mine != null) View.VISIBLE else View.GONE
+        b.actionRemoveReaction.visibility = if (reacts && mine != null) View.VISIBLE else View.GONE
         b.actionRemoveReaction.setOnClickListener {
             sheet.dismiss()
             if (mine != null && isShown(row)) react(row, mine, remove = true)
@@ -1925,13 +1950,16 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             sheet.dismiss()
             copy(row.text)
         }
-        val ownIMessage = backendFor(row).service == ChatService.IMESSAGE && (row.isOutgoing || row.direction == "out") &&
+        // Without the iMessage library, one's own iMessage is edited and unsent in OpenBubbles
+        // (Apple allows 15 minutes and 2), whose notifications cannot do either.
+        val inOpenBubbles = isIMessage && !direct.active && (row.isOutgoing || row.direction == "out") &&
             row.localState != LocalState.FAILED && !row.isLocal
-        // An iMessage of one's own: edited in OpenBubbles (Apple allows 15 minutes), as WhatsApp's edits are here.
-        val editIMessage = ownIMessage && row.text.isNotBlank() && System.currentTimeMillis() - row.timestampMs < EditRule.WINDOW_MS
-        b.actionEdit.visibility = if (editIMessage || (manager.isPaired() && EditRule.canEdit(row, backendFor(row).capabilities))) View.VISIBLE else View.GONE
-        if (editIMessage) b.actionEdit.setText(R.string.imessage_edit)
-        b.actionUnsend.visibility = if (ownIMessage) View.VISIBLE else View.GONE
+        val editInOpenBubbles = inOpenBubbles && row.text.isNotBlank() && System.currentTimeMillis() - row.timestampMs < EditRule.WINDOW_MS
+        val editHere = if (directIMessage) direct.canEdit(row, reachable = reachable) else manager.isPaired() && EditRule.canEdit(row, link.capabilities)
+        b.actionEdit.visibility = if (editHere || editInOpenBubbles) View.VISIBLE else View.GONE
+        if (editInOpenBubbles) b.actionEdit.setText(R.string.imessage_edit)
+        b.actionUnsend.visibility = if ((directIMessage && direct.canUnsend(row, reachable = reachable)) || inOpenBubbles) View.VISIBLE else View.GONE
+        if (inOpenBubbles) b.actionUnsend.setText(R.string.imessage_unsend)
         b.actionUnsend.setOnClickListener {
             sheet.dismiss()
             if (isShown(row)) unsendIMessage(row)
@@ -1939,7 +1967,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         b.actionEdit.setOnClickListener {
             sheet.dismiss()
             if (!isShown(row)) return@setOnClickListener
-            if (editIMessage) openInOpenBubblesFor(row, getString(R.string.imessage_edit_how), "edit") else askEdit(row)
+            if (editInOpenBubbles) openInOpenBubblesFor(row, getString(R.string.imessage_edit_how), "edit") else askEdit(row)
         }
         val sayable = reader.isAvailable && ReadAloudText.sentence(this, row) != null
         b.actionReadAloud.visibility = if (sayable) View.VISIBLE else View.GONE
@@ -1959,7 +1987,6 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             sheet.dismiss()
             if (!isShown(row)) return@setOnClickListener
             val tmpId = row.tmpId
-            val link = backendFor(row)
             runInBackground { link.discardFailed(tmpId) }
         }
         b.actionDelete.visibility = if (real) View.VISIBLE else View.GONE
@@ -1977,12 +2004,21 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private fun quickReactions(mine: String?): List<String> =
         if (mine == null || mine in QUICK_REACTIONS) QUICK_REACTIONS else QUICK_REACTIONS.take(QUICK_REACTIONS.size - 1) + mine
 
-    /** [emoji] chosen for [row]: the same as [mine] takes it back. An iMessage's tapback goes through OpenBubbles. */
+    /** An iMessage's quick reactions: Apple's six tapbacks, then [mine] when it is another emoji (iOS 18). */
+    private fun tapbacks(mine: String?): List<String> = if (mine == null || mine in TAPBACKS) TAPBACKS else TAPBACKS + mine
+
+    /**
+     * [emoji] chosen for [row]: the same as [mine] takes it back. An iMessage's tapback goes to
+     * Apple through the iMessage library; without it, it is put on in OpenBubbles.
+     */
     @androidx.annotation.VisibleForTesting
     internal fun reactionPicked(row: MessageRow, emoji: String, mine: String?, isIMessage: Boolean) {
         if (!isShown(row)) return
-        if (isIMessage) openInOpenBubblesFor(row, getString(R.string.imessage_react_how, emoji), "react")
-        else react(row, emoji, remove = emoji == mine)
+        if (isIMessage && !com.lightdecoder.imessage.direct.DirectLink.get(this).active) {
+            openInOpenBubblesFor(row, getString(R.string.imessage_react_how, emoji), "react")
+        } else {
+            react(row, emoji, remove = emoji == mine)
+        }
     }
 
     /** Every emoji, by category, recently used first (Android's own picker); one tap reacts with it. */
@@ -2024,11 +2060,14 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     override fun onReactionDetails(row: MessageRow, reaction: ReactionDto) {
-        val service = manager.service
-        val people = participants
+        // A companion iMessage's reactions are iMessage's, by the iMessage chat's members.
+        val link = backendFor(row)
+        val service = link.service
+        val own = participants.takeIf { link === manager }
         lifecycleScope.launch {
-            val stored = withContext(Dispatchers.IO) {
-                runCatching { com.lightdecoder.reactions.ReactionTimes.get(this@ThreadActivity).timesFor(service, row.id) }
+            val (people, stored) = withContext(Dispatchers.IO) {
+                val members = own ?: runCatching { link.repo.participants(row.conversationId) }.getOrDefault(emptyList())
+                members to runCatching { com.lightdecoder.reactions.ReactionTimes.get(this@ThreadActivity).timesFor(service, row.id) }
                     .getOrDefault(emptyMap())
             }
             if (isFinishing || isDestroyed) return@launch
@@ -2294,10 +2333,13 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             .let(::trackConfirm)
     }
 
-    /** Asks for the new text of one of the user's own messages and sends the change ([Capability.EDIT]). */
+    /**
+     * Asks for the new text of one of the user's own messages and sends the change ([Capability.EDIT]),
+     * through the service the message is from (a companion iMessage's is iMessage).
+     */
     private fun askEdit(row: MessageRow) {
         if (!isShown(row)) return
-        val link = manager
+        val link = backendFor(row)
         val field = com.google.android.material.textfield.TextInputEditText(this).apply {
             setText(row.text)
             setSelection(row.text.length)
@@ -2312,12 +2354,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.chat_edit_title)
-            .setMessage(R.string.chat_edit_note)
+            .setMessage(if (link.service == ChatService.IMESSAGE) R.string.imessage_edit_note else R.string.chat_edit_note)
             .setView(box)
             .setPositiveButton(R.string.chat_edit_save) { _, _ ->
                 val text = field.text?.toString()?.trim().orEmpty()
                 // The thread switched under the question (onNewIntent closes it; this is the backstop).
-                if (text.isEmpty() || text == row.text || !isShown(row) || link !== manager) return@setPositiveButton
+                if (text.isEmpty() || text == row.text || !isShown(row) || link !== backendFor(row)) return@setPositiveButton
                 lifecycleScope.launch {
                     relayAttempt { edit(link, row.id, text) }.onFailure {
                         val tooLate = it is RelayException && it.code == RelayException.INVALID_ARGUMENT
@@ -2331,9 +2373,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     /** Like "delete for everyone", editing is the service's own manager's. */
-    private suspend fun edit(link: ChatBackend, messageId: String, text: String) {
-        if (link is WaManager) link.editMessage(messageId, text)
-        else throw RelayException(WaErrors.UNSUPPORTED, "no editing")
+    private suspend fun edit(link: ChatBackend, messageId: String, text: String) = when (link) {
+        is WaManager -> link.editMessage(messageId, text)
+        is com.lightdecoder.imessage.IMessageManager -> link.editMessage(messageId, text)
+        else -> throw RelayException(WaErrors.UNSUPPORTED, "no editing")
     }
 
     /** "Delete for everyone" is the one thing [ChatBackend] leaves to the service's own manager. */
@@ -2481,10 +2524,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     // --- unsending an iMessage ------------------------------------------------------------
 
     /**
-     * One of the user's iMessages: OpenBubbles' notification has no unsend button, so OpenBubbles opens
-     * on the chat, where a long press on it offers Undo Send. Apple allows that for [UNSEND_WINDOW_MS].
+     * Without the iMessage library: opens OpenBubbles on [row]'s chat for something its notification
+     * cannot do ([what]: edit, react), with [how] to do it there.
      */
-    /** Opens OpenBubbles on [row]'s chat for something its notification cannot do ([what]: edit, react), with [how] to do it there. */
     private fun openInOpenBubblesFor(row: MessageRow, how: String, what: String) {
         val chat = row.conversationId.takeIf { backendFor(row).service == ChatService.IMESSAGE } ?: companionId ?: return
         val opened = com.lightdecoder.imessage.IMessageReplies.open(this, chat) ||
@@ -2494,20 +2536,28 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         toast(if (opened) how else errorText(iMessageLink, com.lightdecoder.imessage.IMessageErrors.NOT_INSTALLED))
     }
 
-    private fun unsendIMessage(row: MessageRow) {
+    /**
+     * One of the user's iMessages, within the 2 minutes Apple allows ([UnsendWindow]): through the
+     * iMessage library it is retracted straight away. Without the library, OpenBubbles opens on the
+     * chat (its notification has no unsend button), where a long press on it offers Undo Send.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun unsendIMessage(row: MessageRow) {
         // Sent through the iMessage library: unsent straight away, and Apple's answer is shown.
         val direct = com.lightdecoder.imessage.direct.DirectLink.get(this)
-        if (direct.canUnsend(row)) {
+        if (direct.canUnsend(row, reachable = row.conversationId in directReachable)) {
             unsendDirectly(direct, row)
             return
         }
         val chat = row.conversationId
         val ref = com.lightdecoder.imessage.IMessageLog.chatRef(chat)
-        val age = System.currentTimeMillis() - row.timestampMs
-        if (age > UNSEND_WINDOW_MS) {
+        val now = System.currentTimeMillis()
+        val age = now - row.timestampMs
+        // Through the library only a message still in time is offered; one that is not any more is too late.
+        if (direct.active || !UnsendWindow.canUnsend(row.timestampMs, now)) {
             com.lightdecoder.imessage.IMessageLog.add(this, "$ref: unsend asked ${age / 60_000} min after sending (too late for Apple)")
             MaterialAlertDialogBuilder(this)
-                .setTitle(R.string.imessage_unsend)
+                .setTitle(R.string.imessage_action_unsend)
                 .setMessage(R.string.imessage_unsend_too_late)
                 .setPositiveButton(R.string.imessage_delete_here) { _, _ -> confirmDeleteMessage(row) }
                 .setNegativeButton(android.R.string.cancel, null)
@@ -2529,16 +2579,17 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private fun unsendDirectly(direct: com.lightdecoder.imessage.direct.DirectLink, row: MessageRow) {
         toast(getString(R.string.imessage_unsending))
         lifecycleScope.launch {
-            try {
-                direct.unsend(row.id)
-                toast(getString(R.string.imessage_unsent_toast))
-            } catch (e: Exception) {
-                MaterialAlertDialogBuilder(this@ThreadActivity)
-                    .setTitle(R.string.imessage_unsend_failed_title)
-                    .setMessage(getString(R.string.imessage_unsend_failed, com.lightdecoder.imessage.direct.DirectEngine.readable(e)))
-                    .setPositiveButton(android.R.string.ok, null)
-                    .show()
-            }
+            // A screen closed meanwhile shows nothing: the unsend goes on without it (DirectLink.unsend).
+            relayAttempt { withContext(Dispatchers.IO) { direct.unsend(row.id) } }
+                .onSuccess { toast(getString(R.string.imessage_unsent_toast)) }
+                .onFailure { e ->
+                    if (isFinishing || isDestroyed) return@onFailure
+                    MaterialAlertDialogBuilder(this@ThreadActivity)
+                        .setTitle(R.string.imessage_unsend_failed_title)
+                        .setMessage(getString(R.string.imessage_unsend_failed, com.lightdecoder.imessage.direct.DirectEngine.readable(e)))
+                        .setPositiveButton(android.R.string.ok, null)
+                        .show()
+                }
         }
     }
 
@@ -2935,9 +2986,6 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         private const val MAX_PREVIEW_READ = 32 * 1024 * 1024
         private const val ATTACHMENT_THUMB_DP = 96
 
-        /** How long after sending Apple lets an iMessage be unsent. */
-        private const val UNSEND_WINDOW_MS = 2 * 60 * 1000L
-
         /** Most pictures picked for one message. */
         private const val MAX_ATTACHMENTS = 10
 
@@ -2959,6 +3007,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
         /** The quick reactions offered on long press, in Google Messages' order. */
         val QUICK_REACTIONS = listOf("👍", "❤️", "😂", "😮", "😢")
+
+        /** An iMessage's quick reactions: Apple's six tapbacks, in an iPhone's order. */
+        val TAPBACKS = with(com.lightdecoder.imessage.direct.DirectArchive.Tapback) { listOf(LOVE, LIKE, DISLIKE, LAUGH, EMPHASIZE, QUESTION) }
 
         /**
          * Tests only: runs on the IO thread before every read of a

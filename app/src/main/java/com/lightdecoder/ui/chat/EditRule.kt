@@ -6,9 +6,9 @@ import com.lightdecoder.chat.Capability
 /** Which messages "Edit" is offered for. */
 internal object EditRule {
     /**
-     * WhatsApp's own apps let a message be edited for 15 minutes. (The
-     * bridge allows a little longer, so one opened at the last moment still
-     * goes through.)
+     * WhatsApp's own apps, and iPhones, let a message be edited for 15
+     * minutes. (WhatsApp's bridge allows a little longer, so one opened at
+     * the last moment still goes through.)
      */
     const val WINDOW_MS = 15 * 60 * 1000L
 

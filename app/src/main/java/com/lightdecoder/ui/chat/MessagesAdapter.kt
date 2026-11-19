@@ -9,6 +9,7 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.core.view.ViewCompat
 import androidx.core.view.accessibility.AccessibilityNodeInfoCompat.AccessibilityActionCompat
 import androidx.recyclerview.widget.DiffUtil
@@ -27,8 +28,8 @@ import com.lightdecoder.relay.ReactionDto
 
 /**
  * Draws a thread: day headers, incoming and outgoing bubbles (sender name in
- * groups, reply quote, media, text, time and delivery status, reactions),
- * and system notices.
+ * groups, reply quote, media, text, "Edited", time and delivery status,
+ * reactions), and system notices.
  */
 class MessagesAdapter(
     private val media: MediaLoader,
@@ -204,6 +205,20 @@ class MessagesAdapter(
 
         // Time and delivery status.
         b.time.text = TimeFormat.clock(context, row.timestampMs)
+        // Changed since it was sent: "Edited" by the time, as on an iPhone; a tap says when.
+        val edited = row.editedAtMs > 0
+        b.edited.visibility = if (edited) View.VISIBLE else View.GONE
+        b.edited.setTextColor(metaColor)
+        b.edited.setOnClickListener(
+            if (edited) {
+                View.OnClickListener {
+                    Toast.makeText(context, context.getString(R.string.imessage_edited_at, TimeFormat.clock(context, row.editedAtMs)), Toast.LENGTH_SHORT).show()
+                }
+            } else {
+                null
+            }
+        )
+        if (!edited) b.edited.isClickable = false
         val tick = MessageStatus.tickFor(row)
         // A send that may have gone out all the same has its own words: "Not sent" would invite a resend.
         val unconfirmed = MessageStatus.outcomeUnknown(row)
@@ -508,6 +523,7 @@ class MessagesAdapter(
             parts += context.resources.getQuantityString(R.plurals.chat_attachments, row.media.size, row.media.size)
         }
         if (row.text.isNotEmpty()) parts += row.text
+        if (row.editedAtMs > 0) parts += context.getString(R.string.imessage_edited)
         parts += TimeFormat.clock(context, row.timestampMs)
         holder.binding.statusIcon.contentDescription?.takeIf { tick != Tick.NONE }?.let { parts += it.toString() }
         return parts.joinToString(", ")

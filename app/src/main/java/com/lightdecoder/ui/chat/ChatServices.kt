@@ -227,7 +227,13 @@ internal object ChatErrors {
     /** The bridge code of any failure ("internal" for anything that is not a link error). */
     fun codeOf(t: Throwable): String = RelayErrors.codeOf(t)
 
-    fun message(context: Context, service: ChatService, t: Throwable): String = message(context, service, codeOf(t))
+    /** The iMessage library's failures already say why in words ([com.lightdecoder.imessage.direct.DirectEngine.ImessageError]): shown as they are. */
+    fun message(context: Context, service: ChatService, t: Throwable): String =
+        if (t is com.lightdecoder.imessage.direct.DirectEngine.ImessageError) {
+            com.lightdecoder.imessage.direct.DirectEngine.readable(t)
+        } else {
+            message(context, service, codeOf(t))
+        }
 
     fun message(context: Context, service: ChatService, code: String): String = context.getString(messageRes(service, code))
 

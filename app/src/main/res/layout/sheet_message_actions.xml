@@ -86,7 +86,7 @@
         android:drawableStart="@drawable/ic_edit"
         android:text="@string/chat_action_edit" />
 
-    <!-- One of the user's iMessages: undone in OpenBubbles (Apple allows it for 2 minutes). -->
+    <!-- One of the user's iMessages, within the 2 minutes Apple allows: retracted (Undo Send on an iPhone). -->
     <TextView
         android:id="@+id/actionUnsend"
         android:layout_width="match_parent"
@@ -100,7 +100,7 @@
         android:paddingHorizontal="24dp"
         android:textAppearance="?attr/textAppearanceBodyLarge"
         android:drawableStart="@drawable/ic_undo"
-        android:text="@string/imessage_unsend"
+        android:text="@string/imessage_action_unsend"
         android:visibility="gone" />
 
     <!-- A picture or sticker someone sent: kept among the user's own stickers. -->
