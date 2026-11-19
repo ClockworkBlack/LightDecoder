@@ -216,6 +216,28 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private var remoteFailedAtMs = 0L
     private var scrollToBottomNext = false
 
+    /** The picture behind the messages now (the chat's background, iOS 26): its file, or null for none. */
+    @VisibleForTesting
+    internal var shownBackground: File? = null
+
+    /** The iMessage chat a background picture is being picked for ([chooseBackground]). */
+    private var backgroundFor: String? = null
+
+    private val pickBackground = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        val chat = backgroundFor
+        backgroundFor = null
+        if (uri != null && chat != null) setChatBackground(chat, uri)
+    }
+
+    /**
+     * When the earliest Send Later message shown reaches its time: its row is the same, so the
+     * bubbles are drawn again (it then shows as sent), and read again for what came with it.
+     */
+    private val sendLaterDue = Runnable {
+        if (::adapter.isInitialized) adapter.notifyItemRangeChanged(0, adapter.itemCount)
+        scheduleReload()
+    }
+
     // Several pictures at once: they go out together, one after another, and show as one stack.
     private val pickMedia = registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(MAX_ATTACHMENTS)) { uris ->
         if (uris.isNotEmpty()) setAttachments((attachments + uris).distinct().take(MAX_ATTACHMENTS))
@@ -523,6 +545,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         readerInstance?.shutdown()
         readerInstance = null
         if (::effectPlayer.isInitialized) effectPlayer.cancel()
+        if (::binding.isInitialized) binding.messages.removeCallbacks(sendLaterDue)
         super.onDestroy()
     }
 
@@ -718,6 +741,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
          * conversation with no iMessage chat yet, through the iMessage library.
          */
         val reach: String? = null,
+        /** The picture behind the messages: this iMessage chat's background, or its companion's ([ChatBackgrounds]). */
+        val background: File? = null,
     )
 
     /**
@@ -773,6 +798,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             val shown = if (companionRows.isEmpty()) rows else (rows + companionRows).sortedBy { it.timestampMs }
             val companionIds = companionRows.mapTo(HashSet()) { it.id }
             val reach = if (link.service == ChatService.MESSAGES && companion == null) reachAddress(conversation, people) else null
+            val backgroundChat = if (link.service == ChatService.IMESSAGE) id else companion
+            val background = backgroundChat?.let { chat ->
+                runCatching { com.lightdecoder.imessage.direct.ChatBackgrounds(applicationContext).pictureOf(chat) }.getOrNull()
+            }
             Snapshot(
                 conversation = conversation,
                 participants = people,
@@ -790,6 +819,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 receipts = receiptsFor(shown) { appleReceipts(it, link.service, companionIds) },
                 direct = direct?.active == true,
                 reach = reach,
+                background = background,
             )
         }
         if (grow) growPending = false
@@ -817,6 +847,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         participants = snapshot.participants
         historyComplete = snapshot.historyComplete
         renderConversation()
+        renderBackground(snapshot.background)
+        watchSendLater(messages)
         readNewAloud(messages)
         val unreadAtOpen = snapshot.conversation?.unread == true || snapshot.companionUnread
         effectWatch.arrived(messages, unreadAtOpen, System.currentTimeMillis(), effectPlays::contains)?.let { arrivedEffect = it.id }
@@ -1721,8 +1753,185 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         confirmDialog?.dismiss()
         // The Text tab: a text effect on the whole message, which needs words to move.
         val onText: ((TextEffectKind) -> Unit)? = if (text.isEmpty()) null else { effect -> send(textEffect = effect) }
-        confirmDialog = EffectSheet.show(this, preview, onText) { effect -> send(effect = effect) }
+        confirmDialog = EffectSheet.show(this, preview, onText, onSendLater = ::askSendLater) { effect -> send(effect = effect) }
         return true
+    }
+
+    // --- Send Later (iOS 18) ---
+
+    /**
+     * "Send Later" in the effect sheet: a day (today to 14 days ahead, as on an iPhone), then a
+     * time; the message goes to Apple now and Apple sends it then ([sendLaterAt]).
+     */
+    @VisibleForTesting
+    internal fun askSendLater() {
+        if (!sendsWithEffects()) return
+        val now = java.util.Calendar.getInstance()
+        confirmDialog?.dismiss()
+        val dialog = android.app.DatePickerDialog(
+            this,
+            { _, year, month, day -> askSendLaterTime(year, month, day) },
+            now.get(java.util.Calendar.YEAR), now.get(java.util.Calendar.MONTH), now.get(java.util.Calendar.DAY_OF_MONTH),
+        )
+        dialog.datePicker.minDate = now.timeInMillis - 1_000
+        dialog.datePicker.maxDate = now.timeInMillis + com.lightdecoder.imessage.direct.SendLater.MAX_AHEAD_MS
+        dialog.setTitle(R.string.imessage_send_later_pick_title)
+        confirmDialog = dialog
+        dialog.show()
+    }
+
+    private fun askSendLaterTime(year: Int, month: Int, day: Int) {
+        // An hour from now, on the hour, to start from.
+        val start = java.util.Calendar.getInstance().apply { add(java.util.Calendar.HOUR_OF_DAY, 1) }
+        val dialog = android.app.TimePickerDialog(
+            this,
+            { _, hour, minute ->
+                val at = java.util.Calendar.getInstance().apply {
+                    set(year, month, day, hour, minute, 0)
+                    set(java.util.Calendar.MILLISECOND, 0)
+                }
+                sendLaterAt(at.timeInMillis)
+            },
+            start.get(java.util.Calendar.HOUR_OF_DAY), 0, android.text.format.DateFormat.is24HourFormat(this),
+        )
+        dialog.setTitle(R.string.imessage_send_later_pick_title)
+        confirmDialog = dialog
+        dialog.show()
+    }
+
+    /** Sends what the composer holds with Send Later at [atMs], if that is a time Apple takes (a minute to 14 days ahead). */
+    @VisibleForTesting
+    internal fun sendLaterAt(atMs: Long, nowMs: Long = System.currentTimeMillis()) {
+        when (com.lightdecoder.imessage.direct.SendLater.check(atMs, nowMs)) {
+            com.lightdecoder.imessage.direct.SendLater.Check.TOO_SOON -> toast(getString(R.string.imessage_send_later_too_soon))
+            com.lightdecoder.imessage.direct.SendLater.Check.TOO_FAR -> toast(getString(R.string.imessage_send_later_too_far))
+            com.lightdecoder.imessage.direct.SendLater.Check.OK -> if (sendsWithEffects()) {
+                send(scheduledAt = atMs)
+                toast(getString(R.string.imessage_send_later_scheduled, TimeFormat.sendLaterTime(this, atMs, nowMs)))
+            }
+        }
+    }
+
+    /** When the earliest Send Later message among [rows] is due, they are read again: it then shows as sent. */
+    private fun watchSendLater(rows: List<MessageRow>) {
+        binding.messages.removeCallbacks(sendLaterDue)
+        val now = System.currentTimeMillis()
+        val next = rows.asSequence()
+            .filter { com.lightdecoder.imessage.direct.SendLater.pending(it, now) }
+            .minOfOrNull { com.lightdecoder.imessage.direct.SendLater.scheduledAt(it) } ?: return
+        binding.messages.postDelayed(sendLaterDue, (next - now).coerceIn(1_000, 24 * 60 * 60 * 1000L) + 500)
+    }
+
+    /** "Cancel Send Later" on one of the user's scheduled messages: Apple is told not to send it. */
+    private fun cancelSendLater(row: MessageRow) {
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(applicationContext)
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) { runCatching { direct.cancelScheduled(row.id) } }
+            result.onSuccess { toast(getString(R.string.imessage_send_later_cancelled)) }
+                .onFailure { toast(getString(R.string.imessage_send_later_cancel_failed, com.lightdecoder.imessage.direct.DirectEngine.readable(it))) }
+        }
+    }
+
+    /** "Send Now" on one of the user's scheduled texts: taken back, and sent at once. */
+    private fun sendScheduledNow(row: MessageRow) {
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(applicationContext)
+        scrollToBottomNext = true
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) { runCatching { direct.sendScheduledNow(row.id) } }
+            result.onFailure { toast(getString(R.string.imessage_send_later_cancel_failed, com.lightdecoder.imessage.direct.DirectEngine.readable(it))) }
+        }
+    }
+
+    // --- chat backgrounds (iOS 26) ---
+
+    /**
+     * Shows [file] behind the messages (centre-cropped, under a light scrim so they stay readable),
+     * or none. Decoded off the main thread, at most the screen's size.
+     */
+    private fun renderBackground(file: File?) {
+        val same = file?.path == shownBackground?.path && (file == null || file.lastModified() == shownBackground?.lastModified())
+        if (same) return
+        shownBackground = file
+        if (file == null) {
+            binding.chatBackground.setImageDrawable(null)
+            binding.chatBackground.tag = null
+            binding.chatBackground.visibility = View.GONE
+            binding.chatBackgroundScrim.visibility = View.GONE
+            return
+        }
+        val metrics = resources.displayMetrics
+        val longest = maxOf(metrics.widthPixels, metrics.heightPixels).coerceAtLeast(1)
+        lifecycleScope.launch {
+            val bitmap = withContext(Dispatchers.IO) { decodeBackground(file, longest) }
+            if (shownBackground?.path != file.path) return@launch
+            if (bitmap == null) {
+                binding.chatBackground.visibility = View.GONE
+                binding.chatBackgroundScrim.visibility = View.GONE
+                return@launch
+            }
+            binding.chatBackground.setImageBitmap(bitmap)
+            binding.chatBackground.tag = file.path
+            binding.chatBackground.visibility = View.VISIBLE
+            binding.chatBackgroundScrim.visibility = View.VISIBLE
+        }
+    }
+
+    private fun decodeBackground(file: File, longest: Int): Bitmap? = try {
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeFile(file.path, bounds)
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= longest) sample *= 2
+        android.graphics.BitmapFactory.decodeFile(file.path, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
+    } catch (e: OutOfMemoryError) {
+        null
+    }
+
+    /**
+     * The iMessage chat whose background the menu's "Background" changes: this iMessage chat, or the
+     * person's iMessage chat shown in this Messages conversation, when the iMessage library can reach
+     * it ([sendsWithEffects]); else null.
+     */
+    private fun backgroundChat(): String? {
+        if (!sendsWithEffects()) return null
+        return when (manager.service) {
+            ChatService.MESSAGES -> companionId
+            ChatService.IMESSAGE -> conversationId
+            else -> null
+        }
+    }
+
+    /** The menu's "Background": a photo (the system's photo picker), or Remove Background when it has one. */
+    @VisibleForTesting
+    internal fun chooseBackground() {
+        val chat = backgroundChat() ?: return
+        val items = listOfNotNull(
+            getString(R.string.imessage_background_choose),
+            getString(R.string.imessage_background_remove).takeIf { shownBackground != null },
+        )
+        confirmDialog?.dismiss()
+        confirmDialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.imessage_background)
+            .setItems(items.toTypedArray()) { _, which ->
+                if (which == 0) {
+                    backgroundFor = chat
+                    pickBackground.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                } else {
+                    setChatBackground(chat, null)
+                }
+            }
+            .show()
+    }
+
+    /** Sets [chat]'s background to the picture [uri], or takes it off (null), through the iMessage library. */
+    @VisibleForTesting
+    internal fun setChatBackground(chat: String, uri: Uri?) {
+        toast(getString(R.string.imessage_background_sending))
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(applicationContext)
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) { runCatching { direct.setBackground(chat, uri) } }
+            result.onSuccess { toast(getString(if (uri != null) R.string.imessage_background_set else R.string.imessage_background_removed)) }
+                .onFailure { toast(getString(R.string.imessage_background_failed, com.lightdecoder.imessage.direct.DirectEngine.readable(it))) }
+        }
     }
 
     /**
@@ -1764,7 +1973,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      * Sends what the composer holds; [effect] is Apple's effect to send it with, [textEffect] a text
      * effect on all of its text, and its words' formatting goes too (iMessage through the library only).
      */
-    private fun send(effect: String? = null, textEffect: TextEffectKind? = null) {
+    private fun send(effect: String? = null, textEffect: TextEffectKind? = null, scheduledAt: Long? = null) {
         val (text, formatted) = TextRuns.trimmed(binding.input.text?.toString().orEmpty(), composerRuns())
         val runs = if (textEffect != null && text.isNotEmpty()) TextRuns.apply(text, formatted, 0, text.length, TextRuns.Change.Effect(textEffect)) else formatted
         val files = attachments
@@ -1805,7 +2014,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             lifecycleScope.launch {
                 withContext(Dispatchers.IO) {
                     relayAttempt {
-                        if (files.isEmpty()) im.sendText(companion, text, replyTo, effect, runs) else sendFiles(im, companion, files, text, replyTo, effect, runs)
+                        if (files.isEmpty()) {
+                            im.sendText(companion, text, replyTo, effect, runs, scheduledAt)
+                        } else {
+                            sendFiles(im, companion, files, text, replyTo, effect, runs, scheduledAt)
+                        }
                     }
                 }.onFailure { toast(errorText(im, it)) }
             }
@@ -1845,9 +2058,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             val result = withContext(Dispatchers.IO) {
                 relayAttempt {
                     when {
-                        files.isEmpty() && link is com.lightdecoder.imessage.IMessageManager -> link.sendText(id, text, replyTo, effect, runs)
+                        files.isEmpty() && link is com.lightdecoder.imessage.IMessageManager -> link.sendText(id, text, replyTo, effect, runs, scheduledAt)
                         files.isEmpty() -> link.sendText(id, text, replyTo)
-                        link is com.lightdecoder.imessage.IMessageManager -> sendFiles(link, id, files, text, replyTo, effect, runs)
+                        link is com.lightdecoder.imessage.IMessageManager -> sendFiles(link, id, files, text, replyTo, effect, runs, scheduledAt)
                         else -> {
                             // Each picture as a message of its own, in the order picked (queued in turn, they go
                             // out in it): the phone keeps only one part of a message with several. The text goes
@@ -1887,10 +2100,14 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         replyTo: String?,
         effect: String?,
         runs: List<TextRun> = emptyList(),
+        scheduledAt: Long? = null,
     ) {
         files.forEachIndexed { i, file ->
             val first = i == 0
-            im.sendMedia(chat, file, text.ifEmpty { null }.takeIf { first }, replyTo.takeIf { first }, effect.takeIf { first }, if (first) runs else emptyList())
+            im.sendMedia(
+                chat, file, text.ifEmpty { null }.takeIf { first }, replyTo.takeIf { first }, effect.takeIf { first },
+                if (first) runs else emptyList(), scheduledAt,
+            )
         }
     }
 
@@ -2470,6 +2687,18 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         b.actionUnsend.setOnClickListener {
             sheet.dismiss()
             if (isShown(row)) unsendIMessage(row)
+        }
+        // Send Later, waiting for its time: taken back, or sent at once (a text), as on an iPhone.
+        val scheduled = directIMessage && direct.canCancelScheduled(row, reachable = reachable)
+        b.actionCancelSendLater.visibility = if (scheduled) View.VISIBLE else View.GONE
+        b.actionCancelSendLater.setOnClickListener {
+            sheet.dismiss()
+            if (isShown(row)) cancelSendLater(row)
+        }
+        b.actionSendNow.visibility = if (scheduled && row.media.isEmpty() && row.text.isNotBlank()) View.VISIBLE else View.GONE
+        b.actionSendNow.setOnClickListener {
+            sheet.dismiss()
+            if (isShown(row)) sendScheduledNow(row)
         }
         b.actionEdit.setOnClickListener {
             sheet.dismiss()
@@ -3383,6 +3612,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         menu.findItem(R.id.action_link_imessage)?.isVisible =
             manager.service == ChatService.MESSAGES && blueOn && companionId == null && conv != null && !conv.isGroup
         menu.findItem(R.id.action_unlink_imessage)?.isVisible = manager.service == ChatService.MESSAGES && companionId != null
+        // The chat's background (iOS 26): only an iMessage chat the iMessage library reaches.
+        menu.findItem(R.id.action_chat_background)?.isVisible = backgroundChat() != null
         val checking = com.lightdecoder.imessage.IMessageChecks.current.value?.let { it.running && it.conversationId == conversationId } == true
         menu.findItem(R.id.action_check_imessage)?.setTitle(if (checking) R.string.imessage_check_running else R.string.imessage_check)
         val archived = conv?.folderEnum == Folder.ARCHIVE
@@ -3452,6 +3683,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             R.id.action_send_imessage -> sendIMessage()
             R.id.action_link_imessage -> chooseIMessageToLink()
             R.id.action_unlink_imessage -> confirmUnlinkIMessage()
+            R.id.action_chat_background -> chooseBackground()
             R.id.action_check_imessage ->
                 if (com.lightdecoder.imessage.IMessageChecks.current.value?.let { it.running && it.conversationId == conversationId } == true) {
                     showIMessageCheck()

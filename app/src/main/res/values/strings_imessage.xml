@@ -317,4 +317,42 @@
     <string name="imessage_error_hand_off">That is done in OpenBubbles.</string>
     <string name="imessage_error_unsupported">iMessages here cannot do that.</string>
     <string name="imessage_error_internal">Something went wrong with Blue Bubbles.</string>
+
+    <!-- Chat backgrounds (iOS 26), through the iMessage library. %1$s: who ("Bob", "You"). -->
+    <string name="imessage_event_background_changed">%1$s changed the chat background.</string>
+    <string name="imessage_event_background_removed">%1$s removed the chat background.</string>
+    <!-- The thread's menu: the chat's background, as on an iPhone. -->
+    <string name="imessage_background">Background</string>
+    <string name="imessage_background_choose">Choose Photo</string>
+    <string name="imessage_background_remove">Remove Background</string>
+    <string name="imessage_background_sending">Setting the background…</string>
+    <string name="imessage_background_set">Background set</string>
+    <string name="imessage_background_removed">Background removed</string>
+    <!-- %1$s: why. -->
+    <string name="imessage_background_failed">The background was not changed: %1$s</string>
+    <string name="imessage_background_unreadable">That picture could not be read.</string>
+    <string name="imessage_background_too_big">That picture is too large to use as a background.</string>
+    <string name="imessage_direct_background_not_confirmed">Apple did not confirm the new background within %1$d seconds. It may not have gone through.</string>
+    <string name="imessage_direct_background_refused">Apple refused the new background: %1$s</string>
+    <string name="imessage_direct_background_upload">The background could not be uploaded to Apple.</string>
+
+    <!-- Send Later (iOS 18): in "Send with effect", and under a message waiting for its time. -->
+    <string name="imessage_send_later">Send Later</string>
+    <string name="imessage_send_later_pick_title">Send later at…</string>
+    <!-- %1$s: when it goes ("9:00 AM", "Tomorrow 9:00 AM", "Fri, Nov 21 9:00 AM"). -->
+    <string name="imessage_send_later_label">Send Later · %1$s</string>
+    <!-- %1$s: the time. -->
+    <string name="imessage_send_later_tomorrow">Tomorrow %1$s</string>
+    <string name="imessage_send_later_too_soon">Pick a time at least a minute from now.</string>
+    <string name="imessage_send_later_too_far">Messages can be scheduled up to 14 days ahead.</string>
+    <!-- %1$s: when it goes. -->
+    <string name="imessage_send_later_scheduled">Scheduled for %1$s</string>
+    <string name="imessage_send_later_cancel">Cancel Send Later</string>
+    <string name="imessage_send_later_send_now">Send Now</string>
+    <string name="imessage_send_later_cancelled">Send Later cancelled</string>
+    <!-- %1$s: why. -->
+    <string name="imessage_send_later_cancel_failed">Send Later was not cancelled: %1$s</string>
+    <string name="imessage_send_later_not_cancellable">This message is no longer waiting to be sent.</string>
+    <string name="imessage_direct_unschedule_not_confirmed">Apple did not confirm within %1$d seconds that the message will not be sent. It may still go.</string>
+    <string name="imessage_direct_unschedule_refused">Apple refused to take the message back: %1$s</string>
 </resources>

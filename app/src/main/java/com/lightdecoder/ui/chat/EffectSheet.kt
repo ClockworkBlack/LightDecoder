@@ -18,7 +18,8 @@ import com.lightdecoder.imessage.direct.TextEffectKind
  * "Send with effect", as on an iPhone when send is held down: Bubble (Slam, Loud, Gentle,
  * Invisible Ink), Screen (Echo, Spotlight, Balloons, ...) or Text (iOS 18's text effects, Big,
  * Shake, ..., on the whole message's text), the message being sent in a blue bubble at the top,
- * and the round blue arrow that sends it with the effect picked. One effect at a time.
+ * and the round blue arrow that sends it with the effect picked. One effect at a time. Under the
+ * message, "Send Later" (iOS 18): sent at a time picked instead.
  */
 internal object EffectSheet {
 
@@ -26,11 +27,14 @@ internal object EffectSheet {
      * Shows the sheet for a message shown as [preview] (its text, or "2 attachments"); [onSend]
      * gets the id of the effect picked ([IMessageExtra.EFFECTS]) when the arrow is tapped, and
      * [onSendText] the text effect picked in the Text tab (shown only with it: a message with text).
+     * With [onSendLater], "Send Later" (iOS 18) closes the sheet and calls it, to pick when the
+     * message goes.
      */
     fun show(
         activity: Activity,
         preview: CharSequence,
         onSendText: ((TextEffectKind) -> Unit)? = null,
+        onSendLater: (() -> Unit)? = null,
         onSend: (String) -> Unit,
     ): BottomSheetDialog {
         val sheet = BottomSheetDialog(activity)
@@ -104,6 +108,13 @@ internal object EffectSheet {
             if (text != null) onSendText?.invoke(text) else onSend(effect!!)
         }
         view.findViewById<View>(R.id.effectClose).setOnClickListener { sheet.cancel() }
+        view.findViewById<View>(R.id.effectSendLater).apply {
+            visibility = if (onSendLater != null) View.VISIBLE else View.GONE
+            setOnClickListener {
+                sheet.dismiss()
+                onSendLater?.invoke()
+            }
+        }
         pick(null)
         sheet.setContentView(view)
         sheet.behavior.state = BottomSheetBehavior.STATE_EXPANDED

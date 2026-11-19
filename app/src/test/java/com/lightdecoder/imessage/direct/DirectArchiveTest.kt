@@ -611,6 +611,8 @@ class DirectArchiveTest {
         override fun changedPhoto(who: String) = "$who changed the group photo."
         override fun removedPhoto(who: String) = "$who removed the group photo."
         override fun updated(who: String, app: String) = if (app.isEmpty()) "$who updated an iMessage app." else "$who updated $app."
+        override fun changedBackground(who: String) = "$who changed the chat background."
+        override fun removedBackground(who: String) = "$who removed the chat background."
     }
 
     @Test

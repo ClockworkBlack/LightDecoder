@@ -254,18 +254,27 @@ class DirectLink private constructor(
     /**
      * Like every send in the app: a local copy now ("tmp:<tmpId>"), the sent message once Apple
      * confirms it. [effect] is the Apple effect it is sent with ("Sent with Slam"), if any; [runs]
-     * the text's formatting and text effects (iOS 18), over [text], kept with both copies.
+     * the text's formatting and text effects (iOS 18), over [text], kept with both copies. With
+     * [scheduledAt] it is Send Later ([SendLater]): Apple sends it then, and until then it shows
+     * "Send Later · <time>", at that time.
      */
-    fun sendText(conversationId: String, text: String, replyToId: String?, effect: String? = null, runs: List<TextRun> = emptyList()): String {
+    fun sendText(
+        conversationId: String,
+        text: String,
+        replyToId: String?,
+        effect: String? = null,
+        runs: List<TextRun> = emptyList(),
+        scheduledAt: Long? = null,
+    ): String {
         // The message ends the typing indicator on their side: no "stopped typing" after it.
-        typingThrottle.sent(conversationId)
+        if (scheduledAt == null) typingThrottle.sent(conversationId)
         val tmpId = UUID.randomUUID().toString()
         val formatted = TextRuns.normalize(text, runs)
         repo.insertLocalOutgoing(
-            tmpId, conversationId, text, null, null, null, replyToId, System.currentTimeMillis(),
-            IMessageExtra(effect = effect, runs = runsOf(formatted)).toJson(),
+            tmpId, conversationId, text, null, null, null, replyToId, scheduledAt ?: System.currentTimeMillis(),
+            IMessageExtra(effect = effect, runs = runsOf(formatted), scheduledAt = scheduledAt ?: 0).toJson(),
         )
-        inTurn(conversationId) { deliver(tmpId, conversationId, text, replyToId, effect = effect, runs = formatted) }
+        inTurn(conversationId) { deliver(tmpId, conversationId, text, replyToId, effect = effect, runs = formatted, scheduledAt = scheduledAt) }
         return tmpId
     }
 
@@ -286,6 +295,7 @@ class DirectLink private constructor(
         voice: Boolean = false,
         effect: String? = null,
         runs: List<TextRun> = emptyList(),
+        scheduledAt: Long? = null,
     ): String {
         val tmpId = UUID.randomUUID().toString()
         val file = repo.outboxFileFor(tmpId)
@@ -295,10 +305,12 @@ class DirectLink private constructor(
         // Named as an iPhone names its own voice messages.
         val name = if (voice) "$VOICE_NAME.${DirectMedia.extensionFor(mime, given)}" else given.ifBlank { DirectMedia.nameFor(mime) }
         val (text, formatted) = TextRuns.trimmed(caption.orEmpty(), runs)
-        typingThrottle.sent(conversationId)
-        val extra = IMessageExtra(voice = voice, effect = effect, runs = runsOf(formatted)).toJson()
-        repo.insertLocalOutgoing(tmpId, conversationId, text, file.path, mime, name, replyToId, System.currentTimeMillis(), extra)
-        inTurn(conversationId) { deliver(tmpId, conversationId, text, replyToId, Outgoing(file, mime, name, voice), effect, runs = formatted) }
+        if (scheduledAt == null) typingThrottle.sent(conversationId)
+        val extra = IMessageExtra(voice = voice, effect = effect, runs = runsOf(formatted), scheduledAt = scheduledAt ?: 0).toJson()
+        repo.insertLocalOutgoing(tmpId, conversationId, text, file.path, mime, name, replyToId, scheduledAt ?: System.currentTimeMillis(), extra)
+        inTurn(conversationId) {
+            deliver(tmpId, conversationId, text, replyToId, Outgoing(file, mime, name, voice), effect, runs = formatted, scheduledAt = scheduledAt)
+        }
         return tmpId
     }
 
@@ -534,8 +546,10 @@ class DirectLink private constructor(
         val media = row.media.firstOrNull()?.let { Outgoing(File(it.localPath), it.mime, it.fileName, extra.voice) }
         // From failed to waiting, once: of two retries at once only one goes.
         if (!repo.setLocalStateIf(tmpId, LocalState.FAILED, LocalState.PENDING)) return true
+        // Send Later whose time has passed meanwhile: it goes now.
+        val scheduledAt = extra.scheduledAt.takeIf { SendLater.check(it, System.currentTimeMillis()) == SendLater.Check.OK }
         inTurn(row.conversationId) {
-            deliver(tmpId, row.conversationId, row.text, row.replyToId.ifEmpty { null }, media, extra.effect, extra.app, extra.textRuns(row.text))
+            deliver(tmpId, row.conversationId, row.text, row.replyToId.ifEmpty { null }, media, extra.effect, extra.app, extra.textRuns(row.text), scheduledAt)
         }
         return true
     }
@@ -582,6 +596,7 @@ class DirectLink private constructor(
         effect: String? = null,
         appCard: IMessageExtra.App? = null,
         runs: List<TextRun> = emptyList(),
+        scheduledAt: Long? = null,
     ) {
         try {
             repo.setLocalState(tmpId, LocalState.SENDING)
@@ -597,6 +612,7 @@ class DirectLink private constructor(
                 voice = media?.voice == true,
                 app = appCard,
                 runs = if (appCard != null) emptyList() else runs,
+                scheduledMs = scheduledAt,
             )
             // A file is uploaded first: that takes longer than a text.
             val reply = requests.call(DirectWire.SEND, request, if (media == null) SEND_TIMEOUT_MS else MEDIA_SEND_TIMEOUT_MS)
@@ -618,7 +634,8 @@ class DirectLink private constructor(
                 conversationId = conversationId,
                 tmpId = tmpId,
                 fromMe = true,
-                timestampMs = sent.timestampMs.takeIf { it > 0 } ?: System.currentTimeMillis(),
+                // Send Later: at the time Apple sends it, as on an iPhone.
+                timestampMs = scheduledAt ?: sent.timestampMs.takeIf { it > 0 } ?: System.currentTimeMillis(),
                 direction = "out",
                 status = DirectArchive.STATUS_SENT,
                 statusCode = 1,
@@ -631,6 +648,7 @@ class DirectLink private constructor(
                 extra = IMessageExtra(
                     voice = media?.voice == true, effect = effect, app = appCard?.copy(root = messageId),
                     runs = if (appCard != null) emptyMap() else runsOf(runs),
+                    scheduledAt = scheduledAt ?: 0,
                 ).toJson(),
             )
             // A receipt (or a reaction) can come from Apple before the send's answer did: what
@@ -648,6 +666,7 @@ class DirectLink private constructor(
                     (if (media != null) " with ${if (media.voice) "a voice message" else media.mime.substringBefore('/')}" else "") +
                     (if (effect != null) ", with an effect" else "") +
                     (if (runs.isNotEmpty()) ", formatted" else "") +
+                    (if (scheduledAt != null) ", Send Later" else "") +
                     (if (appCard != null) ", an iMessage app's card" else ""),
             )
         } catch (e: Exception) {
@@ -1124,6 +1143,7 @@ class DirectLink private constructor(
                 manager.noteTyping(id, update.participantId, nameOf(update.participantId), update.typing)
             }
             is DirectArchive.Update.ReadElsewhere -> readElsewhere(update)
+            is DirectArchive.Update.Background -> background(update)
             is DirectArchive.Update.Failed -> {
                 if (repo.message(update.messageId) == null) {
                     hold(update.messageId, update)
@@ -1320,6 +1340,160 @@ class DirectLink private constructor(
         repo.editText(row.id, next.text(), row.editedAtMs, next.toJson(), snippetOf(next.text(), row.extra))
     }
 
+    /**
+     * The chat's background was set or taken off (by someone in it, or the user on another device):
+     * the picture the ":imessage" process wrote becomes the chat's ([ChatBackgrounds]) and the row
+     * saying so is stored, unless the chat already has a newer one (then neither: the picture goes).
+     */
+    private fun background(update: DirectArchive.Update.Background) {
+        val incoming = update.path?.let(::File)?.takeIf { ChatBackgrounds.isOurs(app, it) }
+        val store = ChatBackgrounds(app)
+        val id = backgroundChatId(update) ?: run {
+            // A group not stored here: nothing to show it in.
+            incoming?.delete()
+            return
+        }
+        // Older than the chat's, or that one again (Apple's journal after a restart, or the user's
+        // own change from here coming back): nothing new to show or to say.
+        val stored = store.of(id).version
+        if (stored > 0 && update.version <= stored) {
+            incoming?.delete()
+            return
+        }
+        update.row?.let(::upsert)
+        // A chat with one person stored only now (the row made it): where it was filed.
+        val chat = backgroundChatId(update) ?: id
+        if (store.apply(chat, incoming, update.version) == ChatBackgrounds.Applied.APPLIED) {
+            IMessageLog.add(app, "${IMessageLog.chatRef(chat)}: chat background ${if (incoming != null) "set" else "taken off"} (through the iMessage library)")
+        }
+        com.lightdecoder.archive.ArchiveEvents.notify(
+            com.lightdecoder.archive.ArchiveChange(chat, com.lightdecoder.archive.ArchiveChange.Kind.CONVERSATIONS, ChatService.IMESSAGE),
+        )
+    }
+
+    /** The archive's chat a background change is for: the group, or the person's stored chat (a Blue Bubbles one too). */
+    private fun backgroundChatId(update: DirectArchive.Update.Background): String? {
+        update.groupGuid?.let { guid ->
+            val group = DirectArchive.groupConversationId(guid)
+            return group.takeIf { update.row != null || repo.conversation(it) != null }
+        }
+        val peer = update.peer ?: return update.conversationId
+        return manager.conversationWith(Handles.display(peer)) ?: update.conversationId
+    }
+
+    /**
+     * Sets [conversationId]'s background to the picture at [uri] (one the user picked), or takes it
+     * off ([uri] null), as on an iPhone: every member's iPhone (and the user's other devices) shows
+     * it. In turn with the chat's sends ([inTurn]); once Apple confirmed it, it shows here too, with
+     * "You changed the chat background.". Throws [DirectEngine.ImessageError] saying why when it
+     * does not go through.
+     */
+    suspend fun setBackground(conversationId: String, uri: Uri?) {
+        targetOf(conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
+        val picture = uri?.let { preparePicture(it) }
+        val done = kotlinx.coroutines.CompletableDeferred<Unit>()
+        inTurn(conversationId) {
+            try {
+                // Read again in turn: the chat as it is when it goes.
+                val target = targetOf(conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
+                val version = maxOf(ChatBackgrounds.versionNow(), ChatBackgrounds(app).of(conversationId).version + 1)
+                val reply = requests.call(DirectWire.BACKGROUND, DirectWire.background(target, picture?.path, version), MEDIA_SEND_TIMEOUT_MS)
+                DirectWire.errorOf(reply)?.let { throw DirectEngine.ImessageError(it) }
+                synchronized(this@DirectLink) { backgroundSetHere(conversationId, picture, version) }
+                done.complete(Unit)
+            } catch (e: Exception) {
+                picture?.delete()
+                done.completeExceptionally(e)
+            }
+        }
+        done.await()
+    }
+
+    /** The background just set from here: shown, with the row saying so, as one from Apple would be. */
+    private fun backgroundSetHere(conversationId: String, picture: File?, version: Long) {
+        ChatBackgrounds(app).apply(conversationId, picture, version)
+        val texts = DirectTexts(app)
+        val text = if (picture != null) texts.changedBackground(texts.you) else texts.removedBackground(texts.you)
+        repo.upsertMessage(
+            MessageDto(
+                id = DirectArchive.messageId("background-" + UUID.randomUUID().toString().uppercase()),
+                conversationId = conversationId,
+                fromMe = true,
+                timestampMs = System.currentTimeMillis(),
+                direction = "system",
+                transport = IMessageManager.TRANSPORT,
+                text = text,
+                parts = listOf(PartDto(partId = "0", kind = "text", text = text)),
+                isOld = true,
+            ),
+        )
+        IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: chat background ${if (picture != null) "set" else "taken off"} through the iMessage library (Apple confirmed)")
+        com.lightdecoder.archive.ArchiveEvents.notify(
+            com.lightdecoder.archive.ArchiveChange(conversationId, com.lightdecoder.archive.ArchiveChange.Kind.CONVERSATIONS, ChatService.IMESSAGE),
+        )
+    }
+
+    /** The picture at [uri] as the JPEG that is sent and shown ([BackgroundPosters.prepareOutgoing]), in the backgrounds' folder. */
+    private fun preparePicture(uri: Uri): File {
+        val raw = ChatBackgrounds.incomingFile(app, "picked")
+        copyCapped(uri, raw)
+        if (raw.length() > MAX_BACKGROUND_SOURCE_BYTES) {
+            raw.delete()
+            throw DirectEngine.ImessageError(app.getString(R.string.imessage_background_too_big))
+        }
+        val out = ChatBackgrounds.incomingFile(app, "outgoing")
+        val ok = try {
+            BackgroundPosters.prepareOutgoing(raw.readBytes(), out)
+        } catch (e: OutOfMemoryError) {
+            false
+        } finally {
+            raw.delete()
+        }
+        if (!ok) {
+            out.delete()
+            throw DirectEngine.ImessageError(app.getString(R.string.imessage_background_unreadable))
+        }
+        return out
+    }
+
+    // --- Send Later ---------------------------------------------------------------------------------
+
+    /** Whether [row] is one of the user's Send Later messages the library can take back (or send now). */
+    fun canCancelScheduled(row: MessageRow, now: Long = System.currentTimeMillis(), reachable: Boolean? = null): Boolean =
+        active && SendLater.cancellable(row, now) && (reachable ?: canSend(row.conversationId))
+
+    /**
+     * "Cancel Send Later": Apple is told not to send the user's scheduled message [messageId]; once
+     * it confirmed, the message is gone here too (as on the user's other devices). Throws
+     * [DirectEngine.ImessageError] saying why when it cannot be taken back.
+     */
+    suspend fun cancelScheduled(messageId: String) {
+        val row = repo.message(messageId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_not_stored))
+        val guid = DirectArchive.guidOf(messageId)
+        if (guid == null || !SendLater.cancellable(row, System.currentTimeMillis())) {
+            throw DirectEngine.ImessageError(app.getString(R.string.imessage_send_later_not_cancellable))
+        }
+        val target = targetOf(row.conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
+        withContext(NonCancellable) {
+            val reply = requests.call(DirectWire.UNSCHEDULE, DirectWire.unschedule(target, guid), SEND_TIMEOUT_MS)
+            DirectWire.errorOf(reply)?.let { throw DirectEngine.ImessageError(it) }
+            apply(DirectArchive.Update.Remove(messageId))
+        }
+        IMessageLog.add(app, "${IMessageLog.chatRef(row.conversationId)}: Send Later cancelled through the iMessage library (Apple confirmed)")
+    }
+
+    /**
+     * "Send Now" for a scheduled text: it is taken back ([cancelScheduled]) and sent again at once,
+     * with its effect, formatting and reply. Returns the new local copy's id.
+     */
+    suspend fun sendScheduledNow(messageId: String): String {
+        val row = repo.message(messageId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_not_stored))
+        if (row.media.isNotEmpty() || row.text.isBlank()) throw DirectEngine.ImessageError(app.getString(R.string.imessage_send_later_not_cancellable))
+        val extra = IMessageExtra.parse(row.extra)
+        cancelScheduled(messageId)
+        return sendText(row.conversationId, row.text, row.replyToId.ifEmpty { null }, extra.effect, extra.textRuns(row.text))
+    }
+
     /** The user read [update]'s message on another device: the chat is read here too, unless something newer came since. */
     private fun readElsewhere(update: DirectArchive.Update.ReadElsewhere) {
         val row = repo.message(update.messageId) ?: return hold(update.messageId, update)
@@ -1442,6 +1616,8 @@ class DirectLink private constructor(
          */
         internal fun editable(row: MessageRow): Boolean {
             if (!row.isOutgoing || row.direction != "out" || row.isLocal || !DirectArchive.isImessage(row.id)) return false
+            // Waiting for its Send Later time: it is taken back instead.
+            if (SendLater.pending(row, System.currentTimeMillis())) return false
             if (row.localState == LocalState.FAILED || DirectArchive.statusRank(row.status) < 0) return false
             if (row.text.isBlank() || row.media.isNotEmpty()) return false
             val extra = IMessageExtra.parse(row.extra)
@@ -1457,6 +1633,7 @@ class DirectLink private constructor(
          */
         internal fun unsendable(row: MessageRow): Boolean {
             if (!row.isOutgoing || row.direction != "out" || row.isLocal || !DirectArchive.isImessage(row.id)) return false
+            if (SendLater.pending(row, System.currentTimeMillis())) return false
             if (row.localState == LocalState.FAILED || DirectArchive.statusRank(row.status) < 0) return false
             val extra = IMessageExtra.parse(row.extra)
             if (0 in extra.unsent) return false
@@ -1470,7 +1647,7 @@ class DirectLink private constructor(
 
         /** Whether [row] can take a tapback: a message (not a row of the conversation's own) Apple knows by its GUID. */
         internal fun reactable(row: MessageRow): Boolean =
-            DirectArchive.isImessage(row.id) && !row.isLocal && row.direction != "system"
+            DirectArchive.isImessage(row.id) && !row.isLocal && row.direction != "system" && !SendLater.pending(row, System.currentTimeMillis())
 
         /** At most this much of a message's text goes with a tapback (for the other side's notification). */
         private const val TAPBACK_TEXT_MAX = 100
@@ -1505,6 +1682,9 @@ class DirectLink private constructor(
 
         /** A send with a file also waits for the file to go up to Apple (up to 100 MB). */
         private const val MEDIA_SEND_TIMEOUT_MS = 10 * 60_000L
+
+        /** The largest picture taken as a chat's background (it is read whole to be made smaller). */
+        private const val MAX_BACKGROUND_SOURCE_BYTES = 40L * 1024 * 1024
 
         /** A download from Apple may take this long. */
         private const val DOWNLOAD_TIMEOUT_MS = 5 * 60_000L

@@ -8,6 +8,7 @@ import com.lightdecoder.relay.PartDto
 import uniffi.rust_bridge.AttachmentType
 import uniffi.rust_bridge.BalloonLayout
 import uniffi.rust_bridge.ConversationData
+import uniffi.rust_bridge.DeleteTarget
 import uniffi.rust_bridge.ExtensionApp
 import uniffi.rust_bridge.IndexedMessagePart
 import uniffi.rust_bridge.LinkMeta
@@ -18,6 +19,7 @@ import uniffi.rust_bridge.PartExtension
 import uniffi.rust_bridge.PushChatMessage
 import uniffi.rust_bridge.ReactMessageType
 import uniffi.rust_bridge.Reaction
+import uniffi.rust_bridge.SetTranscriptBackgroundMessage
 
 /**
  * How iMessages live in the Messages tab's archive, next to the Google Messages conversations:
@@ -175,6 +177,21 @@ object DirectArchive {
         /** Apple could not deliver one of the user's messages: [error] says why. */
         data class Failed(val messageId: String, val error: String) : Update()
 
+        /**
+         * The chat's background (iOS 26) was set or taken off, as of [version] (Apple's, nanoseconds
+         * since 2001; an older one than the chat's is ignored): the chat [conversationId] (a group by
+         * [groupGuid], a chat with one person by [peer]), the picture to show from now on at [path]
+         * (written by the ":imessage" process; null: none), and the row saying who did it ([row]).
+         */
+        data class Background(
+            val conversationId: String,
+            val groupGuid: String?,
+            val peer: String?,
+            val version: Long,
+            val path: String?,
+            val row: Upsert?,
+        ) : Update()
+
         object Ignore : Update()
     }
 
@@ -198,6 +215,12 @@ object DirectArchive {
 
         /** Someone voted in a poll or did the like in an iMessage app ([app]: its name, empty when unknown). */
         fun updated(who: String, app: String): String
+
+        /** Someone set the chat's background (iOS 26): "Bob changed the chat background." */
+        fun changedBackground(who: String): String
+
+        /** Someone took the chat's background off. */
+        fun removedBackground(who: String): String
     }
 
     /**
@@ -222,7 +245,9 @@ object DirectArchive {
         return when (m) {
             is PushChatMessage.Message -> {
                 val n = m.v1
-                val body = Body(n.parts, n.effect, n.voice, linkOf(n.linkMeta), appOf(n.app, messageId(inst.id)), n.subject, n.replyGuid)
+                // Send Later from another of the user's devices: Apple sends it then.
+                val scheduled = n.scheduled?.takeIf { it.schedule && fromMe }?.ms?.toLong() ?: 0L
+                val body = Body(n.parts, n.effect, n.voice, linkOf(n.linkMeta), appOf(n.app, messageId(inst.id)), n.subject, n.replyGuid, scheduled)
                 message(inst, body, me, nameOf, describe)
             }
             is PushChatMessage.React -> when (val r = m.v1.reaction) {
@@ -270,6 +295,12 @@ object DirectArchive {
             }
             is PushChatMessage.Error ->
                 if (fromMe) Update.Failed(messageId(m.v1.forUuid), m.v1.statusStr) else Update.Ignore
+            // A Send Later message taken back on another of the user's devices: it is gone there too.
+            is PushChatMessage.PermanentDelete -> {
+                val target = m.v1.target as? DeleteTarget.Messages
+                val guid = target?.v1?.singleOrNull()
+                if (fromMe && m.v1.isScheduled && guid != null) Update.Remove(messageId(guid)) else Update.Ignore
+            }
             else -> Update.Ignore
         }
     }
@@ -290,6 +321,7 @@ object DirectArchive {
         val app: IMessageExtra.App?,
         val subject: String?,
         val replyGuid: String?,
+        val scheduledAt: Long = 0,
     )
 
     private fun message(
@@ -318,6 +350,7 @@ object DirectArchive {
             sticker = attachments.any { it.sticker },
             // An app's card shows its own lines, not the text that stands for them.
             runs = if (n.app == null) TextRuns.fromParts(n.parts).filterKeys { it in texts } else emptyMap(),
+            scheduledAt = n.scheduledAt,
         )
         val msg = MessageDto(
             id = messageId(inst.id),
@@ -325,7 +358,8 @@ object DirectArchive {
             senderId = sender.orEmpty(),
             senderName = if (fromMe || sender == null) "" else nameOf(sender),
             fromMe = fromMe,
-            timestampMs = timestampOf(inst),
+            // A Send Later message is at the time Apple sends it, as on an iPhone.
+            timestampMs = n.scheduledAt.takeIf { it > 0 } ?: timestampOf(inst),
             direction = if (fromMe) "out" else "in",
             status = if (fromMe) STATUS_SENT else STATUS_RECEIVED,
             transport = TRANSPORT,
@@ -546,6 +580,76 @@ object DirectArchive {
             parts = listOf(PartDto(partId = "0", kind = "text", text = text)),
         )
         return byGuid(Update.Upsert(conv, msg), id, conversation, groupName ?: conversation.cvName)
+    }
+
+    /**
+     * The chat a background change ([PushChatMessage.SetTranscriptBackground]) is for, as
+     * OpenBubbles finds it: its `chatId` is the other person's address (a chat with one person, as
+     * the user's own devices are told), else a group's guid; with none, the chat with its sender.
+     * Null when it names no chat.
+     */
+    data class BackgroundChat(val conversationId: String, val members: List<String>, val groupGuid: String?, val peer: String?)
+
+    fun backgroundChat(inst: MessageInst, me: Set<String>): BackgroundChat? {
+        val m = (inst.message as? PushChatMessage.SetTranscriptBackground)?.v1 ?: return null
+        val chatId = when (m) {
+            is SetTranscriptBackgroundMessage.Set -> m.chatId
+            is SetTranscriptBackgroundMessage.Remove -> m.chatId
+        }?.trim()?.takeIf { it.isNotEmpty() }
+        val sender = inst.sender
+        val conversation = inst.conversation
+        if (chatId != null && ('+' in chatId || '@' in chatId)) {
+            val peer = Handles.normalize(chatId) ?: chatId
+            if (peer in me) return null
+            val members = (listOf(peer) + listOfNotNull(sender)).distinct()
+            return BackgroundChat(conversationId(members, me, null), members, null, peer)
+        }
+        if (chatId != null) {
+            val members = ((conversation?.participants ?: emptyList()) + listOfNotNull(sender)).distinct()
+            return BackgroundChat(groupConversationId(chatId), members, chatId, null)
+        }
+        val peer = when {
+            sender != null && sender !in me -> sender
+            else -> conversation?.participants?.filter { it !in me }?.distinct()?.singleOrNull()
+        } ?: return null
+        val members = (listOf(peer) + listOfNotNull(sender)).distinct()
+        return BackgroundChat(conversationId(members, me, null), members, null, peer)
+    }
+
+    /** The version a background change is as of ([Update.Background.version]). */
+    fun backgroundVersion(m: SetTranscriptBackgroundMessage): Long = when (m) {
+        is SetTranscriptBackgroundMessage.Set -> m.bid.toLong()
+        is SetTranscriptBackgroundMessage.Remove -> m.bid.toLong()
+    }
+
+    /**
+     * A background change from Apple as the archive takes it: the chat it is for
+     * ([backgroundChat]), the picture the ":imessage" process saved for it at [path] (null: the
+     * background was taken off, or is one only an iPhone draws), and the row saying who did it
+     * ("Bob changed the chat background.", as an iPhone puts it). Ignored when it names no chat.
+     */
+    fun background(inst: MessageInst, me: Set<String>, nameOf: (String) -> String, texts: Texts, path: String?): Update {
+        val m = (inst.message as? PushChatMessage.SetTranscriptBackground)?.v1 ?: return Update.Ignore
+        val chat = backgroundChat(inst, me) ?: return Update.Ignore
+        val sender = inst.sender
+        val fromMe = sender != null && sender in me
+        val who = actor(sender, fromMe, nameOf, texts) ?: return Update.Ignore
+        val text = if (path != null) texts.changedBackground(who) else texts.removedBackground(who)
+        val members = (chat.members + listOfNotNull(sender)).distinct()
+        val conv = conversationDto(chat.conversationId, members, inst.conversation?.cvName.takeIf { chat.groupGuid != null }, me, nameOf)
+        val row = MessageDto(
+            id = messageId(inst.id),
+            conversationId = chat.conversationId,
+            senderId = sender.orEmpty(),
+            senderName = if (fromMe || sender == null) "" else nameOf(sender),
+            fromMe = fromMe,
+            timestampMs = timestampOf(inst),
+            direction = "system",
+            transport = TRANSPORT,
+            text = text,
+            parts = listOf(PartDto(partId = "0", kind = "text", text = text)),
+        )
+        return Update.Background(chat.conversationId, chat.groupGuid, chat.peer, backgroundVersion(m), path, Update.Upsert(conv, row))
     }
 
     private fun actor(sender: String?, fromMe: Boolean, nameOf: (String) -> String, texts: Texts): String? = when {

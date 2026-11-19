@@ -19,6 +19,23 @@
         android:layout_height="0dp"
         android:layout_weight="1">
 
+        <!-- The chat's background (iOS 26), behind the messages, with a light scrim for reading. -->
+        <ImageView
+            android:id="@+id/chatBackground"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:importantForAccessibility="no"
+            android:scaleType="centerCrop"
+            android:visibility="gone" />
+
+        <View
+            android:id="@+id/chatBackgroundScrim"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@color/chat_background_scrim"
+            android:importantForAccessibility="no"
+            android:visibility="gone" />
+
         <androidx.recyclerview.widget.RecyclerView
             android:id="@+id/messages"
             android:layout_width="match_parent"

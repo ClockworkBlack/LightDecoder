@@ -86,6 +86,39 @@
         android:drawableStart="@drawable/ic_edit"
         android:text="@string/chat_action_edit" />
 
+    <!-- One of the user's Send Later messages, before Apple sends it: taken back, or sent at once (iOS 18). -->
+    <TextView
+        android:id="@+id/actionCancelSendLater"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?attr/selectableItemBackground"
+        android:clickable="true"
+        android:drawablePadding="20dp"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:minHeight="52dp"
+        android:paddingHorizontal="24dp"
+        android:textAppearance="?attr/textAppearanceBodyLarge"
+        android:drawableStart="@drawable/ic_undo"
+        android:text="@string/imessage_send_later_cancel"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/actionSendNow"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?attr/selectableItemBackground"
+        android:clickable="true"
+        android:drawablePadding="20dp"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:minHeight="52dp"
+        android:paddingHorizontal="24dp"
+        android:textAppearance="?attr/textAppearanceBodyLarge"
+        android:drawableStart="@drawable/ic_arrow_upward"
+        android:text="@string/imessage_send_later_send_now"
+        android:visibility="gone" />
+
     <!-- One of the user's iMessages, within the 2 minutes Apple allows: retracted (Undo Send on an iPhone). -->
     <TextView
         android:id="@+id/actionUnsend"

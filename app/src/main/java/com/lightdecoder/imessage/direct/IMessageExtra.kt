@@ -22,6 +22,8 @@ import org.json.JSONObject
  *   that the same unsend handed over again, or Apple sending the message again, changes nothing
  * @param runs    iOS 18's formatting (bold, italic, underline, strikethrough) and text effects
  *   (Big, Shake, ...), by part index: the formatted stretches of each part's text ([TextRuns])
+ * @param scheduledAt Send Later: when Apple sends it (ms; 0: sent at once). Until then the user's
+ *   message shows "Send Later · <time>" ([SendLater.pending]), as on an iPhone
  *
  * Pure. Tested in IMessageExtraTest.
  */
@@ -35,6 +37,7 @@ data class IMessageExtra(
     val sticker: Boolean = false,
     val unsent: Set<Int> = emptySet(),
     val runs: Map<Int, List<TextRun>> = emptyMap(),
+    val scheduledAt: Long = 0,
 ) {
     /** A link preview: the address, the page's title and summary, and the site it is on. */
     data class Link(val url: String, val title: String = "", val summary: String = "", val site: String = "") {
@@ -160,6 +163,7 @@ data class IMessageExtra(
         if (sticker) o.put("sticker", true)
         if (unsent.isNotEmpty()) o.put("unsent", JSONArray(unsent.sorted()))
         if (runs.values.any { it.isNotEmpty() }) o.put("runs", TextRuns.toJson(runs))
+        if (scheduledAt > 0) o.put("scheduledAt", scheduledAt)
         return if (o.length() == 0) "" else o.toString()
     }
 
@@ -240,6 +244,7 @@ data class IMessageExtra(
                         (0 until a.length()).map { a.optInt(it, -1) }.filter { it >= 0 }.toSet()
                     }.orEmpty(),
                     runs = TextRuns.fromJson(o.optJSONObject("runs")),
+                    scheduledAt = o.optLong("scheduledAt"),
                 )
             } catch (e: JSONException) {
                 IMessageExtra()

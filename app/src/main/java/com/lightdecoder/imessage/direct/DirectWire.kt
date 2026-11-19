@@ -11,7 +11,7 @@ import org.json.JSONObject
  * tested (DirectWireTest), so both sides always agree.
  *
  * Main -> :imessage: [SEND], [UNSEND], [REACH], [EDIT], [REACT], [TYPING], [READ], [DOWNLOAD],
- * [EXTENSION] (requests, answered with the same request id; a failure is answered with
+ * [EXTENSION], [BACKGROUND], [UNSCHEDULE] (requests, answered with the same request id; a failure is answered with
  * [error]). Never raw media bytes: files are passed by path, in the app's own storage.
  * :imessage -> main: [UPDATE] (an archive change from Apple), answered once it is stored; only
  * then does the library forget the event.
@@ -44,6 +44,16 @@ object DirectWire {
     const val EXTENSION = 9
 
     const val UPDATE = 10
+
+    /**
+     * Sets the chat's background (iOS 26) to the picture at a path, or takes it off: [background],
+     * answered with [ok] once Apple confirmed it.
+     */
+    const val BACKGROUND = 11
+
+    /** Takes back a Send Later message before Apple sends it ("Cancel Send Later"): [unschedule], answered with [ok]. */
+    const val UNSCHEDULE = 12
+
     const val REPLY = 100
 
     const val KEY_ID = "id"
@@ -127,6 +137,8 @@ object DirectWire {
         val app: IMessageExtra.App? = null,
         /** The text's formatting and text effects, over [text] ([TextRuns]). */
         val runs: List<TextRun> = emptyList(),
+        /** Send Later: when Apple is to send it (ms), null to send it now ([SendLater]). */
+        val scheduledMs: Long? = null,
     ) {
         companion object {
             fun fromJson(o: JSONObject) = SendRequest(
@@ -139,6 +151,22 @@ object DirectWire {
                 o.optBoolean("voice"),
                 o.optJSONObject("app")?.let(IMessageExtra.App::fromJson),
                 TextRuns.fromJsonArray(o.optJSONArray("runs")),
+                o.optLong("scheduledMs").takeIf { it > 0 },
+            )
+        }
+    }
+
+    /**
+     * What a [BACKGROUND] request asks for: the chat's background is now the picture at [path] (a
+     * JPEG in the app's own storage), or none ([path] null), as of [version] (Apple's, nanoseconds
+     * since 2001: a later one wins on every device).
+     */
+    data class BackgroundRequest(val target: Target, val path: String?, val version: Long) {
+        companion object {
+            fun fromJson(o: JSONObject) = BackgroundRequest(
+                Target.fromJson(o.getJSONObject("target")),
+                o.optStringOrNull("path")?.ifEmpty { null },
+                o.getLong("version"),
             )
         }
     }
@@ -181,7 +209,8 @@ object DirectWire {
      * "<part>:<start>:<end>" of that message's text, as iMessage expects). [effect] is Apple's
      * effect id; [voice] marks a recorded audio message. [app] makes it an iMessage app's card
      * (a new game): the app's balloon, with its picture as the attachment. [runs] are the text's
-     * formatting and text effects (iOS 18), over [text].
+     * formatting and text effects (iOS 18), over [text]. With [scheduledMs] Apple sends it then
+     * (Send Later, [SendLater]).
      */
     fun send(
         target: Target,
@@ -193,6 +222,7 @@ object DirectWire {
         voice: Boolean = false,
         app: IMessageExtra.App? = null,
         runs: List<TextRun> = emptyList(),
+        scheduledMs: Long? = null,
     ): JSONObject =
         JSONObject().put("target", target.toJson()).put("text", text)
             .put("replyGuid", replyGuid ?: JSONObject.NULL).put("replyPart", replyPart ?: JSONObject.NULL)
@@ -201,6 +231,14 @@ object DirectWire {
             .put("voice", voice)
             .apply { if (app != null) put("app", app.toJson()) }
             .apply { if (runs.isNotEmpty()) put("runs", TextRuns.toJsonArray(runs)) }
+            .apply { if (scheduledMs != null && scheduledMs > 0) put("scheduledMs", scheduledMs) }
+
+    /** The chat [target]'s background is now the picture at [path], or none ([path] null), as of [version] ([BackgroundRequest]). */
+    fun background(target: Target, path: String?, version: Long): JSONObject =
+        JSONObject().put("target", target.toJson()).put("path", path ?: JSONObject.NULL).put("version", version)
+
+    /** Take back the Send Later message [guid] before Apple sends it. */
+    fun unschedule(target: Target, guid: String): JSONObject = JSONObject().put("target", target.toJson()).put("guid", guid)
 
     /**
      * An iMessage app's update to the session that message [rootGuid] started: [app]'s new state
@@ -309,6 +347,11 @@ object DirectWire {
             .put("participantId", u.participantId).put("typing", u.typing).apply { u.groupGuid?.let { put("groupGuid", it) } }
         is DirectArchive.Update.ReadElsewhere -> JSONObject().put("kind", "readElsewhere").put("messageId", u.messageId)
         is DirectArchive.Update.Failed -> JSONObject().put("kind", "failed").put("messageId", u.messageId).put("error", u.error)
+        is DirectArchive.Update.Background -> JSONObject().put("kind", "background").put("conversationId", u.conversationId)
+            .put("version", u.version).put("path", u.path ?: JSONObject.NULL)
+            .apply { u.groupGuid?.let { put("groupGuid", it) } }
+            .apply { u.peer?.let { put("peer", it) } }
+            .apply { u.row?.let { put("row", encode(it)) } }
         DirectArchive.Update.Ignore -> JSONObject().put("kind", "ignore")
     }
 
@@ -398,6 +441,14 @@ object DirectWire {
         )
         "readElsewhere" -> DirectArchive.Update.ReadElsewhere(o.getString("messageId"))
         "failed" -> DirectArchive.Update.Failed(o.getString("messageId"), o.optString("error"))
+        "background" -> DirectArchive.Update.Background(
+            o.getString("conversationId"),
+            o.optString("groupGuid").takeIf { it.isNotEmpty() },
+            o.optString("peer").takeIf { it.isNotEmpty() },
+            o.getLong("version"),
+            o.optStringOrNull("path")?.ifEmpty { null },
+            o.optJSONObject("row")?.let { decode(it) as? DirectArchive.Update.Upsert },
+        )
         else -> DirectArchive.Update.Ignore
     }
 

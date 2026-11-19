@@ -31,6 +31,7 @@ import uniffi.rust_bridge.MessageAttachment
 import uniffi.rust_bridge.MessageInst
 import uniffi.rust_bridge.MessageReceiver
 import uniffi.rust_bridge.MessageType
+import uniffi.rust_bridge.MmcsFile
 import uniffi.rust_bridge.NormalMessage
 import uniffi.rust_bridge.PushChatMessage
 import uniffi.rust_bridge.PushEvent
@@ -38,7 +39,10 @@ import uniffi.rust_bridge.ReactMessage
 import uniffi.rust_bridge.ReactMessageType
 import uniffi.rust_bridge.RegisterState
 import uniffi.rust_bridge.RustBridgeException
+import uniffi.rust_bridge.ScheduleMode
+import uniffi.rust_bridge.SetTranscriptBackgroundMessage
 import uniffi.rust_bridge.SharedPushStateHandle
+import uniffi.rust_bridge.SimplifiedTranscriptPoster
 import uniffi.rust_bridge.UnsendMessage
 
 /**
@@ -105,6 +109,19 @@ class DirectEngine private constructor(private val app: Context) {
 
     private val texts = DirectTexts(app)
 
+    /** Chat backgrounds from Apple: fetched, their picture written for the main process. */
+    private val backgrounds = IncomingBackgrounds(
+        app,
+        object : IncomingBackgrounds.Natives {
+            override fun toMmcs(message: SetTranscriptBackgroundMessage): MmcsFile? = uniffi.rust_bridge.transcriptBackgroundToMmcs(message)
+            override suspend fun download(file: MmcsFile, path: String) {
+                val s = requireSession()
+                call { uniffi.rust_bridge.downloadMmcsFile(s, file, path, null) }
+            }
+            override fun parse(payload: ByteArray): SimplifiedTranscriptPoster = uniffi.rust_bridge.parseTranscriptPoster(payload)
+        },
+    )
+
     /** Waiting for Apple's answer to a send, by message id. */
     private val confirms = ConcurrentHashMap<String, CompletableDeferred<String?>>()
 
@@ -135,7 +152,11 @@ class DirectEngine private constructor(private val app: Context) {
         val me = handles.first { it.isNotEmpty() }.toSet()
         DirectMessages.oneToOneChat(inst, me)?.let { (peer, guid) -> chatGuids.remember(peer, guid) }
         val update = try {
-            DirectArchive.map(inst, me, Handles::display, texts, ::describe)
+            if (inst.message is PushChatMessage.SetTranscriptBackground) {
+                backgrounds.receive(inst, me, Handles::display, texts)
+            } else {
+                DirectArchive.map(inst, me, Handles::display, texts, ::describe)
+            }
         } catch (e: Exception) {
             Log.w(TAG, "message ${inst.message::class.simpleName} not mapped", e)
             DirectArchive.Update.Ignore
@@ -421,6 +442,7 @@ class DirectEngine private constructor(private val app: Context) {
         voice: Boolean,
         app: IMessageExtra.App? = null,
         runs: List<TextRun> = emptyList(),
+        scheduledMs: Long? = null,
     ): DirectWire.SendReply {
         val s = requireSession()
         val (conversation, from) = conversationOf(target)
@@ -429,7 +451,9 @@ class DirectEngine private constructor(private val app: Context) {
         val message = NormalMessage(
             outgoing.parts,
             effect, replyGuid, replyGuid?.let { replyPart ?: "0:0:0" }, MessageType.IMessage,
-            null, app?.let { DirectMessages.extensionApp(it) }, null, voice, null, null,
+            null, app?.let { DirectMessages.extensionApp(it) }, null, voice,
+            // Send Later: Apple's servers send it then ([SendLater]).
+            scheduledMs?.let { ScheduleMode(it.toULong(), true) }, null,
         )
         val inst = uniffi.rust_bridge.newMsg(conversation, from, PushChatMessage.Message(message))
         sendAndConfirm(s, inst, Sent.MESSAGE)
@@ -469,6 +493,81 @@ class DirectEngine private constructor(private val app: Context) {
         val uploaded = call { uniffi.rust_bridge.uploadMmcsAttachment(s, file.path, mime, DirectMedia.utiFor(mime), name, null) }
         // With the type and name the main process stored it under.
         return uploaded.copy(mime = mime, name = name)
+    }
+
+    /**
+     * Takes back the Send Later message [guid] before Apple sends it, as an iPhone's "Cancel Send
+     * Later" does: rustpush's [PushChatMessage.Unschedule], sent as that message (its queue on
+     * Apple's servers is found by its GUID; the user's other devices are told to delete it).
+     */
+    suspend fun unschedule(target: DirectWire.Target, guid: String) {
+        val s = requireSession()
+        val (conversation, from) = conversationOf(target)
+        val inst = uniffi.rust_bridge.newMsg(conversation, from, PushChatMessage.Unschedule)
+            .copy(id = guid, sentTimestamp = System.currentTimeMillis().toULong())
+        sendAndConfirm(s, inst, Sent.UNSCHEDULE)
+    }
+
+    /**
+     * Sets the chat's background (iOS 26) to the JPEG at [path], or takes it off ([path] null), as
+     * of [version], as OpenBubbles does: the photo made into a poster ([BackgroundPosters.photoPoster]),
+     * packed, uploaded to Apple's file servers and the message naming it sent. A group is told with
+     * its guid; in a chat with one person the other person is told with none (it is the chat with
+     * its sender for them) and the user's other devices with that person's address.
+     */
+    suspend fun setBackground(target: DirectWire.Target, path: String?, version: Long) {
+        val s = requireSession()
+        val (conversation, from) = conversationOf(target)
+        val file = path?.let { uploadPoster(s, File(it)) }
+        val now = System.currentTimeMillis().toULong()
+        fun message(chatId: String?) = PushChatMessage.SetTranscriptBackground(
+            uniffi.rust_bridge.transcriptBackgroundFromMmcs(file, version.toULong(), chatId),
+        )
+        val guid = target.groupGuid
+        if (guid != null || !target.isOneToOne) {
+            val inst = uniffi.rust_bridge.newMsg(conversation, from, message(guid ?: conversation.senderGuid)).copy(sentTimestamp = now)
+            sendAndConfirm(s, inst, Sent.BACKGROUND)
+            return
+        }
+        val peer = target.peer!!
+        val toThem = conversation.copy(participants = conversation.participants.filter { it != from && it !in myHandles }.ifEmpty { listOf(peer) })
+        sendAndConfirm(s, uniffi.rust_bridge.newMsg(toThem, from, message(null)).copy(sentTimestamp = now), Sent.BACKGROUND)
+        // The user's other devices: a copy naming the chat. Not waited for, nor in the way if it does not go.
+        try {
+            val toMe = conversation.copy(participants = listOf(from), afterGuid = null)
+            sendOnly(s, uniffi.rust_bridge.newMsg(toMe, from, message(Handles.display(peer))).copy(sentTimestamp = now))
+        } catch (e: Exception) {
+            Log.w(TAG, "the user's other devices were not told of the new background", e)
+        }
+    }
+
+    /** The photo at [jpeg] as a background poster on Apple's file servers: where it is, and its key. */
+    private suspend fun uploadPoster(s: SharedPushStateHandle, jpeg: File): MmcsFile {
+        if (!jpeg.isFile || jpeg.length() == 0L) throw ImessageError(app.getString(R.string.imessage_background_unreadable))
+        val bytes = jpeg.readBytes()
+        val bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            ?: throw ImessageError(app.getString(R.string.imessage_background_unreadable))
+        val scratch = File(app.cacheDir, "background-${java.util.UUID.randomUUID()}")
+        // PosterKit keeps the layers as HEIC; where this phone cannot make one, the JPEG goes as it is.
+        val heic = BackgroundPosters.heic(bitmap, File(scratch.path + ".heic")) ?: bytes
+        val metrics = app.resources.displayMetrics
+        val aspect = metrics.widthPixels.toDouble().coerceAtLeast(1.0) / metrics.heightPixels.toDouble().coerceAtLeast(1.0)
+        val nsNull = try {
+            uniffi.rust_bridge.nsNull()
+        } catch (e: Exception) {
+            null
+        }
+        val poster = BackgroundPosters.photoPoster(bitmap.width, bitmap.height, heic, BackgroundPosters.watchPng(bitmap), aspect, timeNumberingSystem = nsNull)
+        val packed = call { uniffi.rust_bridge.packTranscriptPoster(poster) }
+        val zip = File(scratch.path + ".zip")
+        try {
+            zip.writeBytes(packed)
+            val uploaded = call { uniffi.rust_bridge.uploadMmcsAttachment(s, zip.path, POSTER_MIME, POSTER_UTI, POSTER_NAME, null) }
+            return (uploaded.aType as? AttachmentType.Mmcs)?.v1?.singleOrNull()
+                ?: throw ImessageError(app.getString(R.string.imessage_direct_background_upload))
+        } finally {
+            zip.delete()
+        }
     }
 
     /** Retracts [guid]; the main process has checked the 2-minute window. */
@@ -571,6 +670,8 @@ class DirectEngine private constructor(private val app: Context) {
         UNSEND(R.string.imessage_direct_unsend_not_confirmed, R.string.imessage_direct_unsend_refused),
         EDIT(R.string.imessage_direct_edit_not_confirmed, R.string.imessage_direct_edit_refused),
         REACTION(R.string.imessage_direct_reaction_not_confirmed, R.string.imessage_direct_reaction_refused),
+        UNSCHEDULE(R.string.imessage_direct_unschedule_not_confirmed, R.string.imessage_direct_unschedule_refused),
+        BACKGROUND(R.string.imessage_direct_background_not_confirmed, R.string.imessage_direct_background_refused),
     }
 
     /**
@@ -642,6 +743,11 @@ class DirectEngine private constructor(private val app: Context) {
         /** The name OpenBubbles gives an iMessage app's picture. */
         const val APP_IMAGE_NAME = "jpeg-image.jpeg"
         const val APP_IMAGE_MIME = "image/jpeg"
+
+        /** How a chat background's poster (a zip) is uploaded. */
+        private const val POSTER_MIME = "application/zip"
+        private const val POSTER_UTI = "public.zip-archive"
+        private const val POSTER_NAME = "transcriptBackground.zip"
 
         /** How long a delivery receipt may hold up the next message from Apple. */
         private const val RECEIPT_TIMEOUT_MS = 15_000L

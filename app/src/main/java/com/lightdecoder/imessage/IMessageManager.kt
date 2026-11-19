@@ -359,12 +359,15 @@ class IMessageManager private constructor(
         replyToId: String?,
         effect: String?,
         runs: List<com.lightdecoder.imessage.direct.TextRun> = emptyList(),
+        scheduledAt: Long? = null,
     ): String {
         val (body, formatted) = com.lightdecoder.imessage.direct.TextRuns.trimmed(text, runs)
         if (body.isEmpty()) throw RelayException(RelayException.INVALID_ARGUMENT, "empty message")
         // Straight to Apple through the library: a real iMessage with its own GUID (Unsend works),
         // replies inline, and Apple's answer decides sent or failed.
-        if (direct.canSend(conversationId)) return direct.sendText(conversationId, body, replyToId, effect, formatted)
+        if (direct.canSend(conversationId)) return direct.sendText(conversationId, body, replyToId, effect, formatted, scheduledAt)
+        // Send Later is Apple's: only through the library.
+        if (scheduledAt != null) throw RelayException(IMessageErrors.NO_REPLY_BUTTON, "Send Later goes through the iMessage library only")
         requireEnabled()
         val tmpId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
@@ -433,8 +436,9 @@ class IMessageManager private constructor(
         replyToId: String?,
         effect: String?,
         runs: List<com.lightdecoder.imessage.direct.TextRun> = emptyList(),
+        scheduledAt: Long? = null,
     ): String =
-        sendThroughLibrary(conversationId, uri, caption, replyToId, voice = false, effect = effect, runs = runs)
+        sendThroughLibrary(conversationId, uri, caption, replyToId, voice = false, effect = effect, runs = runs, scheduledAt = scheduledAt)
 
     /** A recorded voice message, which an iPhone shows as one: as [sendMedia]. */
     fun sendVoice(conversationId: String, uri: Uri, replyToId: String?): String =
@@ -448,8 +452,9 @@ class IMessageManager private constructor(
         voice: Boolean,
         effect: String?,
         runs: List<com.lightdecoder.imessage.direct.TextRun> = emptyList(),
+        scheduledAt: Long? = null,
     ): String {
-        if (direct.canSend(conversationId)) return direct.sendMedia(conversationId, uri, caption, replyToId, voice, effect, runs)
+        if (direct.canSend(conversationId)) return direct.sendMedia(conversationId, uri, caption, replyToId, voice, effect, runs, scheduledAt)
         if (direct.active) throw RelayException(IMessageErrors.NO_REPLY_BUTTON, "this chat cannot be reached through the iMessage library")
         throw RelayException(IMessageErrors.HAND_OFF, "attachments are sent in OpenBubbles")
     }

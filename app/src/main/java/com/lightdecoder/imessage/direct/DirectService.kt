@@ -24,7 +24,7 @@ import org.json.JSONObject
  * The ":imessage" process's service: keeps the iMessage session connected (in the foreground,
  * like the Google Messages link's service) so iMessages reach the Messages tab whether a screen is
  * open or not, answers the main process's requests ([DirectWire]: send, unsend, reach, edit,
- * react, typing, read, download, an iMessage app's update), and hands what Apple sends to the main process's
+ * react, typing, read, download, an iMessage app's update, a chat's background, Send Later taken back), and hands what Apple sends to the main process's
  * [DirectSinkService].
  */
 class DirectService : Service() {
@@ -37,7 +37,7 @@ class DirectService : Service() {
         when (what) {
             DirectWire.SEND -> {
                 val r = DirectWire.SendRequest.fromJson(request)
-                engine.send(r.target, r.text, r.replyGuid, r.replyPart, r.effect, r.attachments, r.voice, r.app, r.runs).toJson()
+                engine.send(r.target, r.text, r.replyGuid, r.replyPart, r.effect, r.attachments, r.voice, r.app, r.runs, r.scheduledMs).toJson()
             }
             DirectWire.EXTENSION -> {
                 val r = DirectWire.ExtensionRequest.fromJson(request)
@@ -71,6 +71,18 @@ class DirectService : Service() {
                 DirectWire.ok()
             }
             DirectWire.DOWNLOAD -> DirectWire.downloaded(engine.download(request.getString("descriptor"), request.getString("path")))
+            DirectWire.BACKGROUND -> {
+                val r = DirectWire.BackgroundRequest.fromJson(request)
+                // Only a picture the main process put where backgrounds are kept.
+                val path = r.path?.takeIf { ChatBackgrounds.isOurs(this, java.io.File(it)) }
+                if (r.path != null && path == null) throw DirectEngine.ImessageError(getString(R.string.imessage_background_unreadable))
+                engine.setBackground(r.target, path, r.version)
+                DirectWire.ok()
+            }
+            DirectWire.UNSCHEDULE -> {
+                engine.unschedule(target(request), request.getString("guid"))
+                DirectWire.ok()
+            }
             else -> DirectWire.error("Unknown request $what")
         }
     }

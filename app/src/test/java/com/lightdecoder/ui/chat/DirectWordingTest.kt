@@ -72,6 +72,17 @@ class DirectWordingTest {
             R.string.imessage_effect_tab_text, R.string.imessage_format_bold, R.string.imessage_format_italic,
             R.string.imessage_format_underline, R.string.imessage_format_strikethrough, R.string.imessage_text_effect_described,
             R.string.imessage_text_effect_replay_action,
+            R.string.imessage_event_background_changed, R.string.imessage_event_background_removed, R.string.imessage_background,
+            R.string.imessage_background_choose, R.string.imessage_background_remove, R.string.imessage_background_sending,
+            R.string.imessage_background_set, R.string.imessage_background_removed, R.string.imessage_background_failed,
+            R.string.imessage_background_unreadable, R.string.imessage_background_too_big,
+            R.string.imessage_direct_background_not_confirmed, R.string.imessage_direct_background_refused,
+            R.string.imessage_direct_background_upload, R.string.imessage_send_later, R.string.imessage_send_later_pick_title,
+            R.string.imessage_send_later_label, R.string.imessage_send_later_tomorrow, R.string.imessage_send_later_too_soon,
+            R.string.imessage_send_later_too_far, R.string.imessage_send_later_scheduled, R.string.imessage_send_later_cancel,
+            R.string.imessage_send_later_send_now, R.string.imessage_send_later_cancelled, R.string.imessage_send_later_cancel_failed,
+            R.string.imessage_send_later_not_cancellable, R.string.imessage_direct_unschedule_not_confirmed,
+            R.string.imessage_direct_unschedule_refused,
         )
         for (res in direct) {
             val text = context.getString(res)

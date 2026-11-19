@@ -45,6 +45,12 @@
         android:title="@string/imessage_unlink"
         android:visible="false"
         app:showAsAction="never" />
+    <!-- An iMessage chat the iMessage library can reach: its background (iOS 26), as on an iPhone. -->
+    <item
+        android:id="@+id/action_chat_background"
+        android:title="@string/imessage_background"
+        android:visible="false"
+        app:showAsAction="never" />
     <!-- An iMessage chat: the same chat in OpenBubbles (not through the iMessage library, which opens no other app). -->
     <item
         android:id="@+id/action_open_openbubbles"

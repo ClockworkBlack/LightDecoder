@@ -8,12 +8,25 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
    had earlier chosen "build with a warning", then "pause on Discord", and has now asked for
    the web-view tab only, with no bridge). **Instagram: skipped** (ban risk, like Messenger).
 
+## 0.5.61 (versionCode 72) - text effects and formatting, chat backgrounds, Send Later
+- iOS 18 text effects (Big, Small, Shake, Nod, Explode, Ripple, Bloom, Jitter) and bold/italic/underline/
+  strikethrough both ways: `TextRuns` (extra.runs per part), `TextFormatting`, `TextEffectView`;
+  composer selection menu and the effect sheet's Text tab in iMessage chats.
+- Chat backgrounds: incoming `SetTranscriptBackground` (photo posters decoded, dynamic/gradient = removed)
+  in `IncomingBackgrounds`, stored by `ChatBackgrounds` (files + index.json), shown behind the thread
+  with a scrim; outgoing via thread menu "Background" (`BackgroundPosters.photoPoster`, packed,
+  uploaded through `uploadMmcsAttachment`, DirectWire.BACKGROUND=11). New dependency
+  androidx.heifwriter 1.0.0 (Apache-2.0). **Outgoing poster not yet seen accepted by an iPhone.**
+- Send Later: `ScheduleMode` queued on Apple's side; "Send Later ·" label, Cancel (Unschedule,
+  DirectWire.UNSCHEDULE=12) and Send Now.
+- Unit tests: 1080, all passing. Next version: 0.5.62 / 73.
+
 ## 0.5.60 (versionCode 71) - effects play on screen
 - Owner asked for sent effects to show on their own screen too. `ui/chat/EffectPlayer.kt` animates the
   bubble (Slam, Loud, Gentle) and `EffectOverlayView` draws screen effects (original drawing, no Apple
   assets). Plays once after sending, once for a new or newest-unread incoming effect (played ids kept
   in `effect_plays`, last 500), and on "· Replay" next to the caption; skipped when system animations
-  are off. Not yet watched on a device. Unit tests: 1032, all passing. Next version: 0.5.61 / 72.
+  are off. Not yet watched on a device. Unit tests: 1032, all passing.
 
 ## 0.5.59 (versionCode 70) - iPhone-style effects sheet; Games sheet diagnosable
 - Owner's 0.5.58 test: the Games sheet showed blank with OpenPigeon installed (cause unknown, no logcat);

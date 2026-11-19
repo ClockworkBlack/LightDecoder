@@ -10,4 +10,6 @@
     <color name="imessage_light_amber">#FFFFB300</color>
     <color name="imessage_light_red">#FFE53935</color>
     <color name="imessage_light_grey">#FF8E8E93</color>
+    <!-- Over a chat's background picture (iOS 26), so the messages and times on it stay readable. -->
+    <color name="chat_background_scrim">#33000000</color>
 </resources>

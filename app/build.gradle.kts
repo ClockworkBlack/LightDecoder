@@ -39,8 +39,8 @@ android {
         applicationId = "com.lightdecoder"
         minSdk = 26
         targetSdk = 36
-        versionCode = 71
-        versionName = "0.5.60"
+        versionCode = 72
+        versionName = "0.5.61"
         // On-device tests (app/src/androidTest): the Blue Bubbles round trip against the
         // stand-in OpenBubbles app (:fakebubbles), run on an emulator by .github/workflows/device-test.yml.
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -694,6 +694,9 @@ dependencies {
     implementation("androidx.webkit:webkit:1.12.1")
     // Reads a photo's EXIF orientation, so camera pictures are not shown sideways (Apache-2.0).
     implementation("androidx.exifinterface:exifinterface:1.3.7")
+    // Chat backgrounds sent to iPhones: the picture as HEIC, as PosterKit stores it (Android 9+, the
+    // phone's own HEVC encoder; JPEG otherwise). Pure Java over MediaCodec (Apache-2.0).
+    implementation("androidx.heifwriter:heifwriter:1.0.0")
     // The Gmail tab: IMAP to read, SMTP to send (Jakarta Mail 1.6 for Android; EPL-2.0 or GPL-2.0 + CPE).
     implementation("com.sun.mail:android-mail:1.6.7")
     implementation("com.sun.mail:android-activation:1.6.7")

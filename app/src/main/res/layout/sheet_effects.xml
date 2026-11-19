@@ -108,6 +108,17 @@
             app:tint="@color/on_imessage_blue" />
     </LinearLayout>
 
+    <!-- Send Later (iOS 18): the message goes at a day and time picked, up to 14 days ahead. -->
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/effectSendLater"
+        style="?attr/materialButtonOutlinedStyle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="end"
+        android:layout_marginTop="8dp"
+        android:text="@string/imessage_send_later"
+        android:visibility="gone" />
+
     <TextView
         android:id="@+id/effectHint"
         android:layout_width="match_parent"

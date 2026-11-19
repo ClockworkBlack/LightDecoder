@@ -277,7 +277,11 @@ class MessagesAdapter(
         val unconfirmed = MessageStatus.outcomeUnknown(row)
         val shownTick = if (tick in RECEIPT_TICKS && appleReceipts(row)) Tick.NONE else tick
         bindTick(holder, shownTick, metaColor, unconfirmed)
-        val receipt = item.receipt?.let { receiptText(context, it) }
+        // Send Later, before its time: when it goes, in place of a receipt (iOS 18).
+        val scheduledAt = com.lightdecoder.imessage.direct.SendLater.scheduledAt(row)
+            .takeIf { it > 0 && com.lightdecoder.imessage.direct.SendLater.pending(row, System.currentTimeMillis()) }
+        val receipt = scheduledAt?.let { context.getString(R.string.imessage_send_later_label, TimeFormat.sendLaterTime(context, it)) }
+            ?: item.receipt?.let { receiptText(context, it) }
         b.receipt.visibility = if (receipt == null) View.GONE else View.VISIBLE
         b.receipt.text = receipt.orEmpty()
         // Pictures sent together: one time line, under the last of them (a failed one keeps its own).

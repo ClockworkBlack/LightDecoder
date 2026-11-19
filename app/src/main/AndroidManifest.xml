@@ -2,6 +2,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- heifwriter is declared for Android 9+; it is only used there (imessage/direct/BackgroundPosters). -->
+    <uses-sdk tools:overrideLibrary="androidx.heifwriter" />
+
     <!-- Only to show a caught sticker as a notification. Asked for at the moment it is needed. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 

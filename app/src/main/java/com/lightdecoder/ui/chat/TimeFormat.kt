@@ -65,6 +65,25 @@ object TimeFormat {
         if (daysBetween(timestampMs, nowMs, zone) == 1) context.getString(R.string.chat_day_yesterday)
         else listTime(context, timestampMs, nowMs, zone, locale)
 
+    /**
+     * When a Send Later message goes, as an iPhone writes it under the message: the time today,
+     * "Tomorrow 9:00 AM", then the weekday and date with the time.
+     */
+    fun sendLaterTime(
+        context: Context,
+        timestampMs: Long,
+        nowMs: Long = System.currentTimeMillis(),
+        zone: TimeZone = TimeZone.getDefault(),
+        locale: Locale = Locale.getDefault(),
+    ): String {
+        val time = clock(context, timestampMs, zone, locale)
+        return when (daysBetween(nowMs, timestampMs, zone)) {
+            0 -> time
+            1 -> context.getString(R.string.imessage_send_later_tomorrow, time)
+            else -> pattern(skeleton(locale, "EEEMMMd"), timestampMs, zone, locale) + " " + time
+        }
+    }
+
     /** The label of the day header above a group of messages. */
     fun dayLabel(
         context: Context,
