@@ -23,6 +23,19 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.34 (versionCode 42) - iMessage log
+- `imessage/IMessageLog`: Blue Bubbles step by step, in app storage (200 lines, problem report section
+  "== iMessage (Blue Bubbles) ==" with setup summary, chats stored, Reply buttons held) and in logcat,
+  tag `LDiMessage` (`adb logcat -s LDiMessage` on a real phone; the device test's "Show the result" step
+  prints it). Logged: Blue Bubbles on/off and state changes (OpenBubbles package + version, notification
+  access); each OpenBubbles notification with new lines (from them / from me in OpenBubbles, Reply button
+  yes/NO, new chat), unreadable message notifications, a Reply button going away; each send's route from a
+  Messages conversation (silently through the Reply button, OpenBubbles' screen and why, or TEXT/green and
+  why); the Reply button result; how long OpenBubbles took to show a sent message back; hand-offs (text,
+  file types); Mark As Read missing; every Check iMessage step with seconds, the verdict BLUE/GREEN, a
+  stall after 60 s, closing early. Content-free: chats are `chat#xxxx` (SHA-256 of the chat id, 4 hex);
+  no text, names, numbers, emails or chat ids (tested in BlueBubblesScreenTest and on the emulator).
+
 ## 0.5.33 (versionCode 41) - several pictures at once, voice messages, Check iMessage
 - **Several pictures in one go** (thread composer): the picker takes up to 10 pictures/videos
   (`PickMultipleVisualMedia`); the attachment bar reads "3 attachments". Each picture goes out as a

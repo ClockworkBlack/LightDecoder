@@ -96,6 +96,7 @@ class BlueBubblesDeviceTest {
             context, receiver, IntentFilter().apply { addAction(REPLIED); addAction(MARKED_READ) }, ContextCompat.RECEIVER_EXPORTED,
         )
         IMessagePrefs.setEnabled(context, true)
+        com.lightdecoder.imessage.IMessageLog.clear(context)
         IMessageManager.get(context).repo.clearAll()
         // The person's Messages conversation (as Google Messages would have it).
         ArchiveRepository.get(context, ChatService.MESSAGES).upsertConversation(
@@ -217,6 +218,19 @@ class BlueBubblesDeviceTest {
             waitFor("the verdict: green") { checkVerdict(scenario) == green }
             assertTrue("no check went out as a text", ArchiveRepository.get(context, ChatService.MESSAGES).messages(MESSAGES_ID)
                 .none { it.isOutgoing && it.text.startsWith("LightDecoder iMessage check") })
+
+            // The iMessage log on a real Android system: every step, both verdicts, nothing private.
+            val log = com.lightdecoder.imessage.IMessageLog.read(context).reversed()
+            fun has(what: String) = assertTrue("log has \"$what\":\n" + log.joinToString("\n"), log.any { it.contains(what) })
+            has("notification: 1 new from them")
+            has("send through OpenBubbles' Reply button: handed over")
+            has("OpenBubbles showed a message sent from here back after")
+            has("step 2 shown back by OpenBubbles")
+            has("by iMessage: BLUE on their iPhone")
+            has("by text: GREEN on their iPhone")
+            for (secret in listOf("Alice", "5551234567", "Hi from my iPhone", "1111", "2222", GUID)) {
+                assertFalse("must not be in the log: $secret", log.any { it.contains(secret) })
+            }
         }
     }
 

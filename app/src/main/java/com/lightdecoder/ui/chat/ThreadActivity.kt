@@ -1334,10 +1334,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         // else OpenBubbles opens with the message filled in, for one tap on send.
         val companion = companionId
         if (manager.service == ChatService.MESSAGES && companion != null && (files.isNotEmpty() || !sendsAsIMessage(text))) {
+            logRoute(companion, if (files.isNotEmpty()) "${files.size} file(s): through OpenBubbles' screen" else "no usable Reply button: through OpenBubbles' screen")
             handOffToOpenBubbles(iMessageLink, companion, text, files, clearComposer = true)
             return
         }
         if (manager.service == ChatService.MESSAGES && companion != null && files.isEmpty() && sendsAsIMessage(text)) {
+            logRoute(companion, "silently through OpenBubbles' Reply button")
             val im = iMessageLink
             scrollToBottomNext = true
             binding.input.setText("")
@@ -1353,6 +1355,14 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         if (iMessage != null && (files.isNotEmpty() || !iMessage.canReply(id, text))) {
             handOffToOpenBubbles(iMessage, id, text, files, clearComposer = true)
             return
+        }
+        if (manager.service == ChatService.MESSAGES && com.lightdecoder.imessage.IMessagePrefs.enabled(this) && conversation?.isGroup == false) {
+            // Blue Bubbles is on but this goes green: say why, so "it went green" can be traced.
+            com.lightdecoder.imessage.IMessageLog.add(
+                this,
+                "Messages conversation sent as a TEXT (green): no iMessage chat with this person in OpenBubbles yet" +
+                    if (otherAddress() == null) " (no phone number or email to match one by)" else " (use Send iMessage to start one)",
+            )
         }
         // Only ever a message of this conversation (onReply checks too).
         val replyTo = replyTarget?.takeIf { it.conversationId == id }?.id
@@ -1391,6 +1401,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             }
         }
     }
+
+    /** One line in the iMessage log: how a message from a Messages conversation is being sent. */
+    private fun logRoute(companion: String, how: String) =
+        com.lightdecoder.imessage.IMessageLog.add(
+            this, "Messages conversation with ${com.lightdecoder.imessage.IMessageLog.chatRef(companion)}: sent as iMessage, $how",
+        )
 
     /**
      * Opens OpenBubbles on this chat with [text] and [files] filled in
@@ -2304,9 +2320,17 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             .setPositiveButton(R.string.imessage_check_close, null)
             .create()
         checkDialog = dialog
+        val ref = com.lightdecoder.imessage.IMessageLog.chatRef(companion)
+        fun log(line: String) = com.lightdecoder.imessage.IMessageLog.add(this, "Check iMessage $ref: $line")
+        var last = com.lightdecoder.imessage.IMessageCheck.Progress(false, false, false, com.lightdecoder.imessage.IMessageCheck.Reply.NONE)
+        var slowNoted = false
         val job = lifecycleScope.launch {
+            log("started; ${im.setupSummary()}")
             val silent = withContext(Dispatchers.IO) { relayAttempt { im.sendText(companion, text) } }.isSuccess
-            if (!silent) handOffToOpenBubbles(im, companion, text, emptyList(), clearComposer = false)
+            if (!silent) {
+                log("no usable Reply button: OpenBubbles opened for the user to tap send")
+                handOffToOpenBubbles(im, companion, text, emptyList(), clearComposer = false)
+            }
             while (true) {
                 if (conversationId != id) return@launch
                 val progress = withContext(Dispatchers.IO) {
@@ -2315,6 +2339,22 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                     )
                 }
                 val waited = System.currentTimeMillis() - sentAt
+                val secs = (waited + 500) / 1000
+                if (progress.handedOver && !last.handedOver) log("step 1 handed to OpenBubbles after ${secs}s")
+                if (progress.inOpenBubbles && !last.inOpenBubbles) log("step 2 shown back by OpenBubbles (sent to Apple) after ${secs}s")
+                if (progress.sentAsText && !last.sentAsText) log("WRONG: the check also went out as a text through Google Messages")
+                if (progress.reply != last.reply) log(
+                    "step 3 reply after ${secs}s by " + when (progress.reply) {
+                        com.lightdecoder.imessage.IMessageCheck.Reply.IMESSAGE -> "iMessage: BLUE on their iPhone"
+                        com.lightdecoder.imessage.IMessageCheck.Reply.TEXT -> "text: GREEN on their iPhone"
+                        com.lightdecoder.imessage.IMessageCheck.Reply.NONE -> "nothing"
+                    },
+                )
+                if (!slowNoted && waited > CHECK_SLOW_MS && !progress.done) {
+                    slowNoted = true
+                    log("after ${secs}s: handed over ${progress.handedOver}, shown back ${progress.inOpenBubbles}, no reply yet")
+                }
+                last = progress
                 steps.text = checkSteps(progress, name, silent, waited)
                 verdict.text = checkVerdict(progress, name, waited)
                 if (progress.done) return@launch
@@ -2322,6 +2362,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             }
         }
         dialog.setOnDismissListener {
+            if (!last.done) log("closed before a reply (handed over ${last.handedOver}, shown back ${last.inOpenBubbles})")
             job.cancel()
             if (checkDialog === dialog) checkDialog = null
         }

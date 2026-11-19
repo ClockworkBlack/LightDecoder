@@ -61,6 +61,7 @@ class BlueBubblesScreenTest {
         ArchiveRepository.installForTesting(imRepo)
         iMessage = IMessageManager.installForTesting(two.app, imRepo)
         IMessagePrefs.setEnabled(two.app, false)
+        com.lightdecoder.imessage.IMessageLog.clear(two.app)
     }
 
     @After
@@ -451,9 +452,46 @@ class BlueBubblesScreenTest {
                 }
                 scenario.waitFor("the verdict") { verdict(it) == expected }
                 scenario.onActivity { assertTrue(steps(it).lines()[2].startsWith("\u2713")) }
+
+                // The log tells the same story, with nothing of who or what.
+                val log = com.lightdecoder.imessage.IMessageLog.read(two.app).reversed()
+                val ref = com.lightdecoder.imessage.IMessageLog.chatRef(ALICE)
+                fun has(what: String) = assertTrue("log has \"$what\":\n" + log.joinToString("\n"), log.any { it.contains(what) })
+                has("Check iMessage $ref: started")
+                has("$ref: send through OpenBubbles' Reply button: handed over")
+                has("Check iMessage $ref: step 1 handed to OpenBubbles")
+                has("$ref: OpenBubbles showed a message sent from here back after")
+                has("Check iMessage $ref: step 2 shown back by OpenBubbles")
+                has(if (replyByIMessage) "step 3 reply after" else "step 3 reply after")
+                has(if (replyByIMessage) "by iMessage: BLUE on their iPhone" else "by text: GREEN on their iPhone")
+                val report = com.lightdecoder.ui.ProblemReport.build(two.app)
+                assertTrue(report.contains("== iMessage (Blue Bubbles) =="))
+                assertTrue(report.contains("Blue Bubbles: on"))
+                assertTrue(report.contains("step 2 shown back by OpenBubbles"))
+                for (secret in listOf("Alice", "5551234567", "555-123", check, check.filter(Char::isDigit), ALICE, "OK\n")) {
+                    assertFalse("must not be in the log: $secret", log.any { it.contains(secret) })
+                    assertFalse("must not be in the report: $secret", report.contains(secret))
+                }
             }
         } finally {
             two.app.unregisterReceiver(receiver)
+        }
+    }
+
+    @Test
+    fun aTextThatGoesGreenSaysWhyInTheLog() {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        two.seedConversation(ChatService.MESSAGES, "c2", "Bob", lastTs = 1_000, number = "+1 555-987-6543")
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c2").setFlags(0)).use { scenario ->
+            scenario.waitFor("the composer") { it.findViewById<View>(R.id.input).isEnabled }
+            scenario.onActivity { activity ->
+                activity.findViewById<EditText>(R.id.input).setText("A green one")
+                activity.findViewById<View>(R.id.send).performClick()
+            }
+            val log = com.lightdecoder.imessage.IMessageLog.read(two.app)
+            assertTrue(log.joinToString("\n"), log.any { it.contains("sent as a TEXT (green): no iMessage chat with this person in OpenBubbles yet") })
+            assertTrue(log.none { it.contains("Bob") || it.contains("5559876543") || it.contains("A green one") })
         }
     }
 

@@ -50,6 +50,9 @@ object IMessageReplies {
 
     private val entries = ConcurrentHashMap<String, Entry>()
 
+    /** How many chats have a Reply button to send through right now (for the problem report). */
+    fun replyButtonsHeld(): Int = entries.values.count { it.reply != null }
+
     /**
      * The last reply handed over (the message it answered, and its text).
      * OpenBubbles remembers exactly one, for all chats, and drops a reply

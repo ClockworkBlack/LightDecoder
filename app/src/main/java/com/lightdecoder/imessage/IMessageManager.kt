@@ -83,12 +83,26 @@ class IMessageManager private constructor(
 
     /** Looks again at what [state] depends on (after the user changed a setting or came back from one). */
     fun refreshState() {
-        _state.value = currentState()
+        val before = _state.value
+        val now = currentState()
+        _state.value = now
+        if (now.phase != before.phase || now.code != before.code) {
+            IMessageLog.add(appContext, "State: ${now.phase} ${now.code}".trimEnd() + "; " + setupSummary())
+        }
+    }
+
+    /** "OpenBubbles com.openbubbles.messaging 1.15.0; notification access yes": what Blue Bubbles needs. */
+    fun setupSummary(): String {
+        val pkg = OpenBubbles.installedPackage(appContext)
+        val version = pkg?.let { runCatching { appContext.packageManager.getPackageInfo(it, 0).versionName }.getOrNull() }
+        return "OpenBubbles " + (if (pkg == null) "not installed" else "$pkg ${version.orEmpty()}".trimEnd()) +
+            "; notification access " + (if (MessengerNotificationListener.hasAccess(appContext)) "yes" else "NO")
     }
 
     /** Turns Blue Bubbles on or off. Off forgets OpenBubbles' buttons and LightDecoder's iMessage notifications; the archive stays. */
     fun setEnabled(on: Boolean) {
         IMessagePrefs.setEnabled(appContext, on)
+        IMessageLog.add(appContext, if (on) "Blue Bubbles turned on; ${setupSummary()}" else "Blue Bubbles turned off")
         if (!on) {
             IMessageReplies.clear()
             com.lightdecoder.chat.ShareShortcuts.removeAll(appContext, ChatService.IMESSAGE)
@@ -109,15 +123,24 @@ class IMessageManager private constructor(
     fun onNotification(sbn: StatusBarNotification, live: Boolean) {
         if (!IMessagePrefs.enabled(appContext)) return
         val notification = sbn.notification ?: return
-        val chat = try { IMessageCapture.parse(sbn) } catch (e: RuntimeException) { null } ?: return
+        val chat = try { IMessageCapture.parse(sbn) } catch (e: RuntimeException) { null }
+        if (chat == null) {
+            // Only a message notification that could not be read is worth a line (OpenBubbles posts others too).
+            if (sbn.tag == OpenBubbles.MESSAGE_TAG) IMessageLog.add(appContext, "A message notification from ${sbn.packageName} could not be read")
+            return
+        }
         val reply = try { IMessageCapture.replyAction(notification) } catch (e: RuntimeException) { null }
         val markRead = try { IMessageCapture.markReadAction(notification) } catch (e: RuntimeException) { null }
+        val hadReply = IMessageReplies.canReply(chat.chatGuid)
         // The buttons first: by the time the messages show, they can be answered.
         IMessageReplies.update(chat.chatGuid, reply, markRead, notification.contentIntent, chat.messageGuid)
+        val ref = IMessageLog.chatRef(chat.chatGuid)
+        if (hadReply && reply == null) IMessageLog.add(appContext, "$ref: OpenBubbles' notification has no Reply button now (messages to it open OpenBubbles)")
         try {
-            record(chat, live)
+            record(chat, live, if (reply != null) "Reply button yes" else "Reply button NO")
         } catch (e: RuntimeException) {
             // A full disk or a damaged file: these messages are not kept.
+            IMessageLog.add(appContext, "$ref: could not store a notification's messages (${e.javaClass.simpleName})")
         }
     }
 
@@ -127,7 +150,7 @@ class IMessageManager private constructor(
      * them again until the chat is read there), and the line OpenBubbles
      * adds for a message sent from here, which takes that message's place.
      */
-    internal fun record(chat: CapturedIMessageChat, live: Boolean): List<MessageDto> = synchronized(captureLock) {
+    internal fun record(chat: CapturedIMessageChat, live: Boolean, buttons: String = ""): List<MessageDto> = synchronized(captureLock) {
         val id = chat.chatGuid
         val existing = repo.conversation(id)
         val deleted = IMessagePrefs.deletedMessages(appContext)
@@ -150,6 +173,9 @@ class IMessageManager private constructor(
                 if (sent != null) {
                     unmatched.remove(sent)
                     replaced += sent.id
+                    // OpenBubbles stamps it in whole seconds: about how long it took to show it back.
+                    val secs = ((System.currentTimeMillis() - sent.timestampMs).coerceAtLeast(0) + 500) / 1000
+                    IMessageLog.add(appContext, "${IMessageLog.chatRef(id)}: OpenBubbles showed a message sent from here back after ~$secs s (it went to Apple as an iMessage)")
                 } else if (echoOfDeleted(id, message)) {
                     continue
                 }
@@ -167,6 +193,19 @@ class IMessageManager private constructor(
                 text = message.text,
                 // Only what is newer than anything seen from them is announced.
                 isOld = !live || message.fromMe || message.timestampMs <= newestIncoming,
+            )
+        }
+        if (added.isNotEmpty()) {
+            val fromThem = added.count { !it.fromMe }
+            // Not counted: OpenBubbles' lines for messages sent from here (logged above).
+            val fromMe = added.size - fromThem - replaced.size
+            IMessageLog.add(
+                appContext,
+                "${IMessageLog.chatRef(id)}: ${if (live) "notification" else "notification already up"}" +
+                    (if (chat.isGroup) " (group)" else "") +
+                    ": $fromThem new from them, $fromMe from me (sent in OpenBubbles)" +
+                    (if (buttons.isNotEmpty()) "; $buttons" else "") +
+                    (if (existing == null) "; new chat" else ""),
             )
         }
         // A notification still up with someone's lines in it: unread in OpenBubbles (it takes it down once read).
@@ -250,7 +289,17 @@ class IMessageManager private constructor(
 
     /** False if it could not be handed over (it is then marked failed). */
     private fun deliver(tmpId: String, conversationId: String, text: String): Boolean =
-        when (IMessageReplies.send(appContext, conversationId, text)) {
+        when (IMessageReplies.send(appContext, conversationId, text).also { result ->
+            IMessageLog.add(
+                appContext,
+                "${IMessageLog.chatRef(conversationId)}: send through OpenBubbles' Reply button: " + when (result) {
+                    IMessageReplies.Result.HANDED_OVER -> "handed over"
+                    IMessageReplies.Result.NO_REPLY_BUTTON -> "NO Reply button held for this chat"
+                    IMessageReplies.Result.WITHDRAWN -> "the button was withdrawn (OpenBubbles took the notification down)"
+                    IMessageReplies.Result.REPEAT -> "same text as the last reply (OpenBubbles would drop it)"
+                },
+            )
+        }) {
             IMessageReplies.Result.HANDED_OVER -> {
                 repo.upsertMessage(
                     MessageDto(
@@ -296,7 +345,19 @@ class IMessageManager private constructor(
      * chat, or failing that a new chat with the person's address. The user
      * sends it there. False if OpenBubbles is not installed or could not be opened.
      */
-    fun handOff(context: Context, conversationId: String, text: String, attachments: List<Pair<Uri, String>> = emptyList()): Boolean {
+    fun handOff(context: Context, conversationId: String, text: String, attachments: List<Pair<Uri, String>> = emptyList()): Boolean =
+        handOffNow(context, conversationId, text, attachments).also { ok ->
+            val what = (if (text.isNotBlank()) "text" else "") +
+                (if (attachments.isNotEmpty()) (if (text.isNotBlank()) " + " else "") + "${attachments.size} file(s) " +
+                    attachments.joinToString(",", "(", ")") { it.second.substringBefore('/') } else "")
+            IMessageLog.add(
+                appContext,
+                "${IMessageLog.chatRef(conversationId)}: opened OpenBubbles with $what for the user to tap send" +
+                    if (ok) "" else ": FAILED (OpenBubbles not installed or would not open)",
+            )
+        }
+
+    private fun handOffNow(context: Context, conversationId: String, text: String, attachments: List<Pair<Uri, String>>): Boolean {
         val pkg = OpenBubbles.installedPackage(appContext) ?: return false
         if (OpenBubbles.start(context, OpenBubbles.shareToChatIntent(pkg, conversationId, text, attachments))) return true
         val address = addressOf(conversationId) ?: return false
@@ -354,7 +415,8 @@ class IMessageManager private constructor(
     override suspend fun markRead(conversationId: String): Unit = withContext(Dispatchers.IO) {
         runCatching { repo.markConversationRead(conversationId) }
         MessageNotifier.cancel(appContext, conversationId, ChatService.IMESSAGE)
-        runCatching { IMessageReplies.markRead(appContext, conversationId) }
+        val pressed = runCatching { IMessageReplies.markRead(appContext, conversationId) }.getOrDefault(false)
+        if (!pressed) IMessageLog.add(appContext, "${IMessageLog.chatRef(conversationId)}: read here, but OpenBubbles offered no Mark As Read button (it stays unread there)")
     }
 
     override suspend fun loadOlder(conversationId: String, count: Int): Int = 0
