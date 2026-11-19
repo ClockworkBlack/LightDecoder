@@ -23,6 +23,31 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.44 (versionCode 52) - received iMessage pictures in their bubbles
+- OpenBubbles' notification carries only a description ("Image", "Attachments: 2 images, 1 movie"), never
+  the picture (its payload is title, text, time, guid). `IMessageCapture.attachmentKinds` turns such a line
+  into picture or video slots (parts with mime `image/*` / `video/*`, no file).
+- `imessage/IMessageMedia` fills them. With OpenBubbles' Settings → Attachments → "Auto-save Attachments" on,
+  OpenBubbles saves each received picture and video, as it came (`SaverGallery quality: 100`), to Pictures
+  through MediaStore. LightDecoder queries `MediaStore.Files` for `OWNER_PACKAGE_NAME` = OpenBubbles, images
+  or videos, `DATE_ADDED` from 2 min before to 15 min after each waiting message. It takes the first unused
+  file of the right kind (used ids in `IMessagePrefs.usedMedia`) and copies it to the iMessage media folder
+  (HEIC kept; videos get a still from `loadThumbnail`). It then records the path and the real mime, size and
+  dimensions (`ArchiveRepository.mediaAwaitingFiles` / `setMediaDetails`).
+- When it looks: 1 s, 5 s, 15 s, 45 s, 2 min and 5 min after a placeholder arrives; when the gallery changes
+  (ContentObserver); and when a thread comes to the front. It needs Android 10+ (owner column) and
+  READ_MEDIA_IMAGES / READ_MEDIA_VIDEO (READ_EXTERNAL_STORAGE ≤ 12), asked when a waiting slot is tapped.
+  The slot reads "Picture from OpenBubbles · tap", and a tap explains Auto-save, offering Allow or Open in
+  OpenBubbles.
+- Logged: each match (mime, KB, seconds after the message), missing access, and a slot still empty after 6 min
+  ("is Auto-save on?").
+- Extensions / a wrapper for inline replies, checked: OpenBubbles' `IMadridExtension` is for iMessage apps
+  (GamePigeon-style balloons). A dev extension can be registered (developer mode), but it can only add its
+  own app balloons and update them. It never sees normal messages and cannot reply inline, unsend or send
+  text. An accessibility wrapper driving OpenBubbles' screen would be fragile and visible. Inline replies
+  stay with the link plan.
+- Activity log work paused at the user's request.
+
 ## 0.5.43 (versionCode 51) - LightDecoder's features with iMessages
 - **Reply to a message:** now offered on iMessages too (`canReplyTo` no longer excludes them). It goes as an
   iMessage of its own: OpenBubbles' Reply button cannot make an inline thread reply. The reply bar says

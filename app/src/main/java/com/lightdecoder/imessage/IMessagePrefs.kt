@@ -14,6 +14,8 @@ object IMessagePrefs {
     private const val FILE = "imessage"
     private const val KEY_ENABLED = "blue_bubbles"
     private const val KEY_HIDDEN_TEXT = "hidden_text_at"
+    private const val KEY_USED_MEDIA = "used_media"
+    private const val KEY_MISSING_NOTED = "missing_media_noted"
     private const val KEY_NOTIFY = "notify_messages"
     private const val KEY_ID_SALT = "id_salt"
     private const val KEY_DELETED = "deleted_messages"
@@ -27,6 +29,21 @@ object IMessagePrefs {
      * "Blue Bubbles": OpenBubbles' iMessages are read into the Messages tab
      * and can be answered from there. Off until the user ticks it.
      */
+    /** Gallery files (MediaStore ids) already given to an iMessage bubble: each is used once. The newest 500. */
+    fun usedMedia(context: Context): Set<String> =
+        prefs(context).getString(KEY_USED_MEDIA, "").orEmpty().split(',').filter { it.isNotEmpty() }.toSet()
+
+    fun setUsedMedia(context: Context, ids: Set<String>) =
+        prefs(context).edit { putString(KEY_USED_MEDIA, ids.toList().takeLast(500).joinToString(",")) }
+
+    /** True the first time [key] (a waiting picture) is noted as missing; false after. */
+    fun markMissingNoted(context: Context, key: String): Boolean {
+        val now = prefs(context).getString(KEY_MISSING_NOTED, "").orEmpty().split('\n').filter { it.isNotEmpty() }
+        if (key in now) return false
+        prefs(context).edit { putString(KEY_MISSING_NOTED, (now + key).takeLast(200).joinToString("\n")) }
+        return true
+    }
+
     /** When OpenBubbles was last seen hiding message text (0: not since its last readable message). */
     fun hiddenTextAt(context: Context): Long = prefs(context).getLong(KEY_HIDDEN_TEXT, 0L)
 

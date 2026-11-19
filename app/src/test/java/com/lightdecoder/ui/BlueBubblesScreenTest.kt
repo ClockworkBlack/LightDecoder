@@ -590,6 +590,50 @@ class BlueBubblesScreenTest {
         }
     }
 
+    // --- received pictures ---------------------------------------------------------------
+
+    @Test
+    fun aPictureFromIMessageShowsInItsBubbleFromOpenBubblesSavedCopy() {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        val t = System.currentTimeMillis()
+        iMessage.record(
+            CapturedIMessageChat(ALICE, "m1", "Alice", false, "+15551234567", listOf(CapturedIMessage("Alice", "tel:+15551234567", false, "Image", t))),
+            live = false,
+        )
+        val png = java.io.ByteArrayOutputStream().also {
+            android.graphics.Bitmap.createBitmap(40, 30, android.graphics.Bitmap.Config.ARGB_8888).apply { eraseColor(android.graphics.Color.RED) }
+                .compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+        }.toByteArray()
+        com.lightdecoder.imessage.IMessageMedia.source = { _, from, to ->
+            listOf(com.lightdecoder.imessage.IMessageMedia.Saved(9, android.net.Uri.parse("content://media/9"), "image/png", t / 1000 + 3, png.size.toLong(), 40, 30))
+                .filter { it.addedSec in from..to }
+        }
+        com.lightdecoder.imessage.IMessageMedia.open = { _, _ -> java.io.ByteArrayInputStream(png) }
+        try {
+            ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+                fun status(a: Activity) = a.findViewById<RecyclerView>(R.id.messages).findViewById<android.widget.TextView>(R.id.mediaStatus)
+                scenario.waitFor("a picture slot, not the word Image") { a ->
+                    shownTexts(a).none { it == "Image" } && status(a)?.let { it.isShown && it.text == a.getString(R.string.imessage_media_waiting) } == true
+                }
+                // Tapped without photo access: what it needs, and Allow.
+                scenario.onActivity { a -> a.findViewById<RecyclerView>(R.id.messages).findViewById<View>(R.id.mediaFrame).performClick() }
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                assertTrue(latestDialog().findViewById<android.widget.TextView>(android.R.id.message)!!.text.contains("Auto-save Attachments"))
+                latestDialog().dismiss()
+                shadowOf(two.app).grantPermissions(*com.lightdecoder.imessage.IMessageMedia.permissions())
+                assertEquals(1, com.lightdecoder.imessage.IMessageMedia.fill(two.app))
+                scenario.waitFor("the picture itself") { a -> status(a)?.isShown != true }
+                val part = imRepo.messages(ALICE).single().media.single()
+                assertEquals("image/png", part.mime)
+                assertTrue(java.io.File(part.localPath).readBytes().contentEquals(png))
+            }
+        } finally {
+            com.lightdecoder.imessage.IMessageMedia.resetForTesting()
+        }
+    }
+
     // --- LightDecoder's own features with iMessages --------------------------------------
 
     /** Alice's Messages conversation with her iMessages in it, and OpenBubbles' Reply button held; the replies it gets. */

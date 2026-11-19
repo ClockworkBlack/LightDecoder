@@ -203,9 +203,14 @@ class IMessageManager private constructor(
                     continue
                 }
             }
+            // A picture or video OpenBubbles described in words: a picture slot, filled from its Auto-save copy.
+            val kinds = IMessageCapture.attachmentKinds(message.text)
             added += MessageDto(
                 id = messageId,
                 conversationId = id,
+                parts = kinds?.mapIndexed { i, mime ->
+                    com.lightdecoder.relay.PartDto(partId = i.toString(), kind = "media", mime = mime, width = 4, height = 3)
+                }.orEmpty(),
                 senderId = if (message.fromMe) "" else message.senderHandle.ifEmpty { message.sender },
                 senderName = message.sender,
                 fromMe = message.fromMe,
@@ -213,7 +218,7 @@ class IMessageManager private constructor(
                 direction = if (message.fromMe) "out" else "in",
                 status = if (message.fromMe) STATUS_SENT else "",
                 transport = TRANSPORT,
-                text = message.text,
+                text = if (kinds != null) "" else message.text,
                 // Only what is newer than anything seen from them is announced.
                 isOld = !live || message.fromMe || message.timestampMs <= newestIncoming,
             )
@@ -256,6 +261,7 @@ class IMessageManager private constructor(
             repo.upsertMessage(dto)
             if (live) MessageNotifier.onIncoming(appContext, repo, dto)
         }
+        if (added.any { it.parts.isNotEmpty() }) IMessageMedia.schedule(appContext)
         added
     }
 

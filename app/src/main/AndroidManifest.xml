@@ -37,6 +37,18 @@
         recording bar is on screen. Phones without a microphone still install.
     -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!--
+        Blue Bubbles pictures: OpenBubbles' notification only says "Image"; with its
+        Auto-save Attachments on, the picture is in the gallery, saved by OpenBubbles.
+        LightDecoder reads only files OpenBubbles saved (MediaStore OWNER_PACKAGE_NAME),
+        asked for the first time an iMessage picture is tapped.
+    -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
     <uses-feature
         android:name="android.hardware.microphone"
         android:required="false" />

@@ -457,6 +457,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         MessageNotifier.cancel(this, conversationId, manager.service)
         com.lightdecoder.relay.ReadNotifier.cancel(this, manager.service, conversationId)
         markCompanionVisible()
+        // iMessage pictures OpenBubbles has saved meanwhile.
+        if (com.lightdecoder.imessage.IMessagePrefs.enabled(this) &&
+            (manager.service == ChatService.MESSAGES || manager.service == ChatService.IMESSAGE)
+        ) com.lightdecoder.imessage.IMessageMedia.schedule(this)
     }
 
     override fun onPause() {
@@ -2046,7 +2050,50 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
     }
 
+    private val askMediaAccess = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        if (com.lightdecoder.imessage.IMessageMedia.hasPermission(this)) {
+            com.lightdecoder.imessage.IMessageLog.add(this, "Pictures: photo and video access allowed")
+            com.lightdecoder.imessage.IMessageMedia.schedule(this)
+            explainIMessagePictures(null)
+        } else {
+            com.lightdecoder.imessage.IMessageLog.add(this, "Pictures: photo and video access not allowed (or only some photos)")
+            toast(getString(R.string.imessage_media_partial))
+        }
+    }
+
+    /** An iMessage picture still waiting for OpenBubbles' saved copy: what it needs, and a way to it. */
+    private fun explainIMessagePictures(row: MessageRow?) {
+        if (!com.lightdecoder.imessage.IMessageMedia.hasPermission(this)) {
+            MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.imessage_media_title)
+                .setMessage(getString(R.string.imessage_media_allow) + "\n\n" + getString(R.string.imessage_media_how))
+                .setPositiveButton(R.string.imessage_media_allow_button) { _, _ -> askMediaAccess.launch(com.lightdecoder.imessage.IMessageMedia.permissions()) }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+            return
+        }
+        com.lightdecoder.imessage.IMessageMedia.schedule(this)
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.imessage_media_title)
+            .setMessage(R.string.imessage_media_how)
+            .setPositiveButton(android.R.string.ok, null)
+            .setNeutralButton(R.string.imessage_media_open) { _, _ ->
+                val chat = row?.conversationId?.takeIf { row.let(::backendFor).service == ChatService.IMESSAGE } ?: companionId
+                val opened = (chat != null && com.lightdecoder.imessage.IMessageReplies.open(this, chat)) ||
+                    (chat != null && iMessageLink.handOff(this, chat, "")) || com.lightdecoder.imessage.OpenBubbles.launch(this)
+                if (!opened) toast(errorText(iMessageLink, com.lightdecoder.imessage.IMessageErrors.NOT_INSTALLED))
+            }
+            .show()
+    }
+
     override fun onMediaTap(row: MessageRow, part: MediaRow) {
+        // An iMessage picture waiting for OpenBubbles' saved copy.
+        if ((part.mime == com.lightdecoder.imessage.IMessageCapture.IMAGE || part.mime == com.lightdecoder.imessage.IMessageCapture.VIDEO) &&
+            part.localPath.isEmpty()
+        ) {
+            explainIMessagePictures(row)
+            return
+        }
         val link = manager
         if (PictureGalleryActivity.isPicture(part)) {
             // Pictures open full screen, zoomable, with the conversation's other pictures a swipe away.

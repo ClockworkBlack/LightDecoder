@@ -94,7 +94,16 @@ class MediaLoader(
         jobs.remove(view)?.cancel()
         view.tag = key
         status?.visibility = View.GONE
+        (status as? android.widget.TextView)?.setText(com.lightdecoder.R.string.chat_media_connect_to_load)
         (view as? MediaImageView)?.setMediaSize(part.width, part.height)
+        // An iMessage picture OpenBubbles described in words: it comes from its Auto-save copy, when there is one.
+        if (awaitsFile(part)) {
+            showLoading(view)
+            settle(view)
+            (status as? android.widget.TextView)?.setText(com.lightdecoder.R.string.imessage_media_waiting)
+            status?.visibility = View.VISIBLE
+            return
+        }
         cache.get(key)?.let {
             show(view, it, standIn = false)
             return
@@ -222,6 +231,11 @@ class MediaLoader(
     }
 
     private fun isVideo(part: MediaRow) = part.mime.startsWith("video/")
+
+    /** Nothing to show it from yet: no file, nothing to download, no thumbnail, nothing inline. */
+    private fun awaitsFile(part: MediaRow) =
+        (part.mime == com.lightdecoder.imessage.IMessageCapture.IMAGE || part.mime == com.lightdecoder.imessage.IMessageCapture.VIDEO) &&
+            part.localPath.isEmpty() && part.thumbPath.isEmpty() && part.mediaId.isEmpty() && part.thumbMediaId.isEmpty() && part.inlineData.isEmpty()
 
     /** A local file that really is the media (not an inline preview an older version stored as one). */
     private fun pictureFile(messageId: String, part: MediaRow): File? {

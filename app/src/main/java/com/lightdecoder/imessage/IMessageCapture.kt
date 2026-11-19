@@ -67,6 +67,38 @@ object IMessageCapture {
     /** What OpenBubbles shows in place of a message with its "Hide Message Text" setting on. */
     const val HIDDEN_TEXT = "iMessage"
 
+    /**
+     * The pictures and videos a notification line stands for, when OpenBubbles put a description in
+     * place of them: "Image", "Photo", "Video", or "Attachments: 2 images, 1 movie" (its own wording).
+     * Null for a line of text, or for attachments that are neither (a PDF, a contact card, audio).
+     */
+    fun attachmentKinds(text: String): List<String>? {
+        val t = text.trim()
+        when (t.lowercase().removePrefix("\uD83D\uDCF7").trim()) {
+            "image", "photo", "picture", "gif", "sticker", "1 image", "1 photo" -> return listOf(IMAGE)
+            "video", "movie", "1 video", "1 movie" -> return listOf(VIDEO)
+        }
+        val m = ATTACHMENTS.matchEntire(t) ?: return null
+        val kinds = ArrayList<String>()
+        for (part in m.groupValues[1].split(',')) {
+            val p = COUNTED.matchEntire(part.trim()) ?: continue
+            val n = p.groupValues[1].toIntOrNull()?.coerceIn(1, 10) ?: continue
+            val word = p.groupValues[2].lowercase()
+            val kind = when {
+                word.startsWith("image") || word.startsWith("photo") || word.startsWith("gif") || word.startsWith("sticker") -> IMAGE
+                word.startsWith("movie") || word.startsWith("video") -> VIDEO
+                else -> null
+            } ?: continue
+            repeat(n) { kinds += kind }
+        }
+        return kinds.takeIf { it.isNotEmpty() }
+    }
+
+    const val IMAGE = "image/*"
+    const val VIDEO = "video/*"
+    private val ATTACHMENTS = Regex("(?i)attachments?:\\s*(.+)")
+    private val COUNTED = Regex("(?i)(\\d+)\\s+(\\S+)")
+
     /** [parseOrWhyNot]'s reason for such a notification. */
     const val HIDDEN_REASON = "OpenBubbles hides message text (its setting Hide Message Text is on)"
 

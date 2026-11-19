@@ -55,6 +55,13 @@
     <string name="imessage_light_no_access">LightDecoder is not allowed to read notifications, so it cannot see or answer iMessages. Allow it in Android settings (Notification access).</string>
     <string name="imessage_light_reader_stopped">Android has stopped LightDecoder\u2019s notification reader, so new iMessages are missed until it starts again. Turning notification access off and on for LightDecoder restarts it.</string>
     <string name="imessage_unsend">Unsend (in OpenBubbles)</string>
+    <string name="imessage_media_waiting">Picture from OpenBubbles · tap</string>
+    <string name="imessage_media_title">Pictures from iMessage</string>
+    <string name="imessage_media_how">OpenBubbles\u2019 notifications only say \u201cImage\u201d, so LightDecoder shows the picture from the copy OpenBubbles saves in your gallery, at full quality.\n\nIn OpenBubbles: Settings → Attachments, turn ON \u201cAuto-save Attachments\u201d (and keep Auto-download on).\n\nPictures that came before that show once you open them in OpenBubbles, if Auto-save is on then.</string>
+    <string name="imessage_media_allow">LightDecoder needs to see your photos and videos to show iMessage pictures. It only looks at the ones OpenBubbles saved.</string>
+    <string name="imessage_media_allow_button">Allow</string>
+    <string name="imessage_media_partial">LightDecoder can only see the photos you picked, so new iMessage pictures cannot show. In Android settings, allow LightDecoder all photos and videos.</string>
+    <string name="imessage_media_open">Open in OpenBubbles</string>
     <string name="imessage_edit">Edit (in OpenBubbles)</string>
     <string name="imessage_edit_how">In OpenBubbles, long-press the message and tap Edit (Apple allows it for 15 minutes).</string>
     <string name="imessage_react_how">In OpenBubbles, double-tap the message and pick %1$s.</string>
