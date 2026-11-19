@@ -38,8 +38,8 @@ android {
         applicationId = "com.lightdecoder"
         minSdk = 26
         targetSdk = 36
-        versionCode = 54
-        versionName = "0.5.46"
+        versionCode = 58
+        versionName = "0.5.49"
         // On-device tests (app/src/androidTest): the Blue Bubbles round trip against the
         // stand-in OpenBubbles app (:fakebubbles), run on an emulator by .github/workflows/device-test.yml.
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -594,6 +594,9 @@ dependencies {
     implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
     implementation("androidx.viewpager2:viewpager2:1.1.0")
     // The full emoji picker for reactions (every Unicode emoji, categories, recents, skin tones).
+    // In-app video player (iPhone .mov/HEVC, MP4): Media3 ExoPlayer and its player view.
+    implementation("androidx.media3:media3-exoplayer:1.5.1")
+    implementation("androidx.media3:media3-ui:1.5.1")
     implementation("androidx.emoji2:emoji2-emojipicker:1.5.0") {
         // Annotations only (nothing reads them at run time): not shipped.
         exclude(group = "com.google.code.findbugs", module = "jsr305")

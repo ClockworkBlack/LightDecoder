@@ -2151,6 +2151,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 return@launch
             }
             val mime = part.mime
+            // Videos play here, as they came (an iPhone's .mov included).
+            if (mime.startsWith("video/")) {
+                startActivity(VideoPlayerActivity.intent(this@ThreadActivity, file, title?.toString()))
+                return@launch
+            }
             if (mime.isEmpty() || mime.startsWith("image/")) {
                 try {
                     startActivity(ViewerActivity.intentForFile(this@ThreadActivity, file, mime, title))

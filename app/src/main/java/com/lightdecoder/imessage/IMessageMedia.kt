@@ -141,7 +141,7 @@ object IMessageMedia {
             used += match.id.toString()
             repo.setMediaDetails(item.messageId, item.partId, match.mime, file.length(), match.width, match.height)
             repo.setMediaLocalPath(item.messageId, item.partId, file.path, thumbnail = false)
-            if (match.isVideo) videoStill(context, match)?.let { repo.setMediaLocalPath(item.messageId, item.partId, it.path, thumbnail = true) }
+            if (match.isVideo) videoStill(context, match, file)?.let { repo.setMediaLocalPath(item.messageId, item.partId, it.path, thumbnail = true) }
             given++
             IMessageLog.add(
                 context,
@@ -187,15 +187,27 @@ object IMessageMedia {
     }
 
     /** A still for a video, from Android's own thumbnail (Android 10+). */
-    private fun videoStill(context: Context, saved: Saved): File? {
-        if (Build.VERSION.SDK_INT < 29) return null
+    private fun videoStill(context: Context, saved: Saved, copy: File? = null): File? {
+        val bitmap = (if (Build.VERSION.SDK_INT >= 29) runCatching {
+            context.contentResolver.loadThumbnail(saved.uri, android.util.Size(720, 720), null)
+        }.getOrNull() else null) ?: copy?.let { frameOf(it) } ?: return null
         return runCatching {
-            val bitmap = context.contentResolver.loadThumbnail(saved.uri, android.util.Size(720, 720), null)
             val file = File(MediaCache.mediaDir(context, ChatService.IMESSAGE), "ob-saved-${saved.id}-still.jpg")
             file.outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, it) }
             file
         }.getOrNull()
     }
+
+    /** A frame from the video file itself, when Android has no thumbnail for it. */
+    private fun frameOf(video: File): android.graphics.Bitmap? = runCatching {
+        val r = android.media.MediaMetadataRetriever()
+        try {
+            r.setDataSource(video.path)
+            r.getFrameAtTime(0, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+        } finally {
+            r.release()
+        }
+    }.getOrNull()
 
     private val noted = HashSet<String>()
 
