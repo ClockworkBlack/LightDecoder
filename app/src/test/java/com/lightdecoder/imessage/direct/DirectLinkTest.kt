@@ -56,14 +56,14 @@ class DirectLinkTest {
         db.close()
     }
 
-    private fun incoming(guid: String, from: String, text: String, ts: Long = 1_700_000_000_000L) =
+    private fun incoming(guid: String, from: String, text: String, ts: Long = 1_700_000_000_000L, replyGuid: String? = null) =
         DirectArchive.map(
             MessageInst(
                 guid, from, ConversationData(listOf(me, from), null, null, null),
                 PushChatMessage.Message(
                     NormalMessage(
                         listOf(IndexedMessagePart(MessagePart.Text(text, TextFormat.Flags(TextFlags(false, false, false, false))), null, null)),
-                        null, null, null, MessageType.IMessage, null, null, null, false, null, null,
+                        null, replyGuid, replyGuid?.let { "0:0:0" }, MessageType.IMessage, null, null, null, false, null, null,
                     ),
                 ),
                 ts.toULong(), null, false, false, null,
@@ -121,6 +121,16 @@ class DirectLinkTest {
             ),
         )
         assertNull(DirectLink.get(context).targetOf("iMessage;+;chat123"))
+    }
+
+    @Test
+    fun anInlineReplyFromAnIphoneShowsUnderTheMessageItAnswers() {
+        val link = DirectLink.get(context)
+        link.apply(incoming("G4", bob, "dinner at 7?"))
+        link.apply(incoming("G5", bob, "or 8", ts = 1_700_000_001_000L, replyGuid = "G4"))
+        assertEquals("imsg:G4", repo.message("imsg:G5")!!.replyToId)
+        // And a reply from here to either threads under it on their iPhone.
+        assertEquals("G4", DirectArchive.guidOf(repo.message("imsg:G4")!!.id))
     }
 
     @Test

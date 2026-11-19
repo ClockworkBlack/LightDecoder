@@ -13,11 +13,18 @@ retries and unsends through it. Without the library everything works as in 0.5.5
 below describe the library parts (engine, bridge, keystore, registration); where they say "Messages
 archive" or "imsg: in RelayManager", that was the 0.5.28 design and is replaced by this.
 
+## Inline replies (0.5.57)
+A reply names the answered message's GUID (`NormalMessage.replyGuid`) and the part of it
+(`replyPart`, "<part>:<start>:<end>" of that part's text, as OpenBubbles' `computeWireReplyPart`
+writes it: "0:0:<length>" for a plain text, "0:0:0" when the text is unknown). `DirectLink.deliver`
+works both out from the reply target's row (`imsg:<GUID>`; older rows Blue Bubbles stored from
+notifications have no GUID, and a reply to one goes as a message of its own). Incoming replies are
+stored with `replyToId = imsg:<GUID>`, so the thread shows them under the message they answer.
+
 ## Phone-number verification (0.5.55): SIM first, then SMS
 OpenBubbles 2.0.0's order (`PhoneNumberPage.subscribeSubscription`, default `smsLess = true`):
 1. **SIM ("SMS-less", `SimAuth`)**: needs the app-op `USE_ICC_AUTH_WITH_DEVICE_IDENTIFIER` (user grants
-   it from a shell: `AdbGrant`, LightDecoder's own ADB client over the phone's Wireless debugging,
-   or adb on a computer). mccmnc, IMSI and IMEI of the SIM; subscriber =
+   it from a shell, e.g. adb on a computer; on phones where it is not granted, step 2 is used). mccmnc, IMSI and IMEI of the SIM; subscriber =
    `0<IMSI>@nai.epc.mnc<MNC>.mcc<MCC>.3gppnetwork.org`; the library's `getEntitlements(config, conn,
    mccmnc, subscriber, imei, callback)` talks to the carrier's entitlement server (address in Apple's
    carrier bundle) and calls back with an EAP-AKA challenge; `EapAka.respond` asks the SIM
@@ -71,7 +78,7 @@ restart.
   They talk over two non-exported bound services with `Messenger` (`imessage/ImessageIpc`,
   format `imessage/ImessageWire`):
   - main -> ":imessage" (`ImessageLink` -> `ImessageService`): SEND (target built from the
-    archive, text, reply GUID) -> GUID + time; UNSEND (target, GUID, part); REACH (address) ->
+    archive, text, reply GUID and part) -> GUID + time; UNSEND (target, GUID, part); REACH (address) ->
     the conversation if it is on iMessage. Each waits for Apple's answer; a dead or silent other
     process gives a clear error, never a hang.
   - ":imessage" -> main (`ImessageEngine.sink` -> `ImessageSinkService` -> `ImessageLink.apply`):

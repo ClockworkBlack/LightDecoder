@@ -46,8 +46,16 @@ object DirectWire {
         }
     }
 
-    fun send(target: Target, text: String, replyGuid: String?): JSONObject =
-        JSONObject().put("target", target.toJson()).put("text", text).put("replyGuid", replyGuid ?: JSONObject.NULL)
+    /**
+     * A text to send. An inline reply names the message it answers ([replyGuid]) and the part of it
+     * ([replyPart], "<part>:<start>:<end>" of that message's text, as iMessage expects).
+     */
+    fun send(target: Target, text: String, replyGuid: String?, replyPart: String? = null): JSONObject =
+        JSONObject().put("target", target.toJson()).put("text", text)
+            .put("replyGuid", replyGuid ?: JSONObject.NULL).put("replyPart", replyPart ?: JSONObject.NULL)
+
+    /** iMessage's reply part for a reply to part 0 of a message whose text is [targetText]. */
+    fun replyPart(targetText: String): String = "0:0:" + targetText.length
 
     fun unsend(target: Target, guid: String, part: Int): JSONObject =
         JSONObject().put("target", target.toJson()).put("guid", guid).put("part", part)

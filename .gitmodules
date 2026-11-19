@@ -4,9 +4,3 @@
 [submodule "third_party/libheif"]
 	path = third_party/libheif
 	url = https://github.com/strukturag/libheif
-[submodule "third_party/libadb-android"]
-	path = third_party/libadb-android
-	url = https://github.com/MuntashirAkon/libadb-android.git
-[submodule "third_party/spake2-java"]
-	path = third_party/spake2-java
-	url = https://github.com/MuntashirAkon/spake2-java.git

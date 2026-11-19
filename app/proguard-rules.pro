@@ -33,9 +33,4 @@
 -keep class com.sun.jna.** { *; }
 -keep class * implements com.sun.jna.** { *; }
 -keep class uniffi.rust_bridge.** { *; }
-# The built-in ADB client finds Conscrypt's provider and its key export by name.
--keep class org.conscrypt.** { *; }
--dontwarn org.conscrypt.**
--dontwarn org.bouncycastle.**
--dontwarn javax.naming.**
 -dontwarn java.awt.**

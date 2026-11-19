@@ -19,7 +19,7 @@ import uniffi.rust_bridge.JoinedOsConfig
  *
  * Android lets an app ask the SIM (and read the IMSI and IMEI the carrier wants) only with the
  * app-op USE_ICC_AUTH_WITH_DEVICE_IDENTIFIER, which only the user can grant, from a shell:
- * from the phone itself ([AdbGrant]) or a computer ([adbCommand]). Without it, SMS is used.
+ * from a computer ([adbCommand]). Without it, SMS is used.
  */
 object SimAuth {
 
@@ -38,7 +38,7 @@ object SimAuth {
         false // Android 9 and older do not know the app-op
     }
 
-    /** The shell command that allows it (`adb shell <this>`, or what [AdbGrant] runs). */
+    /** The shell command that allows it (`adb shell <this>`). */
     fun shellCommand(context: Context): Array<String> =
         arrayOf("appops", "set", "--uid", context.packageName, OP_SHELL_NAME, "allow")
 

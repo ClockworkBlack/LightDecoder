@@ -1349,11 +1349,13 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         if (manager.service == ChatService.MESSAGES && companion != null && files.isEmpty() && sendsAsIMessage(text)) {
             logRoute(companion, "silently through OpenBubbles' Reply button")
             val im = iMessageLink
+            // An inline reply to one of the iMessages shown here (threads under it through the iMessage library).
+            val replyTo = replyTarget?.takeIf { it.conversationId == companion }?.id
             scrollToBottomNext = true
             binding.input.setText("")
             clearReply()
             lifecycleScope.launch {
-                withContext(Dispatchers.IO) { relayAttempt { im.sendText(companion, text) } }
+                withContext(Dispatchers.IO) { relayAttempt { im.sendText(companion, text, replyTo) } }
                     .onFailure { toast(errorText(im, it)) }
             }
             return
@@ -1845,8 +1847,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val who = if (row.isOutgoing) getString(R.string.chat_you)
         else row.senderName.ifBlank { getString(R.string.chat_unknown_sender) }
         // Through OpenBubbles' notification an iMessage goes as a message of its own: say so, rather than promise a thread.
-        val asIMessage = backendFor(row).service == ChatService.IMESSAGE || manager.service == ChatService.IMESSAGE ||
-            (manager.service == ChatService.MESSAGES && companionId != null)
+        val asIMessage = (backendFor(row).service == ChatService.IMESSAGE || manager.service == ChatService.IMESSAGE ||
+            (manager.service == ChatService.MESSAGES && companionId != null)) &&
+            // Through the iMessage library a reply to an iMessage threads under it, as on an iPhone.
+            !com.lightdecoder.imessage.direct.DirectLink.get(this).repliesInline(row)
         binding.replySender.text = getString(if (asIMessage) R.string.imessage_replying_to else R.string.chat_replying_to, who)
         binding.replyText.text = ThreadItems.preview(row, getString(R.string.chat_media_picture))
         binding.input.requestFocus()

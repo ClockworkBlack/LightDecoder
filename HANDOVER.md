@@ -8,6 +8,23 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
    had earlier chosen "build with a warning", then "pause on Discord", and has now asked for
    the web-view tab only, with no bridge). **Instagram: skipped** (ban risk, like Messenger).
 
+## 0.5.57 (versionCode 67) - the ADB pairing step is gone; inline replies through the library
+- On the owner's phone the built-in pairing failed ("Could not exchange peer info") while number
+  verification worked without it, so `AdbGrant`, `AdbPairService`, their test, the
+  `libadb-android` / `spake2-java` submodules, Bouncy Castle, Conscrypt and `conscryptMode=OFF` are
+  removed. `SimAuth` is still tried first when the app-op happens to be granted (e.g. by adb from a
+  computer); otherwise the SMS step runs, as before 0.5.55.
+- Inline replies: `DirectWire.send` carries `replyGuid` + `replyPart` ("0:0:<answered text length>",
+  OpenBubbles' `computeWireReplyPart`); `DirectEngine.send` puts them in `NormalMessage`.
+  `ThreadActivity` passes the reply target in a Messages conversation's blue send path too, and the
+  reply bar no longer says "sent as an iMessage of its own" when `DirectLink.repliesInline(row)`.
+  Tests: `DirectWireTest.anInlineReply...`, `DirectLinkTest.anInlineReplyFromAnIphone...`.
+  **Not yet seen on a real iPhone.**
+- Older history: OpenBubbles keeps its chats private (`allowBackup=false`, no export); only iCloud
+  Messages sync through the library (Apple Account sign-in) could bring back what predates the
+  install. Not built.
+- Next version: 0.5.58 / 68.
+
 ## 0.5.56 (versionCode 66) - SIM verification allowed from the phone itself (no Shizuku)
 - Owner asked for no Shizuku. `imessage/direct/AdbGrant` is a built-in ADB client for this phone's own
   Wireless debugging (Android 11+): pairs with the six-digit code and runs the one command

@@ -301,12 +301,12 @@ class DirectEngine private constructor(private val app: Context) {
     }
 
     /** Sends a text and returns its GUID and timestamp once Apple confirmed it. */
-    suspend fun send(target: DirectWire.Target, text: String, replyGuid: String?): Pair<String, Long> {
+    suspend fun send(target: DirectWire.Target, text: String, replyGuid: String?, replyPart: String? = null): Pair<String, Long> {
         val s = requireSession()
         val (conversation, from) = conversationOf(target)
         val message = NormalMessage(
             listOf(IndexedMessagePart(MessagePart.Text(text, TextFormat.Flags(TextFlags(false, false, false, false))), null, null)),
-            null, replyGuid, replyGuid?.let { "0:0:${text.length}" }, MessageType.IMessage, null, null, null, false, null, null,
+            null, replyGuid, replyGuid?.let { replyPart ?: "0:0:0" }, MessageType.IMessage, null, null, null, false, null, null,
         )
         val inst = uniffi.rust_bridge.newMsg(conversation, from, PushChatMessage.Message(message))
         sendAndConfirm(s, inst, unsend = false)
@@ -392,8 +392,7 @@ class DirectEngine private constructor(private val app: Context) {
         const val CONFIRM_TIMEOUT_MS = 45_000L
 
         /** Added to the error when Apple's text gateway stays silent and the SIM route is not allowed yet. */
-        const val NEEDS_SIM = "Many carriers verify the number with the SIM instead of a text. " +
-            "Allow \"Verify with the SIM\" below, then tap Register again."
+        const val NEEDS_SIM = "If this keeps happening, your carrier may verify the number with the SIM instead of a text."
         private const val SESSION_WAIT_MS = 20_000L
 
         /** The public registration relay the iPhone relay apps use by default, and its public token. */

@@ -68,6 +68,16 @@ class DirectWireTest {
     }
 
     @Test
+    fun anInlineReplyNamesTheAnsweredMessageAndItsText() {
+        val t = DirectWire.Target(listOf("tel:+1"), null, null, "tel:+2")
+        val send = JSONObject(DirectWire.send(t, "yes", "GUID-A", DirectWire.replyPart("are you coming?")).toString())
+        assertEquals("GUID-A", send.getString("replyGuid"))
+        // Part 0, from its start to the end of its 15 characters, as OpenBubbles writes it.
+        assertEquals("0:0:15", send.getString("replyPart"))
+        assertTrue(JSONObject(DirectWire.send(t, "hi", null).toString()).isNull("replyPart"))
+    }
+
+    @Test
     fun errorsAreTellableFromAnswers() {
         assertEquals("nope", DirectWire.errorOf(DirectWire.error("nope")))
         assertNull(DirectWire.errorOf(DirectWire.ok()))

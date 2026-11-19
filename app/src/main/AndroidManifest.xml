@@ -25,7 +25,7 @@
     <!--
         The other way to verify the number (imessage/direct/SimAuth): asking the SIM itself, for
         carriers where Apple's text gateway does not answer. Android gives this to an ordinary
-        app only as an app-op the user allows from a shell (AdbGrant, or adb on a computer); declaring it here
+        app only as an app-op the user allows from a shell (adb on a computer); declaring it here
         changes nothing until then.
     -->
     <uses-permission
@@ -294,16 +294,6 @@
         <service
             android:name=".imessage.direct.DirectSinkService"
             android:exported="false" />
-        <!--
-            Allows SIM verification from the phone itself (imessage/direct/AdbGrant): watches for
-            Wireless debugging's pairing offer and takes its code in a notification. Runs only
-            while the user is doing that.
-        -->
-        <service
-            android:name=".imessage.direct.AdbPairService"
-            android:exported="false"
-            android:foregroundServiceType="dataSync"
-            android:process=":imessage" />
         <activity
             android:name=".ui.messenger.MessengerActivity"
             android:exported="false" />

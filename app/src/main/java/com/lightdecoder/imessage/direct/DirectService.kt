@@ -39,6 +39,7 @@ class DirectService : Service() {
                     DirectWire.Target.fromJson(request.getJSONObject("target")),
                     request.getString("text"),
                     request.optString("replyGuid").takeIf { !request.isNull("replyGuid") && it.isNotEmpty() },
+                    request.optString("replyPart").takeIf { request.has("replyPart") && !request.isNull("replyPart") && it.isNotEmpty() },
                 )
                 DirectWire.sent(guid, ts)
             }

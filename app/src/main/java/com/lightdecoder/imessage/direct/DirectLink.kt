@@ -65,6 +65,9 @@ class DirectLink private constructor(private val app: Context) {
         return DirectWire.Target(others, if (group) row.name.ifBlank { null } else null, guid, row.defaultOutgoingId)
     }
 
+    /** Whether a reply to [row] threads under it on iPhones (sent through the library, to a message with a GUID). */
+    fun repliesInline(row: MessageRow): Boolean = DirectArchive.isImessage(row.id) && canSend(row.conversationId)
+
     /** Whether [conversationId] can be sent to through the library (else Blue Bubbles' way is used). */
     fun canSend(conversationId: String): Boolean = active && runCatching { targetOf(conversationId) }.getOrNull() != null
 
@@ -105,9 +108,12 @@ class DirectLink private constructor(private val app: Context) {
         try {
             repo.setLocalState(tmpId, LocalState.SENDING)
             val target = targetOf(conversationId) ?: throw DirectEngine.ImessageError("This chat cannot be reached directly.")
-            val reply = client.call(
-                DirectWire.SEND, DirectWire.send(target, text, replyToId?.let(DirectArchive::guidOf)), SEND_TIMEOUT_MS,
-            )
+            // An inline reply needs the GUID Apple knows the answered message by: messages the
+            // library sent or received have it (imsg:<GUID>); older Blue Bubbles rows do not, and
+            // a reply to one goes as a message of its own.
+            val replyGuid = replyToId?.let(DirectArchive::guidOf)
+            val replyPart = replyGuid?.let { DirectWire.replyPart(repo.message(replyToId)?.text.orEmpty()) }
+            val reply = client.call(DirectWire.SEND, DirectWire.send(target, text, replyGuid, replyPart), SEND_TIMEOUT_MS)
             DirectWire.errorOf(reply)?.let { throw DirectEngine.ImessageError(it) }
             repo.upsertMessage(
                 MessageDto(
