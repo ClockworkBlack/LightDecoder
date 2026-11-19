@@ -8,6 +8,25 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
    had earlier chosen "build with a warning", then "pause on Discord", and has now asked for
    the web-view tab only, with no bridge). **Instagram: skipped** (ban risk, like Messenger).
 
+## 0.5.55 (versionCode 65) - phone number verified with the SIM ("SMS-less"), as OpenBubbles does first
+- On the owner's phone Apple never answered the REG-REQ text (0.5.54 sent it in the right form,
+  screenshot). OpenBubbles 2.0.0 tries **SIM verification first** and SMS only as the fallback:
+  the carrier's entitlement server (from Apple's carrier bundle) challenges the SIM with EAP-AKA and
+  vouches for the number (`getEntitlements` in the library). LightDecoder only had SMS.
+- `imessage/direct/EapAka` (RFC 4187, own implementation; key generator checked against RFC 4186's
+  vectors, `EapAkaTest`), `SimAuth` (IMSI/IMEI/`getIccAuthentication` for the default SMS SIM,
+  `getEntitlements`), `DirectEngine.phoneUser` (SIM first when allowed; SMS when the carrier has
+  none, "Carrier does not support ICC auth!", or when not allowed; a silent SMS gateway now says to
+  allow the SIM way).
+- Android gives the SIM only with the app-op USE_ICC_AUTH_WITH_DEVICE_IDENTIFIER, granted from a
+  shell: `ShizukuGrant` ("Use Shizuku" on the setup screen; Shizuku API 13.1.5, MIT; its provider is
+  in the ":imessage" process) or `adb shell appops set --uid com.lightdecoder
+  USE_ICC_AUTH_WITH_DEVICE_IDENTIFIER allow` (shown, tap to copy).
+- SMS path, also fixed since 0.5.53: trailing `;` in REG-REQ, default SMS SIM, send result checked,
+  data-SMS replies read, paste fallback.
+- **Not verified on a phone**: the SIM handshake against a real carrier, and Shizuku's grant.
+  Next version: 0.5.56 / 66.
+
 ## 0.5.54 (versionCode 64) - iMessage through OpenBubbles' library, powering Blue Bubbles
 Branch `ccr-ffe9dbd4-xu00fq-isolated` = 0.5.53 (`ccr-4fee5e9f-jrrlhu`) + the direct library work.
 The owner chose: the library powers Blue Bubbles; the OpenBubbles-app route stays as the fallback;

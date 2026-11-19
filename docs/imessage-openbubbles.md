@@ -13,6 +13,22 @@ retries and unsends through it. Without the library everything works as in 0.5.5
 below describe the library parts (engine, bridge, keystore, registration); where they say "Messages
 archive" or "imsg: in RelayManager", that was the 0.5.28 design and is replaced by this.
 
+## Phone-number verification (0.5.55): SIM first, then SMS
+OpenBubbles 2.0.0's order (`PhoneNumberPage.subscribeSubscription`, default `smsLess = true`):
+1. **SIM ("SMS-less", `SimAuth`)**: needs the app-op `USE_ICC_AUTH_WITH_DEVICE_IDENTIFIER` (user grants
+   it from a shell: Shizuku or adb). mccmnc, IMSI and IMEI of the SIM; subscriber =
+   `0<IMSI>@nai.epc.mnc<MNC>.mcc<MCC>.3gppnetwork.org`; the library's `getEntitlements(config, conn,
+   mccmnc, subscriber, imei, callback)` talks to the carrier's entitlement server (address in Apple's
+   carrier bundle) and calls back with an EAP-AKA challenge; `EapAka.respond` asks the SIM
+   (`getIccAuthentication(APPTYPE_USIM, AUTHTYPE_EAP_AKA, base64(len|RAND|len|AUTN))`), derives K_aut
+   (MK = SHA-1(identity|IK|CK), FIPS 186-2 generator) and returns the signed EAP response. The library
+   then gets the number + signature and returns the `IdsUser`.
+2. **SMS (`SmsPhoneVerifier`)** when the library says "Carrier does not support ICC auth!", or the
+   app-op is not granted: `REG-REQ?v=3;t=<push token hex>;r=<id>;` to the carrier's gateway, Apple's
+   `REG-RESP?v=3;r=..;n=..;s=..` back (text or data SMS; can be pasted), then `authPhone`.
+On carriers with an entitlement server Apple's SMS gateway may never answer (seen on the owner's
+phone), so a silent gateway now points to step 1.
+
 ## What is built (0.5.28): iMessage inside the Messages tab
 Owner's direction (2026-11-19): no separate tab; iMessage fully in the Messages tab, messages
 arriving whether LightDecoder is open or not, in sync with OpenBubbles, and unsend working after a

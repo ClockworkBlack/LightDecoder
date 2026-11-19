@@ -93,9 +93,8 @@ class SmsPhoneVerifier(private val context: Context) : PhoneVerifier {
             }
             return withTimeoutOrNull(REPLY_TIMEOUT_MS) { reply.await() }
                 ?: throw DirectEngine.ImessageError(
-                    "Apple did not answer the verification text within ${REPLY_TIMEOUT_MS / 60000} minutes. " +
-                        "If a reply starting with REG-RESP arrived in your messages, register again and paste it " +
-                        "when asked. Otherwise check that this SIM can text short codes.",
+                    "$NO_ANSWER within ${REPLY_TIMEOUT_MS / 60000} minutes. If a text starting with REG-RESP did arrive " +
+                        "in your messages, register again and paste it when asked.",
                 )
         } finally {
             manual = null
@@ -166,7 +165,10 @@ class SmsPhoneVerifier(private val context: Context) : PhoneVerifier {
     }
 
     companion object {
-        const val REPLY_TIMEOUT_MS = 3 * 60_000L
+        const val REPLY_TIMEOUT_MS = 2 * 60_000L
+
+        /** How the error starts when Apple's gateway stays silent ([DirectEngine] looks for it). */
+        const val NO_ANSWER = "Apple did not answer the verification text"
         private const val SENT_TIMEOUT_MS = 60_000L
         private const val DATA_SMS_RECEIVED = "android.intent.action.DATA_SMS_RECEIVED"
 

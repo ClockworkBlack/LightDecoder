@@ -201,9 +201,7 @@ class DirectEngine private constructor(private val app: Context) {
         val conn = push.connection
         val anisette = uniffi.rust_bridge.makeAnisette(statePath, config, conn)
 
-        step("Verifying this phone's number by SMS")
-        val reply = phone.verify(uniffi.rust_bridge.getToken(conn))
-        val user = uniffi.rust_bridge.authPhone(conn, config, reply.number, reply.signature)
+        val user = phoneUser(config, conn, phone, ::step)
 
         step("Registering with iMessage")
         val users = listOf(user)
@@ -214,6 +212,43 @@ class DirectEngine private constructor(private val app: Context) {
             statePath, config, conn, anisette, null, result.users ?: users, identity, null, pipeline!!,
         )
         refreshStatus()
+    }
+
+    /**
+     * This phone's number as an iMessage user. As OpenBubbles 2.0.0 does: with the SIM directly when
+     * the user allowed that ([SimAuth]; the carrier vouches for the number, no text is sent), else,
+     * or when the carrier has no such service, by Apple's text-message exchange ([phone]).
+     */
+    private suspend fun phoneUser(
+        config: uniffi.rust_bridge.JoinedOsConfig,
+        conn: uniffi.rust_bridge.ApsConnection,
+        phone: PhoneVerifier,
+        step: (String) -> Unit,
+    ): uniffi.rust_bridge.IdsUser {
+        val simAllowed = SimAuth.allowed(app)
+        if (simAllowed) {
+            step("Verifying this phone's number with its SIM")
+            try {
+                return SimAuth.verify(app, config, conn)
+            } catch (e: ImessageError) {
+                if (SimAuth.UNSUPPORTED !in e.message.orEmpty()) {
+                    throw ImessageError("SIM verification failed: ${e.message}")
+                }
+                Log.i(TAG, "carrier has no SIM verification; using SMS")
+            }
+        }
+        step("Verifying this phone's number by SMS")
+        val reply = try {
+            phone.verify(uniffi.rust_bridge.getToken(conn))
+        } catch (e: ImessageError) {
+            // No answer to the text and the SIM route not allowed yet: that route is the likely fix.
+            throw if (!simAllowed && SmsPhoneVerifier.NO_ANSWER in e.message.orEmpty()) {
+                ImessageError(e.message + " " + NEEDS_SIM)
+            } else {
+                e
+            }
+        }
+        return uniffi.rust_bridge.authPhone(conn, config, reply.number, reply.signature)
     }
 
     /** Waits (a little) for [start] to restore the session, for requests that arrive right after the process starts. */
@@ -355,6 +390,10 @@ class DirectEngine private constructor(private val app: Context) {
     companion object {
         private const val TAG = "Imessage"
         const val CONFIRM_TIMEOUT_MS = 45_000L
+
+        /** Added to the error when Apple's text gateway stays silent and the SIM route is not allowed yet. */
+        const val NEEDS_SIM = "Many carriers verify the number with the SIM instead of a text. " +
+            "Allow \"Verify with the SIM\" below, then tap Register again."
         private const val SESSION_WAIT_MS = 20_000L
 
         /** The public registration relay the iPhone relay apps use by default, and its public token. */

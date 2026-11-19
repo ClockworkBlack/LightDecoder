@@ -20,6 +20,8 @@ import com.lightdecoder.imessage.direct.DirectEngine
 import com.lightdecoder.imessage.direct.DirectEngine.Status
 import com.lightdecoder.imessage.direct.DirectLibrary
 import com.lightdecoder.imessage.direct.DirectPrefs
+import com.lightdecoder.imessage.direct.ShizukuGrant
+import com.lightdecoder.imessage.direct.SimAuth
 import com.lightdecoder.imessage.direct.SmsPhoneVerifier
 import com.lightdecoder.ui.applySystemBarPadding
 import kotlinx.coroutines.Dispatchers
@@ -76,6 +78,19 @@ class DirectSetupActivity : AppCompatActivity() {
         binding.importLibrary.setOnClickListener { pickFiles.launch(arrayOf("*/*")) }
         binding.register.setOnClickListener { onRegister() }
         binding.pasteReply.setOnClickListener { askForReply() }
+        binding.useShizuku.setOnClickListener { useShizuku() }
+        binding.getShizuku.setOnClickListener {
+            try {
+                startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(ShizukuGrant.PLAY_STORE)))
+            } catch (e: android.content.ActivityNotFoundException) {
+                showError(ShizukuGrant.PLAY_STORE)
+            }
+        }
+        binding.adbCommand.setOnClickListener {
+            (getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager)
+                .setPrimaryClip(android.content.ClipData.newPlainText("adb", SimAuth.adbCommand(this)))
+            android.widget.Toast.makeText(this, R.string.imessage_sim_copied, android.widget.Toast.LENGTH_SHORT).show()
+        }
 
         showLibrary()
         engine.start()
@@ -83,6 +98,37 @@ class DirectSetupActivity : AppCompatActivity() {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 engine.status.collect { showStatus(it) }
             }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        showSim() // back from Shizuku, or after the adb command
+    }
+
+    /** Whether the SIM way of verifying the number is allowed, and how to allow it. */
+    private fun showSim() {
+        val allowed = SimAuth.allowed(this)
+        binding.simBody.setText(if (allowed) R.string.imessage_sim_body_on else R.string.imessage_sim_body_off)
+        binding.simActions.visibility = if (allowed) View.GONE else View.VISIBLE
+        binding.adbCommand.visibility = if (allowed) View.GONE else View.VISIBLE
+        binding.adbCommand.text = getString(R.string.imessage_sim_adb, SimAuth.adbCommand(this))
+    }
+
+    private fun useShizuku() {
+        binding.useShizuku.isEnabled = false
+        lifecycleScope.launch {
+            val result = ShizukuGrant.grant(this@DirectSetupActivity)
+            binding.useShizuku.isEnabled = true
+            showSim()
+            showError(
+                when (result) {
+                    ShizukuGrant.Result.Granted -> getString(R.string.imessage_sim_granted)
+                    ShizukuGrant.Result.NotRunning -> getString(R.string.imessage_sim_not_running)
+                    ShizukuGrant.Result.Refused -> getString(R.string.imessage_sim_refused)
+                    is ShizukuGrant.Result.Failed -> getString(R.string.imessage_sim_failed, result.why)
+                },
+            )
         }
     }
 

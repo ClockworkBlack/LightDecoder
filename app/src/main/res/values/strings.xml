@@ -110,7 +110,7 @@
     <string name="imessage_import_ok">%1$s: imported, and it is the OpenBubbles 2.0.0 build.</string>
     <string name="imessage_import_unpinned">%1$s: imported. This copy is not pinned yet (SHA-256 %2$s).</string>
     <string name="imessage_register_title">2. Register this phone\'s number</string>
-    <string name="imessage_register_body">Enter the code shown by the relay app on your iPhone. LightDecoder then verifies this phone\'s number with Apple by one text message, as an iPhone does.</string>
+    <string name="imessage_register_body">Enter the code shown by the relay app on your iPhone. LightDecoder then verifies this phone\'s number: with the SIM if you allowed that below, otherwise by one text message to Apple.</string>
     <string name="imessage_relay_code">Relay code</string>
     <string name="imessage_relay_host">Relay server</string>
     <string name="imessage_relay_code_missing">Enter the relay code from the relay app on your iPhone.</string>
@@ -132,6 +132,17 @@
     <string name="imessage_paste_not_waiting">Nothing is waiting for Apple\'s reply right now. Tap Register first.</string>
     <string name="imessage_paste_not_reply">That is not Apple\'s reply: it should start with REG-RESP and contain r=, n= and s=.</string>
     <string name="imessage_paste_other_request">That reply is for an earlier attempt (its r= number differs). Use the reply to the latest verification text.</string>
+    <string name="imessage_sim_title">Verify with the SIM (no text message)</string>
+    <string name="imessage_sim_body_off">On many carriers Apple never answers the verification text, and the number is verified with the SIM instead (OpenBubbles calls this SMS-less activation). Android lets an app do that only after you allow it once, from a shell:\n\n• Without a computer: install Shizuku, open it, choose \u201cStart via Wireless debugging\u201d and follow its guide. Then tap Use Shizuku here.\n• With a computer: run the command below.\n\nIf you did this for OpenBubbles before, it is the same step, for LightDecoder.</string>
+    <string name="imessage_sim_body_on">Allowed. Registration verifies the number with the SIM first, and by text only if your carrier has no SIM verification.</string>
+    <string name="imessage_sim_use_shizuku">Use Shizuku</string>
+    <string name="imessage_sim_get_shizuku">Get Shizuku</string>
+    <string name="imessage_sim_adb">%1$s\n(tap to copy)</string>
+    <string name="imessage_sim_copied">Command copied</string>
+    <string name="imessage_sim_not_running">Shizuku is not running. Install it from the Play Store (Get Shizuku), open it and start it with \u201cStart via Wireless debugging\u201d: its guide walks you through it. Then come back and tap Use Shizuku.</string>
+    <string name="imessage_sim_refused">Shizuku did not give LightDecoder permission. Tap Use Shizuku again and choose Allow.</string>
+    <string name="imessage_sim_failed">Shizuku could not allow it: %1$s</string>
+    <string name="imessage_sim_granted">Allowed. Now tap Register.</string>
     <string name="imessage_menu">iMessage…</string>
     <string name="imessage_where">Once iMessage is on, iMessage conversations are in the Messages tab with your texts, and LightDecoder stays connected in the background so they arrive whether it is open or not. A new conversation with someone who has iMessage starts as an iMessage.</string>
     <string name="imessage_service_channel">iMessage connection</string>
