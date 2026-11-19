@@ -3304,8 +3304,16 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         sheet.setContentView(view)
         sheet.behavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED
         sheet.behavior.skipCollapsed = true
+        // The sheet would take every vertical drag (it follows the picker's first scrolling list, the
+        // category row), so the emoji list could not be scrolled. It stays put; Back or a tap outside closes it.
+        sheet.behavior.isDraggable = false
+        emojiSheet = sheet
         sheet.show()
     }
+
+    /** The emoji picker open to react with (null when none); for tests. */
+    @androidx.annotation.VisibleForTesting
+    internal var emojiSheet: BottomSheetDialog? = null
 
     override fun onFailedTap(row: MessageRow) {
         // An iMessage that had no Reply button to go through: OpenBubbles sends it instead.

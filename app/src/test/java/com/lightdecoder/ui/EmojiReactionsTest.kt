@@ -21,6 +21,7 @@ import com.lightdecoder.ui.chat.ThreadActivity
 import com.lightdecoder.ui.chat.ThreadItem
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -83,6 +84,8 @@ class EmojiReactionsTest {
             plus.performClick()
             shadowOf(Looper.getMainLooper()).idle()
             assertNotNull("the full picker", ShadowDialog.getLatestDialog().findViewById<View>(R.id.emojiPicker))
+            // The sheet does not take the drags, so the whole emoji list scrolls.
+            scenario.onActivity { a -> assertFalse("the sheet stays put", a.emojiSheet!!.behavior.isDraggable) }
             // Any emoji from it goes to the phone like a quick one.
             scenario.onActivity { a -> a.reactionPicked(row(a), "🔥", null, isIMessage = false) }
             env.eventually(manager, what = "the reaction sent") { fake.reactionsSent.any { it.first == "m1" && it.second == "🔥" } }
