@@ -8,9 +8,12 @@ package com.lightdecoder.imessage.direct
  */
 object PhoneRegSms {
 
-    /** The text to send. The push token is written as upper-case hex. */
+    /**
+     * The text to send, exactly as OpenBubbles 2.0.0 and pypush write it: the push token in upper-case
+     * hex, and a semicolon after the request id too (without it Apple's gateway does not answer).
+     */
     fun request(pushToken: ByteArray, requestId: String): String =
-        "REG-REQ?v=3;t=" + pushToken.joinToString("") { "%02X".format(it) } + ";r=" + requestId
+        "REG-REQ?v=3;t=" + pushToken.joinToString("") { "%02X".format(it) } + ";r=" + requestId + ";"
 
     /** A fresh request id: digits only, so it survives any carrier's SMS handling. */
     fun newRequestId(random: java.util.Random = java.security.SecureRandom()): String =

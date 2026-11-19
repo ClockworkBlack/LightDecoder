@@ -8,6 +8,7 @@ import android.os.Build
 import android.provider.Telephony
 import android.telephony.SmsManager
 import android.telephony.SmsMessage
+import android.telephony.SubscriptionManager
 import android.telephony.TelephonyManager
 import androidx.core.content.ContextCompat
 import kotlin.coroutines.resume
@@ -25,7 +26,11 @@ import uniffi.rust_bridge.CarrierHandler
 class SmsPhoneVerifier(private val context: Context) : PhoneVerifier {
 
     override suspend fun verify(pushToken: ByteArray): PhoneRegSms.Response {
-        val tm = context.getSystemService(TelephonyManager::class.java)
+        // The SIM texts go out from (as OpenBubbles does): the carrier, its gateway, the sending all use it.
+        val subId = SubscriptionManager.getDefaultSmsSubscriptionId()
+        val tm = context.getSystemService(TelephonyManager::class.java)?.let {
+            if (subId != SubscriptionManager.INVALID_SUBSCRIPTION_ID) it.createForSubscriptionId(subId) else it
+        }
         val mccmnc = tm?.simOperator.orEmpty()
         if (mccmnc.isEmpty()) throw DirectEngine.ImessageError("No SIM found: phone-number registration needs this phone's SIM.")
         val gateway = gateway(mccmnc)
@@ -64,8 +69,28 @@ class SmsPhoneVerifier(private val context: Context) : PhoneVerifier {
             context, dataReceiver, data, android.Manifest.permission.BROADCAST_SMS, null, ContextCompat.RECEIVER_EXPORTED,
         )
         manual = ::offer
+        // Whether the carrier took the text: a refusal is said at once, not after minutes of waiting.
+        val sent = CompletableDeferred<Int>()
+        val sentAction = "com.lightdecoder.imessage.REG_REQ_SENT." + requestId
+        val sentReceiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context, intent: Intent) {
+                sent.complete(resultCode)
+            }
+        }
+        ContextCompat.registerReceiver(context, sentReceiver, IntentFilter(sentAction), ContextCompat.RECEIVER_NOT_EXPORTED)
+        val sentIntent = android.app.PendingIntent.getBroadcast(
+            context, 0, Intent(sentAction).setPackage(context.packageName),
+            android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_ONE_SHOT,
+        )
         try {
-            smsManager().sendTextMessage(gateway, null, PhoneRegSms.request(pushToken, requestId), null, null)
+            smsManager(subId).sendTextMessage(gateway, null, PhoneRegSms.request(pushToken, requestId), sentIntent, null)
+            val code = withTimeoutOrNull(SENT_TIMEOUT_MS) { sent.await() }
+            if (code != null && code != android.app.Activity.RESULT_OK) {
+                throw DirectEngine.ImessageError(
+                    "The verification text to Apple ($gateway) could not be sent: ${sendError(code)}. " +
+                        "Check that this SIM has service and can text short codes.",
+                )
+            }
             return withTimeoutOrNull(REPLY_TIMEOUT_MS) { reply.await() }
                 ?: throw DirectEngine.ImessageError(
                     "Apple did not answer the verification text within ${REPLY_TIMEOUT_MS / 60000} minutes. " +
@@ -76,6 +101,7 @@ class SmsPhoneVerifier(private val context: Context) : PhoneVerifier {
             manual = null
             context.unregisterReceiver(textReceiver)
             context.unregisterReceiver(dataReceiver)
+            context.unregisterReceiver(sentReceiver)
         }
     }
 
@@ -116,11 +142,32 @@ class SmsPhoneVerifier(private val context: Context) : PhoneVerifier {
     }
 
     @Suppress("DEPRECATION")
-    private fun smsManager(): SmsManager =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) context.getSystemService(SmsManager::class.java) else SmsManager.getDefault()
+    private fun smsManager(subId: Int): SmsManager {
+        if (subId != SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
+            return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                context.getSystemService(SmsManager::class.java).createForSubscriptionId(subId)
+            } else {
+                SmsManager.getSmsManagerForSubscriptionId(subId)
+            }
+        }
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) context.getSystemService(SmsManager::class.java) else SmsManager.getDefault()
+    }
+
+    /** Android's reason a text was not sent. */
+    private fun sendError(code: Int): String = when (code) {
+        SmsManager.RESULT_ERROR_GENERIC_FAILURE -> "the carrier refused it (generic failure)"
+        SmsManager.RESULT_ERROR_NO_SERVICE -> "no mobile service"
+        SmsManager.RESULT_ERROR_RADIO_OFF -> "the mobile radio is off (airplane mode?)"
+        SmsManager.RESULT_ERROR_NULL_PDU -> "it could not be encoded"
+        SmsManager.RESULT_ERROR_LIMIT_EXCEEDED -> "too many texts sent just now"
+        SmsManager.RESULT_ERROR_SHORT_CODE_NOT_ALLOWED, SmsManager.RESULT_ERROR_SHORT_CODE_NEVER_ALLOWED ->
+            "Android blocked a text to a short code (allow it in LightDecoder's app settings, SMS to premium numbers)"
+        else -> "error $code"
+    }
 
     companion object {
         const val REPLY_TIMEOUT_MS = 3 * 60_000L
+        private const val SENT_TIMEOUT_MS = 60_000L
         private const val DATA_SMS_RECEIVED = "android.intent.action.DATA_SMS_RECEIVED"
 
         /** While a verification waits: takes Apple's reply pasted by the user (setup screen). */

@@ -30,7 +30,7 @@ class DirectLogicTest {
     @Test
     fun theRequestCarriesTheTokenInUpperCaseHex() {
         val text = PhoneRegSms.request(byteArrayOf(0x0a, 0xff.toByte(), 0x00), "123456789")
-        assertEquals("REG-REQ?v=3;t=0AFF00;r=123456789", text)
+        assertEquals("REG-REQ?v=3;t=0AFF00;r=123456789;", text)
     }
 
     @Test
