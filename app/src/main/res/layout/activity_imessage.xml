@@ -208,6 +208,36 @@
                         android:layout_height="wrap_content"
                         android:text="@string/imessage_read_receipts_help"
                         android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                    <!-- iMessage games (DirectPrefs.gamesOn, read in the main process): OpenPigeon plays them. -->
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switchGames"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:minHeight="48dp"
+                        android:text="@string/imessage_games" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/imessage_games_help"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                    <TextView
+                        android:id="@+id/gamesStatus"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:textAppearance="?attr/textAppearanceBodyMedium" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/getGames"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:text="@string/imessage_games_get" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 

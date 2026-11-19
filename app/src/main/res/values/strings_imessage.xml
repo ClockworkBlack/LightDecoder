@@ -260,6 +260,12 @@
     <!-- The iMessage screen (ui/imessage/DirectSetupActivity). -->
     <string name="imessage_read_receipts">Send read receipts</string>
     <string name="imessage_read_receipts_help">When this is on, people are told when you have read their messages (one-to-one chats).</string>
+    <string name="imessage_games">iMessage games</string>
+    <string name="imessage_games_help">Play GamePigeon games with iPhone users in Messages. Uses the free OpenPigeon app.</string>
+    <!-- %1$s: the games app's name (OpenPigeon). -->
+    <string name="imessage_games_not_installed">%1$s is not installed.</string>
+    <string name="imessage_games_get">Get games</string>
+    <string name="imessage_games_ready">Ready. Tap a game in a chat, or choose Games when adding a picture.</string>
     <string name="imessage_status_retrying">Trying again soon</string>
     <!-- %1$s: Apple's reason; %2$d: seconds until the next try. -->
     <string name="imessage_status_retrying_body">Apple could not finish the registration just now (%1$s). LightDecoder tries again by itself in about %2$d seconds.</string>

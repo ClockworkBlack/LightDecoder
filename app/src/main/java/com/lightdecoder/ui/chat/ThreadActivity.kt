@@ -1557,8 +1557,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     /**
-     * The attach button: the photo picker; in an iMessage chat the library can reach, with an
-     * extension app for iMessage games installed (OpenPigeon), a choice of that or "Games".
+     * The attach button: the photo picker; in an iMessage chat the library can reach, with
+     * iMessage games on, a choice of that or "Games" (OpenPigeon's picker, or the offer to install it).
      */
     private fun onAttachTapped() {
         val photos = { pickMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) }
@@ -1570,7 +1570,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                     photos()
                 } else {
                     gamesSheet?.dismiss()
-                    gamesSheet = com.lightdecoder.imessage.madrid.MadridHost.get(this).openPicker(this, chat)
+                    gamesSheet = com.lightdecoder.imessage.madrid.MadridHost.get(this).openGames(this, chat)
                 }
             }
             .show()
@@ -1579,7 +1579,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     /**
      * The iMessage chat a game would be sent to ("Games" in the attach choices): this iMessage chat,
      * or the person's iMessage chat shown in this Messages conversation, when the library can reach
-     * it and an extension app for iMessage games is installed; else null.
+     * it and iMessage games are on (OpenPigeon installed or not); else null.
      */
     private fun gamesChat(): String? {
         if (!directMode()) return null
@@ -1588,7 +1588,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             ChatService.IMESSAGE -> conversationId.takeIf { it in directReachable }
             else -> null
         } ?: return null
-        return chat.takeIf { com.lightdecoder.imessage.madrid.MadridHost.get(this).available(this).isNotEmpty() }
+        return chat.takeIf { com.lightdecoder.imessage.madrid.MadridHost.get(this).gamesOffered(this) }
     }
 
     /** Sends what the composer holds; [effect] is Apple's effect to send it with (iMessage through the library only). */

@@ -7,7 +7,7 @@ import java.io.File
 /**
  * iMessage settings. "Registered" is a file, not SharedPreferences: SharedPreferences are cached
  * per process, and the ":imessage" process sets it while the main process reads it (to start the
- * service at boot and on app start).
+ * service at boot and on app start). So is "iMessage games off" ([gamesOn]), for the same reason.
  *
  * The rest ([prefs]) are the ":imessage" process's own, in a file of their own: the main process's
  * Blue Bubbles settings ([com.lightdecoder.imessage.IMessagePrefs]) are in "imessage", and a
@@ -44,6 +44,28 @@ object DirectPrefs {
     /** Turns read receipts to people on or off (see [sendReadReceipts]). */
     fun setSendReadReceipts(context: Context, on: Boolean) {
         prefs(context).edit().putBoolean(KEY_READ_RECEIPTS, on).apply()
+    }
+
+    private fun gamesOffMarker(context: Context) = File(context.filesDir, "imessage/games-off")
+
+    /**
+     * Whether iMessage games are played here (through OpenPigeon, [com.lightdecoder.imessage.madrid.MadridHost]).
+     * On by default. A file, not [prefs]: the setup screen (":imessage" process) sets it, and the
+     * main process (the host, the chat screen) reads it, where a SharedPreferences cache would not see it change.
+     */
+    fun gamesOn(context: Context): Boolean = !gamesOffMarker(context).isFile
+
+    /** Turns iMessage games on or off (see [gamesOn]). */
+    fun setGamesOn(context: Context, on: Boolean) {
+        runCatching {
+            val f = gamesOffMarker(context)
+            if (on) {
+                f.delete()
+            } else {
+                f.parentFile?.mkdirs()
+                if (!f.isFile) f.writeText("1")
+            }
+        }
     }
 
     private fun marker(context: Context) = File(context.filesDir, "imessage/registered")

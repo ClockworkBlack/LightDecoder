@@ -31,6 +31,7 @@ import com.lightdecoder.imessage.IMessageLog
 import com.lightdecoder.imessage.IMessageManager
 import com.lightdecoder.imessage.direct.DirectArchive
 import com.lightdecoder.imessage.direct.DirectLink
+import com.lightdecoder.imessage.direct.DirectPrefs
 import com.lightdecoder.imessage.direct.IMessageApps
 import com.lightdecoder.imessage.direct.IMessageExtra
 import com.lightdecoder.relay.MessageDto
@@ -57,8 +58,11 @@ import kotlinx.coroutines.launch
  *   ([IMessageViewHandle.setSuppressNotifications]). The session stays open while a handle is
  *   locked ([MadridSessions]).
  * - A move from Apple for an open session goes to the app ([IMadridExtension.messageUpdated]).
- * - "Games" in the composer ([openPicker]): the app's game picker, in a sheet; a game picked there
- *   is sent as a new card.
+ * - "Games" in the composer ([openGames]): the app's game picker, in a sheet; a game picked there
+ *   is sent as a new card. Without the app, an offer to install it.
+ *
+ * Only while "iMessage games" is on ([DirectPrefs.gamesOn]): off, a card's tap is not taken (its
+ * other ways apply), nothing is bound, and no move from Apple is handed over.
  *
  * Main process only. Nothing calls the extension on the main thread; nothing it calls here blocks.
  */
@@ -124,6 +128,7 @@ class MadridHost private constructor(private val app: Context) : IMessageApps.Ho
     // --- a card tapped ----------------------------------------------------------------------------
 
     override fun engage(context: Context, row: MessageRow, app: IMessageExtra.App): Boolean {
+        if (!DirectPrefs.gamesOn(context)) return false
         return when (val route = MadridApps.route(app) { MadridApps.status(context.packageManager, it) }) {
             MadridApps.Route.None -> false
             is MadridApps.Route.Install -> {
@@ -161,18 +166,6 @@ class MadridHost private constructor(private val app: Context) : IMessageApps.Ho
             .setPositiveButton(R.string.imessage_app_install_button) { _, _ -> openStore(context, ext) }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
-    }
-
-    private fun openStore(context: Context, ext: MadridApps.MadridApp) {
-        for (uri in listOf(ext.marketUri, ext.webStoreUri)) {
-            try {
-                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(uri)))
-                return
-            } catch (e: ActivityNotFoundException) {
-                // The next one.
-            }
-        }
-        toast(context.getString(R.string.imessage_app_no_store))
     }
 
     /** Opens [balloon], the card of [row] (an iMessage, the newest of its session), in [ext], with a handle of its own. */
@@ -296,6 +289,7 @@ class MadridHost private constructor(private val app: Context) : IMessageApps.Ho
     // --- moves from Apple, and quiet ----------------------------------------------------------------
 
     override fun appUpdateArrived(conversationId: String, message: MessageDto) {
+        if (!DirectPrefs.gamesOn(app)) return
         val balloon = IMessageExtra.parse(message.extra).app ?: return
         val ext = MadridApps.forApp(balloon) ?: return
         val guid = DirectArchive.guidOf(message.id) ?: return
@@ -313,12 +307,37 @@ class MadridHost private constructor(private val app: Context) : IMessageApps.Ho
         }
     }
 
-    override fun silences(conversationId: String): Boolean = sessions.suppressed(conversationId, now())
+    override fun silences(conversationId: String): Boolean = DirectPrefs.gamesOn(app) && sessions.suppressed(conversationId, now())
 
     // --- "Games" in the composer -------------------------------------------------------------------
 
-    /** The extension apps that can be offered in the composer ("Games"): installed and verified. */
-    fun available(context: Context): List<MadridApps.MadridApp> = MadridApps.installed(context.packageManager)
+    /** The extension apps whose game picker can be opened ([openPicker]): installed and verified; none while games are off. */
+    fun available(context: Context): List<MadridApps.MadridApp> =
+        if (DirectPrefs.gamesOn(context)) MadridApps.installed(context.packageManager) else emptyList()
+
+    /**
+     * Whether "Games" is offered in the composer: while games are on, installed or not (without
+     * the app, choosing it offers to install it: [openGames]).
+     */
+    fun gamesOffered(context: Context): Boolean = DirectPrefs.gamesOn(context) && MadridApps.REGISTRY.isNotEmpty()
+
+    /**
+     * "Games" chosen in the composer, for [conversationId]: the picker of the first extension app
+     * installed ([openPicker]); else the offer to install it, or why the installed copy is not
+     * used. Null when no picker opened (or games are off).
+     */
+    fun openGames(activity: Activity, conversationId: String): Sheet? {
+        if (!DirectPrefs.gamesOn(activity)) return null
+        openPicker(activity, conversationId)?.let { return it }
+        val ext = MadridApps.REGISTRY.firstOrNull() ?: return null
+        when (MadridApps.status(activity.packageManager, ext)) {
+            MadridApps.Status.NOT_INSTALLED -> offerInstall(activity, ext)
+            MadridApps.Status.UNVERIFIED -> toast(activity.getString(R.string.imessage_app_unverified, ext.label))
+            // Verified meanwhile: the picker next time.
+            MadridApps.Status.VERIFIED -> Unit
+        }
+        return null
+    }
 
     /** An open games picker, and the "Send this game?" it led to: the screen that opened it closes it when it goes or changes chat. */
     interface Sheet {
@@ -538,6 +557,24 @@ class MadridHost private constructor(private val app: Context) : IMessageApps.Ho
 
         @Volatile
         private var instance: MadridHost? = null
+
+        /**
+         * Opens [ext]'s page in the store app, else on the web; says so when neither opens. Any
+         * process (the setup screen's "Get games" too).
+         */
+        fun openStore(context: Context, ext: MadridApps.MadridApp) {
+            for (uri in listOf(ext.marketUri, ext.webStoreUri)) {
+                try {
+                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(uri))
+                    if (context !is Activity) intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    context.startActivity(intent)
+                    return
+                } catch (e: ActivityNotFoundException) {
+                    // The next one.
+                }
+            }
+            Toast.makeText(context, context.getString(R.string.imessage_app_no_store), Toast.LENGTH_LONG).show()
+        }
 
         /** Main process only. */
         fun get(context: Context): MadridHost =

@@ -21,6 +21,8 @@ import com.lightdecoder.imessage.direct.DirectEngine.Status
 import com.lightdecoder.imessage.direct.DirectLibrary
 import com.lightdecoder.imessage.direct.DirectPrefs
 import com.lightdecoder.imessage.direct.SmsPhoneVerifier
+import com.lightdecoder.imessage.madrid.MadridApps
+import com.lightdecoder.imessage.madrid.MadridHost
 import com.lightdecoder.ui.applySystemBarPadding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -30,7 +32,8 @@ import kotlinx.coroutines.withContext
  * iMessage setup, from the Messages tab's menu (docs/imessage-openbubbles.md): import OpenBubbles'
  * files, then register this phone's number with the iPhone relay's code. The status is green
  * only once Apple reports the registration. iMessage conversations are then in the Messages tab.
- * Runs in the ":imessage" process, with the library's own settings (read receipts).
+ * Runs in the ":imessage" process, with the library's own settings (read receipts), and "iMessage
+ * games" (a file the main process reads: [DirectPrefs.gamesOn]) with whether OpenPigeon is here.
  */
 class DirectSetupActivity : AppCompatActivity() {
 
@@ -80,6 +83,13 @@ class DirectSetupActivity : AppCompatActivity() {
         // Off by default, as on an iPhone; the library reads it for every read receipt.
         binding.switchReadReceipts.isChecked = DirectPrefs.sendReadReceipts(this)
         binding.switchReadReceipts.setOnCheckedChangeListener { _, on -> DirectPrefs.setSendReadReceipts(this, on) }
+        // On by default; the chat screen and the games host (main process) read it.
+        binding.switchGames.isChecked = DirectPrefs.gamesOn(this)
+        binding.switchGames.setOnCheckedChangeListener { _, on ->
+            DirectPrefs.setGamesOn(this, on)
+            showGames()
+        }
+        binding.getGames.setOnClickListener { MadridHost.openStore(this, MadridApps.OPENPIGEON) }
 
         showLibrary()
         engine.start()
@@ -88,6 +98,30 @@ class DirectSetupActivity : AppCompatActivity() {
                 engine.status.collect { showStatus(it) }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Back from the store, maybe with OpenPigeon installed.
+        showGames()
+    }
+
+    /** Whether games can be played: OpenPigeon installed (and the real one), with "Get games" without it. Nothing while games are off. */
+    private fun showGames() {
+        val ext = MadridApps.OPENPIGEON
+        if (!binding.switchGames.isChecked) {
+            binding.gamesStatus.visibility = View.GONE
+            binding.getGames.visibility = View.GONE
+            return
+        }
+        val status = MadridApps.status(packageManager, ext)
+        binding.gamesStatus.visibility = View.VISIBLE
+        binding.gamesStatus.text = when (status) {
+            MadridApps.Status.NOT_INSTALLED -> getString(R.string.imessage_games_not_installed, ext.label)
+            MadridApps.Status.VERIFIED -> getString(R.string.imessage_games_ready)
+            MadridApps.Status.UNVERIFIED -> getString(R.string.imessage_app_unverified, ext.label)
+        }
+        binding.getGames.visibility = if (status == MadridApps.Status.NOT_INSTALLED) View.VISIBLE else View.GONE
     }
 
     private fun showLibrary() {
