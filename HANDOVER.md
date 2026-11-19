@@ -23,6 +23,17 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.49 (versionCode 58) - videos play in LightDecoder
+- `ui/chat/VideoPlayerActivity`: a conversation's video plays here, full screen, from its own file as it came
+  (iPhone .mov in HEVC or H.264, MP4), with Media3 ExoPlayer + PlayerView (androidx.media3 1.5.1,
+  Apache-2.0, covered by the androidx licence rule). Position is kept through rotation (configChanges)
+  and a restart (saved state). Only files in the app's own storage are played. `ThreadActivity.onMediaTap`
+  sends `video/*` there instead of to another app, for every service.
+- iMessage videos get a still for their bubble: Android's thumbnail, else a frame from the file itself
+  (`MediaMetadataRetriever`, `IMessageMedia.frameOf`).
+- Pictures were already shown from the original file, decoded at the bubble's size, and full resolution and
+  zoomable in the gallery (HEIC included).
+- versionCode 55–57 were wrapper-branch builds, so main jumps to 58 to install over them.
 ## 0.5.48-wrapper (versionCode 57) - BRANCH ccr-4fee5e9f-jrrlhu-wrapper: receipts, tapbacks, unsent, wrapper-off prompt
 - On the user's phone, Unsend and Edit fell back to OpenBubbles. In 0.5.46 that happens when the wrapper is
   switched on but its accessibility service is not running: Android (Samsung especially) can turn it off on

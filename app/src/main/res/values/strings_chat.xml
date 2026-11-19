@@ -296,6 +296,7 @@
     <string name="chat_message_actions">Message options</string>
     <string name="chat_react_with">React with %1$s</string>
     <string name="chat_react_more">More emoji</string>
+    <string name="chat_video_cannot_play">This video could not be played on this phone</string>
     <string name="chat_react_pick_title">React with any emoji</string>
     <string name="chat_action_remove_reaction">Remove my reaction</string>
     <string name="chat_action_reply">Reply</string>

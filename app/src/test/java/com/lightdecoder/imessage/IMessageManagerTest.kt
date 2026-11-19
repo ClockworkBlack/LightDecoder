@@ -267,7 +267,7 @@ class IMessageManagerTest {
         try {
             listener.onNotificationPosted(posted(chat(context, listOf(Line("Hi there", 1_700_000_000_000L, alice)))))
             val deadline = System.currentTimeMillis() + 5_000
-            while (repo.conversation(ALICE_GUID) == null && System.currentTimeMillis() < deadline) {
+            while (messages().isEmpty() && System.currentTimeMillis() < deadline) {
                 idle()
                 Thread.sleep(20)
             }

@@ -9,6 +9,13 @@
         The top bar's overflow menu: its checkboxes (Blue Bubbles) are drawn in the text colour,
         white on the dark theme, instead of the accent colour.
     -->
+    <!-- The video player: black, edge to edge, no title bar. -->
+    <style name="Theme.LightDecoder.Video" parent="Theme.LightDecoder">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:statusBarColor">@android:color/black</item>
+        <item name="android:navigationBarColor">@android:color/black</item>
+    </style>
+
     <style name="ThemeOverlay.LightDecoder.MenuPopup" parent="ThemeOverlay.Material3">
         <item name="colorControlNormal">?attr/colorOnSurface</item>
         <item name="colorControlActivated">?attr/colorOnSurface</item>

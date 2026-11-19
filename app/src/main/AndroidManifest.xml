@@ -322,6 +322,12 @@
         <activity
             android:name=".ui.chat.PictureGalleryActivity"
             android:exported="false" />
+        <!-- A conversation's video, played here (not handed to another app). -->
+        <activity
+            android:name=".ui.chat.VideoPlayerActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize"
+            android:exported="false"
+            android:theme="@style/Theme.LightDecoder.Video" />
         <activity
             android:name=".ui.sticker.StickerMakerActivity"
             android:exported="false" />
