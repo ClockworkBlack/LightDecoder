@@ -33,7 +33,10 @@ import sys
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RUST_LIB = "librust_lib_bluebubbles.so"
+RUST_LIB = "librust_lib_bluebubbles.so"        # up to 1.15.x (Flutter app, flutter_rust_bridge)
+UNIFFI_LIB = "librust_bridge.so"                # 2.0.0 on (native app, uniffi)
+RUST_LIBS = (RUST_LIB, UNIFFI_LIB)
+UNIFFI_RE = re.compile(r"^uniffi_(.+?)_fn_(func|method|constructor)_(.+)$")
 DART_LIB = "libapp.so"
 ABIS = ["arm64-v8a", "armeabi-v7a", "x86_64", "x86"]
 OPAQUE_RE = re.compile(rb"rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInner([A-Za-z0-9]+)")
@@ -197,14 +200,14 @@ def find_libs(path):
 
     def take(where, name, read):
         parts = name.split("/")
-        if len(parts) >= 3 and parts[-3] == "lib" and parts[-1] in (RUST_LIB, DART_LIB):
+        if len(parts) >= 3 and parts[-3] == "lib" and parts[-1] in RUST_LIBS + (DART_LIB,):
             found.setdefault((parts[-2], parts[-1]), (where, read()))
 
     if os.path.isdir(path):
         for root, _d, files in os.walk(path):
             for f in files:
                 p = os.path.join(root, f)
-                if f in (RUST_LIB, DART_LIB):
+                if f in RUST_LIBS + (DART_LIB,):
                     abi = os.path.basename(root)
                     found.setdefault((abi if abi in ABIS else "?", f), (p, open(p, "rb").read()))
                 elif f.lower().endswith((".apk", ".apks", ".xapk", ".apkm")):
@@ -214,8 +217,8 @@ def find_libs(path):
         return found
     data = open(path, "rb").read()
     if data[:4] == b"\x7fELF":
-        is_dart = os.path.basename(path) == DART_LIB
-        found[("?", DART_LIB if is_dart else RUST_LIB)] = (path, data)
+        base = os.path.basename(path)
+        found[("?", base if base in RUST_LIBS + (DART_LIB,) else RUST_LIB)] = (path, data)
         return found
     for sub, z in nested_zips(data):
         for n in z.namelist():
@@ -236,12 +239,56 @@ def load_public():
     return rows, opaque
 
 
+def uniffi_report(name, abi, where, data, elf, syms, out):
+    """A uniffi library: every call is an exported, named C function with a checksum."""
+    print("== %s (%s, %s) - uniffi library" % (name, abi, elf.cpu()), file=out)
+    print("   from    %s" % where, file=out)
+    print("   sha256  %s" % hashlib.sha256(data).hexdigest(), file=out)
+    calls = {}
+    for sym in syms:
+        m = UNIFFI_RE.match(sym)
+        if m:
+            calls.setdefault(m.group(1), []).append((m.group(2), m.group(3), sym))
+    if not calls:
+        print("   no uniffi functions exported", file=out)
+        return 1
+    for crate, items in sorted(calls.items()):
+        cv = syms.get("ffi_%s_uniffi_contract_version" % crate)
+        cvv = decode_return_constant(elf, cv[0]) if cv else None
+        print("   crate %s: %d calls, uniffi contract version %s" % (crate, len(items), cvv), file=out)
+        for kind, rest, sym in sorted(items, key=lambda t: (t[0] != "func", t[1])):
+            ck = syms.get("uniffi_%s_checksum_%s_%s" % (crate, kind, rest))
+            ckv = decode_return_constant(elf, ck[0]) if ck else None
+            ckv = (ckv & 0xFFFF) if ckv is not None else None
+            print("      %-11s %-60s checksum %s" % (kind, rest, ckv), file=out)
+    keys = ("register", "relay", "send", "unsend", "message", "login", "status", "push")
+    hits = sorted({rest for items in calls.values() for _k, rest, _s in items if any(k in rest.lower() for k in keys)})
+    print("   calls that look relevant (register/relay/send/unsend/...): %d" % len(hits), file=out)
+    for h in hits:
+        print("      " + h, file=out)
+    print("   -> Kotlin can call this library directly; exact signatures come from the APK's", file=out)
+    print("      classes*.dex (uniffi Kotlin bindings), e.g. with jadx.", file=out)
+    return 0
+
+
+def dex_report(path, out):
+    """Name the uniffi Kotlin packages found in the APK's dex files."""
+    pk = set()
+    if os.path.isfile(path) and not open(path, "rb").read(4) == b"\x7fELF":
+        for sub, z in nested_zips(open(path, "rb").read()):
+            for n in z.namelist():
+                if re.fullmatch(r"classes\d*\.dex", n):
+                    pk.update(m.decode() for m in re.findall(rb"L(uniffi/[A-Za-z0-9_/]+)/[A-Za-z0-9_$]+;", z.read(n)))
+    if pk:
+        print("== uniffi Kotlin bindings in dex: " + ", ".join(sorted(pk)), file=out)
+
+
 # ---------------------------------------------------------------- report
 
 def report(path, out=sys.stdout):
     libs = find_libs(path)
-    if not any(k[1] == RUST_LIB for k in libs):
-        print("No %s found in %s." % (RUST_LIB, path), file=out)
+    if not any(k[1] in RUST_LIBS for k in libs):
+        print("No %s found in %s." % (" or ".join(RUST_LIBS), path), file=out)
         print("For a Play Store install, use base.apk plus split_config.arm64_v8a.apk (or the whole .xapk).", file=out)
         return 2
     public, public_opaque = load_public()
@@ -251,6 +298,8 @@ def report(path, out=sys.stdout):
         if name != RUST_LIB:
             continue
         elf = Elf(data)
+        if not any(sym.startswith("frb_") or "pde_ffi_dispatcher" in sym for sym in elf.symbols()):
+            continue  # a uniffi-only library under the old name: reported below
         syms = elf.symbols()
         print("== %s (%s, %s)" % (name, abi, elf.cpu()), file=out)
         print("   from    %s" % where, file=out)
@@ -289,6 +338,14 @@ def report(path, out=sys.stdout):
                 if len(names) > 25:
                     print("      %s ... %d more" % (sign, len(names) - 25), file=out)
     for (abi, name), (where, data) in sorted(libs.items()):
+        if name not in RUST_LIBS:
+            continue
+        elf = Elf(data)
+        syms = elf.symbols()
+        if name == RUST_LIB and any(s.startswith("frb_") or "pde_ffi_dispatcher" in s for s in syms):
+            continue  # flutter_rust_bridge build, reported above
+        verdict = min(verdict, uniffi_report(name, abi, where, data, elf, syms, out))
+    for (abi, name), (where, data) in sorted(libs.items()):
         if name != DART_LIB:
             continue
         elf = Elf(data)
@@ -298,6 +355,7 @@ def report(path, out=sys.stdout):
         print("   Dart snapshot hash %s" % (snap or "not found"), file=out)
         if feats:
             print("   snapshot features  %s" % feats, file=out)
+    dex_report(path, out)
     return verdict
 
 
@@ -356,6 +414,26 @@ def self_test():
             ok = all(checks)
             fails += not ok
             print("%-28s %s" % ("xapk report", "ok" if ok else "FAIL %s\n%s" % (checks, text)))
+        # A 2.0.0-style uniffi library.
+        usrc = ("void uniffi_rust_bridge_fn_func_register_relay(void){}\n"
+                "unsigned short uniffi_rust_bridge_checksum_func_register_relay(void){return 51234;}\n"
+                "void uniffi_rust_bridge_fn_method_imclient_unsend(void){}\n"
+                "unsigned short uniffi_rust_bridge_checksum_method_imclient_unsend(void){return 777;}\n"
+                "unsigned int ffi_rust_bridge_uniffi_contract_version(void){return 29;}\n")
+        uc = os.path.join(d, "u.c")
+        open(uc, "w").write(usrc)
+        uso = os.path.join(d, UNIFFI_LIB)
+        r = subprocess.run([clang, "--target=aarch64-linux-android21", "-O2", "-fPIC", "-shared", "-nostdlib",
+                            "-fuse-ld=lld", uc, "-o", uso], capture_output=True, text=True)
+        if r.returncode == 0:
+            buf = io.StringIO()
+            code = report(uso, buf)
+            text = buf.getvalue()
+            checks = [code == 0, "uniffi contract version 29" in text, "checksum 51234" in text,
+                      "checksum 777" in text, "imclient_unsend" in text]
+            ok = all(checks)
+            fails += not ok
+            print("%-28s %s" % ("uniffi report", "ok" if ok else "FAIL %s\n%s" % (checks, text)))
     print("self-test:", "passed" if not fails else "%d failed" % fails)
     return 1 if fails else 0
 

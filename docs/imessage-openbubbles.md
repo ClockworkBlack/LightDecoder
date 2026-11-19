@@ -14,6 +14,23 @@ OpenBubbles 2.0.0 Android APK (see "What is needed next").
   button works for about 2 minutes after sending; the recipient needs iOS 16+ for it to
   disappear on their side; a retract that does not go through shows a clear error.
 
+## Update 2026-11-19: 2.0.0 is not a Flutter app any more
+The owner opened the 2.0.0 XAPK (`config.armeabi_v7a` split, lib/armeabi-v7a). It has
+**no `librust_lib_bluebubbles.so`, no `libflutter.so`, no `libapp.so`**; instead
+`librust_bridge.so` (23 MB on 32-bit ARM) and `libuniffi_runtime.so`. So 2.0.0 is a native
+Android app whose Rust core is reached through **uniffi**, i.e. generated Kotlin bindings.
+If that holds, most of the "Route" section above no longer applies:
+- uniffi calls are exported by name (`uniffi_<crate>_fn_func_*`, `_fn_method_*`) with a
+  checksum per call and a contract version, and the matching Kotlin bindings ship in the
+  same APK's `classes*.dex` (readable with jadx, Apache-2.0).
+- LightDecoder can then call the official 2.0.0 library straight from Kotlin in its
+  `:imessage` process: no Flutter, no Dart, no reverse-engineered byte formats. The
+  import check pins the library's SHA-256 and the per-call checksums.
+- `tools/openbubbles-inspect` now reports uniffi libraries (calls, checksums, contract
+  version, likely register/relay/send/unsend calls, and the uniffi packages in the dex).
+- Still needed: the arm64 `librust_bridge.so` + `libuniffi_runtime.so` and the base APK
+  (for its dex), to read the real call list.
+
 ## What was found
 1. **Why placeholders exist.** Public `OpenBubbles/rustpush` (SSPL-1.0, updated
    2026-10-12) leaves out `certs/fairplay/*` (Apple FairPlay keys used in
