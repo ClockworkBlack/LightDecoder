@@ -86,6 +86,12 @@ class ImessageActivity : AppCompatActivity() {
     }
 
     private fun showLibrary() {
+        if (ImessageLibrary.isBundled(this)) {
+            // This build carries OpenBubbles' files: nothing to import.
+            binding.libraryBody.text = getString(R.string.imessage_library_bundled, ImessageLibrary.processAbi())
+            binding.importLibrary.visibility = android.view.View.GONE
+            return
+        }
         val missing = ImessageLibrary.missing(this)
         binding.libraryBody.text = if (missing.isEmpty()) {
             getString(R.string.imessage_library_ready, ImessageLibrary.processAbi())

@@ -8,6 +8,14 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
    had earlier chosen "build with a warning", then "pause on Discord", and has now asked for
    the web-view tab only, with no bridge). **Instagram: skipped** (ban risk, like Messenger).
 
+## 0.5.29 (versionCode 37) - OpenBubbles' libraries built into the APK on the build machine
+- `bundleImessageLibs` (app/build.gradle.kts) packs `~/.lightdecoder/imessage-libs/<abi>/*.so`
+  into the APK after checking them against `app/imessage-pins.txt`; nothing to import then.
+  Never commit them (public repo) and never publish an APK built with them.
+- 0.5.28's "Package appears to be invalid" on the isolated APK: the file verified fine here
+  (signature, alignment, manifest); most likely an incomplete 155 MB download.
+- Next version: 0.5.30 / 38.
+
 ## 0.5.28 (versionCode 36) - iMessage inside the Messages tab (OpenBubbles 2.0.0's library, user-imported)
 - Everything: `docs/imessage-openbubbles.md` ("What is built"). Code: `imessage/`,
   `ui/imessage/ImessageActivity` (setup, Messages menu > "iMessage..."), routing in
@@ -24,7 +32,7 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
   pictures/attachments, reactions, history from before registration (needs Apple Account/iCloud).
 - **Not tried on a phone.** The owner's pass: registration completes and the status turns green.
 - The release keystore (.p12) the owner sent is kept outside the repo (`*.p12` is ignored);
-  its password is still needed to sign. Next version: 0.5.29 / 37.
+  its password is in the build machine only (never in the repo).
 
 ## Releases and signing
 - Latest: **0.4.2** (versionCode 6), signed with the permanent release key (CN=LightDecoder,

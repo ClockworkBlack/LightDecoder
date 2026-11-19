@@ -103,6 +103,7 @@
     <string name="imessage_library_title">1. OpenBubbles files</string>
     <string name="imessage_library_missing">LightDecoder uses OpenBubbles\' iMessage library, which it does not include. Import these files from the OpenBubbles 2.0.0 app (its lib/%2$s folder): %1$s.</string>
     <string name="imessage_library_ready">Imported (OpenBubbles 2.0.0, %1$s).</string>
+    <string name="imessage_library_bundled">Included in this build of LightDecoder (OpenBubbles 2.0.0, %1$s). Nothing to import.</string>
     <string name="imessage_library_import">Import files…</string>
     <string name="imessage_library_reimport">Import again…</string>
     <string name="imessage_import_result">Import</string>

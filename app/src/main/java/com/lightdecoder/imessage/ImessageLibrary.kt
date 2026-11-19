@@ -50,8 +50,25 @@ object ImessageLibrary {
 
     fun dir(context: Context): File = File(context.filesDir, "imessage/lib/" + processAbi())
 
+    /**
+     * The CPU types this APK carries OpenBubbles' libraries for (built in from the build machine,
+     * see bundleImessageLibs in app/build.gradle.kts; checked against the same pins). Empty for a
+     * build without them, which asks the user to import the files instead.
+     */
+    fun bundledAbis(context: Context): Set<String> = try {
+        context.assets.open("imessage/bundled_abis.txt").bufferedReader().use { r ->
+            r.readLines().map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+        }
+    } catch (e: IOException) {
+        emptySet()
+    }
+
+    /** Whether this APK carries the libraries for this phone: then nothing needs importing. */
+    fun isBundled(context: Context): Boolean = processAbi() in bundledAbis(context)
+
     /** The libraries still missing for this CPU type (empty: ready to load). */
-    fun missing(context: Context): List<String> = REQUIRED.filter { !File(dir(context), it).isFile }
+    fun missing(context: Context): List<String> =
+        if (isBundled(context)) emptyList() else REQUIRED.filter { !File(dir(context), it).isFile }
 
     fun isInstalled(context: Context): Boolean = missing(context).isEmpty()
 
@@ -146,6 +163,14 @@ object ImessageLibrary {
     @Synchronized
     fun load(context: Context) {
         if (loaded) return
+        if (isBundled(context)) {
+            // In the APK: loaded by name, libheifdec first. The bindings then ask for
+            // "rust_bridge" by name too, and get the library already loaded.
+            System.loadLibrary("heifdec")
+            System.loadLibrary("rust_bridge")
+            loaded = true
+            return
+        }
         val dir = dir(context)
         check(isInstalled(context)) { "The OpenBubbles libraries are not imported yet." }
         System.load(File(dir, HEIF).absolutePath)

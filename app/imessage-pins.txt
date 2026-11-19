@@ -1,0 +1,6 @@
+# OpenBubbles 2.0.0 libraries LightDecoder's iMessage bindings were generated for (docs/imessage-openbubbles.md).
+# name  abi  sha256. Read by app/build.gradle.kts (bundleImessageLibs) and checked against
+# ImessageLibrary.PINS by ImessageLogicTest. The libraries themselves are never committed.
+librust_bridge.so arm64-v8a b6dfe8ce44395ca48e041657dc990a534fdaa7acfda1c1d8f2e269d8e332c997
+libheifdec.so arm64-v8a bdabf750465540846ca40b032e64666fb9a5b96b554795e1d809dcfbcb5cb17c
+librust_bridge.so armeabi-v7a 7d62838458723fa2b6fa2a65e48b55f95455cca2fec7ab47ca765daed998e05e

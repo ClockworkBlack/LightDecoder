@@ -1,3 +1,4 @@
+import java.security.MessageDigest
 import java.io.IOException
 import java.util.zip.ZipFile
 
@@ -38,8 +39,8 @@ android {
         applicationId = "com.lightdecoder"
         minSdk = 26
         targetSdk = 36
-        versionCode = 36
-        versionName = "0.5.28"
+        versionCode = 37
+        versionName = "0.5.29"
 
         // The decoder is plain software, so it runs on every ABI. These cover
         // phones (64- and 32-bit ARM) and the emulator.
@@ -605,6 +606,64 @@ val bundleLicenses by tasks.registering {
 }
 
 android.sourceSets["main"].assets.srcDir(generatedLicensesDir)
+
+// --- iMessage: OpenBubbles' libraries, built in from outside the repository ---------
+//
+// The iMessage part uses OpenBubbles 2.0.0's librust_bridge.so and libheifdec.so. They are
+// never committed (this repository is public, and they carry Apple-specific material only
+// OpenBubbles distributes). A build machine that has them puts them in a folder of its own:
+//   <dir>/<abi>/librust_bridge.so and <dir>/<abi>/libheifdec.so
+// with <dir> from LIGHTDECODER_IMESSAGE_LIBS, -Plightdecoder.imessageLibs, or by default
+// ~/.lightdecoder/imessage-libs. Each file must match app/imessage-pins.txt; an ABI is built in
+// only when both are there. Without the folder (CI, anyone else) nothing is built in and the
+// app asks the user to import the files instead. An APK built with them must not be published.
+val imessageLibsDir: File = (
+    signingSetting("LIGHTDECODER_IMESSAGE_LIBS", "lightdecoder.imessageLibs")
+        ?: File(System.getProperty("user.home"), ".lightdecoder/imessage-libs").path
+    ).let { File(it) }
+val imessagePinsFile: File = file("imessage-pins.txt")
+val imessageGeneratedDir: File = layout.buildDirectory.dir("generated/imessage").get().asFile
+
+val bundleImessageLibs by tasks.registering {
+    description = "Checks OpenBubbles' libraries against app/imessage-pins.txt and builds them in, if this machine has them."
+    val src = imessageLibsDir
+    val pins = imessagePinsFile
+    val out = imessageGeneratedDir
+    inputs.file(pins)
+    inputs.files(fileTree(src) { include("*/*.so") }).withPropertyName("libs")
+    inputs.property("dir", src.path)
+    outputs.dir(out)
+    doLast {
+        out.deleteRecursively()
+        val jni = File(out, "jniLibs").apply { mkdirs() }
+        val assets = File(out, "assets/imessage").apply { mkdirs() }
+        val pinned = pins.readLines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }
+            .map { it.split(Regex("\\s+")) }.map { Triple(it[0], it[1], it[2].lowercase()) }
+        val needed = listOf("librust_bridge.so", "libheifdec.so")
+        val bundled = mutableListOf<String>()
+        for (abi in pinned.map { it.second }.distinct().sorted()) {
+            val files = needed.map { File(src, "$abi/$it") }
+            if (!files.all { it.isFile }) continue
+            for (f in files) {
+                val want = pinned.firstOrNull { it.first == f.name && it.second == abi }?.third
+                    ?: throw GradleException("${f.name} for $abi is not pinned in $pins")
+                val have = MessageDigest.getInstance("SHA-256").digest(f.readBytes())
+                    .joinToString("") { "%02x".format(it) }
+                if (have != want) {
+                    throw GradleException("$f is not the pinned OpenBubbles 2.0.0 build (sha256 $have, pinned $want)")
+                }
+                f.copyTo(File(jni, "$abi/${f.name}"), overwrite = true)
+            }
+            bundled += abi
+        }
+        // Which ABIs carry the libraries in this APK (ImessageLibrary.bundledAbis reads it).
+        File(assets, "bundled_abis.txt").writeText(bundled.joinToString("\n"))
+        if (bundled.isNotEmpty()) logger.lifecycle("iMessage: OpenBubbles libraries built in for ${bundled.joinToString()}")
+    }
+}
+android.sourceSets["main"].jniLibs.srcDir(File(imessageGeneratedDir, "jniLibs"))
+android.sourceSets["main"].assets.srcDir(File(imessageGeneratedDir, "assets"))
+tasks.named { it == "preBuild" }.configureEach { dependsOn(bundleImessageLibs) }
 tasks.named { it == "preBuild" }.configureEach { dependsOn(bundleLicenses) }
 
 dependencies {

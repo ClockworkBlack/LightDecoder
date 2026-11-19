@@ -55,6 +55,13 @@ restart.
     open or not.
   - The "registered" flag is a file (`files/imessage/registered`), not SharedPreferences, which
     are cached per process.
+- **Built in (0.5.29)**: a build machine that has the owner's copies puts them in
+  `~/.lightdecoder/imessage-libs/<abi>/` (or `LIGHTDECODER_IMESSAGE_LIBS`); `bundleImessageLibs`
+  checks each against `app/imessage-pins.txt` (a wrong file fails the build) and packs them into
+  the APK's `lib/<abi>/`, so nothing has to be imported (the setup screen says so; they are
+  loaded with `System.loadLibrary`). They are never committed: the repository is public. CI and
+  other builds have no such folder and keep the import step. **An APK built with them is for the
+  owner's devices and must not be published** (e.g. as a GitHub release).
 - **Import** (`imessage/ImessageLibrary`, `ElfInfo`): files identified by SHA-256 against `PINS`
   (arm64: `librust_bridge.so` b6dfe8ce..., `libheifdec.so` bdabf750...), refused if unknown or for
   another CPU type. `libuniffi_runtime.so` is not needed.

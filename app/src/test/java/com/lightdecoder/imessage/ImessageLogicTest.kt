@@ -125,6 +125,15 @@ class ImessageLogicTest {
     }
 
     @Test
+    fun theBuildsPinsAreTheAppsPins() {
+        // app/imessage-pins.txt decides what the build may build in; ImessageLibrary.PINS what an import accepts.
+        val file = listOf(java.io.File("imessage-pins.txt"), java.io.File("app/imessage-pins.txt")).first { it.isFile }
+        val fromFile = file.readLines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }
+            .map { it.split(Regex("\\s+")) }.map { ImessageLibrary.Pin(it[0], it[1], it[2]) }.toSet()
+        assertEquals(ImessageLibrary.PINS.toSet(), fromFile)
+    }
+
+    @Test
     fun theHeifDecoderLoadsBeforeTheBridge() {
         assertEquals(listOf(ImessageLibrary.HEIF, ImessageLibrary.BRIDGE), ImessageLibrary.REQUIRED)
     }
