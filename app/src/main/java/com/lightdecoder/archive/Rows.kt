@@ -57,6 +57,9 @@ data class ParticipantRow(
  * @param direction  "out", "in" or "system"
  * @param localState one of [LocalState]
  * @param media      the media parts, in message order
+ * @param editedAtMs when the sender last edited it; 0 if never
+ * @param extra      display data only one service has (iMessage: JSON, see
+ *   [com.lightdecoder.imessage.direct.IMessageExtra]); empty for the others
  */
 data class MessageRow(
     val id: String,
@@ -78,6 +81,8 @@ data class MessageRow(
     val localState: String,
     val media: List<MediaRow>,
     val updatedAt: Long,
+    val editedAtMs: Long = 0,
+    val extra: String = "",
 ) {
     /** True while only the local copy of an outgoing message exists. */
     val isLocal: Boolean get() = id.startsWith(TMP_PREFIX)

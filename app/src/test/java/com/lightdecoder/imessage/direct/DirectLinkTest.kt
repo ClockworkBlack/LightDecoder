@@ -11,20 +11,28 @@ import com.lightdecoder.relay.ConversationDto
 import com.lightdecoder.relay.ParticipantDto
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import uniffi.rust_bridge.ChatRenameMessage
 import uniffi.rust_bridge.ConversationData
+import uniffi.rust_bridge.EditMessage
+import uniffi.rust_bridge.ErrorMessage
 import uniffi.rust_bridge.IndexedMessagePart
 import uniffi.rust_bridge.MessageInst
 import uniffi.rust_bridge.MessagePart
 import uniffi.rust_bridge.MessageType
 import uniffi.rust_bridge.NormalMessage
 import uniffi.rust_bridge.PushChatMessage
+import uniffi.rust_bridge.ReactMessage
+import uniffi.rust_bridge.ReactMessageType
+import uniffi.rust_bridge.Reaction
 import uniffi.rust_bridge.TextFlags
 import uniffi.rust_bridge.TextFormat
+import uniffi.rust_bridge.UnsendMessage
 
 /**
  * The library's messages land in Blue Bubbles' iMessage archive, in its conventions: a person's
@@ -68,8 +76,25 @@ class DirectLinkTest {
                 ),
                 ts.toULong(), null, false, false, null,
             ),
-            setOf(me), Handles::display,
-        ).let { DirectWire.decode(DirectWire.encode(it)) } // as it arrives from the other process
+            setOf(me), Handles::display, DirectTexts(context),
+        ).let(::wire)
+
+    /** As it arrives from the other process. */
+    private fun wire(u: DirectArchive.Update) = DirectWire.decode(org.json.JSONObject(DirectWire.encode(u).toString()))
+
+    private fun event(guid: String, from: String, m: PushChatMessage, participants: List<String> = listOf(me, from), groupGuid: String? = null) =
+        DirectArchive.map(
+            MessageInst(guid, from, ConversationData(participants, null, groupGuid, null), m, 1_700_000_009_000UL, null, false, false, null),
+            setOf(me), Handles::display, DirectTexts(context),
+        ).let(::wire)
+
+    private fun sentHere(guid: String, text: String, ts: Long = 1_700_000_000_000L) = repo.upsertMessage(
+        com.lightdecoder.relay.MessageDto(
+            id = "imsg:$guid", conversationId = "imsg:$bob", fromMe = true, timestampMs = ts, direction = "out",
+            status = DirectArchive.STATUS_SENT, statusCode = 1, transport = IMessageManager.TRANSPORT, text = text,
+            parts = listOf(com.lightdecoder.relay.PartDto("0", "text", text)),
+        ),
+    )
 
     @Test
     fun aPersonsBlueBubblesChatIsReused() {
@@ -134,11 +159,200 @@ class DirectLinkTest {
     }
 
     @Test
-    fun receiptsAndUnsendsReachTheStoredMessages() {
+    fun aRemovedMessageGoes() {
         val link = DirectLink.get(context)
-        link.apply(incoming("G3", bob, "to be unsent"))
+        link.apply(incoming("G3", bob, "to be removed"))
         link.apply(DirectArchive.Update.Remove("imsg:G3"))
         assertNull(repo.message("imsg:G3"))
+    }
+
+    @Test
+    fun anUnsentMessageLeavesWhoUnsentIt() {
+        val link = DirectLink.get(context)
+        link.apply(incoming("U1", bob, "oops"))
+        link.apply(event("X1", bob, PushChatMessage.Unsend(UnsendMessage("U1", 0UL))))
+        val row = repo.message("imsg:U1")!!
+        assertEquals("system", row.direction)
+        assertEquals("+15559876543 unsent a message.", row.text)
+        // One the user unsent on their iPhone.
+        sentHere("U2", "mine", ts = 1_700_000_001_000L)
+        link.apply(event("X2", me, PushChatMessage.Unsend(UnsendMessage("U2", 0UL)), participants = listOf(me, bob)))
+        assertEquals("You unsent a message.", repo.message("imsg:U2")!!.text)
+        // Apple sending the message again does not bring it back.
+        link.apply(incoming("U1", bob, "oops"))
+        assertEquals("system", repo.message("imsg:U1")!!.direction)
+    }
+
+    @Test
+    fun unsendingOnePartOfSeveralKeepsTheRest() {
+        val link = DirectLink.get(context)
+        val parts = listOf(
+            IndexedMessagePart(MessagePart.Text("look", TextFormat.Flags(TextFlags(false, false, false, false))), 0UL, null),
+            IndexedMessagePart(MessagePart.Text("and this", TextFormat.Flags(TextFlags(false, false, false, false))), 1UL, null),
+        )
+        link.apply(event("U3", bob, PushChatMessage.Message(NormalMessage(parts, null, null, null, MessageType.IMessage, null, null, null, false, null, null))))
+        assertEquals("look\nand this", repo.message("imsg:U3")!!.text)
+        link.apply(event("X3", bob, PushChatMessage.Unsend(UnsendMessage("U3", 1UL))))
+        val row = repo.message("imsg:U3")!!
+        assertEquals("in", row.direction)
+        assertEquals("look", row.text)
+        assertEquals(0L, row.editedAtMs)
+    }
+
+    @Test
+    fun anEditRebuildsTheTextAndKeepsReactions() {
+        val link = DirectLink.get(context)
+        link.apply(incoming("E1", bob, "dinner at 7"))
+        link.apply(DirectArchive.Update.Reaction("imsg:E1", "me", "👍", true, true, 1))
+        link.apply(event("X4", bob, PushChatMessage.Edit(EditMessage("E1", 0UL, listOf(IndexedMessagePart(MessagePart.Text("dinner at 8", TextFormat.Flags(TextFlags(false, false, false, false))), null, null))))))
+        val row = repo.message("imsg:E1")!!
+        assertEquals("dinner at 8", row.text)
+        assertEquals(1_700_000_009_000L, row.editedAtMs)
+        assertEquals(1, IMessageExtra.parse(row.extra).edits)
+        assertEquals(listOf(com.lightdecoder.relay.ReactionDto("👍", listOf("me"), fromMe = true)), row.reactions)
+        // Apple sending the original again keeps the edit and the reaction.
+        link.apply(incoming("E1", bob, "dinner at 7"))
+        assertEquals("dinner at 8", repo.message("imsg:E1")!!.text)
+        assertEquals(1, repo.message("imsg:E1")!!.reactions.size)
+    }
+
+    @Test
+    fun tapbacksAreOnePerPersonAndTheUserIsMe() {
+        val link = DirectLink.get(context)
+        link.apply(incoming("T1", bob, "hello"))
+        fun react(from: String, r: Reaction, enable: Boolean = true) =
+            link.apply(event("R-${r.hashCode()}-$enable", from, PushChatMessage.React(ReactMessage("T1", 0UL, ReactMessageType.React(r, enable), "", null)), participants = listOf(me, bob)))
+        react(bob, Reaction.Heart)
+        react(me, Reaction.Laugh)
+        assertEquals(
+            listOf(com.lightdecoder.relay.ReactionDto("❤️", listOf("+15559876543")), com.lightdecoder.relay.ReactionDto("😂", listOf("me"), fromMe = true)),
+            repo.message("imsg:T1")!!.reactions,
+        )
+        react(bob, Reaction.Heart, enable = false)
+        assertEquals(listOf(com.lightdecoder.relay.ReactionDto("😂", listOf("me"), fromMe = true)), repo.message("imsg:T1")!!.reactions)
+    }
+
+    @Test
+    fun aReceiptBeforeItsMessageIsAppliedOnceTheMessageIsStored() {
+        val link = DirectLink.get(context)
+        // Apple's Delivered arrives before the send returned.
+        link.apply(event("S1", bob, PushChatMessage.Delivered))
+        link.apply(DirectArchive.Update.Reaction("imsg:S1", "+15559876543", "❤️", true, false, 5))
+        link.apply(incoming("S1", me, "sent from the Mac"))
+        val row = repo.message("imsg:S1")!!
+        assertEquals(DirectArchive.STATUS_DELIVERED, row.status)
+        assertEquals("❤️", row.reactions.single().emoji)
+        // A later copy of the message does not put the status back.
+        link.apply(incoming("S1", me, "sent from the Mac"))
+        assertEquals(DirectArchive.STATUS_DELIVERED, repo.message("imsg:S1")!!.status)
+    }
+
+    @Test
+    fun aFailureMarksTheUsersMessageUnlessItWasDelivered() {
+        val link = DirectLink.get(context)
+        sentHere("F1", "one")
+        sentHere("F2", "two")
+        link.apply(DirectArchive.Update.Receipt(listOf("imsg:F2"), DirectArchive.STATUS_DELIVERED))
+        link.apply(event("X5", me, PushChatMessage.Error(ErrorMessage("F1", 4UL, "Not delivered"))))
+        link.apply(event("X6", me, PushChatMessage.Error(ErrorMessage("F2", 4UL, "Not delivered"))))
+        assertEquals(DirectArchive.STATUS_FAILED, repo.message("imsg:F1")!!.status)
+        assertEquals("Not delivered", repo.message("imsg:F1")!!.errorText)
+        assertEquals(DirectArchive.STATUS_DELIVERED, repo.message("imsg:F2")!!.status)
+    }
+
+    @Test
+    fun readOnAnotherDeviceMarksTheChatRead() {
+        val link = DirectLink.get(context)
+        link.apply(incoming("R1", bob, "first", ts = 1_700_000_000_000L))
+        link.apply(incoming("R2", bob, "second", ts = 1_700_000_001_000L))
+        assertTrue(repo.conversation("imsg:$bob")!!.unread)
+        // Read up to the first only: the second is still unread.
+        link.apply(event("R1", me, PushChatMessage.Read))
+        assertTrue(repo.conversation("imsg:$bob")!!.unread)
+        link.apply(event("R2", me, PushChatMessage.Read))
+        assertFalse(repo.conversation("imsg:$bob")!!.unread)
+    }
+
+    @Test
+    fun typingShowsUntilTheyStopOrWrite() {
+        val link = DirectLink.get(context)
+        val manager = IMessageManager.get(context)
+        link.apply(incoming("Y0", bob, "hi"))
+        link.apply(event("Y1", bob, PushChatMessage.Typing(true, null)))
+        assertEquals(mapOf("imsg:$bob" to setOf("+15559876543")), manager.typing.value)
+        link.apply(event("Y2", bob, PushChatMessage.Typing(false, null)))
+        assertTrue(manager.typing.value.isEmpty())
+        link.apply(event("Y3", bob, PushChatMessage.Typing(true, null)))
+        link.apply(incoming("Y4", bob, "there", ts = 1_700_000_002_000L))
+        assertTrue(manager.typing.value.isEmpty())
+    }
+
+    @Test
+    fun aGroupsEventsAreRowsThatAreNotUnread() {
+        val link = DirectLink.get(context)
+        link.apply(event("GE1", bob, PushChatMessage.RenameMessage(ChatRenameMessage("Ski trip")), participants = listOf(me, bob, alice), groupGuid = "G-1"))
+        val id = "imsg:group:G-1"
+        assertEquals("Ski trip", repo.conversation(id)!!.name)
+        val row = repo.message("imsg:GE1")!!
+        assertEquals("system", row.direction)
+        assertEquals("+15559876543 named the conversation “Ski trip”.", row.text)
+        assertFalse(repo.conversation(id)!!.unread)
+        assertEquals("me", repo.participants(id).single { it.isMe }.id)
+    }
+
+    @Test
+    fun sendingNamesTheChatsLatestMessage() {
+        val link = DirectLink.get(context)
+        link.apply(incoming("L1", bob, "hi"))
+        assertEquals("L1", link.targetOf("imsg:$bob")!!.afterGuid)
+    }
+
+    @Test
+    fun heldChangesWaitTwoMinutesAtMost() {
+        val held = HeldUpdates(windowMs = 120_000, maxMessages = 2)
+        val r = DirectArchive.Update.Receipt(listOf("imsg:A"), DirectArchive.STATUS_READ)
+        held.hold("imsg:A", r, 0)
+        assertEquals(listOf(r), held.take("imsg:A", 120_000))
+        assertTrue("taken once", held.take("imsg:A", 120_000).isEmpty())
+        held.hold("imsg:A", r, 0)
+        assertTrue("too old", held.take("imsg:A", 120_001).isEmpty())
+        held.hold("imsg:A", r, 0)
+        held.hold("imsg:B", r, 0)
+        held.hold("imsg:C", r, 0)
+        assertTrue("the oldest goes first", held.take("imsg:A", 1).isEmpty())
+        assertEquals(listOf(r), held.take("imsg:C", 1))
+    }
+
+    @Test
+    fun theStringsForGroupEventsReadAsOnAnIphone() {
+        val t = DirectTexts(context)
+        val e = DirectArchiveTest.TestTexts
+        assertEquals(e.named("Bob", "Trip"), t.named("Bob", "Trip"))
+        assertEquals(e.added("Bob", "Dave"), t.added("Bob", "Dave"))
+        assertEquals(e.removed("Bob", "you"), t.removed("Bob", "you"))
+        assertEquals(e.left("Carol"), t.left("Carol"))
+        assertEquals(e.changedPhoto("You"), t.changedPhoto("You"))
+        assertEquals(e.removedPhoto("Bob"), t.removedPhoto("Bob"))
+        assertEquals("You", t.you)
+        assertEquals("you", t.youObject)
+    }
+
+    @Test
+    fun directModesSettingsAreItsOwnAndKeepTheRelayCode() {
+        // Before: the relay code was kept in the main process's "imessage" file.
+        val old = context.getSharedPreferences("imessage", Context.MODE_PRIVATE)
+        old.edit().putString(DirectPrefs.KEY_CODE, "ABCD").putString(DirectPrefs.KEY_HOST, "https://relay.example").putBoolean("enabled", true).commit()
+        val prefs = DirectPrefs.prefs(context)
+        assertEquals("ABCD", prefs.getString(DirectPrefs.KEY_CODE, null))
+        assertEquals("https://relay.example", prefs.getString(DirectPrefs.KEY_HOST, null))
+        // Read, never written: the main process's file is as it was.
+        assertEquals(setOf(DirectPrefs.KEY_CODE, DirectPrefs.KEY_HOST, "enabled"), old.all.keys)
+        // Once only: a later change of the old file is not taken again.
+        prefs.edit().putString(DirectPrefs.KEY_CODE, "NEW").commit()
+        assertEquals("NEW", DirectPrefs.prefs(context).getString(DirectPrefs.KEY_CODE, null))
+        assertFalse(DirectPrefs.sendReadReceipts(context))
+        DirectPrefs.setSendReadReceipts(context, true)
+        assertTrue(DirectPrefs.sendReadReceipts(context))
     }
 
     companion object {

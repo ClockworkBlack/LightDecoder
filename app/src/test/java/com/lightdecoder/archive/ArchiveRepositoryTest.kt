@@ -627,7 +627,7 @@ class ArchiveRepositoryTest {
         db.onUpgrade(raw, 1, ArchiveDb.VERSION)
         assertTrue(indexes(raw).containsAll(listOf("idx_media_local_path", "idx_media_thumb_path")))
         assertNotNull(repo.mediaPart("m1", "p1"))
-        assertEquals(2, ArchiveDb.VERSION)
+        assertEquals(3, ArchiveDb.VERSION)
         // The used-file check goes through them, not a scan of the table.
         val plan = raw.rawQuery(
             "EXPLAIN QUERY PLAN SELECT 1 FROM media WHERE local_path = ? OR thumb_path = ? LIMIT 1", arrayOf("a", "a"),

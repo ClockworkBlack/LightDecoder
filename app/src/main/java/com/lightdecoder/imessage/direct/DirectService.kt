@@ -23,8 +23,9 @@ import org.json.JSONObject
 /**
  * The ":imessage" process's service: keeps the iMessage session connected (in the foreground,
  * like the Google Messages link's service) so iMessages reach the Messages tab whether a screen is
- * open or not, answers the main process's requests ([DirectWire.SEND], [DirectWire.UNSEND],
- * [DirectWire.REACH]), and hands what Apple sends to the main process's [DirectSinkService].
+ * open or not, answers the main process's requests ([DirectWire]: send, unsend, reach, edit,
+ * react, typing, read, download), and hands what Apple sends to the main process's
+ * [DirectSinkService].
  */
 class DirectService : Service() {
 
@@ -35,29 +36,41 @@ class DirectService : Service() {
     private val server = DirectIpc.Server { what, request ->
         when (what) {
             DirectWire.SEND -> {
-                val (guid, ts) = engine.send(
-                    DirectWire.Target.fromJson(request.getJSONObject("target")),
-                    request.getString("text"),
-                    request.optString("replyGuid").takeIf { !request.isNull("replyGuid") && it.isNotEmpty() },
-                    request.optString("replyPart").takeIf { request.has("replyPart") && !request.isNull("replyPart") && it.isNotEmpty() },
-                )
-                DirectWire.sent(guid, ts)
+                val r = DirectWire.SendRequest.fromJson(request)
+                engine.send(r.target, r.text, r.replyGuid, r.replyPart, r.effect, r.attachments, r.voice).toJson()
             }
             DirectWire.UNSEND -> {
-                engine.unsend(
-                    DirectWire.Target.fromJson(request.getJSONObject("target")),
-                    request.getString("guid"),
-                    request.optInt("part", 0),
-                )
+                engine.unsend(target(request), request.getString("guid"), request.optInt("part", 0))
                 DirectWire.ok()
             }
             DirectWire.REACH -> {
                 val conversation = engine.reach(request.getString("recipient"))
                 if (conversation != null) JSONObject().put("conversation", conversation.toJson()) else JSONObject()
             }
+            DirectWire.EDIT -> {
+                engine.edit(target(request), request.getString("guid"), request.optInt("part", 0), request.getString("text"))
+                DirectWire.ok()
+            }
+            DirectWire.REACT -> DirectWire.guid(
+                engine.react(
+                    target(request), request.getString("guid"), request.optInt("part", 0), request.getString("emoji"),
+                    request.optBoolean("enable", true), request.optString("targetText"),
+                ),
+            )
+            DirectWire.TYPING -> {
+                engine.typing(target(request), request.optBoolean("typing"))
+                DirectWire.ok()
+            }
+            DirectWire.READ -> {
+                engine.read(target(request), request.getString("guid"))
+                DirectWire.ok()
+            }
+            DirectWire.DOWNLOAD -> DirectWire.downloaded(engine.download(request.getString("descriptor"), request.getString("path")))
             else -> DirectWire.error("Unknown request $what")
         }
     }
+
+    private fun target(request: JSONObject) = DirectWire.Target.fromJson(request.getJSONObject("target"))
 
     override fun onBind(intent: Intent?): IBinder = server.messenger.binder
 

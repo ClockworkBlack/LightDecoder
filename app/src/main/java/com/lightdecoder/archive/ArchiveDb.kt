@@ -33,11 +33,22 @@ class ArchiveDb(context: Context, name: String? = NAME) :
 
     override fun onCreate(db: SQLiteDatabase) {
         SCHEMA.forEach(db::execSQL)
+        addMessageColumns(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         // Version 2: indexes on the media paths, for the check whether a file is still used.
         if (oldVersion < 2) MEDIA_PATH_INDEXES.forEach(db::execSQL)
+        // Version 3: when a message was last edited, and a service's own display data.
+        if (oldVersion < 3) addMessageColumns(db)
+    }
+
+    /** The version 3 columns of messages that are not there yet. */
+    private fun addMessageColumns(db: SQLiteDatabase) {
+        val have = db.rawQuery("PRAGMA table_info(messages)", null).use { c ->
+            buildSet { while (c.moveToNext()) add(c.getString(c.getColumnIndexOrThrow("name"))) }
+        }
+        for ((column, sql) in MESSAGE_V3_COLUMNS) if (column !in have) db.execSQL(sql)
     }
 
     companion object {
@@ -48,7 +59,7 @@ class ArchiveDb(context: Context, name: String? = NAME) :
         const val NAME_WHATSAPP = "whatsapp-archive.db"
         const val NAME_GMAIL = "gmail-archive.db"
         const val NAME_IMESSAGE = "imessage-archive.db"
-        const val VERSION = 2
+        const val VERSION = 3
 
         /** The database file of [service]'s archive. */
         fun nameFor(service: ChatService): String = when (service) {
@@ -69,6 +80,16 @@ class ArchiveDb(context: Context, name: String? = NAME) :
             "CREATE INDEX IF NOT EXISTS idx_media_thumb_path ON media(thumb_path)",
         )
 
+        /**
+         * Version 3, on messages: `edited_at`, when the sender last edited it (ms; 0 = never), and
+         * `extra_json`, display data only one service has (iMessage: [com.lightdecoder.imessage.direct.IMessageExtra]).
+         */
+        private val MESSAGE_V3_COLUMNS = listOf(
+            "edited_at" to "ALTER TABLE messages ADD COLUMN edited_at INTEGER NOT NULL DEFAULT 0",
+            "extra_json" to "ALTER TABLE messages ADD COLUMN extra_json TEXT NOT NULL DEFAULT ''",
+        )
+
+        /** Versions 1 and 2; [addMessageColumns] adds version 3's. */
         private val SCHEMA get() = BASE_SCHEMA + MEDIA_PATH_INDEXES
 
         /** Version 1. */

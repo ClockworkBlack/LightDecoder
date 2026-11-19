@@ -14,11 +14,14 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
+import uniffi.rust_bridge.AttachmentType
 import uniffi.rust_bridge.ConversationData
+import uniffi.rust_bridge.EditMessage
 import uniffi.rust_bridge.EventPipeline
 import uniffi.rust_bridge.IndexedMessagePart
 import uniffi.rust_bridge.MessageInst
@@ -28,6 +31,8 @@ import uniffi.rust_bridge.MessageType
 import uniffi.rust_bridge.NormalMessage
 import uniffi.rust_bridge.PushChatMessage
 import uniffi.rust_bridge.PushEvent
+import uniffi.rust_bridge.ReactMessage
+import uniffi.rust_bridge.ReactMessageType
 import uniffi.rust_bridge.RegisterState
 import uniffi.rust_bridge.RustBridgeException
 import uniffi.rust_bridge.SharedPushStateHandle
@@ -44,10 +49,13 @@ import uniffi.rust_bridge.UnsendMessage
  * - [register]: relay code -> device identity -> Apple push connection -> this phone's number,
  *   verified by SMS -> iMessage registration -> live session. Green ([Status.Registered]) only
  *   once Apple reports the registration as done.
- * - [send] / [unsend] for a [DirectWire.Target] the main process built from its archive, so
- *   unsend works after a restart of either process.
+ * - [send], [unsend], [edit], [react], [typing], [read] for a [DirectWire.Target] the main
+ *   process built from its archive, so they work after a restart of either process; [download]
+ *   fetches an attachment.
  * - Incoming events are mapped to archive changes ([DirectArchive]) and handed to [sink] in
- *   order; each is acknowledged to the library only once the main process stored it.
+ *   order, once the user's own addresses are known (else the user's messages would look like
+ *   someone else's); each is acknowledged to the library only once the main process stored it,
+ *   and the sender gets a delivery receipt first, as from an iPhone.
  */
 class DirectEngine private constructor(private val app: Context) {
 
@@ -77,16 +85,24 @@ class DirectEngine private constructor(private val app: Context) {
 
     private var started = false
     private var pipeline: EventPipeline? = null
-    private var session: SharedPushStateHandle? = null
 
     @Volatile
-    private var myHandles: List<String> = emptyList()
+    private var session: SharedPushStateHandle? = null
+
+    /** The user's own addresses, as the library registered them; empty until known. */
+    private val handles = MutableStateFlow<List<String>>(emptyList())
+    private val myHandles: List<String> get() = handles.value
+
+    /** The one-to-one chats' guids (see [ChatGuids]). */
+    private val chatGuids = ChatGuids(File(app.filesDir, "imessage/chat-guids.json"))
+
+    private val texts = DirectTexts(app)
 
     /** Waiting for Apple's answer to a send, by message id. */
     private val confirms = ConcurrentHashMap<String, CompletableDeferred<String?>>()
 
-    /** Archive changes waiting for the main process, in the order Apple sent them. */
-    private val outgoingEvents = Channel<Pair<String, DirectArchive.Update>>(Channel.UNLIMITED)
+    /** Events from Apple not handled yet, in the order Apple sent them, by journal id. */
+    private val events = Channel<Pair<String, PushEvent>>(Channel.UNLIMITED)
 
     @Volatile
     var sink: Sink? = null
@@ -95,23 +111,84 @@ class DirectEngine private constructor(private val app: Context) {
 
     init {
         scope.launch {
-            for ((id, update) in outgoingEvents) {
-                if (update != DirectArchive.Update.Ignore) {
-                    var stored = false
-                    var attempt = 0
-                    while (!stored) {
-                        stored = try {
-                            sink?.deliver(update) == true
-                        } catch (e: Exception) {
-                            Log.w(TAG, "main process did not take an update", e)
-                            false
-                        }
-                        if (!stored) delay((1000L shl attempt.coerceAtMost(6)))
-                        attempt++
-                    }
-                }
+            for ((id, event) in events) {
+                if (event is PushEvent.Message) handle(event.v1)
+                // Acknowledged (in order) once the main process stored it; until then the library
+                // keeps the event in its journal and hands it over again after a restart.
                 pipeline?.ack(id)
             }
+        }
+    }
+
+    /**
+     * One message from Apple: once the user's addresses are known (until then nothing is
+     * acknowledged, so the journal keeps it), into the archive, then the delivery receipt.
+     */
+    private suspend fun handle(inst: MessageInst) {
+        val me = handles.first { it.isNotEmpty() }.toSet()
+        DirectMessages.oneToOneChat(inst, me)?.let { (peer, guid) -> chatGuids.remember(peer, guid) }
+        val update = try {
+            DirectArchive.map(inst, me, Handles::display, texts)
+        } catch (e: Exception) {
+            Log.w(TAG, "message ${inst.message::class.simpleName} not mapped", e)
+            DirectArchive.Update.Ignore
+        }
+        if (update != DirectArchive.Update.Ignore) store(update)
+        sendDeliveryAck(inst, me)
+    }
+
+    /** Hands [update] to the main process until it is stored. */
+    private suspend fun store(update: DirectArchive.Update) {
+        var attempt = 0
+        while (true) {
+            val stored = try {
+                sink?.deliver(update) == true
+            } catch (e: Exception) {
+                Log.w(TAG, "main process did not take an update", e)
+                false
+            }
+            if (stored) return
+            delay((1000L shl attempt.coerceAtMost(6)))
+            attempt++
+        }
+    }
+
+    /**
+     * Tells the sender their message arrived (OpenBubbles' `markCertified`). Never in the way of
+     * the rest: a failure is only logged, and Apple gets [RECEIPT_TIMEOUT_MS] at most.
+     */
+    private suspend fun sendDeliveryAck(inst: MessageInst, me: Set<String>) {
+        val s = session ?: return
+        val ack = DirectMessages.deliveryAck(inst, me)
+        if (ack == DirectMessages.DeliveryAck.None) return
+        try {
+            val done = withTimeoutOrNull(RECEIPT_TIMEOUT_MS) {
+                when (ack) {
+                    is DirectMessages.DeliveryAck.Certify -> uniffi.rust_bridge.certifyDelivery(s, ack.context, ack.notify)
+                    is DirectMessages.DeliveryAck.Delivered -> {
+                        val receipt = uniffi.rust_bridge.newMsg(ack.conversation, ack.from, PushChatMessage.Delivered)
+                            .copy(id = inst.id, target = inst.target)
+                        uniffi.rust_bridge.sendMessage(s, receipt)
+                    }
+                    DirectMessages.DeliveryAck.None -> Unit
+                }
+            }
+            if (done == null) Log.w(TAG, "delivery receipt: Apple did not answer in time")
+        } catch (e: Exception) {
+            Log.w(TAG, "delivery receipt not sent", e)
+        }
+    }
+
+    /** Reads the user's addresses again (they change with the registration). */
+    private suspend fun refreshHandles() {
+        val s = session ?: return
+        try {
+            val now = uniffi.rust_bridge.getHandles(s)
+            if (now.isEmpty()) return
+            handles.value = now
+            if (_status.value is Status.Registered) _status.value = Status.Registered(now)
+        } catch (e: Throwable) {
+            Log.w(TAG, "could not read the registered addresses", e)
         }
     }
 
@@ -143,6 +220,8 @@ class DirectEngine private constructor(private val app: Context) {
         DirectLibrary.load(app)
         uniffi.rust_bridge.doFirstTimeInit(statePath)
         uniffi.rust_bridge.setupKeystore(statePath, DirectKeystore(app))
+        // Needed before any attachment is prepared for upload.
+        uniffi.rust_bridge.setFilePackager(DirectFilePackager(app))
         pipeline = EventPipeline(File(statePath, "journal").path).also { it.setReceiver(receiver) }
         started = true
     }
@@ -156,7 +235,7 @@ class DirectEngine private constructor(private val app: Context) {
         }
         _status.value = when (val reg = uniffi.rust_bridge.getRegState(s)) {
             is RegisterState.Registered -> {
-                myHandles = uniffi.rust_bridge.getHandles(s)
+                handles.value = uniffi.rust_bridge.getHandles(s)
                 DirectPrefs.setRegistered(app, true)
                 Status.Registered(myHandles)
             }
@@ -300,17 +379,31 @@ class DirectEngine private constructor(private val app: Context) {
         )
     }
 
-    /** Sends a text and returns its GUID and timestamp once Apple confirmed it. */
-    suspend fun send(target: DirectWire.Target, text: String, replyGuid: String?, replyPart: String? = null): Pair<String, Long> {
+    /**
+     * Sends a message and returns its GUID, timestamp and attachment parts once Apple confirmed
+     * it: [text], an inline reply to [replyGuid] (part [replyPart]), sent with [effect] (Apple's
+     * effect id), [voice] when it is a recorded audio message.
+     */
+    suspend fun send(
+        target: DirectWire.Target,
+        text: String,
+        replyGuid: String?,
+        replyPart: String?,
+        effect: String?,
+        attachments: List<DirectWire.Attachment>,
+        voice: Boolean,
+    ): DirectWire.SendReply {
+        if (attachments.isNotEmpty()) throw ImessageError("Pictures and files can't be sent over iMessage from LightDecoder yet.")
         val s = requireSession()
         val (conversation, from) = conversationOf(target)
         val message = NormalMessage(
-            listOf(IndexedMessagePart(MessagePart.Text(text, TextFormat.Flags(TextFlags(false, false, false, false))), null, null)),
-            null, replyGuid, replyGuid?.let { replyPart ?: "0:0:0" }, MessageType.IMessage, null, null, null, false, null, null,
+            listOf(textPart(text)),
+            effect, replyGuid, replyGuid?.let { replyPart ?: "0:0:0" }, MessageType.IMessage,
+            null, null, null, voice, null, null,
         )
         val inst = uniffi.rust_bridge.newMsg(conversation, from, PushChatMessage.Message(message))
-        sendAndConfirm(s, inst, unsend = false)
-        return inst.id to (inst.sentTimestamp.toLong().takeIf { it > 0 } ?: System.currentTimeMillis())
+        sendAndConfirm(s, inst, "message")
+        return DirectWire.SendReply(inst.id, inst.sentTimestamp.toLong().takeIf { it > 0 } ?: System.currentTimeMillis(), emptyList())
     }
 
     /** Retracts [guid]; the main process has checked the 2-minute window. */
@@ -318,59 +411,147 @@ class DirectEngine private constructor(private val app: Context) {
         val s = requireSession()
         val (conversation, from) = conversationOf(target)
         val inst = uniffi.rust_bridge.newMsg(conversation, from, PushChatMessage.Unsend(UnsendMessage(guid, part.toULong())))
-        sendAndConfirm(s, inst, unsend = true)
+        sendAndConfirm(s, inst, "unsend")
     }
 
+    /** Part [part] of the user's message [guid] now reads [text]; the main process checked the limits. */
+    suspend fun edit(target: DirectWire.Target, guid: String, part: Int, text: String) {
+        val s = requireSession()
+        val (conversation, from) = conversationOf(target)
+        val inst = uniffi.rust_bridge.newMsg(
+            conversation, from, PushChatMessage.Edit(EditMessage(guid, part.toULong(), listOf(textPart(text)))),
+        ).copy(sentTimestamp = System.currentTimeMillis().toULong())
+        sendAndConfirm(s, inst, "edit")
+    }
+
+    /**
+     * Puts the user's tapback [emoji] on part [part] of message [guid] ([enable]) or takes it
+     * back; returns the tapback's own GUID. [targetText] is for the other side's notification.
+     */
+    suspend fun react(target: DirectWire.Target, guid: String, part: Int, emoji: String, enable: Boolean, targetText: String): String {
+        val s = requireSession()
+        val (conversation, from) = conversationOf(target)
+        val reaction = ReactMessage(guid, part.toULong(), ReactMessageType.React(DirectArchive.reactionOf(emoji), enable), targetText, null)
+        val inst = uniffi.rust_bridge.newMsg(conversation, from, PushChatMessage.React(reaction))
+            .copy(sentTimestamp = System.currentTimeMillis().toULong())
+        sendAndConfirm(s, inst, "reaction")
+        return inst.id
+    }
+
+    /** Tells the chat the user is typing, or stopped. Apple does not answer it. */
+    suspend fun typing(target: DirectWire.Target, typing: Boolean) {
+        val s = requireSession()
+        val (conversation, from) = conversationOf(target)
+        sendOnly(s, uniffi.rust_bridge.newMsg(conversation, from, PushChatMessage.Typing(typing, null)))
+    }
+
+    /**
+     * The user read the chat up to [guid]: the user's other devices are told (they clear it too),
+     * and with read receipts on, the other person of a one-to-one chat. Apple does not answer it.
+     */
+    suspend fun read(target: DirectWire.Target, guid: String) {
+        val s = requireSession()
+        val (conversation, from) = conversationOf(target)
+        val to = DirectMessages.readReceiptParticipants(target, DirectPrefs.sendReadReceipts(app))
+        val receipt = conversation.copy(participants = (to + from).distinct(), afterGuid = null)
+        sendOnly(s, uniffi.rust_bridge.newMsg(receipt, from, PushChatMessage.Read).copy(id = guid))
+    }
+
+    /**
+     * Fetches the attachment [descriptor] (as the library saved it, `saveAttachment`) into the
+     * file [path], through `<path>.partial` so a half-written file is never taken for the whole.
+     * Returns its size.
+     */
+    suspend fun download(descriptor: String, path: String): Long {
+        val attachment = call { uniffi.rust_bridge.restoreAttachment(descriptor) }
+        val file = File(path)
+        val partial = File("$path.partial")
+        file.parentFile?.mkdirs()
+        try {
+            when (val type = attachment.aType) {
+                is AttachmentType.Inline -> partial.writeBytes(type.v1)
+                is AttachmentType.Mmcs -> {
+                    val s = requireSession()
+                    val largest = type.v1.maxByOrNull { it.size } ?: throw ImessageError("Apple sent this attachment without a file.")
+                    call { uniffi.rust_bridge.downloadMmcsFile(s, largest, partial.path, null) }
+                }
+            }
+            if (partial.length() <= 0 || !partial.renameTo(file)) throw ImessageError("The attachment could not be saved.")
+            return file.length()
+        } finally {
+            partial.delete()
+        }
+    }
+
+    private fun textPart(text: String) =
+        IndexedMessagePart(MessagePart.Text(text, TextFormat.Flags(TextFlags(false, false, false, false))), null, null)
+
+    /**
+     * The library's conversation for [target] and the address to send from. A one-to-one chat
+     * keeps its chat guid ([ChatGuids]) so that iPhones keep it in one conversation.
+     */
     private fun conversationOf(target: DirectWire.Target): Pair<ConversationData, String> {
         val from = target.from.takeIf { it in myHandles } ?: Handles.preferredSender(myHandles)
             ?: throw ImessageError("This device has no registered iMessage address.")
-        val handles = (target.participants + from).distinct()
-        return ConversationData(handles, target.groupName, target.groupGuid, null) to from
+        val chatGuid = if (target.isOneToOne) chatGuids.guidFor(target.participants.single()) else null
+        return DirectMessages.conversation(target, from, chatGuid) to from
     }
 
-    private suspend fun sendAndConfirm(s: SharedPushStateHandle, inst: MessageInst, unsend: Boolean) {
+    /**
+     * Sends [inst] and waits for Apple's answer. When the library had nobody to send it to (no
+     * device besides this one), no answer comes and there is nothing to wait for.
+     */
+    private suspend fun sendAndConfirm(s: SharedPushStateHandle, inst: MessageInst, what: String) {
         val waiter = CompletableDeferred<String?>()
         confirms[inst.id] = waiter
         try {
-            call { uniffi.rust_bridge.sendMessage(s, inst) }
+            val sent = call { uniffi.rust_bridge.sendMessage(s, inst) }
+            if (!sent) {
+                Log.i(TAG, "$what had no device to go to")
+                return
+            }
             val answer = withTimeoutOrNull(CONFIRM_TIMEOUT_MS) { waiter.await() }
                 ?: throw ImessageError(
-                    if (unsend) {
-                        "Apple did not confirm the unsend within ${CONFIRM_TIMEOUT_MS / 1000} seconds. It may not have gone through."
-                    } else {
+                    if (what == "message") {
                         "Apple did not confirm the message within ${CONFIRM_TIMEOUT_MS / 1000} seconds. It may not have been delivered."
+                    } else {
+                        "Apple did not confirm the $what within ${CONFIRM_TIMEOUT_MS / 1000} seconds. It may not have gone through."
                     },
                 )
-            if (answer.isNotEmpty()) {
-                throw ImessageError(if (unsend) "Apple refused the unsend: $answer" else "Apple refused the message: $answer")
-            }
+            if (answer.isNotEmpty()) throw ImessageError("Apple refused the $what: $answer")
         } finally {
             confirms.remove(inst.id)
         }
+    }
+
+    /** Sends something Apple does not answer (typing, read): never waits. */
+    private suspend fun sendOnly(s: SharedPushStateHandle, inst: MessageInst) {
+        call { uniffi.rust_bridge.sendMessage(s, inst) }
     }
 
     // --- events from Apple -----------------------------------------------------------------------
 
     private val receiver = object : MessageReceiver {
         override fun onMessage(id: String, event: PushEvent) {
-            var update: DirectArchive.Update = DirectArchive.Update.Ignore
             try {
                 when (event) {
                     is PushEvent.SendConfirm -> confirms[event.uuid]?.complete(event.error ?: "")
-                    is PushEvent.RegistrationState -> _status.value = when (val r = event.v1) {
-                        is RegisterState.Registered -> (status.value as? Status.Registered) ?: Status.Registered(myHandles)
-                        is RegisterState.Registering -> Status.Working("Registering with Apple")
-                        is RegisterState.Failed -> Status.Failed(r.error)
+                    is PushEvent.RegistrationState -> {
+                        _status.value = when (val r = event.v1) {
+                            is RegisterState.Registered -> (status.value as? Status.Registered) ?: Status.Registered(myHandles)
+                            is RegisterState.Registering -> Status.Working("Registering with Apple")
+                            is RegisterState.Failed -> Status.Failed(r.error)
+                        }
+                        scope.launch { refreshHandles() }
                     }
-                    is PushEvent.Message -> update = DirectArchive.map(event.v1, myHandles.toSet(), Handles::display)
                     else -> Unit
                 }
             } catch (e: Throwable) {
                 Log.w(TAG, "event ${event::class.simpleName} not handled", e)
             }
-            // Acknowledged (in order) once the main process stored it; until then the library
-            // keeps the event in its journal and hands it over again after a restart.
-            outgoingEvents.trySend(id to update)
+            // Messages are mapped by the consumer, once the user's addresses are known; every
+            // event is acknowledged there, in order.
+            events.trySend(id to event)
         }
     }
 
@@ -390,6 +571,9 @@ class DirectEngine private constructor(private val app: Context) {
     companion object {
         private const val TAG = "Imessage"
         const val CONFIRM_TIMEOUT_MS = 45_000L
+
+        /** How long a delivery receipt may hold up the next message from Apple. */
+        private const val RECEIPT_TIMEOUT_MS = 15_000L
 
         /** Added to the error when Apple's text gateway stays silent and the SIM route is not allowed yet. */
         const val NEEDS_SIM = "If this keeps happening, your carrier may verify the number with the SIM instead of a text."

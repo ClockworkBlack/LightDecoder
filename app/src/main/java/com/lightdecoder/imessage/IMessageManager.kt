@@ -62,7 +62,11 @@ class IMessageManager private constructor(
 
     private val _state = MutableStateFlow(currentState())
     override val state: StateFlow<RelayState> = _state.asStateFlow()
-    override val typing: StateFlow<Map<String, Set<String>>> = MutableStateFlow(emptyMap())
+    private val _typing = MutableStateFlow<Map<String, Set<String>>>(emptyMap())
+    override val typing: StateFlow<Map<String, Set<String>>> = _typing.asStateFlow()
+
+    /** Who is typing where (direct mode): conversation id -> participant id -> name. */
+    private val typers = HashMap<String, LinkedHashMap<String, String>>()
     override val presence: StateFlow<Map<String, Presence>> = MutableStateFlow(emptyMap())
     override val backfill: StateFlow<BackfillProgress> = MutableStateFlow(BackfillProgress(running = false, 0, 0, 0))
 
@@ -446,6 +450,23 @@ class IMessageManager private constructor(
     // ============================== the rest of the backend ==============================
 
     override fun typing(conversationId: String) = Unit
+
+    /**
+     * [participantId] ([name]) started or stopped typing in [conversationId], as the iMessage
+     * library heard it; [typing] follows. A message from them also stops it.
+     */
+    fun noteTyping(conversationId: String, participantId: String, name: String, typing: Boolean) {
+        synchronized(typers) {
+            val here = typers[conversationId]
+            if (typing) {
+                typers.getOrPut(conversationId) { LinkedHashMap() }[participantId] = name.ifBlank { participantId }
+            } else {
+                if (here?.remove(participantId) == null) return
+                if (here.isEmpty()) typers.remove(conversationId)
+            }
+            _typing.value = typers.mapValues { (_, people) -> people.values.toSet() }
+        }
+    }
     override fun watchPresence(conversationId: String) = Unit
     override fun setAppVisible(visible: Boolean) {
         if (visible) refreshState()

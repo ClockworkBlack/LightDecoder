@@ -266,6 +266,155 @@ class ArchiveRepository private constructor(
         }
 
     /**
+     * Marks one of the account's sent messages failed ([status], with
+     * [errorText]) after the service reported that it did not reach someone,
+     * unless it already got as far as [keepFromRank] ([rankOf] orders the
+     * status names): a delivered or read message stays as it is. Returns
+     * whether it changed.
+     */
+    fun markSentFailed(messageId: String, status: String, errorText: String, keepFromRank: Int, rankOf: (String) -> Int): Boolean = write { b ->
+        val row = query(
+            b.db, "SELECT conversation_id, message_status FROM messages WHERE message_id = ? AND is_outgoing = 1 AND direction = 'out'",
+            arrayOf(messageId),
+        ) { it.getString(0).orEmpty() to it.getString(1).orEmpty() }.firstOrNull() ?: return@write false
+        if (rankOf(row.second) >= keepFromRank) return@write false
+        b.db.update("messages", ContentValues().apply {
+            put("message_status", status)
+            put("error_text", errorText)
+            put("updated_at", b.now)
+        }, "message_id = ?", arrayOf(messageId))
+        b.changed(Kind.MESSAGES, row.first)
+        true
+    }
+
+    /**
+     * The sender edited a message: its new [text], edited at [editedAtMs],
+     * and (when not null) its new [extra]. Its reactions, media and status
+     * stay as they are. The search index follows, and so does the
+     * conversation's snippet when this is its latest message. False if
+     * there is no such message.
+     */
+    fun editText(messageId: String, text: String, editedAtMs: Long, extra: String?): Boolean = write { b ->
+        val found = query(b.db, "SELECT rowid, conversation_id, subject FROM messages WHERE message_id = ?", arrayOf(messageId)) {
+            Triple(it.getLong(0), it.getString(1).orEmpty(), it.getString(2).orEmpty())
+        }.firstOrNull() ?: return@write false
+        val (rowId, conversationId, subject) = found
+        b.db.update("messages", ContentValues().apply {
+            put("text_body", text)
+            put("edited_at", editedAtMs)
+            if (extra != null) put("extra_json", extra)
+            put("updated_at", b.now)
+        }, "message_id = ?", arrayOf(messageId))
+        indexForSearch(b.db, rowId, messageId, conversationId, subject, text)
+        followSnippet(b, conversationId, messageId, text)
+        b.changed(Kind.MESSAGES, conversationId)
+        true
+    }
+
+    /**
+     * One person's reaction to a message, the way Apple's Messages keeps
+     * them: one per person. With [enable] they are taken off every reaction
+     * on the message and put on [emoji]'s; without, they are taken off
+     * [emoji]'s only. The user is [fromMe] (the reaction's fromMe flag) as
+     * well as [participantId]. Reactions left with nobody go. Only the
+     * reactions change. The time a reaction appeared ([atMs]) is noted for
+     * the reaction details. False if there is no such message.
+     */
+    fun applyReaction(messageId: String, participantId: String, emoji: String, enable: Boolean, fromMe: Boolean, atMs: Long): Boolean {
+        var before: List<ReactionDto>? = null
+        var after: List<ReactionDto> = emptyList()
+        val stored = write { b ->
+            val found = query(b.db, "SELECT conversation_id, reactions_json FROM messages WHERE message_id = ?", arrayOf(messageId)) {
+                it.getString(0).orEmpty() to reactionsFrom(it.getString(1) ?: "[]")
+            }.firstOrNull() ?: return@write false
+            before = found.second
+            after = withReaction(found.second, participantId, emoji, enable, fromMe)
+            if (after == found.second) return@write true
+            b.db.update("messages", ContentValues().apply {
+                put("reactions_json", ReactionDto.listToJson(after).toString())
+                put("updated_at", b.now)
+            }, "message_id = ?", arrayOf(messageId))
+            b.changed(Kind.MESSAGES, found.first)
+            true
+        }
+        if (stored) {
+            try {
+                com.lightdecoder.reactions.ReactionTimes.get(helper.appContext).note(service, messageId, before, after, atMs, live = true)
+            } catch (e: RuntimeException) {
+                // Only the reaction's time is lost.
+            }
+        }
+        return stored
+    }
+
+    /**
+     * Puts [text] in a message's place, as a row of the conversation's own
+     * ("You unsent a message."): same id, time and conversation; its
+     * reactions, reply, subject and media go (media files nothing else uses
+     * are deleted). False if there is no such message.
+     */
+    fun replaceWithPlaceholder(messageId: String, text: String): Boolean = write { b ->
+        val found = query(b.db, "SELECT rowid, conversation_id FROM messages WHERE message_id = ?", arrayOf(messageId)) {
+            it.getLong(0) to it.getString(1).orEmpty()
+        }.firstOrNull() ?: return@write false
+        val (rowId, conversationId) = found
+        media(b.db, messageId).forEach {
+            b.maybeOrphaned.add(it.localPath)
+            b.maybeOrphaned.add(it.thumbPath)
+        }
+        b.db.delete("media", "message_id = ?", arrayOf(messageId))
+        b.db.update("messages", ContentValues().apply {
+            put("direction", "system")
+            put("text_body", text)
+            put("subject", "")
+            put("reply_to_msg_id", "")
+            put("reactions_json", "[]")
+            put("message_status", "")
+            put("error_text", "")
+            put("local_state", LocalState.SYNCED)
+            put("edited_at", 0)
+            put("extra_json", "")
+            put("updated_at", b.now)
+        }, "message_id = ?", arrayOf(messageId))
+        indexForSearch(b.db, rowId, messageId, conversationId, "", text)
+        followSnippet(b, conversationId, messageId, text)
+        b.changed(Kind.MESSAGES, conversationId)
+        true
+    }
+
+    /**
+     * Removes one media part of a message (the sender took that attachment
+     * back); its files go if nothing else uses them. False if there was no
+     * such part.
+     */
+    fun removeMediaPart(messageId: String, partId: String): Boolean = write { b ->
+        val part = query(b.db, "SELECT * FROM media WHERE message_id = ? AND part_id = ?", arrayOf(messageId, partId)) {
+            it.toMedia()
+        }.firstOrNull() ?: return@write false
+        b.maybeOrphaned.add(part.localPath)
+        b.maybeOrphaned.add(part.thumbPath)
+        b.db.delete("media", "message_id = ? AND part_id = ?", arrayOf(messageId, partId))
+        query(b.db, "SELECT conversation_id FROM messages WHERE message_id = ?", arrayOf(messageId)) {
+            it.getString(0)
+        }.firstOrNull()?.let { b.changed(Kind.MESSAGES, it) }
+        true
+    }
+
+    /** The newest message of a conversation whose id starts with [prefix], or null if there is none. */
+    fun latestMessageId(conversationId: String, prefix: String = "imsg:"): String? = query(
+        "SELECT message_id FROM messages WHERE conversation_id = ? AND substr(message_id, 1, ${prefix.length}) = ? " +
+            "ORDER BY timestamp_ms DESC, rowid DESC LIMIT 1",
+        arrayOf(conversationId, prefix),
+    ) { it.getString(0) }.firstOrNull()
+
+    /** Like [latestMessageId], among the messages other people sent. */
+    fun latestIncomingMessageId(conversationId: String, prefix: String = "imsg:"): String? = query(
+        "SELECT message_id FROM messages WHERE conversation_id = ? AND substr(message_id, 1, ${prefix.length}) = ? " +
+            "AND is_outgoing = 0 AND direction = 'in' ORDER BY timestamp_ms DESC, rowid DESC LIMIT 1",
+        arrayOf(conversationId, prefix),
+    ) { it.getString(0) }.firstOrNull()
+
+    /**
      * The id and timestamp of the oldest message from the phone in one
      * conversation (ties broken by id), or null if there is none: where a
      * service whose history pages by "older than this message" starts from.
@@ -836,6 +985,8 @@ class ArchiveRepository private constructor(
             put("reply_to_msg_id", dto.replyToId)
             put("reactions_json", ReactionDto.listToJson(dto.reactions).toString())
             put("local_state", LocalState.SYNCED)
+            put("edited_at", dto.editedAtMs)
+            put("extra_json", dto.extra)
             put("raw_json", dto.toJson(includeInlineData = false).toString())
             put("updated_at", b.now)
         }
@@ -920,6 +1071,15 @@ class ArchiveRepository private constructor(
             put("snippet_sender", sender)
             put("updated_at", b.now)
         }, "conversation_id = ? AND last_message_ts < ?", arrayOf(conversationId, timestampMs.toString()))
+        if (updated > 0) b.changed(Kind.CONVERSATIONS, conversationId)
+    }
+
+    /** The conversation's snippet becomes [text] if [messageId] is its latest message. */
+    private fun followSnippet(b: Batch, conversationId: String, messageId: String, text: String) {
+        val updated = b.db.update("conversations", ContentValues().apply {
+            put("snippet", text)
+            put("updated_at", b.now)
+        }, "conversation_id = ? AND latest_message_id = ?", arrayOf(conversationId, messageId))
         if (updated > 0) b.changed(Kind.CONVERSATIONS, conversationId)
     }
 
@@ -1131,6 +1291,37 @@ class ArchiveRepository private constructor(
         private const val MAX_SEARCH_WORDS = 32
 
         /**
+         * [reactions] after [participantId] (and, when [fromMe], the user)
+         * reacted with [emoji] ([enable]) or took it back: see [applyReaction].
+         */
+        internal fun withReaction(
+            reactions: List<ReactionDto>,
+            participantId: String,
+            emoji: String,
+            enable: Boolean,
+            fromMe: Boolean,
+        ): List<ReactionDto> {
+            val out = ArrayList<ReactionDto>()
+            for (r in reactions) {
+                if (!enable && r.emoji != emoji) {
+                    out += r
+                    continue
+                }
+                val left = r.copy(participantIds = r.participantIds - participantId, fromMe = r.fromMe && !fromMe)
+                if (left.participantIds.isNotEmpty() || left.fromMe) out += left
+            }
+            if (enable && emoji.isNotEmpty()) {
+                val i = out.indexOfFirst { it.emoji == emoji }
+                if (i < 0) {
+                    out += ReactionDto(emoji, listOf(participantId), fromMe)
+                } else {
+                    out[i] = out[i].copy(participantIds = out[i].participantIds + participantId, fromMe = out[i].fromMe || fromMe)
+                }
+            }
+            return out
+        }
+
+        /**
          * Letters and numbers, which unicode61 always treats as token
          * characters. It may treat some other characters (newer emoji) as
          * tokens too; leaving those out only widens the search.
@@ -1220,6 +1411,8 @@ private fun DbCursor.toMessage() = MessageRow(
     localState = str("local_state"),
     media = emptyList(),
     updatedAt = long("updated_at"),
+    editedAtMs = long("edited_at"),
+    extra = str("extra_json"),
 )
 
 private fun DbCursor.toMedia() = MediaRow(

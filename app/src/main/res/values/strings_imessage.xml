@@ -108,6 +108,21 @@
     <string name="imessage_no_address">This conversation has no phone number or email address to send an iMessage to.</string>
     <string name="imessage_delete_message_question">Remove this message from LightDecoder? It stays in OpenBubbles and on the other person\'s phone.</string>
 
+    <!--
+        iMessage through the bundled library (direct mode): rows a conversation shows for what
+        happened in it, as an iPhone words them.
+    -->
+    <string name="imessage_event_you">You</string>
+    <string name="imessage_event_you_object">you</string>
+    <string name="imessage_event_named">%1$s named the conversation “%2$s”.</string>
+    <string name="imessage_event_added">%1$s added %2$s.</string>
+    <string name="imessage_event_removed">%1$s removed %2$s.</string>
+    <string name="imessage_event_left">%1$s left the conversation.</string>
+    <string name="imessage_event_photo_changed">%1$s changed the group photo.</string>
+    <string name="imessage_event_photo_removed">%1$s removed the group photo.</string>
+    <string name="imessage_you_unsent">You unsent a message.</string>
+    <string name="imessage_unsent">%1$s unsent a message.</string>
+
     <!-- Errors. -->
     <string name="imessage_error_not_enabled">Blue Bubbles is off. Tick it in the Messages menu.</string>
     <string name="imessage_error_not_installed">OpenBubbles is not installed.</string>

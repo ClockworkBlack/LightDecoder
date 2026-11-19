@@ -296,6 +296,9 @@ data class ReactionDto(
  * @param transport "SMS", "MMS", "RCS" or "UNKNOWN"
  * @param text      the text parts joined by newlines
  * @param isOld     true for history the phone re-sent, not a new arrival
+ * @param editedAtMs when the sender last edited it; 0 if never (iMessage only for now)
+ * @param extra     display data only one service has (iMessage: JSON, see
+ *   [com.lightdecoder.imessage.direct.IMessageExtra]); empty for the others
  */
 data class MessageDto(
     val id: String,
@@ -317,6 +320,8 @@ data class MessageDto(
     val reactions: List<ReactionDto> = emptyList(),
     val isOld: Boolean = false,
     val mmsPendingDownload: Boolean = false,
+    val editedAtMs: Long = 0,
+    val extra: String = "",
 ) {
     val isDeleted: Boolean get() = direction == "deleted"
     val mediaParts: List<PartDto> get() = parts.filter { it.isMedia }
@@ -342,6 +347,8 @@ data class MessageDto(
         put("reactions", ReactionDto.listToJson(reactions))
         put("isOld", isOld)
         put("mmsPendingDownload", mmsPendingDownload)
+        put("editedAtMs", editedAtMs)
+        put("extra", extra)
     }
 
     companion object {
@@ -365,6 +372,8 @@ data class MessageDto(
             reactions = ReactionDto.listFromJson(o.optJSONArray("reactions")),
             isOld = o.optBoolean("isOld"),
             mmsPendingDownload = o.optBoolean("mmsPendingDownload"),
+            editedAtMs = o.optLong("editedAtMs"),
+            extra = o.str("extra"),
         )
     }
 }
