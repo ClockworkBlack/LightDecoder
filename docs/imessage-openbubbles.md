@@ -34,6 +34,13 @@ Files inspected (owner's own download, not committed): OpenBubbles 2.0.0 base AP
   machine and not committed. Same bindings come from any ABI's library.
 - **Needed on the phone**: the arm64 `librust_bridge.so` + `libuniffi_runtime.so` (the
   v7a files cannot run on the Fold 7), imported by the user and pinned by SHA-256.
+- **arm64 files received (2026-11-19), the ones LightDecoder will pin on import:**
+  `librust_bridge.so` sha256 `b6dfe8ce44395ca48e041657dc990a534fdaa7acfda1c1d8f2e269d8e332c997`
+  (33,123,024 bytes), `libuniffi_runtime.so` sha256
+  `dfd4f36f8e452df7d811cafa00a9e4a0a3ff0ad7026a368f342287ea5be776d7`. uniffi contract version
+  30; all 228 call checksums decoded (e.g. send_message 18695, register_ids 886,
+  config_from_relay 61018) and they equal the ones in the generated bindings, which are
+  byte-identical to those made from the v7a library.
 - Still open: how 2.0.0's own app registers (the sequence around `setupPush` ->
   `registerIds` -> `startSession`, and the Android keystore callback `NativeKeystore`
   the library needs); read from the APK's `classes*.dex`.
