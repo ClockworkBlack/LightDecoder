@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The chat background picker (ui.chat.BackgroundPicker), Messenger-like: a grid of previews in
+     sections (Colors, Dynamic, Themes, Your photos). Tapping one shows it behind the thread first. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingBottom="8dp">
+
+    <TextView
+        android:id="@+id/backgroundPickerTitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:paddingVertical="14dp"
+        android:text="@string/imessage_background"
+        android:textAppearance="?attr/textAppearanceTitleMedium" />
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/backgroundGrid"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:clipToPadding="false"
+        android:paddingHorizontal="12dp" />
+</LinearLayout>

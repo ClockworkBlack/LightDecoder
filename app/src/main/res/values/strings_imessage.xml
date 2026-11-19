@@ -332,6 +332,41 @@
     <string name="imessage_background_failed">The background was not changed: %1$s</string>
     <string name="imessage_background_unreadable">That picture could not be read.</string>
     <string name="imessage_background_too_big">That picture is too large to use as a background.</string>
+    <!-- The background picker: its sections, its buttons, and the preview's Set / Cancel. -->
+    <string name="imessage_background_section_colors">Colors</string>
+    <string name="imessage_background_section_dynamic">Dynamic</string>
+    <string name="imessage_background_section_themes">Themes</string>
+    <string name="imessage_background_section_photos">Your photos</string>
+    <string name="imessage_background_photo">Photo</string>
+    <string name="imessage_background_none">None</string>
+    <string name="imessage_background_preview_set">Set</string>
+    <string name="imessage_background_preview_cancel">Cancel</string>
+    <string name="imessage_background_preview_hint">Preview</string>
+    <!-- Gradients, drawn by an iPhone from their colours. -->
+    <string name="imessage_background_palette_sunset">Sunset</string>
+    <string name="imessage_background_palette_ocean">Ocean</string>
+    <string name="imessage_background_palette_forest">Forest</string>
+    <string name="imessage_background_palette_lavender">Lavender</string>
+    <string name="imessage_background_palette_peach">Peach</string>
+    <string name="imessage_background_palette_midnight">Midnight</string>
+    <string name="imessage_background_palette_mint">Mint</string>
+    <string name="imessage_background_palette_rose">Rose</string>
+    <string name="imessage_background_palette_sky">Sky</string>
+    <string name="imessage_background_palette_ember">Ember</string>
+    <string name="imessage_background_palette_grape">Grape</string>
+    <string name="imessage_background_palette_slate">Slate</string>
+    <string name="imessage_background_dynamic_aurora">Aurora</string>
+    <!-- The app's own designs, sent as a photo. -->
+    <string name="imessage_background_theme_bokeh">Soft Lights</string>
+    <string name="imessage_background_theme_stars">Starfield</string>
+    <string name="imessage_background_theme_waves">Waves</string>
+    <string name="imessage_background_theme_confetti">Confetti</string>
+    <string name="imessage_background_theme_triangles">Facets</string>
+    <string name="imessage_background_theme_paper">Pastel Paper</string>
+    <string name="imessage_background_theme_city">City Lights</string>
+    <string name="imessage_background_theme_hearts">Hearts</string>
+    <string name="imessage_background_theme_leaves">Leaves</string>
+    <string name="imessage_background_theme_galaxy">Galaxy</string>
     <string name="imessage_direct_background_not_confirmed">Apple did not confirm the new background within %1$d seconds. It may not have gone through.</string>
     <string name="imessage_direct_background_refused">Apple refused the new background: %1$s</string>
     <string name="imessage_direct_background_upload">The background could not be uploaded to Apple.</string>

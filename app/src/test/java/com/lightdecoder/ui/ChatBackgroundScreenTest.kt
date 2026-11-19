@@ -6,7 +6,6 @@ import android.graphics.Color
 import android.view.View
 import android.widget.EditText
 import android.widget.TextView
-import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.widget.Toolbar
 import androidx.recyclerview.widget.RecyclerView
 import androidx.test.core.app.ActivityScenario
@@ -18,7 +17,11 @@ import com.lightdecoder.archive.ArchiveRepository
 import com.lightdecoder.chat.ChatService
 import com.lightdecoder.imessage.IMessageManager
 import com.lightdecoder.imessage.IMessagePrefs
+import com.lightdecoder.imessage.direct.AuroraDrawable
+import com.lightdecoder.imessage.direct.BackgroundPalettes
+import com.lightdecoder.imessage.direct.BackgroundStyle
 import com.lightdecoder.imessage.direct.ChatBackgrounds
+import com.lightdecoder.imessage.direct.GradientBackgroundDrawable
 import com.lightdecoder.imessage.direct.DirectArchive
 import com.lightdecoder.imessage.direct.DirectLibrary
 import com.lightdecoder.imessage.direct.DirectLink
@@ -29,6 +32,7 @@ import com.lightdecoder.relay.MessageDto
 import com.lightdecoder.relay.PartDto
 import com.lightdecoder.relay.ParticipantDto
 import com.lightdecoder.relay.RelayIntents
+import com.lightdecoder.ui.chat.BackgroundPicker
 import com.lightdecoder.ui.chat.MessagesAdapter
 import com.lightdecoder.ui.chat.ThreadActivity
 import com.lightdecoder.ui.chat.ThreadItem
@@ -116,8 +120,8 @@ class ChatBackgroundScreenTest {
         return f.path
     }
 
-    /** Alice changed the background (or took it off: [path] null), as of [version]. */
-    private fun aliceChanged(guid: String, version: Long, path: String?) = DirectLink.get(two.app).apply(
+    /** Alice changed the background (to a picture at [path], or to [style]; or took it off: neither), as of [version]. */
+    private fun aliceChanged(guid: String, version: Long, path: String?, style: BackgroundStyle? = null) = DirectLink.get(two.app).apply(
         DirectWire.decode(
             JSONObject(
                 DirectWire.encode(
@@ -138,6 +142,7 @@ class ChatBackgroundScreenTest {
                                 text = "Alice changed the chat background.", parts = listOf(PartDto("0", "text", "Alice changed the chat background.")),
                             ),
                         ),
+                        style,
                     ),
                 ).toString(),
             ),
@@ -211,15 +216,23 @@ class ChatBackgroundScreenTest {
         ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, ALICE_DIRECT, service = ChatService.IMESSAGE).setFlags(0)).use { scenario ->
             scenario.waitFor("her background") { background(it).visibility == View.VISIBLE }
             scenario.waitFor("Background in the menu") { menu(it).findItem(R.id.action_chat_background).isVisible }
-            scenario.onActivity { activity -> activity.onOptionsItemSelected(menu(activity).findItem(R.id.action_chat_background)) }
-            ShadowLooper.idleMainLooper()
-            val dialog = ShadowDialog.getLatestDialog() as AlertDialog
-            val items = (0 until dialog.listView.adapter.count).map { dialog.listView.adapter.getItem(it).toString() }
-            assertEquals(listOf("Choose Photo", "Remove Background"), items)
-            dialog.listView.performItemClick(dialog.listView.adapter.getView(1, null, dialog.listView), 1, 1)
+            val sheet = openPicker(scenario)
+            val items = pickerItems(sheet)
+            assertEquals(
+                listOf("Colors", "Dynamic", "Themes", "Your photos"),
+                items.filterIsInstance<BackgroundPicker.Item.Header>().map { two.app.getString(it.title) },
+            )
+            val tiles = items.filterIsInstance<BackgroundPicker.Item.Tile>()
+            assertEquals(BackgroundPalettes.ALL.size + 1 + 10 + 2, tiles.size)
+            assertTrue(tiles.map { it.name }.containsAll(listOf("Sunset", "Ocean", "Slate", "Aurora", "Galaxy", "Photo", "None")))
+            // Each section's tiles come under it.
+            assertTrue(items.indexOfFirst { it is BackgroundPicker.Item.Tile && it.name == "Aurora" } > items.indexOfFirst { it == BackgroundPicker.Item.Header(R.string.imessage_background_section_dynamic) })
+            tap(sheet) { it is BackgroundPicker.Item.Tile && it.pick == BackgroundPicker.Pick.Remove }
+            assertFalse(sheet.isShowing)
             two.waitUntil("taken off through Apple") { asked.any { it.first == DirectWire.BACKGROUND } }
             val r = DirectWire.BackgroundRequest.fromJson(asked.single { it.first == DirectWire.BACKGROUND }.second)
             assertEquals(null, r.path)
+            assertEquals(null, r.style)
             assertTrue(r.version > 1_000)
             scenario.waitFor("gone here too") { background(it).visibility == View.GONE }
             scenario.waitFor("said so") { shownTexts(it).contains("You removed the chat background.") }
@@ -229,6 +242,130 @@ class ChatBackgroundScreenTest {
         ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c2").setFlags(0)).use { scenario ->
             ShadowLooper.idleMainLooper(500, java.util.concurrent.TimeUnit.MILLISECONDS)
             scenario.onActivity { assertFalse(menu(it).findItem(R.id.action_chat_background).isVisible) }
+        }
+    }
+
+    private fun openPicker(scenario: ActivityScenario<ThreadActivity>): BottomSheetDialog {
+        scenario.onActivity { activity -> activity.onOptionsItemSelected(menu(activity).findItem(R.id.action_chat_background)) }
+        ShadowLooper.idleMainLooper()
+        return ShadowDialog.getLatestDialog() as BottomSheetDialog
+    }
+
+    private fun grid(sheet: BottomSheetDialog) = sheet.findViewById<RecyclerView>(R.id.backgroundGrid)!!
+
+    private fun pickerItems(sheet: BottomSheetDialog) = (grid(sheet).adapter as BackgroundPicker.Adapter).items
+
+    /** Taps the picker's tile that [which] picks out. */
+    private fun tap(sheet: BottomSheetDialog, which: (BackgroundPicker.Item) -> Boolean) {
+        val grid = grid(sheet)
+        val adapter = grid.adapter as BackgroundPicker.Adapter
+        val position = adapter.items.indexOfFirst(which)
+        assertTrue("in the picker", position >= 0)
+        grid.scrollToPosition(position)
+        ShadowLooper.idleMainLooper()
+        val holder = grid.findViewHolderForAdapterPosition(position)
+            ?: adapter.createViewHolder(grid, adapter.getItemViewType(position)).also { adapter.bindViewHolder(it, position) }
+        assertTrue(holder.itemView.performClick())
+        ShadowLooper.idleMainLooper()
+    }
+
+    private fun tile(name: String): (BackgroundPicker.Item) -> Boolean = { it is BackgroundPicker.Item.Tile && it.name == name }
+
+    private fun previewBar(activity: Activity) = activity.findViewById<View>(R.id.backgroundPreviewBar)
+
+    private fun drawableOf(activity: Activity) = (background(activity) as android.widget.ImageView).drawable
+
+    @Test
+    fun anIPhonesGradientOrAuroraShowsDrawnNotTakenOff() {
+        directMode()
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, ALICE_DIRECT, service = ChatService.IMESSAGE).setFlags(0)).use { scenario ->
+            scenario.waitFor("her message") { shownTexts(it).contains("Hello") }
+            // A light gradient (Peach): drawn behind the messages, with the scrim.
+            val peach = BackgroundPalettes.ALL.first { it.id == "peach" }.style
+            aliceChanged("BG1", 1_000, null, peach)
+            scenario.waitFor("her gradient") { background(it).visibility == View.VISIBLE && drawableOf(it) is GradientBackgroundDrawable }
+            scenario.onActivity { activity ->
+                assertEquals("gradient:${peach.data}", background(activity).tag)
+                assertEquals(View.VISIBLE, activity.findViewById<View>(R.id.chatBackgroundScrim).visibility)
+                assertTrue(shownTexts(activity).contains("Alice changed the chat background."))
+                // Her bubble is opaque over it, so its text reads as on no background.
+                val bubble = bubbleOf(activity, "Hello")!!.findViewById<View>(R.id.bubble)
+                assertEquals(255, Color.alpha(bubble.backgroundTintList!!.defaultColor))
+            }
+            // Aurora: drawn moving while the screen is in front, still when it is not.
+            aliceChanged("BG2", 2_000, null, BackgroundStyle.Dynamic("aurora_1"))
+            scenario.waitFor("her aurora") { drawableOf(it) is AuroraDrawable }
+            scenario.onActivity { assertTrue((drawableOf(it) as AuroraDrawable).isRunning) }
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.STARTED)
+            scenario.onActivity { assertFalse((drawableOf(it) as AuroraDrawable).isRunning) }
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
+            scenario.onActivity { assertTrue((drawableOf(it) as AuroraDrawable).isRunning) }
+            // One not known here: a plain gradient all the same.
+            aliceChanged("BG3", 3_000, null, BackgroundStyle.Dynamic("comet_7"))
+            scenario.waitFor("drawn as a gradient") { drawableOf(it) is GradientBackgroundDrawable && background(it).tag == "dynamic:comet_7" }
+        }
+    }
+
+    @Test
+    fun withAnimationsOffTheAuroraStandsStill() {
+        directMode()
+        android.provider.Settings.Global.putFloat(two.app.contentResolver, android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 0f)
+        try {
+            aliceChanged("BG1", 1_000, null, BackgroundStyle.Dynamic("aurora_1"))
+            ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, ALICE_DIRECT, service = ChatService.IMESSAGE).setFlags(0)).use { scenario ->
+                scenario.waitFor("her aurora") { drawableOf(it) is AuroraDrawable }
+                scenario.onActivity { assertFalse((drawableOf(it) as AuroraDrawable).isRunning) }
+            }
+        } finally {
+            android.provider.Settings.Global.putFloat(two.app.contentResolver, android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f)
+        }
+    }
+
+    @Test
+    fun aPickedBackgroundIsPreviewedAndOnlySetSendsIt() {
+        directMode()
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, ALICE_DIRECT, service = ChatService.IMESSAGE).setFlags(0)).use { scenario ->
+            scenario.waitFor("her message") { shownTexts(it).contains("Hello") }
+            scenario.waitFor("Background in the menu") { menu(it).findItem(R.id.action_chat_background).isVisible }
+            // No background yet: no None.
+            assertTrue(pickerItems(openPicker(scenario)).none { it is BackgroundPicker.Item.Tile && it.pick == BackgroundPicker.Pick.Remove })
+            ShadowDialog.getLatestDialog().dismiss()
+
+            // Sunset: shown behind the thread, with Set and Cancel; nothing sent.
+            tap(openPicker(scenario), tile("Sunset"))
+            val sunset = BackgroundPalettes.ALL.first { it.id == "sunset" }.style
+            scenario.waitFor("previewed") { background(it).visibility == View.VISIBLE && background(it).tag == "gradient:${sunset.data}" }
+            scenario.onActivity { assertEquals(View.VISIBLE, previewBar(it).visibility) }
+            assertTrue(asked.none { it.first == DirectWire.BACKGROUND })
+            // Cancel: back to none, nothing sent.
+            scenario.onActivity { assertTrue(it.findViewById<View>(R.id.backgroundPreviewCancel).performClick()) }
+            scenario.waitFor("back to none") { background(it).visibility == View.GONE && previewBar(it).visibility == View.GONE }
+            ShadowLooper.idleMainLooper(300, java.util.concurrent.TimeUnit.MILLISECONDS)
+            assertTrue(asked.none { it.first == DirectWire.BACKGROUND })
+
+            // A design: drawn for the preview, then Set sends it as a photo.
+            tap(openPicker(scenario), tile("Galaxy"))
+            scenario.waitFor("the design previewed") { background(it).visibility == View.VISIBLE && background(it).tag == "theme:galaxy" }
+            scenario.onActivity { assertTrue(it.findViewById<View>(R.id.backgroundPreviewSet).performClick()) }
+            two.waitUntil("sent") { asked.any { it.first == DirectWire.BACKGROUND } }
+            val theme = DirectWire.BackgroundRequest.fromJson(asked.single { it.first == DirectWire.BACKGROUND }.second)
+            assertTrue(theme.path != null)
+            assertEquals(null, theme.style)
+            scenario.waitFor("kept and shown") { a ->
+                val f = ChatBackgrounds(two.app).pictureOf(ALICE_DIRECT)
+                f != null && background(a).tag == f.path && previewBar(a).visibility == View.GONE
+            }
+            scenario.waitFor("said so") { shownTexts(it).contains("You changed the chat background.") }
+
+            // Aurora: sent as Apple's dynamic background.
+            tap(openPicker(scenario), tile("Aurora"))
+            scenario.waitFor("aurora previewed") { drawableOf(it) is AuroraDrawable }
+            scenario.onActivity { assertTrue(it.findViewById<View>(R.id.backgroundPreviewSet).performClick()) }
+            two.waitUntil("aurora sent") { asked.count { it.first == DirectWire.BACKGROUND } == 2 }
+            val aurora = DirectWire.BackgroundRequest.fromJson(asked.last { it.first == DirectWire.BACKGROUND }.second)
+            assertEquals(BackgroundStyle.Dynamic("aurora_1"), aurora.style)
+            assertEquals(null, aurora.path)
+            two.waitUntil("stored") { ChatBackgrounds(two.app).of(ALICE_DIRECT).style == BackgroundStyle.Dynamic("aurora_1") }
         }
     }
 

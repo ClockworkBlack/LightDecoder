@@ -166,18 +166,66 @@ class ChatBackgroundsTest {
         assertEquals(u.row!!.message.text, wired.row!!.message.text)
     }
 
+    private fun gradient(vararg colors: PosterColor): SimplifiedTranscriptPoster {
+        val p = photo()
+        return p.copy(poster = SimplifiedPoster(titleOf(p), PosterType.TranscriptGradient(colors.toList()), PosterRole.PR_POSTER_ROLE_BACKDROP))
+    }
+
+    private fun dynamicNamed(identifier: String): SimplifiedTranscriptPoster {
+        val p = photo()
+        return p.copy(poster = SimplifiedPoster(titleOf(p), PosterType.TranscriptDynamic(TranscriptDynamicUserData(identifier)), PosterRole.PR_POSTER_ROLE_BACKDROP))
+    }
+
     @Test
-    fun aDynamicOrRemovedBackgroundIsNone() {
-        val natives = FakeNatives(dynamic())
-        val d = receive(inst("B2", bob, set(2_000)), natives) as DirectArchive.Update.Background
+    fun aGradientOrDynamicBackgroundIsKeptToBeDrawnNotTakenOff() {
+        // A gradient: its colours (PosterColor is alpha, blue, green, red), no picture, "changed".
+        val g = receive(inst("B2", bob, set(2_000)), FakeNatives(gradient(PosterColor(1.0, 0.0, 0.5, 1.0), PosterColor(1.0, 1.0, 0.0, 0.0)))) as DirectArchive.Update.Background
+        assertNull(g.path)
+        assertEquals(BackgroundStyle.Gradient(listOf(Rgba(1.0, 0.5, 0.0, 1.0), Rgba(0.0, 0.0, 1.0, 1.0))), g.style)
+        assertEquals("+15559876543 changed the chat background.", g.row!!.message.text)
+        // Aurora, by its identifier.
+        val d = receive(inst("B2b", bob, set(2_001)), FakeNatives(dynamicNamed("aurora_1"))) as DirectArchive.Update.Background
         assertNull(d.path)
-        assertEquals("+15559876543 removed the chat background.", d.row!!.message.text)
+        assertEquals(BackgroundStyle.Dynamic("aurora_1"), d.style)
+        assertTrue((d.style as BackgroundStyle.Dynamic).isKnown)
+        assertEquals("+15559876543 changed the chat background.", d.row!!.message.text)
+        // As they cross to the main process.
+        for (u in listOf(g, d)) {
+            val wired = DirectWire.decode(JSONObject(DirectWire.encode(u).toString())) as DirectArchive.Update.Background
+            assertEquals(u.copy(row = null), wired.copy(row = null))
+        }
+        // Nothing is left in the backgrounds' folder for them.
+        assertTrue(ChatBackgrounds.dir(context).listFiles().orEmpty().none { it.name.endsWith(".jpg") })
         // Taken off: nothing is fetched.
         val none = FakeNatives(null)
         val r = receive(inst("B3", bob, remove(3_000)), none) as DirectArchive.Update.Background
         assertNull(r.path)
+        assertNull(r.style)
+        assertEquals("+15559876543 removed the chat background.", r.row!!.message.text)
         assertEquals(3_000L, r.version)
         assertTrue(none.downloads.isEmpty())
+    }
+
+    @Test
+    fun gradientColoursRoundTripAsPosterKitWritesThem() {
+        val colors = listOf(Rgba(1.0, 0.5, 0.25, 1.0), Rgba(0.0, 0.123456, 1.0, 0.5))
+        val text = BackgroundStyle.encodeColors(colors)
+        assertEquals("1/0.5/0.25/1//0/0.123456/1/0.5", text)
+        assertEquals(colors, BackgroundStyle.decodeColors(text))
+        // As the library writes them (Rust's float formatting), and tolerantly.
+        assertEquals(listOf(Rgba(1.0, 0.0, 0.0, 1.0)), BackgroundStyle.decodeColors("1.0/0/0/1"))
+        assertEquals(listOf(Rgba(1.0, 0.0, 0.0, 1.0)), BackgroundStyle.decodeColors("255/0/0"))
+        assertEquals(emptyList<Rgba>(), BackgroundStyle.decodeColors("junk"))
+        // Kind and data, as stored and wired.
+        val g = BackgroundStyle.Gradient(colors)
+        assertEquals(g, BackgroundStyle.of(g.type, g.data))
+        assertEquals(BackgroundStyle.Dynamic("aurora_1"), BackgroundStyle.of("dynamic", "aurora_1"))
+        assertNull(BackgroundStyle.of("photo", ""))
+        assertNull(BackgroundStyle.of(null, null))
+        // Android colours.
+        assertEquals(0xFFFF8040.toInt(), Rgba.of(0xFFFF8040.toInt()).argb())
+        // To and from PosterKit's poster type.
+        assertEquals(g, BackgroundPosters.styleOf(BackgroundPosters.drawnPoster(g, ByteArray(0))))
     }
 
     @Test
@@ -277,6 +325,98 @@ class ChatBackgroundsTest {
         assertEquals("imsg:group:G-9", repo.message("imsg:D2")!!.conversationId)
     }
 
+    @Test
+    fun aDrawnBackgroundIsStoredWithItsKindAndAnUnknownOneIsLogged() {
+        val link = DirectLink.get(context)
+        val store = ChatBackgrounds(context)
+        val sunset = BackgroundPalettes.ALL.first().style
+        link.apply(wire(DirectArchive.background(inst("E1", bob, set(30_000)), setOf(me), Handles::display, DirectTexts(context), null, sunset)))
+        val shown = store.of("imsg:$bob")
+        assertEquals(sunset, shown.style)
+        assertNull(shown.file)
+        assertTrue(shown.isSet)
+        assertEquals("+15559876543 changed the chat background.", repo.message("imsg:E1")!!.text)
+
+        // A photo after it: the photo, the style gone.
+        link.apply(change("E2", bob, set(31_000), incomingPicture(Color.RED)))
+        assertNull(store.of("imsg:$bob").style)
+        assertNotNull(store.of("imsg:$bob").file)
+
+        // A dynamic one not known here: kept (drawn as a plain gradient), its name in the iMessage log.
+        com.lightdecoder.imessage.IMessageLog.clear(context)
+        val old = store.of("imsg:$bob").file!!
+        link.apply(wire(DirectArchive.background(inst("E3", bob, set(32_000)), setOf(me), Handles::display, DirectTexts(context), null, BackgroundStyle.Dynamic("comet_7"))))
+        assertEquals(BackgroundStyle.Dynamic("comet_7"), store.of("imsg:$bob").style)
+        assertFalse("the photo before it goes", old.exists())
+        val log = com.lightdecoder.imessage.IMessageLog.read(context)
+        assertTrue(log.toString(), log.any { it.contains("unknown dynamic background \"comet_7\"") })
+        // Aurora is known: not logged as unknown.
+        link.apply(wire(DirectArchive.background(inst("E4", bob, set(33_000)), setOf(me), Handles::display, DirectTexts(context), null, BackgroundStyle.Dynamic("aurora_1"))))
+        assertEquals(1, com.lightdecoder.imessage.IMessageLog.read(context).count { it.contains("unknown dynamic background") })
+        assertEquals(BackgroundStyle.Dynamic("aurora_1"), store.of("imsg:$bob").style)
+    }
+
+    // --- drawn here ---------------------------------------------------------------------------------
+
+    private fun pixels(b: Bitmap) = IntArray(b.width * b.height).also { b.getPixels(it, 0, b.width, 0, 0, b.width, b.height) }
+
+    private fun distinctColours(b: Bitmap) = pixels(b).toSet().size
+
+    @Test
+    fun everyThemeIsDrawnTheSameEachTimeAtTheSizeAsked() {
+        assertEquals(10, BackgroundThemes.ALL.size)
+        for (theme in BackgroundThemes.ALL) {
+            val a = BackgroundThemes.render(theme.id, 108, 234)!!
+            assertEquals(108, a.width)
+            assertEquals(234, a.height)
+            assertTrue("${theme.id} is not blank", distinctColours(a) > 20)
+            assertTrue("${theme.id} is opaque", pixels(a).all { Color.alpha(it) == 255 })
+            val b = BackgroundThemes.render(theme.id, 108, 234)!!
+            assertTrue("${theme.id} is the same each time", pixels(a).contentEquals(pixels(b)))
+        }
+        // The designs differ from one another.
+        val firsts = BackgroundThemes.ALL.map { pixels(BackgroundThemes.render(it.id, 54, 117)!!).toList() }
+        assertEquals(firsts.size, firsts.toSet().size)
+        assertNull(BackgroundThemes.render("nope", 10, 10))
+        // The size sent: the screen's, portrait, at most 2048 on its longest side.
+        assertEquals(1080 to 1920, DirectLink.themeSize(1080, 1920))
+        assertEquals(1080 to 1920, DirectLink.themeSize(1920, 1080))
+        assertEquals(945 to 2048, DirectLink.themeSize(1080, 2340))
+    }
+
+    @Test
+    fun gradientsAndTheAuroraAreDrawnHere() {
+        for (palette in BackgroundPalettes.ALL) {
+            val b = BackgroundArt.render(palette.style, 60, 120)
+            val top = b.getPixel(30, 2)
+            val bottom = b.getPixel(30, 117)
+            assertTrue("${palette.id} blends from top to bottom", top != bottom)
+            assertTrue(pixels(b).all { Color.alpha(it) == 255 })
+        }
+        // A blend: the middle lies between the ends.
+        val bw = BackgroundArt.render(BackgroundStyle.Gradient(listOf(Rgba(1.0, 1.0, 1.0), Rgba(0.0, 0.0, 0.0))), 40, 200)
+        val mid = Color.red(bw.getPixel(20, 100))
+        assertTrue(mid in 40..215)
+        assertTrue(Color.red(bw.getPixel(20, 1)) > Color.red(bw.getPixel(20, 198)))
+        // Aurora: an animated drawing, still until started.
+        val aurora = BackgroundArt.drawableFor(BackgroundStyle.Dynamic("aurora_1"), animate = true)
+        assertTrue(aurora is AuroraDrawable)
+        assertFalse((aurora as AuroraDrawable).isRunning)
+        aurora.start()
+        assertTrue(aurora.isRunning)
+        aurora.stop()
+        assertFalse(aurora.isRunning)
+        // Animations off: it never runs.
+        val still = BackgroundArt.drawableFor(BackgroundStyle.Dynamic("aurora_1"), animate = false) as AuroraDrawable
+        still.start()
+        assertFalse(still.isRunning)
+        assertTrue(distinctColours(BackgroundArt.render(BackgroundStyle.Dynamic("aurora_1"), 60, 120)) > 20)
+        // Unknown: a calm gradient from its name, the same each time, different per name.
+        assertTrue(BackgroundArt.drawableFor(BackgroundStyle.Dynamic("comet_7"), animate = true) is GradientBackgroundDrawable)
+        assertTrue(BackgroundArt.neutralFor("comet_7").contentEquals(BackgroundArt.neutralFor("comet_7")))
+        assertFalse(BackgroundArt.neutralFor("comet_7").contentEquals(BackgroundArt.neutralFor("nebula_2")))
+    }
+
     // --- set from here -------------------------------------------------------------------------------
 
     private fun directMode() {
@@ -324,6 +464,98 @@ class ChatBackgroundsTest {
         assertTrue(removed.version > r.version)
         assertNull(ChatBackgrounds(context).pictureOf("imsg:$bob"))
         assertTrue(repo.messages("imsg:$bob").any { it.text == "You removed the chat background." })
+    }
+
+    @Test
+    fun aGradientAuroraOrThemePickedGoesToAppleAsSuch() {
+        directMode()
+        bobsChat()
+        val asked = Collections.synchronizedList(ArrayList<Pair<Int, JSONObject>>())
+        val link = DirectLink.installForTesting(context) { what, request, _ ->
+            asked += what to request
+            if (what == DirectWire.BACKGROUND) {
+                val r = DirectWire.BackgroundRequest.fromJson(request)
+                assertTrue(r.path == null || BitmapFactory.decodeFile(r.path) != null)
+            }
+            DirectWire.ok()
+        }
+        val ocean = BackgroundPalettes.ALL.first { it.id == "ocean" }.style
+        runBlocking { link.setBackground("imsg:$bob", BackgroundChoice.Drawn(ocean)) }
+        val g = DirectWire.BackgroundRequest.fromJson(asked.last().second)
+        assertNull(g.path)
+        assertEquals(ocean, g.style)
+        assertEquals(ocean, ChatBackgrounds(context).of("imsg:$bob").style)
+        assertTrue(repo.messages("imsg:$bob").any { it.text == "You changed the chat background." })
+
+        runBlocking { link.setBackground("imsg:$bob", BackgroundChoice.Drawn(BackgroundStyle.Dynamic("aurora_1"))) }
+        assertEquals(BackgroundStyle.Dynamic("aurora_1"), DirectWire.BackgroundRequest.fromJson(asked.last().second).style)
+
+        // A design: drawn now, sent as a photo.
+        runBlocking { link.setBackground("imsg:$bob", BackgroundChoice.Theme("galaxy")) }
+        val t = DirectWire.BackgroundRequest.fromJson(asked.last().second)
+        assertNull(t.style)
+        assertNotNull(t.path)
+        val shown = ChatBackgrounds(context).of("imsg:$bob")
+        assertNull(shown.style)
+        val bitmap = BitmapFactory.decodeFile(shown.file!!.path)!!
+        assertTrue(bitmap.height > bitmap.width)
+    }
+
+    /** The library's packing and upload, faked: what was packed. */
+    private class FakeOutgoing : OutgoingBackgrounds.Natives {
+        val packed = ArrayList<SimplifiedTranscriptPoster>()
+        val uploads = ArrayList<String>()
+        override fun nsNull(): ByteArray? = byteArrayOf(7)
+        override suspend fun pack(poster: SimplifiedTranscriptPoster): ByteArray {
+            packed += poster
+            return byteArrayOf(0x50, 0x4b, 3, 4)
+        }
+        override suspend fun upload(path: String): MmcsFile? {
+            uploads += path
+            assertEquals(0x50.toByte(), File(path).readBytes()[0])
+            return MmcsFile(byteArrayOf(1), "OBJ", "https://mmcs.example/obj", byteArrayOf(2), 4UL)
+        }
+        override fun heic(bitmap: Bitmap, scratch: File): ByteArray? = null
+    }
+
+    @Test
+    fun theOutgoingPosterIsAGradientADynamicOrAPhoto() {
+        val natives = FakeOutgoing()
+        val out = OutgoingBackgrounds(context, natives)
+        val sunset = BackgroundPalettes.ALL.first().style
+        assertEquals("OBJ", runBlocking { out.upload(null, sunset) }.`object`)
+        val g = natives.packed.last()
+        val type = g.poster.type as PosterType.TranscriptGradient
+        assertEquals(sunset.colors, type.colors.map { Rgba(it.red, it.green, it.blue, it.alpha) })
+        assertEquals(BackgroundPosters.GRADIENT_PROVIDER, g.watch.extensionIdentifier)
+        assertEquals(PosterRole.PR_POSTER_ROLE_BACKDROP, g.poster.role)
+        assertTrue(g.poster.titleConfiguration.timeNumberingSystem!!.contentEquals(byteArrayOf(7)))
+        val watch = BitmapFactory.decodeByteArray(g.watch.backgroundImageData, 0, g.watch.backgroundImageData.size)!!
+        assertEquals(BackgroundPosters.WATCH_WIDTH, watch.width)
+        assertEquals(BackgroundPosters.WATCH_HEIGHT, watch.height)
+        assertTrue(g.watch.luminance > 0.0)
+
+        runBlocking { out.upload(null, BackgroundStyle.Dynamic("aurora_1")) }
+        val d = natives.packed.last()
+        assertEquals("aurora_1", (d.poster.type as PosterType.TranscriptDynamic).data.identifier)
+        assertEquals(BackgroundPosters.DYNAMIC_PROVIDER, d.watch.extensionIdentifier)
+        assertFalse(d.watch.isHighKey)
+
+        // A photo (a design is one too): the photo poster, the JPEG as its layers where HEIC cannot be made.
+        val jpeg = File(context.cacheDir, "theme.jpg").apply { writeBytes(jpeg(90, 180, Color.CYAN)) }
+        runBlocking { out.upload(jpeg, null) }
+        val p = natives.packed.last()
+        assertEquals(BackgroundPosters.PHOTOS_PROVIDER, p.watch.extensionIdentifier)
+        assertTrue((p.poster.type as PosterType.Photo).assets.single().files.values.all { it.contentEquals(jpeg.readBytes()) })
+        // The zips do not stay behind.
+        assertTrue(natives.uploads.none { File(it).exists() })
+        // Nothing to send: said so.
+        try {
+            runBlocking { out.upload(null, null) }
+            fail("no background was taken")
+        } catch (e: DirectEngine.ImessageError) {
+            assertEquals(context.getString(com.lightdecoder.R.string.imessage_background_unreadable), e.message)
+        }
     }
 
     @Test
@@ -384,8 +616,8 @@ class ChatBackgroundsTest {
         val both = p.copy(watch = p.watch.copy(backgroundImageData = byteArrayOf(1)))
         assertEquals(2, BackgroundPosters.pictureSources(both).size)
         assertNull(BackgroundPosters.pictureSources(both).last().second)
-        assertTrue(BackgroundPosters.isRemoval(dynamic()))
-        assertFalse(BackgroundPosters.isRemoval(p))
+        assertEquals(BackgroundStyle.Dynamic(""), BackgroundPosters.styleOf(dynamic()))
+        assertNull(BackgroundPosters.styleOf(p))
     }
 
     @Test

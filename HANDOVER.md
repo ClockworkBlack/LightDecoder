@@ -8,6 +8,15 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
    had earlier chosen "build with a warning", then "pause on Discord", and has now asked for
    the web-view tab only, with no bridge). **Instagram: skipped** (ban risk, like Messenger).
 
+## 0.5.62 (versionCode 73) - stock chat backgrounds
+- Owner asked for Messenger-like stock backgrounds plus iPhone's own. Picker (`BackgroundPicker`) with
+  Colors (12 palettes sent as TranscriptGradient, rendered natively by iPhones), Dynamic (Aurora,
+  TranscriptDynamic "aurora_1", the only identifier confirmed in rustpush), Themes (10 original Canvas
+  designs in `BackgroundThemes`, sent as photo posters), Your photos; preview with Set/Cancel.
+- Incoming gradient/dynamic backgrounds are now shown (own renderers in `BackgroundArt`), not removed;
+  unknown dynamic identifiers are logged to IMessageLog. Not yet verified with a real iPhone.
+- Unit tests: 1089, all passing. Next version: 0.5.63 / 74.
+
 ## 0.5.61 (versionCode 72) - text effects and formatting, chat backgrounds, Send Later
 - iOS 18 text effects (Big, Small, Shake, Nod, Explode, Ripple, Bloom, Jitter) and bold/italic/underline/
   strikethrough both ways: `TextRuns` (extra.runs per part), `TextFormatting`, `TextEffectView`;
@@ -19,7 +28,7 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
   androidx.heifwriter 1.0.0 (Apache-2.0). **Outgoing poster not yet seen accepted by an iPhone.**
 - Send Later: `ScheduleMode` queued on Apple's side; "Send Later ·" label, Cancel (Unschedule,
   DirectWire.UNSCHEDULE=12) and Send Now.
-- Unit tests: 1080, all passing. Next version: 0.5.62 / 73.
+- Unit tests: 1080, all passing.
 
 ## 0.5.60 (versionCode 71) - effects play on screen
 - Owner asked for sent effects to show on their own screen too. `ui/chat/EffectPlayer.kt` animates the

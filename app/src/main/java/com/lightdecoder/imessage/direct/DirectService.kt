@@ -76,7 +76,7 @@ class DirectService : Service() {
                 // Only a picture the main process put where backgrounds are kept.
                 val path = r.path?.takeIf { ChatBackgrounds.isOurs(this, java.io.File(it)) }
                 if (r.path != null && path == null) throw DirectEngine.ImessageError(getString(R.string.imessage_background_unreadable))
-                engine.setBackground(r.target, path, r.version)
+                engine.setBackground(r.target, path, r.version, r.style)
                 DirectWire.ok()
             }
             DirectWire.UNSCHEDULE -> {

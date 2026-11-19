@@ -216,9 +216,20 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private var remoteFailedAtMs = 0L
     private var scrollToBottomNext = false
 
-    /** The picture behind the messages now (the chat's background, iOS 26): its file, or null for none. */
+    /** The chat's background (iOS 26) as stored, shown behind the messages unless one is being previewed. */
     @VisibleForTesting
-    internal var shownBackground: File? = null
+    internal var shownBackground: com.lightdecoder.imessage.direct.ChatBackgrounds.Background? = null
+
+    /** What is behind the messages now (a stored background's or a preview's key), so the same one is not drawn again. */
+    private var shownBackgroundKey: String? = null
+
+    /** A background picked in the picker and shown, not yet sent: for which chat, and what ([previewBackground]). */
+    @VisibleForTesting
+    internal var backgroundPreview: Pair<String, com.lightdecoder.imessage.direct.BackgroundChoice>? = null
+
+    /** The background picker open now ([chooseBackground]). */
+    @VisibleForTesting
+    internal var backgroundPicker: Dialog? = null
 
     /** The iMessage chat a background picture is being picked for ([chooseBackground]). */
     private var backgroundFor: String? = null
@@ -226,7 +237,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private val pickBackground = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         val chat = backgroundFor
         backgroundFor = null
-        if (uri != null && chat != null) setChatBackground(chat, uri)
+        if (uri != null && chat != null) previewBackground(chat, com.lightdecoder.imessage.direct.BackgroundChoice.Photo(uri))
     }
 
     /**
@@ -546,6 +557,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         readerInstance = null
         if (::effectPlayer.isInitialized) effectPlayer.cancel()
         if (::binding.isInitialized) binding.messages.removeCallbacks(sendLaterDue)
+        if (::binding.isInitialized) animateBackground(false)
+        backgroundPicker?.dismiss()
         super.onDestroy()
     }
 
@@ -560,6 +573,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         MessageNotifier.cancel(this, conversationId, manager.service)
         com.lightdecoder.relay.ReadNotifier.cancel(this, manager.service, conversationId)
         markCompanionVisible()
+        animateBackground(true)
         // iMessage pictures OpenBubbles has saved meanwhile.
         if (com.lightdecoder.imessage.IMessagePrefs.enabled(this) &&
             (manager.service == ChatService.MESSAGES || manager.service == ChatService.IMESSAGE)
@@ -573,6 +587,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         companionId?.let { if (MessageNotifier.visibleConversationId(ChatService.IMESSAGE) == it) MessageNotifier.setVisibleConversationId(ChatService.IMESSAGE, null) }
         // Nothing is recorded while the screen is not in front: a half-made recording is thrown away.
         if (recorder != null && !isChangingConfigurations) cancelRecording(quietly = false)
+        // A moving background (the aurora) stands still while the screen is not in front.
+        animateBackground(false)
         super.onPause()
     }
 
@@ -741,8 +757,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
          * conversation with no iMessage chat yet, through the iMessage library.
          */
         val reach: String? = null,
-        /** The picture behind the messages: this iMessage chat's background, or its companion's ([ChatBackgrounds]). */
-        val background: File? = null,
+        /** The background behind the messages: this iMessage chat's, or its companion's ([ChatBackgrounds]). */
+        val background: com.lightdecoder.imessage.direct.ChatBackgrounds.Background? = null,
     )
 
     /**
@@ -800,7 +816,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             val reach = if (link.service == ChatService.MESSAGES && companion == null) reachAddress(conversation, people) else null
             val backgroundChat = if (link.service == ChatService.IMESSAGE) id else companion
             val background = backgroundChat?.let { chat ->
-                runCatching { com.lightdecoder.imessage.direct.ChatBackgrounds(applicationContext).pictureOf(chat) }.getOrNull()
+                runCatching { com.lightdecoder.imessage.direct.ChatBackgrounds(applicationContext).of(chat) }.getOrNull()
             }
             Snapshot(
                 conversation = conversation,
@@ -1845,35 +1861,84 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     // --- chat backgrounds (iOS 26) ---
 
     /**
-     * Shows [file] behind the messages (centre-cropped, under a light scrim so they stay readable),
-     * or none. Decoded off the main thread, at most the screen's size.
+     * Shows the chat's background [background] behind the messages (under a light scrim so they stay
+     * readable): a picture centre-cropped, or a gradient or dynamic one drawn here
+     * ([com.lightdecoder.imessage.direct.BackgroundArt]); or none. While a picked one is previewed,
+     * that stays shown and this is only remembered.
      */
-    private fun renderBackground(file: File?) {
-        val same = file?.path == shownBackground?.path && (file == null || file.lastModified() == shownBackground?.lastModified())
-        if (same) return
-        shownBackground = file
-        if (file == null) {
-            binding.chatBackground.setImageDrawable(null)
-            binding.chatBackground.tag = null
-            binding.chatBackground.visibility = View.GONE
-            binding.chatBackgroundScrim.visibility = View.GONE
-            return
+    private fun renderBackground(background: com.lightdecoder.imessage.direct.ChatBackgrounds.Background?) {
+        shownBackground = background?.takeIf { it.isSet }
+        if (backgroundPreview != null) return
+        showBackground(shownBackground)
+    }
+
+    private fun showBackground(background: com.lightdecoder.imessage.direct.ChatBackgrounds.Background?) {
+        val style = background?.style
+        val file = background?.file
+        when {
+            style != null -> showStyle(style)
+            file != null -> showPicture(file)
+            else -> clearBackground()
         }
+    }
+
+    private fun backgroundKey(style: com.lightdecoder.imessage.direct.BackgroundStyle) = "${style.type}:${style.data}"
+
+    private fun clearBackground() {
+        shownBackgroundKey = null
+        animateBackground(false)
+        binding.chatBackground.setImageDrawable(null)
+        binding.chatBackground.tag = null
+        binding.chatBackground.visibility = View.GONE
+        binding.chatBackgroundScrim.visibility = View.GONE
+    }
+
+    /** A gradient or dynamic background, drawn (the aurora moving, unless the system's animations are off). */
+    private fun showStyle(style: com.lightdecoder.imessage.direct.BackgroundStyle) {
+        val key = backgroundKey(style)
+        if (key == shownBackgroundKey) return
+        animateBackground(false)
+        shownBackgroundKey = key
+        val drawable = com.lightdecoder.imessage.direct.BackgroundArt.drawableFor(style, animate = !EffectPlayer.animationsOff(this))
+        binding.chatBackground.setImageDrawable(drawable)
+        binding.chatBackground.tag = key
+        binding.chatBackground.visibility = View.VISIBLE
+        binding.chatBackgroundScrim.visibility = View.VISIBLE
+        if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) animateBackground(true)
+    }
+
+    /** Starts or stops a moving background (the aurora): it moves only while the screen is in front. */
+    private fun animateBackground(on: Boolean) {
+        val anim = binding.chatBackground.drawable as? android.graphics.drawable.Animatable ?: return
+        if (on) anim.start() else anim.stop()
+    }
+
+    /** A picture (decoded off the main thread, at most the screen's size), centre-cropped. */
+    private fun showPicture(file: File) {
+        val key = "${file.path}@${file.lastModified()}"
+        if (key == shownBackgroundKey) return
+        shownBackgroundKey = key
         val metrics = resources.displayMetrics
         val longest = maxOf(metrics.widthPixels, metrics.heightPixels).coerceAtLeast(1)
         lifecycleScope.launch {
             val bitmap = withContext(Dispatchers.IO) { decodeBackground(file, longest) }
-            if (shownBackground?.path != file.path) return@launch
-            if (bitmap == null) {
-                binding.chatBackground.visibility = View.GONE
-                binding.chatBackgroundScrim.visibility = View.GONE
-                return@launch
-            }
-            binding.chatBackground.setImageBitmap(bitmap)
-            binding.chatBackground.tag = file.path
-            binding.chatBackground.visibility = View.VISIBLE
-            binding.chatBackgroundScrim.visibility = View.VISIBLE
+            if (shownBackgroundKey != key) return@launch
+            showBitmap(bitmap, file.path)
         }
+    }
+
+    private fun showBitmap(bitmap: Bitmap?, tag: String) {
+        animateBackground(false)
+        if (bitmap == null) {
+            binding.chatBackground.visibility = View.GONE
+            binding.chatBackgroundScrim.visibility = View.GONE
+            return
+        }
+        binding.chatBackground.scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
+        binding.chatBackground.setImageBitmap(bitmap)
+        binding.chatBackground.tag = tag
+        binding.chatBackground.visibility = View.VISIBLE
+        binding.chatBackgroundScrim.visibility = View.VISIBLE
     }
 
     private fun decodeBackground(file: File, longest: Int): Bitmap? = try {
@@ -1882,6 +1947,24 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         var sample = 1
         while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= longest) sample *= 2
         android.graphics.BitmapFactory.decodeFile(file.path, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
+    } catch (e: OutOfMemoryError) {
+        null
+    }
+
+    /** A photo the user picked, decoded for the preview (upright, at most the screen's size). */
+    private fun decodePicked(uri: Uri, longest: Int): Bitmap? = try {
+        val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        if (bytes == null) null else {
+            val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            var sample = 1
+            while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= longest) sample *= 2
+            val decoded = if (com.lightdecoder.heif.ImageSniffer.isHeif(bytes)) com.lightdecoder.heif.Media.decodeFirstFrame(bytes)
+            else android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
+            decoded?.let { com.lightdecoder.heif.ExifOrientation.upright(bytes, it) }
+        }
+    } catch (e: Exception) {
+        null
     } catch (e: OutOfMemoryError) {
         null
     }
@@ -1900,37 +1983,103 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
     }
 
-    /** The menu's "Background": a photo (the system's photo picker), or Remove Background when it has one. */
+    /**
+     * The menu's "Background": the picker ([BackgroundPicker]) of gradients, Aurora, the app's own
+     * designs, a photo (the system's photo picker), or none when the chat has one. A gradient,
+     * Aurora, design or photo is previewed behind the thread first ([previewBackground]).
+     */
     @VisibleForTesting
     internal fun chooseBackground() {
         val chat = backgroundChat() ?: return
-        val items = listOfNotNull(
-            getString(R.string.imessage_background_choose),
-            getString(R.string.imessage_background_remove).takeIf { shownBackground != null },
-        )
-        confirmDialog?.dismiss()
-        confirmDialog = MaterialAlertDialogBuilder(this)
-            .setTitle(R.string.imessage_background)
-            .setItems(items.toTypedArray()) { _, which ->
-                if (which == 0) {
+        backgroundPicker?.dismiss()
+        backgroundPicker = BackgroundPicker.show(this, lifecycleScope, hasBackground = shownBackground != null) { pick ->
+            backgroundPicker = null
+            when (pick) {
+                is BackgroundPicker.Pick.Drawn -> previewBackground(chat, com.lightdecoder.imessage.direct.BackgroundChoice.Drawn(pick.style))
+                is BackgroundPicker.Pick.Theme -> previewBackground(chat, com.lightdecoder.imessage.direct.BackgroundChoice.Theme(pick.id))
+                BackgroundPicker.Pick.ChoosePhoto -> {
                     backgroundFor = chat
                     pickBackground.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                } else {
-                    setChatBackground(chat, null)
+                }
+                BackgroundPicker.Pick.Remove -> setChatBackground(chat, com.lightdecoder.imessage.direct.BackgroundChoice.None)
+            }
+        }
+    }
+
+    /**
+     * Shows [choice] behind the thread as [chat]'s background would look, with Set (sends it) and
+     * Cancel (back to the chat's own); nothing goes to Apple until Set.
+     */
+    @VisibleForTesting
+    internal fun previewBackground(chat: String, choice: com.lightdecoder.imessage.direct.BackgroundChoice) {
+        backgroundPreview = chat to choice
+        binding.backgroundPreviewBar.visibility = View.VISIBLE
+        binding.backgroundPreviewSet.setOnClickListener { endBackgroundPreview(send = true) }
+        binding.backgroundPreviewCancel.setOnClickListener { endBackgroundPreview(send = false) }
+        val metrics = resources.displayMetrics
+        when (choice) {
+            is com.lightdecoder.imessage.direct.BackgroundChoice.Drawn -> showStyle(choice.style)
+            is com.lightdecoder.imessage.direct.BackgroundChoice.Theme -> {
+                val key = "theme:${choice.id}"
+                shownBackgroundKey = key
+                val (w, h) = com.lightdecoder.imessage.direct.DirectLink.themeSize(metrics.widthPixels, metrics.heightPixels)
+                lifecycleScope.launch {
+                    val bitmap = withContext(Dispatchers.Default) {
+                        try {
+                            com.lightdecoder.imessage.direct.BackgroundThemes.render(choice.id, w / 2, h / 2)
+                        } catch (e: OutOfMemoryError) {
+                            null
+                        }
+                    }
+                    if (shownBackgroundKey == key) showBitmap(bitmap, key)
                 }
             }
-            .show()
+            is com.lightdecoder.imessage.direct.BackgroundChoice.Photo -> {
+                val key = "photo:${choice.uri}"
+                shownBackgroundKey = key
+                val longest = maxOf(metrics.widthPixels, metrics.heightPixels).coerceAtLeast(1)
+                lifecycleScope.launch {
+                    val bitmap = withContext(Dispatchers.IO) { decodePicked(choice.uri, longest) }
+                    if (shownBackgroundKey == key) showBitmap(bitmap, key)
+                }
+            }
+            com.lightdecoder.imessage.direct.BackgroundChoice.None -> clearBackground()
+        }
+    }
+
+    /** The preview's Set ([send]: it goes to Apple, and stays shown meanwhile) or Cancel (the chat's own again). */
+    @VisibleForTesting
+    internal fun endBackgroundPreview(send: Boolean) {
+        val (chat, choice) = backgroundPreview ?: return
+        backgroundPreview = null
+        binding.backgroundPreviewBar.visibility = View.GONE
+        if (send) {
+            setChatBackground(chat, choice)
+        } else {
+            showBackground(shownBackground)
+        }
     }
 
     /** Sets [chat]'s background to the picture [uri], or takes it off (null), through the iMessage library. */
     @VisibleForTesting
-    internal fun setChatBackground(chat: String, uri: Uri?) {
+    internal fun setChatBackground(chat: String, uri: Uri?) = setChatBackground(
+        chat,
+        if (uri != null) com.lightdecoder.imessage.direct.BackgroundChoice.Photo(uri) else com.lightdecoder.imessage.direct.BackgroundChoice.None,
+    )
+
+    /** Sets [chat]'s background to [choice] through the iMessage library; if it does not go, the chat's own shows again. */
+    @VisibleForTesting
+    internal fun setChatBackground(chat: String, choice: com.lightdecoder.imessage.direct.BackgroundChoice) {
         toast(getString(R.string.imessage_background_sending))
         val direct = com.lightdecoder.imessage.direct.DirectLink.get(applicationContext)
+        val removing = choice is com.lightdecoder.imessage.direct.BackgroundChoice.None
         lifecycleScope.launch {
-            val result = withContext(Dispatchers.IO) { runCatching { direct.setBackground(chat, uri) } }
-            result.onSuccess { toast(getString(if (uri != null) R.string.imessage_background_set else R.string.imessage_background_removed)) }
-                .onFailure { toast(getString(R.string.imessage_background_failed, com.lightdecoder.imessage.direct.DirectEngine.readable(it))) }
+            val result = withContext(Dispatchers.IO) { runCatching { direct.setBackground(chat, choice) } }
+            result.onSuccess { toast(getString(if (!removing) R.string.imessage_background_set else R.string.imessage_background_removed)) }
+                .onFailure {
+                    toast(getString(R.string.imessage_background_failed, com.lightdecoder.imessage.direct.DirectEngine.readable(it)))
+                    if (backgroundPreview == null) showBackground(shownBackground)
+                }
         }
     }
 

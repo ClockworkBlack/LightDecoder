@@ -190,6 +190,8 @@ object DirectArchive {
             val version: Long,
             val path: String?,
             val row: Upsert?,
+            /** A gradient or dynamic background (drawn here, no picture): set, though [path] is null. */
+            val style: BackgroundStyle? = null,
         ) : Update()
 
         object Ignore : Update()
@@ -624,17 +626,17 @@ object DirectArchive {
 
     /**
      * A background change from Apple as the archive takes it: the chat it is for
-     * ([backgroundChat]), the picture the ":imessage" process saved for it at [path] (null: the
-     * background was taken off, or is one only an iPhone draws), and the row saying who did it
+     * ([backgroundChat]), the picture the ":imessage" process saved for it at [path] or the gradient
+     * or dynamic background [style] (neither: the background was taken off), and the row saying who did it
      * ("Bob changed the chat background.", as an iPhone puts it). Ignored when it names no chat.
      */
-    fun background(inst: MessageInst, me: Set<String>, nameOf: (String) -> String, texts: Texts, path: String?): Update {
+    fun background(inst: MessageInst, me: Set<String>, nameOf: (String) -> String, texts: Texts, path: String?, style: BackgroundStyle? = null): Update {
         val m = (inst.message as? PushChatMessage.SetTranscriptBackground)?.v1 ?: return Update.Ignore
         val chat = backgroundChat(inst, me) ?: return Update.Ignore
         val sender = inst.sender
         val fromMe = sender != null && sender in me
         val who = actor(sender, fromMe, nameOf, texts) ?: return Update.Ignore
-        val text = if (path != null) texts.changedBackground(who) else texts.removedBackground(who)
+        val text = if (path != null || style != null) texts.changedBackground(who) else texts.removedBackground(who)
         val members = (chat.members + listOfNotNull(sender)).distinct()
         val conv = conversationDto(chat.conversationId, members, inst.conversation?.cvName.takeIf { chat.groupGuid != null }, me, nameOf)
         val row = MessageDto(
@@ -649,7 +651,7 @@ object DirectArchive {
             text = text,
             parts = listOf(PartDto(partId = "0", kind = "text", text = text)),
         )
-        return Update.Background(chat.conversationId, chat.groupGuid, chat.peer, backgroundVersion(m), path, Update.Upsert(conv, row))
+        return Update.Background(chat.conversationId, chat.groupGuid, chat.peer, backgroundVersion(m), path, Update.Upsert(conv, row), style)
     }
 
     private fun actor(sender: String?, fromMe: Boolean, nameOf: (String) -> String, texts: Texts): String? = when {

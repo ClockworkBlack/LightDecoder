@@ -1363,13 +1363,30 @@ class DirectLink private constructor(
         update.row?.let(::upsert)
         // A chat with one person stored only now (the row made it): where it was filed.
         val chat = backgroundChatId(update) ?: id
-        if (store.apply(chat, incoming, update.version) == ChatBackgrounds.Applied.APPLIED) {
-            IMessageLog.add(app, "${IMessageLog.chatRef(chat)}: chat background ${if (incoming != null) "set" else "taken off"} (through the iMessage library)")
+        val style = update.style
+        if (store.apply(chat, if (style == null) incoming else null, update.version, style) == ChatBackgrounds.Applied.APPLIED) {
+            IMessageLog.add(app, "${IMessageLog.chatRef(chat)}: chat background ${describe(incoming != null, style)} (through the iMessage library)")
+            if (style is BackgroundStyle.Dynamic && !style.isKnown) {
+                // One not drawn here yet (shown as a plain gradient): its name, to learn it.
+                IMessageLog.add(app, "${IMessageLog.chatRef(chat)}: unknown dynamic background \"${loggable(style.identifier)}\"")
+            }
         }
+        if (style != null) incoming?.delete()
         com.lightdecoder.archive.ArchiveEvents.notify(
             com.lightdecoder.archive.ArchiveChange(chat, com.lightdecoder.archive.ArchiveChange.Kind.CONVERSATIONS, ChatService.IMESSAGE),
         )
     }
+
+    /** A background change as the log says it: "set (photo)", "set (gradient, 3 colours)", "taken off". */
+    private fun describe(picture: Boolean, style: BackgroundStyle?): String = when (style) {
+        is BackgroundStyle.Gradient -> "set (gradient, ${style.colors.size} colours)"
+        is BackgroundStyle.Dynamic -> "set (dynamic${if (style.isKnown) ", ${loggable(style.identifier)}" else ""})"
+        null -> if (picture) "set (photo)" else "taken off"
+    }
+
+    /** Apple's identifier of a dynamic background, safe for the log: short, plain characters only. */
+    private fun loggable(identifier: String): String =
+        identifier.take(64).map { if (it.isLetterOrDigit() || it in "._-") it else '?' }.joinToString("")
 
     /** The archive's chat a background change is for: the group, or the person's stored chat (a Blue Bubbles one too). */
     private fun backgroundChatId(update: DirectArchive.Update.Background): String? {
@@ -1388,18 +1405,31 @@ class DirectLink private constructor(
      * "You changed the chat background.". Throws [DirectEngine.ImessageError] saying why when it
      * does not go through.
      */
-    suspend fun setBackground(conversationId: String, uri: Uri?) {
+    suspend fun setBackground(conversationId: String, uri: Uri?) =
+        setBackground(conversationId, if (uri != null) BackgroundChoice.Photo(uri) else BackgroundChoice.None)
+
+    /**
+     * Sets [conversationId]'s background to [choice]: a photo of the user's, one of the app's own
+     * designs ([BackgroundThemes], drawn now at this screen's size and sent as a photo), a gradient
+     * or dynamic one (sent as such: an iPhone draws it itself), or none. As [setBackground] with a picture.
+     */
+    suspend fun setBackground(conversationId: String, choice: BackgroundChoice) {
         targetOf(conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
-        val picture = uri?.let { preparePicture(it) }
+        val style = (choice as? BackgroundChoice.Drawn)?.style
+        val picture = when (choice) {
+            is BackgroundChoice.Photo -> preparePicture(choice.uri)
+            is BackgroundChoice.Theme -> drawTheme(choice.id)
+            else -> null
+        }
         val done = kotlinx.coroutines.CompletableDeferred<Unit>()
         inTurn(conversationId) {
             try {
                 // Read again in turn: the chat as it is when it goes.
                 val target = targetOf(conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
                 val version = maxOf(ChatBackgrounds.versionNow(), ChatBackgrounds(app).of(conversationId).version + 1)
-                val reply = requests.call(DirectWire.BACKGROUND, DirectWire.background(target, picture?.path, version), MEDIA_SEND_TIMEOUT_MS)
+                val reply = requests.call(DirectWire.BACKGROUND, DirectWire.background(target, picture?.path, version, style), MEDIA_SEND_TIMEOUT_MS)
                 DirectWire.errorOf(reply)?.let { throw DirectEngine.ImessageError(it) }
-                synchronized(this@DirectLink) { backgroundSetHere(conversationId, picture, version) }
+                synchronized(this@DirectLink) { backgroundSetHere(conversationId, picture, version, style) }
                 done.complete(Unit)
             } catch (e: Exception) {
                 picture?.delete()
@@ -1410,10 +1440,10 @@ class DirectLink private constructor(
     }
 
     /** The background just set from here: shown, with the row saying so, as one from Apple would be. */
-    private fun backgroundSetHere(conversationId: String, picture: File?, version: Long) {
-        ChatBackgrounds(app).apply(conversationId, picture, version)
+    private fun backgroundSetHere(conversationId: String, picture: File?, version: Long, style: BackgroundStyle?) {
+        ChatBackgrounds(app).apply(conversationId, picture, version, style)
         val texts = DirectTexts(app)
-        val text = if (picture != null) texts.changedBackground(texts.you) else texts.removedBackground(texts.you)
+        val text = if (picture != null || style != null) texts.changedBackground(texts.you) else texts.removedBackground(texts.you)
         repo.upsertMessage(
             MessageDto(
                 id = DirectArchive.messageId("background-" + UUID.randomUUID().toString().uppercase()),
@@ -1427,10 +1457,27 @@ class DirectLink private constructor(
                 isOld = true,
             ),
         )
-        IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: chat background ${if (picture != null) "set" else "taken off"} through the iMessage library (Apple confirmed)")
+        IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: chat background ${describe(picture != null, style)} through the iMessage library (Apple confirmed)")
         com.lightdecoder.archive.ArchiveEvents.notify(
             com.lightdecoder.archive.ArchiveChange(conversationId, com.lightdecoder.archive.ArchiveChange.Kind.CONVERSATIONS, ChatService.IMESSAGE),
         )
+    }
+
+    /** The app's design [id] ([BackgroundThemes]) drawn at this screen's size as the JPEG that is sent and shown. */
+    private fun drawTheme(id: String): File {
+        val metrics = app.resources.displayMetrics
+        val (w, h) = themeSize(metrics.widthPixels, metrics.heightPixels)
+        val bitmap = try {
+            BackgroundThemes.render(id, w, h)
+        } catch (e: OutOfMemoryError) {
+            null
+        } ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_background_unreadable))
+        val out = ChatBackgrounds.incomingFile(app, "outgoing")
+        if (!BackgroundPosters.writeJpeg(bitmap, out)) {
+            out.delete()
+            throw DirectEngine.ImessageError(app.getString(R.string.imessage_background_unreadable))
+        }
+        return out
     }
 
     /** The picture at [uri] as the JPEG that is sent and shown ([BackgroundPosters.prepareOutgoing]), in the backgrounds' folder. */
@@ -1685,6 +1732,20 @@ class DirectLink private constructor(
 
         /** The largest picture taken as a chat's background (it is read whole to be made smaller). */
         private const val MAX_BACKGROUND_SOURCE_BYTES = 40L * 1024 * 1024
+
+        /**
+         * The size a design ([BackgroundThemes]) is drawn at for a screen of [width] x [height]:
+         * portrait, the screen's own size, its longest side at most [BackgroundPosters.MAX_SIDE].
+         */
+        fun themeSize(width: Int, height: Int): Pair<Int, Int> {
+            var w = minOf(width, height).coerceAtLeast(360)
+            var h = maxOf(width, height).coerceAtLeast(640)
+            if (h > BackgroundPosters.MAX_SIDE) {
+                w = w * BackgroundPosters.MAX_SIDE / h
+                h = BackgroundPosters.MAX_SIDE
+            }
+            return w to h
+        }
 
         /** A download from Apple may take this long. */
         private const val DOWNLOAD_TIMEOUT_MS = 5 * 60_000L

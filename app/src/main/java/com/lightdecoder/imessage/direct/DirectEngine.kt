@@ -509,16 +509,17 @@ class DirectEngine private constructor(private val app: Context) {
     }
 
     /**
-     * Sets the chat's background (iOS 26) to the JPEG at [path], or takes it off ([path] null), as
-     * of [version], as OpenBubbles does: the photo made into a poster ([BackgroundPosters.photoPoster]),
+     * Sets the chat's background (iOS 26) to the JPEG at [path], or to [style] (a gradient or a
+     * dynamic one), or takes it off (neither), as of [version], as OpenBubbles does: the photo made
+     * into a poster ([BackgroundPosters.photoPoster]; [BackgroundPosters.drawnPoster] for a style),
      * packed, uploaded to Apple's file servers and the message naming it sent. A group is told with
      * its guid; in a chat with one person the other person is told with none (it is the chat with
      * its sender for them) and the user's other devices with that person's address.
      */
-    suspend fun setBackground(target: DirectWire.Target, path: String?, version: Long) {
+    suspend fun setBackground(target: DirectWire.Target, path: String?, version: Long, style: BackgroundStyle? = null) {
         val s = requireSession()
         val (conversation, from) = conversationOf(target)
-        val file = path?.let { uploadPoster(s, File(it)) }
+        val file = if (style != null || path != null) uploadPoster(s, path?.let(::File), style) else null
         val now = System.currentTimeMillis().toULong()
         fun message(chatId: String?) = PushChatMessage.SetTranscriptBackground(
             uniffi.rust_bridge.transcriptBackgroundFromMmcs(file, version.toULong(), chatId),
@@ -541,34 +542,19 @@ class DirectEngine private constructor(private val app: Context) {
         }
     }
 
-    /** The photo at [jpeg] as a background poster on Apple's file servers: where it is, and its key. */
-    private suspend fun uploadPoster(s: SharedPushStateHandle, jpeg: File): MmcsFile {
-        if (!jpeg.isFile || jpeg.length() == 0L) throw ImessageError(app.getString(R.string.imessage_background_unreadable))
-        val bytes = jpeg.readBytes()
-        val bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-            ?: throw ImessageError(app.getString(R.string.imessage_background_unreadable))
-        val scratch = File(app.cacheDir, "background-${java.util.UUID.randomUUID()}")
-        // PosterKit keeps the layers as HEIC; where this phone cannot make one, the JPEG goes as it is.
-        val heic = BackgroundPosters.heic(bitmap, File(scratch.path + ".heic")) ?: bytes
-        val metrics = app.resources.displayMetrics
-        val aspect = metrics.widthPixels.toDouble().coerceAtLeast(1.0) / metrics.heightPixels.toDouble().coerceAtLeast(1.0)
-        val nsNull = try {
-            uniffi.rust_bridge.nsNull()
-        } catch (e: Exception) {
-            null
-        }
-        val poster = BackgroundPosters.photoPoster(bitmap.width, bitmap.height, heic, BackgroundPosters.watchPng(bitmap), aspect, timeNumberingSystem = nsNull)
-        val packed = call { uniffi.rust_bridge.packTranscriptPoster(poster) }
-        val zip = File(scratch.path + ".zip")
-        try {
-            zip.writeBytes(packed)
-            val uploaded = call { uniffi.rust_bridge.uploadMmcsAttachment(s, zip.path, POSTER_MIME, POSTER_UTI, POSTER_NAME, null) }
-            return (uploaded.aType as? AttachmentType.Mmcs)?.v1?.singleOrNull()
-                ?: throw ImessageError(app.getString(R.string.imessage_direct_background_upload))
-        } finally {
-            zip.delete()
-        }
-    }
+    /** The photo at [jpeg], or [style] (a gradient or dynamic one), as a background poster on Apple's file servers. */
+    private suspend fun uploadPoster(s: SharedPushStateHandle, jpeg: File?, style: BackgroundStyle?): MmcsFile =
+        OutgoingBackgrounds(
+            app,
+            object : OutgoingBackgrounds.Natives {
+                override fun nsNull(): ByteArray? = uniffi.rust_bridge.nsNull()
+                override suspend fun pack(poster: SimplifiedTranscriptPoster): ByteArray = call { uniffi.rust_bridge.packTranscriptPoster(poster) }
+                override suspend fun upload(path: String): MmcsFile? {
+                    val uploaded = call { uniffi.rust_bridge.uploadMmcsAttachment(s, path, POSTER_MIME, POSTER_UTI, POSTER_NAME, null) }
+                    return (uploaded.aType as? AttachmentType.Mmcs)?.v1?.singleOrNull()
+                }
+            },
+        ).upload(jpeg, style)
 
     /** Retracts [guid]; the main process has checked the 2-minute window. */
     suspend fun unsend(target: DirectWire.Target, guid: String, part: Int) {

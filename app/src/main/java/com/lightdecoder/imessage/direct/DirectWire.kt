@@ -158,15 +158,16 @@ object DirectWire {
 
     /**
      * What a [BACKGROUND] request asks for: the chat's background is now the picture at [path] (a
-     * JPEG in the app's own storage), or none ([path] null), as of [version] (Apple's, nanoseconds
-     * since 2001: a later one wins on every device).
+     * JPEG in the app's own storage), or the gradient or dynamic background [style], or none
+     * (neither), as of [version] (Apple's, nanoseconds since 2001: a later one wins on every device).
      */
-    data class BackgroundRequest(val target: Target, val path: String?, val version: Long) {
+    data class BackgroundRequest(val target: Target, val path: String?, val version: Long, val style: BackgroundStyle? = null) {
         companion object {
             fun fromJson(o: JSONObject) = BackgroundRequest(
                 Target.fromJson(o.getJSONObject("target")),
                 o.optStringOrNull("path")?.ifEmpty { null },
                 o.getLong("version"),
+                BackgroundStyle.of(o.optStringOrNull("styleType"), o.optStringOrNull("styleData")),
             )
         }
     }
@@ -234,8 +235,9 @@ object DirectWire {
             .apply { if (scheduledMs != null && scheduledMs > 0) put("scheduledMs", scheduledMs) }
 
     /** The chat [target]'s background is now the picture at [path], or none ([path] null), as of [version] ([BackgroundRequest]). */
-    fun background(target: Target, path: String?, version: Long): JSONObject =
+    fun background(target: Target, path: String?, version: Long, style: BackgroundStyle? = null): JSONObject =
         JSONObject().put("target", target.toJson()).put("path", path ?: JSONObject.NULL).put("version", version)
+            .apply { style?.let { put("styleType", it.type).put("styleData", it.data) } }
 
     /** Take back the Send Later message [guid] before Apple sends it. */
     fun unschedule(target: Target, guid: String): JSONObject = JSONObject().put("target", target.toJson()).put("guid", guid)
@@ -349,6 +351,7 @@ object DirectWire {
         is DirectArchive.Update.Failed -> JSONObject().put("kind", "failed").put("messageId", u.messageId).put("error", u.error)
         is DirectArchive.Update.Background -> JSONObject().put("kind", "background").put("conversationId", u.conversationId)
             .put("version", u.version).put("path", u.path ?: JSONObject.NULL)
+            .apply { u.style?.let { put("styleType", it.type).put("styleData", it.data) } }
             .apply { u.groupGuid?.let { put("groupGuid", it) } }
             .apply { u.peer?.let { put("peer", it) } }
             .apply { u.row?.let { put("row", encode(it)) } }
@@ -448,6 +451,7 @@ object DirectWire {
             o.getLong("version"),
             o.optStringOrNull("path")?.ifEmpty { null },
             o.optJSONObject("row")?.let { decode(it) as? DirectArchive.Update.Upsert },
+            BackgroundStyle.of(o.optStringOrNull("styleType"), o.optStringOrNull("styleData")),
         )
         else -> DirectArchive.Update.Ignore
     }

@@ -10,7 +10,8 @@ import org.json.JSONObject
 
 /**
  * Each iMessage chat's background (iOS 26's transcript backgrounds), by the archive's conversation
- * id: the picture shown behind its messages and the version Apple last gave it.
+ * id: the picture shown behind its messages (or, for a gradient or dynamic one, its kind and
+ * colours or identifier: [BackgroundStyle]) and the version Apple last gave it.
  *
  * Kept in files, not preferences: the pictures in [dir] (one per chat, `<key>-<version>.jpg`) and an
  * index (`index.json`) the main process alone writes and reads ([DirectLink] when Apple says, or the
@@ -26,8 +27,14 @@ class ChatBackgrounds(context: Context) {
     private val dir = dir(context)
     private val index = File(dir, INDEX)
 
-    /** A chat's background: its picture (null: none) and its version (0: never set). */
-    data class Background(val file: File?, val version: Long)
+    /**
+     * A chat's background: its picture (null: none), its version (0: never set), and, for one that
+     * is drawn rather than a picture (a gradient's colours, a dynamic one's identifier), its [style].
+     */
+    data class Background(val file: File?, val version: Long, val style: BackgroundStyle? = null) {
+        /** Whether there is a background to show. */
+        val isSet: Boolean get() = file != null || style != null
+    }
 
     /** How [apply] went. */
     enum class Applied { APPLIED, SAME, OLDER }
@@ -36,19 +43,20 @@ class ChatBackgrounds(context: Context) {
     fun of(conversationId: String): Background = synchronized(LOCK) {
         val entry = read().optJSONObject(conversationId) ?: return Background(null, 0)
         val path = entry.optString(KEY_PATH)
-        Background(path.takeIf { it.isNotEmpty() }?.let(::File)?.takeIf { it.isFile }, entry.optLong(KEY_VERSION))
+        val style = BackgroundStyle.of(entry.optString(KEY_TYPE), entry.optString(KEY_DATA))
+        Background(path.takeIf { it.isNotEmpty() }?.let(::File)?.takeIf { it.isFile }, entry.optLong(KEY_VERSION), style)
     }
 
     /** The picture shown behind [conversationId]'s messages, if it has one. */
     fun pictureOf(conversationId: String): File? = of(conversationId).file
 
     /**
-     * [conversationId]'s background is now the picture [picture] (a file in [dir], moved into place;
-     * null: none) as of [version]. One older than the chat's is ignored ([Applied.OLDER]), and the
+     * [conversationId]'s background is now the picture [picture] (a file in [dir], moved into place),
+     * or the drawn background [style], or none (neither), as of [version]. One older than the chat's is ignored ([Applied.OLDER]), and the
      * same version again changes nothing ([Applied.SAME]); either way [picture] is deleted. A new
      * one replaces the old picture, which is deleted.
      */
-    fun apply(conversationId: String, picture: File?, version: Long): Applied = synchronized(LOCK) {
+    fun apply(conversationId: String, picture: File?, version: Long, style: BackgroundStyle? = null): Applied = synchronized(LOCK) {
         val all = read()
         val entry = all.optJSONObject(conversationId)
         val stored = entry?.optLong(KEY_VERSION) ?: 0L
@@ -57,8 +65,13 @@ class ChatBackgrounds(context: Context) {
             return if (version == stored) Applied.SAME else Applied.OLDER
         }
         val old = entry?.optString(KEY_PATH).orEmpty()
-        val kept = picture?.let { moveIntoPlace(conversationId, it, version) }
-        all.put(conversationId, JSONObject().put(KEY_PATH, kept?.path.orEmpty()).put(KEY_VERSION, version))
+        val kept = if (style == null) picture?.let { moveIntoPlace(conversationId, it, version) } else null
+        if (style != null) picture?.delete()
+        val type = style?.type ?: if (kept != null) BackgroundStyle.TYPE_PHOTO else ""
+        all.put(
+            conversationId,
+            JSONObject().put(KEY_PATH, kept?.path.orEmpty()).put(KEY_VERSION, version).put(KEY_TYPE, type).put(KEY_DATA, style?.data.orEmpty()),
+        )
         write(all)
         if (old.isNotEmpty() && old != kept?.path) File(old).delete()
         Applied.APPLIED
@@ -104,6 +117,8 @@ class ChatBackgrounds(context: Context) {
         private const val INDEX = "index.json"
         private const val KEY_PATH = "path"
         private const val KEY_VERSION = "version"
+        private const val KEY_TYPE = "type"
+        private const val KEY_DATA = "data"
         private val LOCK = Any()
 
         /** Where the pictures are, in either process. */

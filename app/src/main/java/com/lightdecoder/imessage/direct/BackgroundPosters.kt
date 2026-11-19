@@ -8,6 +8,7 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.os.Build
 import android.util.Log
+import com.lightdecoder.R
 import com.lightdecoder.heif.ExifOrientation
 import com.lightdecoder.heif.ImageSniffer
 import com.lightdecoder.heif.Media
@@ -23,6 +24,7 @@ import uniffi.rust_bridge.PhotoPosterLayer
 import uniffi.rust_bridge.PhotoPosterLayout
 import uniffi.rust_bridge.PhotoPosterProperties
 import uniffi.rust_bridge.PosterAsset
+import uniffi.rust_bridge.PosterColor
 import uniffi.rust_bridge.PosterRole
 import uniffi.rust_bridge.PosterType
 import uniffi.rust_bridge.PrPosterColor
@@ -33,6 +35,7 @@ import uniffi.rust_bridge.PushChatMessage
 import uniffi.rust_bridge.SetTranscriptBackgroundMessage
 import uniffi.rust_bridge.SimplifiedPoster
 import uniffi.rust_bridge.SimplifiedTranscriptPoster
+import uniffi.rust_bridge.TranscriptDynamicUserData
 import uniffi.rust_bridge.UiColor
 import uniffi.rust_bridge.WatchBackground
 
@@ -44,12 +47,13 @@ import uniffi.rust_bridge.WatchBackground
  * `background-backfill` under it) as HEIC files, with the part of the picture on screen
  * ([PhotoPosterLayout.visibleFrame], in the picture's points, y up from the bottom as Core Graphics
  * counts). Next to the poster is the Watch's picture of it ([WatchBackground.backgroundImageData]),
- * a PNG already cut to the part on screen. A dynamic or gradient background is one only an iPhone
- * draws; OpenBubbles takes those as the background being taken off, and so does this.
+ * a PNG already cut to the part on screen. A gradient ([PosterType.TranscriptGradient]: its colours)
+ * or dynamic ([PosterType.TranscriptDynamic]: an identifier, "aurora_1" for iOS's Aurora) background
+ * is one an iPhone draws itself; here it is kept as a [BackgroundStyle] and drawn by [BackgroundArt].
  *
  * Pure (no library calls): the picture to show for a poster ([pictureSources], [cropOf]), and a
- * poster for a photo to send ([photoPoster]), mirroring OpenBubbles' poster editor. Tested in
- * BackgroundPostersTest.
+ * poster to send: a photo ([photoPoster]), mirroring OpenBubbles' poster editor, or a gradient or
+ * dynamic one ([drawnPoster]). Tested in ChatBackgroundsTest.
  */
 object BackgroundPosters {
 
@@ -67,9 +71,22 @@ object BackgroundPosters {
     /** The longest side of a background picture kept here: plenty for a phone's screen. */
     const val MAX_SIDE = 2048
 
-    /** Whether [poster] means "no background" here: one only an iPhone draws (OpenBubbles: "dynamic posters are deleted posters"). */
-    fun isRemoval(poster: SimplifiedTranscriptPoster): Boolean =
-        poster.poster.type is PosterType.TranscriptDynamic || poster.poster.type is PosterType.TranscriptGradient
+    /** PosterKit's providers of the backgrounds an iPhone draws itself. */
+    const val GRADIENT_PROVIDER = "com.apple.transcriptBackgroundPoster.GradientExtension"
+    const val DYNAMIC_PROVIDER = "com.apple.transcriptBackgroundPoster.DynamicExtension"
+
+    /** The drawn background [poster] is (a gradient's colours, a dynamic one's identifier), or null for a picture. */
+    fun styleOf(poster: SimplifiedTranscriptPoster): BackgroundStyle? = when (val t = poster.poster.type) {
+        is PosterType.TranscriptGradient -> BackgroundStyle.Gradient(t.colors.map { Rgba(it.red, it.green, it.blue, it.alpha) })
+        is PosterType.TranscriptDynamic -> BackgroundStyle.Dynamic(t.data.identifier)
+        else -> null
+    }
+
+    /** [style] as PosterKit's poster type. */
+    fun posterTypeOf(style: BackgroundStyle): PosterType = when (style) {
+        is BackgroundStyle.Gradient -> PosterType.TranscriptGradient(style.colors.map { PosterColor(it.alpha, it.blue, it.green, it.red) })
+        is BackgroundStyle.Dynamic -> PosterType.TranscriptDynamic(TranscriptDynamicUserData(style.identifier))
+    }
 
     /** Where a background's picture can come from: the bytes of an image file. */
     class Source(val bytes: ByteArray)
@@ -182,7 +199,33 @@ object BackgroundPosters {
             files = mapOf(LAYER_BACKFILL to heic, LAYER_BACKGROUND to heic),
             uuid = uuid,
         )
-        val title = PrPosterTitleStyleConfiguration(
+        val title = titleStyle(timeNumberingSystem)
+        return SimplifiedTranscriptPoster(
+            watch = WatchBackground(false, 0.0, watchPng, PHOTOS_PROVIDER),
+            poster = SimplifiedPoster(title, PosterType.Photo(listOf(asset)), PosterRole.PR_POSTER_ROLE_BACKDROP),
+        )
+    }
+
+    /**
+     * The poster for a gradient or dynamic background ([style]), as PosterKit makes one: no assets,
+     * its colours or identifier in the poster's user info (the library writes it), the title style
+     * PosterKit's default, and the Watch's picture of it [watchPng] (drawn here: [BackgroundArt.png]),
+     * from the gradient or dynamic provider.
+     */
+    fun drawnPoster(style: BackgroundStyle, watchPng: ByteArray, timeNumberingSystem: ByteArray? = null): SimplifiedTranscriptPoster {
+        val luminance = BackgroundArt.luminanceOf(style)
+        val provider = if (style is BackgroundStyle.Gradient) GRADIENT_PROVIDER else DYNAMIC_PROVIDER
+        return SimplifiedTranscriptPoster(
+            watch = WatchBackground(luminance > HIGH_KEY, luminance, watchPng, provider),
+            poster = SimplifiedPoster(titleStyle(timeNumberingSystem), posterTypeOf(style), PosterRole.PR_POSTER_ROLE_BACKDROP),
+        )
+    }
+
+    private const val HIGH_KEY = 0.7
+
+    /** PosterKit's default title style for a new poster; [timeNumberingSystem] the library's encoded NSNull. */
+    private fun titleStyle(timeNumberingSystem: ByteArray?): PrPosterTitleStyleConfiguration =
+        PrPosterTitleStyleConfiguration(
             alternateDateEnabled = false,
             contentsLuminence = 0.0,
             groupName = "PREditingLook",
@@ -199,11 +242,6 @@ object BackgroundPosters {
             // Packing needs one (the library archives it); PosterKit's default.
             titleStyle = PrPosterContentMaterialStyle.PrPosterContentVibrantMaterialStyle,
         )
-        return SimplifiedTranscriptPoster(
-            watch = WatchBackground(false, 0.0, watchPng, PHOTOS_PROVIDER),
-            poster = SimplifiedPoster(title, PosterType.Photo(listOf(asset)), PosterRole.PR_POSTER_ROLE_BACKDROP),
-        )
-    }
 
     // --- pictures (Android graphics) ----------------------------------------------------------------
 
@@ -337,13 +375,16 @@ class IncomingBackgrounds(private val app: Context, private val natives: Natives
     suspend fun receive(inst: MessageInst, me: Set<String>, nameOf: (String) -> String, texts: DirectArchive.Texts): DirectArchive.Update {
         val m = (inst.message as? PushChatMessage.SetTranscriptBackground)?.v1 ?: return DirectArchive.Update.Ignore
         if (DirectArchive.backgroundChat(inst, me) == null) return DirectArchive.Update.Ignore
+        var style: BackgroundStyle? = null
         val path = when (m) {
             is SetTranscriptBackgroundMessage.Remove -> null
             is SetTranscriptBackgroundMessage.Set -> {
                 val file = natives.toMmcs(m) ?: return DirectArchive.Update.Ignore
                 val payload = fetch(file)
                 val poster = natives.parse(payload)
-                if (BackgroundPosters.isRemoval(poster)) {
+                style = BackgroundPosters.styleOf(poster)
+                if (style != null) {
+                    // A gradient or dynamic one: drawn here from its colours or identifier, no picture.
                     null
                 } else {
                     val out = ChatBackgrounds.incomingFile(app)
@@ -356,7 +397,7 @@ class IncomingBackgrounds(private val app: Context, private val natives: Natives
                 }
             }
         }
-        return DirectArchive.background(inst, me, nameOf, texts, path)
+        return DirectArchive.background(inst, me, nameOf, texts, path, style)
     }
 
     private suspend fun fetch(file: MmcsFile): ByteArray {
@@ -372,5 +413,63 @@ class IncomingBackgrounds(private val app: Context, private val natives: Natives
 
     private companion object {
         const val TAG = "IncomingBackgrounds"
+    }
+}
+
+/**
+ * A background set from here, in the ":imessage" process: made into a poster (a photo's, or a
+ * gradient's or dynamic one's: [BackgroundPosters]), packed, and uploaded to Apple's file servers.
+ * The library's calls are passed in ([Natives]) so this can be tested without it.
+ */
+class OutgoingBackgrounds(private val app: Context, private val natives: Natives) {
+
+    interface Natives {
+        /** The library's encoded NSNull, for a new poster's title style; null when it has none. */
+        fun nsNull(): ByteArray?
+
+        /** Packs [poster] as PosterKit's zip ([uniffi.rust_bridge.packTranscriptPoster]). */
+        suspend fun pack(poster: SimplifiedTranscriptPoster): ByteArray
+
+        /** Uploads the zip at [path] to Apple's file servers: where it is, and its key. */
+        suspend fun upload(path: String): MmcsFile?
+
+        /** [bitmap] as HEIC ([BackgroundPosters.heic]), or null. */
+        fun heic(bitmap: Bitmap, scratch: File): ByteArray? = BackgroundPosters.heic(bitmap, scratch)
+    }
+
+    /** The poster that is sent for the JPEG [photo], or for [style] when it is given. */
+    fun posterFor(photo: File?, style: BackgroundStyle?, scratch: File): SimplifiedTranscriptPoster {
+        val nsNull = try {
+            natives.nsNull()
+        } catch (e: Exception) {
+            null
+        }
+        if (style != null) {
+            val watch = BackgroundArt.png(style, BackgroundPosters.WATCH_WIDTH, BackgroundPosters.WATCH_HEIGHT)
+            return BackgroundPosters.drawnPoster(style, watch, timeNumberingSystem = nsNull)
+        }
+        val jpeg = photo ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_background_unreadable))
+        if (!jpeg.isFile || jpeg.length() == 0L) throw DirectEngine.ImessageError(app.getString(R.string.imessage_background_unreadable))
+        val bytes = jpeg.readBytes()
+        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_background_unreadable))
+        // PosterKit keeps the layers as HEIC; where this phone cannot make one, the JPEG goes as it is.
+        val heic = natives.heic(bitmap, File(scratch.path + ".heic")) ?: bytes
+        val metrics = app.resources.displayMetrics
+        val aspect = metrics.widthPixels.toDouble().coerceAtLeast(1.0) / metrics.heightPixels.toDouble().coerceAtLeast(1.0)
+        return BackgroundPosters.photoPoster(bitmap.width, bitmap.height, heic, BackgroundPosters.watchPng(bitmap), aspect, timeNumberingSystem = nsNull)
+    }
+
+    /** The poster for [photo] or [style] ([posterFor]) on Apple's file servers. */
+    suspend fun upload(photo: File?, style: BackgroundStyle?): MmcsFile {
+        val scratch = File(app.cacheDir, "background-${UUID.randomUUID()}")
+        val packed = natives.pack(posterFor(photo, style, scratch))
+        val zip = File(scratch.path + ".zip")
+        try {
+            zip.writeBytes(packed)
+            return natives.upload(zip.path) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_background_upload))
+        } finally {
+            zip.delete()
+        }
     }
 }

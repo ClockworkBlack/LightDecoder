@@ -52,6 +52,41 @@
             android:text="@string/chat_thread_empty"
             android:textAppearance="?attr/textAppearanceBodyMedium"
             android:visibility="gone" />
+
+        <!-- A background picked in the picker, shown behind the thread before it is sent: Cancel or Set. -->
+        <LinearLayout
+            android:id="@+id/backgroundPreviewBar"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom|center_horizontal"
+            android:layout_marginBottom="16dp"
+            android:background="@drawable/bg_day_header"
+            android:elevation="6dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingHorizontal="8dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:paddingHorizontal="8dp"
+                android:text="@string/imessage_background_preview_hint"
+                android:textAppearance="?attr/textAppearanceLabelLarge" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/backgroundPreviewCancel"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/imessage_background_preview_cancel" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/backgroundPreviewSet"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/imessage_background_preview_set" />
+        </LinearLayout>
     </FrameLayout>
 
     <TextView
