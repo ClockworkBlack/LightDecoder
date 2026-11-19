@@ -33,7 +33,7 @@ object IMessageChecks {
         val conversationId: String,
         val name: String,
         val text: String,
-        /** Sent silently through OpenBubbles' Reply button (else the user tapped send in OpenBubbles). */
+        /** Sent from here: silently through OpenBubbles' Reply button, or through the iMessage library (else the user tapped send in OpenBubbles). */
         val silent: Boolean,
         val sentAtMs: Long,
         val progress: IMessageCheck.Progress,
@@ -73,6 +73,10 @@ object IMessageChecks {
     ) {
         val app = context.applicationContext
         stop(app, quietly = true)
+        // Through the iMessage library: sent from here, confirmed by Apple (no OpenBubbles in it).
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(app).active
+        val handedTo = if (direct) "sent from LightDecoder" else "handed to OpenBubbles"
+        val shownBack = if (direct) "confirmed by Apple" else "shown back by OpenBubbles (sent to Apple)"
         val ref = companion?.let(IMessageLog::chatRef) ?: "(new chat)"
         fun log(line: String) = IMessageLog.add(app, "Check iMessage $ref: $line")
         var last = IMessageCheck.Progress(false, false, false, IMessageCheck.Reply.NONE)
@@ -96,8 +100,8 @@ object IMessageChecks {
                 }
                 val waited = System.currentTimeMillis() - sentAtMs
                 val secs = (waited + 500) / 1000
-                if (progress.handedOver && !last.handedOver) log("step 1 handed to OpenBubbles after ${secs}s")
-                if (progress.inOpenBubbles && !last.inOpenBubbles) log("step 2 shown back by OpenBubbles (sent to Apple) after ${secs}s")
+                if (progress.handedOver && !last.handedOver) log("step 1 $handedTo after ${secs}s")
+                if (progress.inOpenBubbles && !last.inOpenBubbles) log("step 2 $shownBack after ${secs}s")
                 if (progress.sentAsText && !last.sentAsText) log("WRONG: the check also went out as a text through Google Messages")
                 if (progress.reply != last.reply) log(
                     "step 3 reply after ${secs}s by " + when (progress.reply) {
@@ -109,7 +113,7 @@ object IMessageChecks {
                 if (!slowNoted && waited > SLOW_MS && !progress.done) {
                     slowNoted = true
                     log(
-                        "after ${secs}s: handed over ${progress.handedOver}, shown back ${progress.inOpenBubbles}, no reply yet" +
+                        "after ${secs}s: $handedTo ${progress.handedOver}, $shownBack ${progress.inOpenBubbles}, no reply yet" +
                             (if (chatSeen == null) "; no iMessage chat with this person seen yet" else "") +
                             (if (!silent) "; sent from OpenBubbles' screen: a reply while that chat is open there is not notified" else ""),
                     )
@@ -122,7 +126,7 @@ object IMessageChecks {
                     return@launch
                 }
                 if (giveUp) {
-                    log("gave up after ${secs / 60} min with no reply (handed over ${progress.handedOver}, shown back ${progress.inOpenBubbles})")
+                    log("gave up after ${secs / 60} min with no reply ($handedTo ${progress.handedOver}, $shownBack ${progress.inOpenBubbles})")
                     return@launch
                 }
                 // Quick at first, when a reply is most likely; easy on the battery later.

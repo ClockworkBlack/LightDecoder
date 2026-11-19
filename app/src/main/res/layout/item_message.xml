@@ -146,6 +146,18 @@
             android:layout_marginTop="-8dp"
             android:visibility="gone" />
 
+        <!-- "Delivered" or "Read 9:41" under the user's latest iMessages, as an iPhone shows them. -->
+        <TextView
+            android:id="@+id/receipt"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginHorizontal="8dp"
+            android:layout_marginTop="2dp"
+            android:importantForAccessibility="no"
+            android:textAppearance="?attr/textAppearanceLabelSmall"
+            android:textColor="?attr/colorOnSurfaceVariant"
+            android:visibility="gone" />
+
         <TextView
             android:id="@+id/failedText"
             android:layout_width="wrap_content"

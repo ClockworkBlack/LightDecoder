@@ -1,5 +1,6 @@
 package com.lightdecoder.imessage
 
+import com.lightdecoder.archive.LocalState
 import com.lightdecoder.archive.MessageRow
 
 /**
@@ -29,9 +30,9 @@ object IMessageCheck {
     }
 
     data class Progress(
-        /** LightDecoder handed the check to OpenBubbles (through its Reply button, or its screen). */
+        /** LightDecoder handed the check to OpenBubbles (through its Reply button, or its screen), or to the iMessage library. */
         val handedOver: Boolean,
-        /** OpenBubbles shows it in its iMessage chat: it went to Apple as an iMessage. */
+        /** OpenBubbles shows it in its iMessage chat, or Apple confirmed the library's send: it went to Apple as an iMessage. */
         val inOpenBubbles: Boolean,
         /** It went out as a text through Google Messages instead (should never happen). */
         val sentAsText: Boolean,
@@ -55,8 +56,11 @@ object IMessageCheck {
     fun progress(text: String, sentAtMs: Long, iMessageRows: List<MessageRow>, textRows: List<MessageRow>): Progress {
         // OpenBubbles stamps its lines in whole seconds: allow for it.
         val since = sentAtMs - CLOCK_SLACK_MS
-        val mine = iMessageRows.filter { it.isOutgoing && it.text.trim() == text && it.timestampMs >= since }
-        val echoed = mine.any { !it.id.startsWith(SENT_PREFIX) }
+        // A copy that failed to go is not handed over; one still on its way (a local copy) is not at Apple yet.
+        val mine = iMessageRows.filter {
+            it.isOutgoing && it.text.trim() == text && it.timestampMs >= since && it.localState != LocalState.FAILED
+        }
+        val echoed = mine.any { !it.id.startsWith(SENT_PREFIX) && !it.isLocal }
         val firstIMessageReply = iMessageRows.filter { !it.isOutgoing && it.timestampMs >= sentAtMs }.minOfOrNull { it.timestampMs }
         val firstTextReply = textRows.filter { !it.isOutgoing && it.direction != "out" && it.timestampMs >= sentAtMs }.minOfOrNull { it.timestampMs }
         val reply = when {

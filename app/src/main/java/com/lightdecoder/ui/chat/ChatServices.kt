@@ -74,6 +74,13 @@ internal object ChatUiPrefs {
 /** Wording and destinations that depend on the service a screen shows. */
 internal object ServiceUi {
 
+    /**
+     * Whether [service] is iMessage through the bundled library ("direct mode"): its texts then
+     * never send the user to the OpenBubbles app. Pass it as the wording functions' `direct`.
+     */
+    fun direct(context: Context, service: ChatService): Boolean =
+        service == ChatService.IMESSAGE && com.lightdecoder.imessage.direct.DirectLink.get(context).active
+
     /** The service's name on its tab of the conversation list. */
     @StringRes
     fun tabLabel(service: ChatService): Int = when (service) {
@@ -96,12 +103,18 @@ internal object ServiceUi {
         ChatService.IMESSAGE -> RelayIntents.conversations(context, ChatService.MESSAGES)
     }.setFlags(0)
 
-    /** The status and settings of [service]'s link, started from one of the app's own screens. */
+    /**
+     * The status and settings of [service]'s link, started from one of the app's own screens.
+     * iMessage's is the iMessage screen when it goes through the library, else the Messages tab
+     * (whose menu has Blue Bubbles).
+     */
     fun status(context: Context, service: ChatService): Intent = when (service) {
         ChatService.MESSAGES -> RelayIntents.status(context)
         ChatService.WHATSAPP -> RelayIntents.waStatus(context)
         ChatService.GMAIL -> RelayIntents.mailSetup(context)
-        ChatService.IMESSAGE -> RelayIntents.conversations(context, ChatService.MESSAGES)
+        ChatService.IMESSAGE ->
+            if (direct(context, service)) Intent(context, com.lightdecoder.ui.imessage.DirectSetupActivity::class.java)
+            else RelayIntents.conversations(context, ChatService.MESSAGES)
     }.setFlags(0)
 
     /**
@@ -159,11 +172,11 @@ internal object ServiceUi {
     }
 
     @StringRes
-    fun emptyInbox(service: ChatService): Int = when (service) {
+    fun emptyInbox(service: ChatService, direct: Boolean): Int = when (service) {
         ChatService.MESSAGES -> R.string.chat_empty_inbox
         ChatService.WHATSAPP -> R.string.chat_wa_empty_inbox
         ChatService.GMAIL -> R.string.mail_empty_inbox
-        ChatService.IMESSAGE -> R.string.imessage_empty_inbox
+        ChatService.IMESSAGE -> if (direct) R.string.imessage_empty_inbox_direct else R.string.imessage_empty_inbox
     }
 
     @StringRes
@@ -176,44 +189,44 @@ internal object ServiceUi {
 
     /** Said when a message the service itself failed to send is tapped: only the phone's app can retry it. */
     @StringRes
-    fun failedOnPhone(service: ChatService): Int = when (service) {
+    fun failedOnPhone(service: ChatService, direct: Boolean): Int = when (service) {
         ChatService.MESSAGES -> R.string.chat_failed_phone_detail
         ChatService.WHATSAPP -> R.string.chat_wa_failed_phone_detail
         ChatService.GMAIL -> R.string.mail_failed_detail
-        ChatService.IMESSAGE -> R.string.imessage_failed_detail
+        ChatService.IMESSAGE -> if (direct) R.string.imessage_failed_detail_direct else R.string.imessage_failed_detail
     }
 
     /** The "Send again?" question for a send that was never confirmed. */
     @StringRes
-    fun resendBody(service: ChatService): Int = when (service) {
+    fun resendBody(service: ChatService, direct: Boolean): Int = when (service) {
         ChatService.MESSAGES -> R.string.chat_resend_body
         ChatService.WHATSAPP -> R.string.chat_wa_resend_body
         ChatService.GMAIL -> R.string.mail_resend_body
-        ChatService.IMESSAGE -> R.string.imessage_resend_body
+        ChatService.IMESSAGE -> if (direct) R.string.imessage_resend_body_direct else R.string.imessage_resend_body
     }
 
     @StringRes
-    fun mediaNeedsConnection(service: ChatService): Int = when (service) {
+    fun mediaNeedsConnection(service: ChatService, direct: Boolean): Int = when (service) {
         ChatService.MESSAGES -> R.string.chat_media_needs_connection
         ChatService.WHATSAPP -> R.string.chat_wa_media_needs_connection
         ChatService.GMAIL -> R.string.mail_media_needs_connection
-        ChatService.IMESSAGE -> R.string.imessage_media_needs_connection
+        ChatService.IMESSAGE -> if (direct) R.string.imessage_media_needs_connection_direct else R.string.imessage_media_needs_connection
     }
 
     @StringRes
-    fun contactsNoMatch(service: ChatService): Int = when (service) {
+    fun contactsNoMatch(service: ChatService, direct: Boolean): Int = when (service) {
         ChatService.MESSAGES -> R.string.chat_contacts_no_match
         ChatService.WHATSAPP -> R.string.chat_wa_contacts_no_match
         ChatService.GMAIL -> R.string.mail_contacts_no_match
-        ChatService.IMESSAGE -> R.string.imessage_contacts_no_match
+        ChatService.IMESSAGE -> if (direct) R.string.imessage_contacts_no_match_direct else R.string.imessage_contacts_no_match
     }
 
     @StringRes
-    fun deleteConversationBody(service: ChatService): Int = when (service) {
+    fun deleteConversationBody(service: ChatService, direct: Boolean): Int = when (service) {
         ChatService.MESSAGES -> R.string.chat_delete_conversation_body
         ChatService.WHATSAPP -> R.string.chat_wa_delete_conversation_body
         ChatService.GMAIL -> R.string.mail_delete_conversation_body
-        ChatService.IMESSAGE -> R.string.imessage_delete_conversation_body
+        ChatService.IMESSAGE -> if (direct) R.string.imessage_delete_conversation_body_direct else R.string.imessage_delete_conversation_body
     }
 }
 
@@ -235,26 +248,29 @@ internal object ChatErrors {
             message(context, service, codeOf(t))
         }
 
-    fun message(context: Context, service: ChatService, code: String): String = context.getString(messageRes(service, code))
+    fun message(context: Context, service: ChatService, code: String): String =
+        context.getString(messageRes(service, code, ServiceUi.direct(context, service)))
 
+    /** [direct]: iMessage through the bundled library ([ServiceUi.direct]), worded without OpenBubbles. */
     @StringRes
-    fun messageRes(service: ChatService, code: String): Int = when (service) {
+    fun messageRes(service: ChatService, code: String, direct: Boolean): Int = when (service) {
         ChatService.MESSAGES -> RelayErrors.messageRes(code)
         ChatService.WHATSAPP -> whatsAppRes(code)
         ChatService.GMAIL -> mailRes(code)
-        ChatService.IMESSAGE -> iMessageRes(code)
+        ChatService.IMESSAGE -> iMessageRes(code, direct)
     }
 
     @StringRes
-    private fun iMessageRes(code: String): Int = when (code) {
+    private fun iMessageRes(code: String, direct: Boolean): Int = when (code) {
         RelayException.NOT_PAIRED -> R.string.imessage_error_not_enabled
         com.lightdecoder.imessage.IMessageErrors.NOT_INSTALLED -> R.string.imessage_error_not_installed
         com.lightdecoder.imessage.IMessageErrors.NO_ACCESS -> R.string.imessage_error_no_access
-        com.lightdecoder.imessage.IMessageErrors.NO_REPLY_BUTTON -> R.string.imessage_error_no_reply
-        com.lightdecoder.imessage.IMessageErrors.HAND_OFF -> R.string.imessage_error_hand_off
+        com.lightdecoder.imessage.IMessageErrors.NO_REPLY_BUTTON -> if (direct) R.string.imessage_error_no_reply_direct else R.string.imessage_error_no_reply
+        // Through the library only attachments are not there yet.
+        com.lightdecoder.imessage.IMessageErrors.HAND_OFF -> if (direct) R.string.imessage_no_attachments else R.string.imessage_error_hand_off
         WaErrors.UNSUPPORTED -> R.string.imessage_error_unsupported
         RelayState.NOTIFICATIONS_OFF -> R.string.link_error_notifications_off
-        else -> R.string.imessage_error_internal
+        else -> if (direct) R.string.imessage_error_internal_direct else R.string.imessage_error_internal
     }
 
     @StringRes

@@ -52,8 +52,10 @@ class ReplyReceiver : BroadcastReceiver() {
                     com.lightdecoder.imessage.IMessageManager.get(context).sendText(companion, text)
                     com.lightdecoder.imessage.IMessageLog.add(context, "Notification reply in a Messages conversation with $ref: sent as iMessage")
                 } catch (e: RelayException) {
-                    // No Reply button from OpenBubbles yet: it waits, failed, in the conversation, where a tap sends it through OpenBubbles.
-                    com.lightdecoder.imessage.IMessageLog.add(context, "Notification reply in a Messages conversation with $ref: no Reply button, waits in the conversation (not sent as a text)")
+                    // No Reply button from OpenBubbles yet (or, through the iMessage library, a chat it cannot reach):
+                    // it waits, failed, in the conversation, where a tap says what to do.
+                    val why = if (com.lightdecoder.imessage.direct.DirectLink.get(context).active) "the chat cannot be reached through iMessage" else "no Reply button"
+                    com.lightdecoder.imessage.IMessageLog.add(context, "Notification reply in a Messages conversation with $ref: $why, waits in the conversation (not sent as a text)")
                     MessageNotifier.cancel(context, conversationId, service)
                     return
                 }

@@ -240,7 +240,7 @@ class PictureGalleryActivity : AppCompatActivity() {
     }
 
     private fun loadFailure(t: Throwable): String =
-        if (ChatErrors.codeOf(t) == RelayException.NOT_CONNECTED) getString(ServiceUi.mediaNeedsConnection(backend.service))
+        if (ChatErrors.codeOf(t) == RelayException.NOT_CONNECTED) getString(ServiceUi.mediaNeedsConnection(backend.service, ServiceUi.direct(this, backend.service)))
         else ChatErrors.message(this, backend.service, t)
 
     private fun toast(text: String) = Toast.makeText(this, text, Toast.LENGTH_LONG).show()

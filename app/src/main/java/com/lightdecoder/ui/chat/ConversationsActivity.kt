@@ -540,7 +540,7 @@ class ConversationsActivity : AppCompatActivity() {
             }
             binding.emptyText.setText(
                 when (shown) {
-                    Folder.INBOX -> if (paired) ServiceUi.emptyInbox(from.service) else R.string.chat_empty_unpaired
+                    Folder.INBOX -> if (paired) ServiceUi.emptyInbox(from.service, ServiceUi.direct(this@ConversationsActivity, from.service)) else R.string.chat_empty_unpaired
                     Folder.ARCHIVE -> R.string.chat_empty_archive
                     Folder.SPAM -> R.string.chat_empty_spam
                     Folder.DELETED -> R.string.chat_empty_deleted
@@ -790,7 +790,7 @@ class ConversationsActivity : AppCompatActivity() {
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.chat_delete_conversation_title)
             .setMessage(
-                if (linked) ServiceUi.deleteConversationBody(on.service) else R.string.chat_delete_conversation_body_local
+                if (linked) ServiceUi.deleteConversationBody(on.service, ServiceUi.direct(this, on.service)) else R.string.chat_delete_conversation_body_local
             )
             .setPositiveButton(R.string.chat_action_delete) { _, _ ->
                 if (on.isPaired() != linked) {

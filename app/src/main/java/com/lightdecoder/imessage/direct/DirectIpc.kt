@@ -54,7 +54,7 @@ object DirectIpc {
                             handle(what, request)
                         } catch (e: Exception) {
                             Log.w(TAG, "request $what failed", e)
-                            DirectWire.error(DirectEngine.readable(e))
+                            DirectWire.failure(e)
                         }
                         try {
                             replyTo.send(

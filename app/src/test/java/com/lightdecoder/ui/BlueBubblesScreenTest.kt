@@ -861,10 +861,15 @@ class BlueBubblesScreenTest {
 
     /**
      * The iMessage library set up, its requests to the other process kept in [asked] and answered
-     * as Apple would (or by [answer]); Alice's iMessage chat as the library stores it.
+     * as Apple would (or by [answer]); Alice's iMessage chat as the library stores it. Typing and
+     * read receipts (which go whenever a conversation is open) are kept only with [notices]. The
+     * user's typing is told again after [typingRepeatMs] and stopped after [typingIdleMs].
      */
     private fun directMode(
         asked: MutableList<Pair<Int, org.json.JSONObject>>,
+        notices: Boolean = false,
+        typingRepeatMs: Long = com.lightdecoder.imessage.direct.DirectLink.TYPING_REPEAT_MS,
+        typingIdleMs: Long = com.lightdecoder.imessage.direct.DirectLink.TYPING_IDLE_MS,
         answer: (Int) -> org.json.JSONObject = { what ->
             if (what == com.lightdecoder.imessage.direct.DirectWire.REACT) com.lightdecoder.imessage.direct.DirectWire.guid("T-OWN")
             else com.lightdecoder.imessage.direct.DirectWire.ok()
@@ -874,8 +879,9 @@ class BlueBubblesScreenTest {
         com.lightdecoder.imessage.direct.DirectLibrary.REQUIRED.forEach {
             java.io.File(com.lightdecoder.imessage.direct.DirectLibrary.dir(two.app), it).apply { parentFile?.mkdirs(); writeText("") }
         }
-        com.lightdecoder.imessage.direct.DirectLink.installForTesting(two.app) { what, request, _ ->
-            asked += what to request
+        val notice = setOf(com.lightdecoder.imessage.direct.DirectWire.TYPING, com.lightdecoder.imessage.direct.DirectWire.READ)
+        com.lightdecoder.imessage.direct.DirectLink.installForTesting(two.app, typingIdleMs, typingRepeatMs) { what, request, _ ->
+            if (notices || what !in notice) asked += what to request
             answer(what)
         }
         imRepo.upsertConversation(
@@ -1131,6 +1137,514 @@ class BlueBubblesScreenTest {
             assertEquals(View.GONE, sheet.findViewById<View>(R.id.reactionRow).visibility)
             scenario.onActivity { activity -> assertEquals(null, shadowOf(activity).nextStartedActivity) }
             assertEquals(1, asked.size)
+        }
+    }
+
+    // --- with the iMessage library: typing, receipts, no hand-offs (phase 3) -----------------
+
+    /** Apple's answers as [directMode] gives them, and a send's (its GUID [guid]). */
+    private fun appleAnswers(guid: String = "S1"): (Int) -> org.json.JSONObject = { what ->
+        when (what) {
+            com.lightdecoder.imessage.direct.DirectWire.SEND -> com.lightdecoder.imessage.direct.DirectWire.sent(guid, System.currentTimeMillis())
+            com.lightdecoder.imessage.direct.DirectWire.REACT -> com.lightdecoder.imessage.direct.DirectWire.guid("T-OWN")
+            else -> com.lightdecoder.imessage.direct.DirectWire.ok()
+        }
+    }
+
+    private fun asked(asked: List<Pair<Int, org.json.JSONObject>>, what: Int) = synchronized(asked) { asked.filter { it.first == what }.map { it.second } }
+
+    @Test
+    fun withTheLibraryNothingIsHandedToOpenBubbles() {
+        two.env.pairedManager()
+        installOpenBubbles()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        directMode(asked, answer = appleAnswers())
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        directMessage("H1", "Hers", System.currentTimeMillis() - 60_000, mine = false)
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("her iMessage") { shownTexts(it).contains("Hers") }
+            // A picture cannot go through the library yet: it says so, and the composer keeps it all.
+            scenario.onActivity { activity ->
+                activity.setAttachment(android.net.Uri.parse("content://media/external/images/media/1"))
+                activity.findViewById<EditText>(R.id.input).setText("Look")
+                activity.findViewById<View>(R.id.send).performClick()
+            }
+            assertEquals(two.app.getString(R.string.imessage_no_attachments), org.robolectric.shadows.ShadowToast.getTextOfLatestToast())
+            scenario.onActivity { activity ->
+                assertEquals("Look", activity.findViewById<EditText>(R.id.input).text.toString())
+                assertEquals(View.VISIBLE, activity.findViewById<View>(R.id.attachmentBar).visibility)
+                // A sticker: the same.
+                val sticker = java.io.File(activity.cacheDir, "sticker.png").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+                activity.sendStickers(listOf(sticker))
+            }
+            assertEquals(two.app.getString(R.string.imessage_no_attachments), org.robolectric.shadows.ShadowToast.getTextOfLatestToast())
+            // The text alone goes straight to Apple.
+            scenario.onActivity { activity ->
+                activity.findViewById<View>(R.id.attachmentRemove).performClick()
+                activity.findViewById<View>(R.id.send).performClick()
+            }
+            two.waitUntil("sent through the library") { asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).isNotEmpty() }
+            assertEquals("Look", asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).single().getString("text"))
+            scenario.onActivity { activity -> assertEquals(null, shadowOf(activity).nextStartedActivity) }
+            val log = com.lightdecoder.imessage.IMessageLog.read(two.app)
+            assertTrue(log.joinToString("\n"), log.any { it.contains("sent as iMessage, through the iMessage library") })
+            assertFalse(log.joinToString("\n"), log.any { it.contains("OpenBubbles") })
+        }
+    }
+
+    @Test
+    fun withTheLibraryAnIMessageChatsMenuLeadsToTheIMessageScreenNotOpenBubbles() {
+        two.env.pairedManager()
+        installOpenBubbles()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        directMode(asked, answer = appleAnswers())
+        directMessage("H1", "Hers", System.currentTimeMillis() - 60_000, mine = false)
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, ALICE_DIRECT, service = ChatService.IMESSAGE).setFlags(0)).use { scenario ->
+            scenario.waitFor("her iMessage") { shownTexts(it).contains("Hers") }
+            scenario.onActivity { activity ->
+                assertFalse(menu(activity).findItem(R.id.action_open_openbubbles).isVisible)
+                activity.onOptionsItemSelected(org.robolectric.fakes.RoboMenuItem(R.id.action_open_openbubbles))
+                assertEquals("nothing opened", null, shadowOf(activity).nextStartedActivity)
+                activity.onOptionsItemSelected(org.robolectric.fakes.RoboMenuItem(R.id.action_link_status))
+                assertEquals(
+                    com.lightdecoder.ui.imessage.DirectSetupActivity::class.java.name,
+                    shadowOf(activity).nextStartedActivity.component?.className,
+                )
+                // Its light: blue, through the library.
+                assertEquals(com.lightdecoder.ui.chat.IMessageLight.State.ACTIVE, light(activity).second)
+            }
+        }
+    }
+
+    @Test
+    fun withTheLibraryItReadsAsOnAnIphone() {
+        com.lightdecoder.reactions.ReadTimes.resetForTesting()
+        try {
+            two.env.pairedManager()
+            IMessagePrefs.setEnabled(two.app, true)
+            val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+            directMode(asked, notices = true, answer = appleAnswers())
+            two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+            val now = System.currentTimeMillis()
+            directMessage("H1", "Hers", now - 300_000, mine = false)
+            directMessage("M1", "Mine, read", now - 200_000, mine = true)
+            directMessage("M2", "Mine, delivered", now - 100_000, mine = true)
+            val rank = com.lightdecoder.imessage.direct.DirectArchive::statusRank
+            imRepo.advanceMessageStatus(listOf("imsg:M1"), com.lightdecoder.imessage.direct.DirectArchive.STATUS_READ, 11, rank)
+            imRepo.advanceMessageStatus(listOf("imsg:M2"), com.lightdecoder.imessage.direct.DirectArchive.STATUS_DELIVERED, 2, rank)
+            val readAt = now - 150_000
+            com.lightdecoder.reactions.ReadTimes.get(two.app).note(ChatService.IMESSAGE, "imsg:M1", readAt, live = true)
+            ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+                // "Read 9:41" under the one read, "Delivered" under the later one; no ticks on either.
+                val read = two.app.getString(R.string.imessage_receipt_read_at, com.lightdecoder.ui.chat.TimeFormat.receiptTime(two.app, readAt))
+                fun footer(activity: Activity, text: String) =
+                    bubbleOf(activity, text)?.findViewById<android.widget.TextView>(R.id.receipt)?.takeIf { it.visibility == View.VISIBLE }?.text?.toString()
+                scenario.waitFor("the receipts") { activity ->
+                    footer(activity, "Mine, read") == read && footer(activity, "Mine, delivered") == two.app.getString(R.string.imessage_receipt_delivered)
+                }
+                scenario.onActivity { activity ->
+                    assertEquals(View.GONE, bubbleOf(activity, "Mine, read")!!.findViewById<View>(R.id.statusIcon).visibility)
+                    assertEquals(View.GONE, bubbleOf(activity, "Mine, delivered")!!.findViewById<View>(R.id.statusIcon).visibility)
+                    assertEquals(null, footer(activity, "Hers"))
+                }
+                // Opened: Apple is told her message was read (the setting decides whether she is).
+                two.waitUntil("the read receipt") { asked(asked, com.lightdecoder.imessage.direct.DirectWire.READ).any { it.getString("guid") == "H1" } }
+                // She types: shown above the composer, until she stops.
+                iMessage.noteTyping(ALICE_DIRECT, "+15551234567", "Alice", typing = true)
+                scenario.waitFor("her typing") { activity ->
+                    val typing = activity.findViewById<android.widget.TextView>(R.id.typingText)
+                    typing.visibility == View.VISIBLE && typing.text.toString() == activity.getString(R.string.chat_typing_one, "Alice")
+                }
+                iMessage.noteTyping(ALICE_DIRECT, "+15551234567", "Alice", typing = false)
+                scenario.waitFor("her typing gone") { it.findViewById<View>(R.id.typingText).visibility == View.GONE }
+                // The user types: her iPhone is told, and told it stopped when the composer is emptied.
+                scenario.onActivity { activity -> activity.findViewById<EditText>(R.id.input).setText("H") }
+                two.waitUntil("typing told") { asked(asked, com.lightdecoder.imessage.direct.DirectWire.TYPING).map { it.getBoolean("typing") } == listOf(true) }
+                scenario.onActivity { activity -> activity.findViewById<EditText>(R.id.input).setText("") }
+                two.waitUntil("stopped told") { asked(asked, com.lightdecoder.imessage.direct.DirectWire.TYPING).map { it.getBoolean("typing") } == listOf(true, false) }
+                // A new message from her while the conversation is open: read too.
+                directMessage("H2", "Hers again", System.currentTimeMillis(), mine = false)
+                two.waitUntil("its read receipt") { asked(asked, com.lightdecoder.imessage.direct.DirectWire.READ).any { it.getString("guid") == "H2" } }
+                assertEquals("once per message", 1, asked(asked, com.lightdecoder.imessage.direct.DirectWire.READ).count { it.getString("guid") == "H1" })
+            }
+        } finally {
+            com.lightdecoder.reactions.ReadTimes.resetForTesting()
+        }
+    }
+
+    @Test
+    fun withTheLibraryASendThatMayHaveGoneAsksBeforeItGoesAgain() {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        directMode(asked, answer = appleAnswers())
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        val now = System.currentTimeMillis()
+        directMessage("H1", "Hers", now - 60_000, mine = false)
+        // LightDecoder stopped while this was being sent.
+        imRepo.insertLocalOutgoing("t-cut", ALICE_DIRECT, "Cut short", null, null, null, null, now - 30_000)
+        imRepo.setLocalState("t-cut", com.lightdecoder.archive.LocalState.FAILED, com.lightdecoder.relay.Outbox.INTERRUPTED)
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("the message cut short") { shownTexts(it).contains("Cut short") }
+            scenario.onActivity { activity -> activity.onFailedTap(rowOf(activity, "Cut short")) }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val question = latestDialog()
+            assertEquals(two.app.getString(R.string.imessage_resend_body_direct), question.findViewById<android.widget.TextView>(android.R.id.message)?.text?.toString())
+            assertTrue("nothing sent before the answer", asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).isEmpty())
+            question.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+            two.waitUntil("sent again, through the library") { asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).isNotEmpty() }
+            assertEquals("Cut short", asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).single().getString("text"))
+            scenario.onActivity { activity -> assertEquals(null, shadowOf(activity).nextStartedActivity) }
+        }
+    }
+
+    @Test
+    fun withTheLibraryThePersonsOlderIMessageChatIsIMessageToo() {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        directMode(asked, answer = appleAnswers())
+        // Another iMessage chat with Alice, from before: shown in the same conversation.
+        val older = "iMessage;-;+15551234567"
+        imRepo.upsertConversation(
+            com.lightdecoder.relay.ConversationDto(
+                id = older, type = IMessageManager.TRANSPORT,
+                participants = listOf(
+                    com.lightdecoder.relay.ParticipantDto(id = "me", isMe = true),
+                    com.lightdecoder.relay.ParticipantDto(id = "+15551234567", name = "Alice", number = "+15551234567", formattedNumber = "+15551234567"),
+                ),
+            ),
+        )
+        val now = System.currentTimeMillis()
+        imRepo.upsertMessage(
+            com.lightdecoder.relay.MessageDto(
+                id = "imsg:OLD1", conversationId = older, senderId = "+15551234567", senderName = "Alice", timestampMs = now - 600_000,
+                direction = "in", status = "INCOMING_COMPLETE", transport = IMessageManager.TRANSPORT, text = "From the older chat",
+                parts = listOf(com.lightdecoder.relay.PartDto("0", "text", "From the older chat")), isOld = true,
+            ),
+        )
+        directMessage("H1", "In the newer chat", now - 60_000, mine = false)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("both chats' iMessages") { shownTexts(it).containsAll(listOf("From the older chat", "In the newer chat")) }
+            // Each is an iMessage: Apple's tapbacks, sent through the library.
+            for ((text, guid) in listOf("From the older chat" to "OLD1", "In the newer chat" to "H1")) {
+                scenario.onActivity { activity -> activity.onMessageLongPress(rowOf(activity, text)) }
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                val row = ShadowDialog.getLatestDialog().findViewById<android.view.ViewGroup>(R.id.reactionRow)
+                assertEquals(text, ThreadActivity.TAPBACKS, (0 until 6).map { (row.getChildAt(it) as android.widget.TextView).text.toString() })
+                row.getChildAt(0).performClick()
+                two.waitUntil("the tapback on \"$text\"") { asked(asked, com.lightdecoder.imessage.direct.DirectWire.REACT).any { it.getString("guid") == guid } }
+            }
+        }
+    }
+
+    @Test
+    fun withTheLibrarySendIMessageAsksAppleAndSaysWhenTheyAreNotOnIMessage() {
+        two.env.pairedManager()
+        installOpenBubbles()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        directMode(asked) { what ->
+            if (what == com.lightdecoder.imessage.direct.DirectWire.REACH) org.json.JSONObject() else com.lightdecoder.imessage.direct.DirectWire.ok()
+        }
+        two.seedConversation(ChatService.MESSAGES, "c2", "Bob", lastTs = 1_000, number = "+1 555-987-6543")
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c2").setFlags(0)).use { scenario ->
+            scenario.waitFor("the conversation") { it.findViewById<View>(R.id.input).isEnabled }
+            // Opened: Apple is asked (as an iPhone does), and says not.
+            two.waitUntil("asked on opening") { asked(asked, com.lightdecoder.imessage.direct.DirectWire.REACH).size == 1 }
+            assertEquals("+1 555-987-6543", asked(asked, com.lightdecoder.imessage.direct.DirectWire.REACH).single().getString("recipient"))
+            val notOn = two.app.getString(R.string.imessage_not_on_imessage, "+1 555-987-6543")
+            scenario.onActivity { activity ->
+                assertTrue(menu(activity).findItem(R.id.action_send_imessage).isVisible)
+                activity.onOptionsItemSelected(org.robolectric.fakes.RoboMenuItem(R.id.action_send_imessage))
+            }
+            two.waitUntil("Apple's answer") { org.robolectric.shadows.ShadowToast.getTextOfLatestToast() == notOn }
+            assertEquals("asked again when the user asks", 2, asked(asked, com.lightdecoder.imessage.direct.DirectWire.REACH).size)
+            // The check says what it does, and asks Apple too.
+            scenario.onActivity { activity -> activity.onOptionsItemSelected(org.robolectric.fakes.RoboMenuItem(R.id.action_check_imessage)) }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val explain = latestDialog().findViewById<android.widget.TextView>(android.R.id.message)?.text?.toString().orEmpty()
+            assertTrue(explain, explain.endsWith(two.app.getString(R.string.imessage_check_new_chat_direct)))
+            latestDialog().dismiss()
+            org.robolectric.shadows.ShadowToast.reset()
+            scenario.onActivity { activity -> activity.startIMessageCheck(com.lightdecoder.imessage.IMessageCheck.TEXT) }
+            two.waitUntil("Apple's answer to the check") { org.robolectric.shadows.ShadowToast.getTextOfLatestToast() == notOn }
+            assertEquals(3, asked(asked, com.lightdecoder.imessage.direct.DirectWire.REACH).size)
+            assertTrue("nothing sent", asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).isEmpty())
+            scenario.onActivity { activity -> assertEquals("OpenBubbles not opened", null, shadowOf(activity).nextStartedActivity) }
+        }
+    }
+
+    @Test
+    fun withTheLibraryTheCheckGoesFromHereAndAppleConfirmsIt() {
+        two.env.pairedManager()
+        installOpenBubbles()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        directMode(asked, answer = appleAnswers("CHK1"))
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        directMessage("H1", "Hers", System.currentTimeMillis() - 60_000, mine = false)
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("her iMessage") { shownTexts(it).contains("Hers") }
+            scenario.onActivity { activity -> activity.startIMessageCheck(com.lightdecoder.imessage.IMessageCheck.TEXT) }
+            scenario.waitFor("the check dialog") { it.checkDialog != null }
+            val sent = "\u2713  " + two.app.getString(R.string.imessage_check_step_sent_direct)
+            val confirmed = "\u2713  " + two.app.getString(R.string.imessage_check_step_confirmed_direct)
+            scenario.waitFor("sent, and confirmed by Apple") { steps(it).lines().take(2) == listOf(sent, confirmed) }
+            assertEquals(com.lightdecoder.imessage.IMessageCheck.TEXT, asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).single().getString("text"))
+            scenario.onActivity { activity -> assertEquals(null, shadowOf(activity).nextStartedActivity) }
+            val log = com.lightdecoder.imessage.IMessageLog.read(two.app)
+            assertTrue(log.joinToString("\n"), log.any { it.contains("step 1 sent from LightDecoder") })
+            assertFalse(log.joinToString("\n"), log.any { it.contains("OpenBubbles") })
+        }
+    }
+
+    @Test
+    fun withTheLibraryTickingBlueBubblesNeedsNeitherOpenBubblesNorNotificationAccess() {
+        two.env.pairedManager()
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        directMode(asked)
+        // Turned on once when the library was registered, and off by the user since.
+        com.lightdecoder.imessage.direct.DirectPrefs.setBlueBubblesTurnedOn(two.app)
+        IMessagePrefs.setEnabled(two.app, false)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Bob")
+        launchList().use { scenario ->
+            scenario.waitFor("the Messages inbox") { titles(it).contains("Bob") }
+            scenario.onActivity { activity -> activity.onOptionsItemSelected(menu(activity).findItem(R.id.action_blue_bubbles)) }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            assertTrue(IMessagePrefs.enabled(two.app))
+            assertEquals(two.app.getString(R.string.blue_bubbles_on_body_direct), latestDialog().findViewById<android.widget.TextView>(android.R.id.message)?.text?.toString())
+            scenario.onActivity { activity -> assertEquals("no Play Store, no settings", null, shadowOf(activity).nextStartedActivity) }
+        }
+    }
+
+    @Test
+    fun theIMessageScreenHasTheReadReceiptsSwitchOffAtFirst() {
+        ActivityScenario.launch(com.lightdecoder.ui.imessage.DirectSetupActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                val switch = activity.findViewById<android.widget.CompoundButton>(R.id.switchReadReceipts)
+                assertFalse(switch.isChecked)
+                switch.performClick()
+                assertTrue(com.lightdecoder.imessage.direct.DirectPrefs.sendReadReceipts(activity))
+                switch.performClick()
+                assertFalse(com.lightdecoder.imessage.direct.DirectPrefs.sendReadReceipts(activity))
+            }
+        }
+    }
+
+    @Test
+    fun withTheLibraryEveryKeystrokeCountsForWhenTheUserStoppedTyping() {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        // "Typing" told on every keystroke the library hears, and never "stopped" by a pause.
+        directMode(asked, notices = true, typingRepeatMs = 0, typingIdleMs = 600_000, answer = appleAnswers())
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        directMessage("M1", "Mine", System.currentTimeMillis() - 60_000, mine = true)
+        fun typings() = asked(asked, com.lightdecoder.imessage.direct.DirectWire.TYPING).map { it.getBoolean("typing") }
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("my iMessage") { shownTexts(it).contains("Mine") }
+            // Three keystrokes within a second: the library hears each (its pause counts from the last).
+            scenario.onActivity { activity ->
+                val input = activity.findViewById<EditText>(R.id.input)
+                input.setText("H")
+                input.setText("He")
+                input.setText("Hey")
+            }
+            two.waitUntil("every keystroke heard") { typings() == listOf(true, true, true) }
+            scenario.onActivity { activity -> activity.findViewById<EditText>(R.id.input).setText("") }
+            two.waitUntil("stopped told") { typings().lastOrNull() == false }
+        }
+    }
+
+    @Test
+    fun withTheLibraryAVoiceMessageToAnIMessageChatStaysHere() {
+        val default = com.lightdecoder.ui.chat.VoiceRecorder.factory
+        val recorder = object : com.lightdecoder.ui.chat.VoiceRecorder {
+            var file: java.io.File? = null
+            override var onMaxDuration: (() -> Unit)? = null
+            override fun start(file: java.io.File, maxDurationMs: Int): Boolean {
+                file.parentFile?.mkdirs()
+                file.writeBytes(byteArrayOf(0, 0, 0, 0x18) + "ftypM4A voice".toByteArray())
+                this.file = file
+                return true
+            }
+            override fun stop(): Boolean = file?.isFile == true
+            override fun cancel() {
+                file?.delete()
+            }
+        }
+        com.lightdecoder.ui.chat.VoiceRecorder.factory = { recorder }
+        shadowOf(two.app.packageManager).setSystemFeature(android.content.pm.PackageManager.FEATURE_MICROPHONE, true)
+        shadowOf(two.app).grantPermissions(android.Manifest.permission.RECORD_AUDIO)
+        try {
+            val (_, fake) = two.env.pairedManager()
+            installOpenBubbles()
+            IMessagePrefs.setEnabled(two.app, true)
+            val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+            directMode(asked, answer = appleAnswers())
+            two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+            directMessage("H1", "Hers", System.currentTimeMillis() - 60_000, mine = false)
+            ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+                scenario.waitFor("her iMessage and the record button") {
+                    shownTexts(it).contains("Hers") && it.findViewById<View>(R.id.voiceMessage).isShown && it.findViewById<View>(R.id.voiceMessage).isEnabled
+                }
+                scenario.onActivity { it.findViewById<View>(R.id.voiceMessage).performClick() }
+                shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(3))
+                scenario.onActivity { it.findViewById<View>(R.id.recordingSend).performClick() }
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                // Not through the library yet, not as a text, not through OpenBubbles: it says so.
+                assertEquals(two.app.getString(R.string.imessage_no_attachments), org.robolectric.shadows.ShadowToast.getTextOfLatestToast())
+                scenario.onActivity { activity -> assertEquals(null, shadowOf(activity).nextStartedActivity) }
+                assertTrue("the recording is kept", recorder.file!!.isFile)
+                assertTrue(asked.isEmpty())
+                assertTrue("no text sent instead", fake.sent.isEmpty())
+                assertFalse(com.lightdecoder.imessage.IMessageLog.read(two.app).any { it.contains("OpenBubbles") })
+            }
+        } finally {
+            com.lightdecoder.ui.chat.VoiceRecorder.factory = default
+        }
+    }
+
+    @Test
+    fun withTheLibraryAPictureANotificationOnlyNamedSaysSoWithoutOpenBubbles() {
+        two.env.pairedManager()
+        installOpenBubbles()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        directMode(asked)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        // From before the library: OpenBubbles' notification said only "Image".
+        iMessage.record(
+            CapturedIMessageChat(ALICE, "m1", "Alice", false, "+15551234567", listOf(CapturedIMessage("Alice", "tel:+15551234567", false, "Image", System.currentTimeMillis()))),
+            live = false,
+        )
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            fun status(a: Activity) = a.findViewById<RecyclerView>(R.id.messages).findViewById<android.widget.TextView>(R.id.mediaStatus)
+            scenario.waitFor("a picture slot that names no other app") { a ->
+                status(a)?.let { it.isShown && it.text == a.getString(R.string.imessage_media_waiting_direct) } == true
+            }
+            scenario.onActivity { a -> a.findViewById<RecyclerView>(R.id.messages).findViewById<View>(R.id.mediaFrame).performClick() }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val dialog = latestDialog()
+            assertEquals(two.app.getString(R.string.imessage_media_not_here_direct), dialog.findViewById<android.widget.TextView>(android.R.id.message)?.text?.toString())
+            assertFalse("no Open in OpenBubbles", dialog.getButton(AlertDialog.BUTTON_NEUTRAL)?.isShown == true)
+            scenario.onActivity { activity ->
+                assertEquals(null, shadowOf(activity).nextStartedActivity)
+                assertEquals("no photo access asked for", null, shadowOf(activity).lastRequestedPermission)
+            }
+        }
+    }
+
+    @Test
+    fun withTheLibraryAnIMessageChatItCannotReachSaysSoAndHandsNothingOver() {
+        two.env.pairedManager()
+        installOpenBubbles()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        directMode(asked, answer = appleAnswers())
+        // A group OpenBubbles' notifications showed: the library has no group id to send to it by.
+        val group = "iMessage;+;chat123"
+        imRepo.upsertConversation(
+            com.lightdecoder.relay.ConversationDto(
+                id = group, isGroup = true, name = "Trip", type = IMessageManager.TRANSPORT,
+                participants = listOf(
+                    com.lightdecoder.relay.ParticipantDto(id = "me", isMe = true),
+                    com.lightdecoder.relay.ParticipantDto(id = "+15551234567", name = "Alice", number = "+15551234567"),
+                    com.lightdecoder.relay.ParticipantDto(id = "+15559876543", name = "Bob", number = "+15559876543"),
+                ),
+            ),
+        )
+        val now = System.currentTimeMillis()
+        imRepo.upsertMessage(
+            com.lightdecoder.relay.MessageDto(
+                id = "ld:g1", conversationId = group, senderId = "+15551234567", senderName = "Alice", timestampMs = now - 60_000,
+                direction = "in", status = "INCOMING_COMPLETE", transport = IMessageManager.TRANSPORT, text = "Who's driving?", isOld = true,
+            ),
+        )
+        imRepo.insertLocalOutgoing("t-g", group, "Not me", null, null, null, null, now - 30_000)
+        imRepo.setLocalState("t-g", com.lightdecoder.archive.LocalState.FAILED, com.lightdecoder.imessage.IMessageErrors.NO_REPLY_BUTTON)
+        val unreachable = two.app.getString(R.string.imessage_error_no_reply_direct)
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, group, service = ChatService.IMESSAGE).setFlags(0)).use { scenario ->
+            scenario.waitFor("the group") { shownTexts(it).containsAll(listOf("Who's driving?", "Not me")) }
+            // Its light: a problem, not "one tap in OpenBubbles".
+            scenario.onActivity { activity -> assertEquals(com.lightdecoder.ui.chat.IMessageLight.State.PROBLEM, light(activity).second) }
+            // A text: it says why, and the composer keeps it.
+            scenario.onActivity { activity ->
+                activity.findViewById<EditText>(R.id.input).setText("I can")
+                activity.findViewById<View>(R.id.send).performClick()
+            }
+            assertEquals(unreachable, org.robolectric.shadows.ShadowToast.getTextOfLatestToast())
+            // A picture: not through the library yet.
+            scenario.onActivity { activity ->
+                assertEquals("I can", activity.findViewById<EditText>(R.id.input).text.toString())
+                activity.setAttachment(android.net.Uri.parse("content://media/external/images/media/1"))
+                activity.findViewById<View>(R.id.send).performClick()
+            }
+            assertEquals(two.app.getString(R.string.imessage_no_attachments), org.robolectric.shadows.ShadowToast.getTextOfLatestToast())
+            // The failed one, tapped: why, not OpenBubbles.
+            org.robolectric.shadows.ShadowToast.reset()
+            scenario.onActivity { activity -> activity.onFailedTap(rowOf(activity, "Not me")) }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            assertEquals(unreachable, org.robolectric.shadows.ShadowToast.getTextOfLatestToast())
+            scenario.onActivity { activity ->
+                assertEquals(null, shadowOf(activity).nextStartedActivity)
+                assertEquals("I can", activity.findViewById<EditText>(R.id.input).text.toString())
+            }
+            assertTrue("nothing asked of the library", asked.isEmpty())
+            assertEquals(com.lightdecoder.archive.LocalState.FAILED, imRepo.message(com.lightdecoder.archive.MessageRow.tmpMessageId("t-g"))!!.localState)
+            assertFalse(com.lightdecoder.imessage.IMessageLog.read(two.app).any { it.contains("OpenBubbles opened") })
+        }
+    }
+
+    @Test
+    fun withTheLibraryOpeningAConversationFindsThePersonsIMessage() {
+        val (_, fake) = two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        val bob = "imsg:tel:+15559876543"
+        directMode(asked) { what ->
+            when (what) {
+                // Apple: Bob has iMessage.
+                com.lightdecoder.imessage.direct.DirectWire.REACH -> org.json.JSONObject().put(
+                    "conversation",
+                    com.lightdecoder.relay.ConversationDto(
+                        id = bob, name = "+15559876543", type = IMessageManager.TRANSPORT, lastMessageTs = System.currentTimeMillis(),
+                        participants = listOf(
+                            com.lightdecoder.relay.ParticipantDto(id = "tel:+15559876543", number = "+15559876543"),
+                            com.lightdecoder.relay.ParticipantDto(id = "tel:+15550000001", isMe = true),
+                        ),
+                    ).toJson(),
+                )
+                com.lightdecoder.imessage.direct.DirectWire.SEND -> com.lightdecoder.imessage.direct.DirectWire.sent("B1", System.currentTimeMillis())
+                else -> com.lightdecoder.imessage.direct.DirectWire.ok()
+            }
+        }
+        two.seedConversation(ChatService.MESSAGES, "c2", "Bob", lastTs = 1_000, number = "+1 555-987-6543")
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c2").setFlags(0)).use { scenario ->
+            // Asked on opening; their iMessage chat is made, and is this conversation's from then on.
+            scenario.waitFor("their iMessage chat, inside") { activity ->
+                imRepo.conversation(bob) != null && !menu(activity).findItem(R.id.action_send_imessage).isVisible
+            }
+            assertEquals("+1 555-987-6543", asked(asked, com.lightdecoder.imessage.direct.DirectWire.REACH).single().getString("recipient"))
+            assertEquals("not at the top of the list before anything is written", 0L, imRepo.conversation(bob)!!.lastMessageTs)
+            scenario.onActivity { activity -> assertEquals(com.lightdecoder.ui.chat.IMessageLight.State.ACTIVE, light(activity).second) }
+            // What is typed now goes blue, through the library.
+            scenario.onActivity { activity ->
+                activity.findViewById<EditText>(R.id.input).setText("Hi Bob")
+                activity.findViewById<View>(R.id.send).performClick()
+            }
+            two.waitUntil("sent as iMessage") { asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).isNotEmpty() }
+            assertEquals("Hi Bob", asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).single().getString("text"))
+            assertTrue("not as a text", fake.sent.isEmpty())
+        }
+        // Opened again: their chat is here already, nothing to ask.
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c2").setFlags(0)).use { scenario ->
+            scenario.waitFor("Hi Bob") { shownTexts(it).contains("Hi Bob") }
+            assertEquals(1, asked(asked, com.lightdecoder.imessage.direct.DirectWire.REACH).size)
         }
     }
 

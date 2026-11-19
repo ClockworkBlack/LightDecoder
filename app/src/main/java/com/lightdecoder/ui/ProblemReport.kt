@@ -71,7 +71,12 @@ object ProblemReport {
         appendLine("Blue Bubbles: ${if (com.lightdecoder.imessage.IMessagePrefs.enabled(app)) "on" else "off"}; state: ${imState.phase} ${imState.code}".trimEnd())
         appendLine(im.setupSummary())
         val chats = runCatching { im.repo.conversations(null).size }.getOrDefault(-1)
-        appendLine("iMessage chats stored: $chats; with a Reply button to send through now: ${com.lightdecoder.imessage.IMessageReplies.replyButtonsHeld()}")
+        // Through the iMessage library nothing goes through OpenBubbles' Reply buttons.
+        if (com.lightdecoder.imessage.direct.DirectLink.get(app).active) {
+            appendLine("iMessage chats stored: $chats; sent and received through the iMessage library")
+        } else {
+            appendLine("iMessage chats stored: $chats; with a Reply button to send through now: ${com.lightdecoder.imessage.IMessageReplies.replyButtonsHeld()}")
+        }
         val imLog = com.lightdecoder.imessage.IMessageLog.read(app)
         if (imLog.isEmpty()) appendLine("(nothing logged yet)") else imLog.take(LOG_LINES).forEach { appendLine(it) }
         appendLine()

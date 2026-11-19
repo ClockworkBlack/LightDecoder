@@ -145,7 +145,7 @@ class NewConversationActivity : AppCompatActivity() {
         adapter.submitList(items)
         binding.emptyText.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
         binding.emptyText.setText(
-            if (query.isBlank()) R.string.chat_contacts_empty else ServiceUi.contactsNoMatch(manager.service)
+            if (query.isBlank()) R.string.chat_contacts_empty else ServiceUi.contactsNoMatch(manager.service, ServiceUi.direct(this, manager.service))
         )
     }
 

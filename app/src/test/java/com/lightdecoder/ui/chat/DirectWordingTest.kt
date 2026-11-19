@@ -1,0 +1,106 @@
+package com.lightdecoder.ui.chat
+
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.lightdecoder.R
+import com.lightdecoder.chat.ChatService
+import com.lightdecoder.imessage.IMessageErrors
+import com.lightdecoder.imessage.IMessageManager
+import com.lightdecoder.imessage.direct.DirectLibrary
+import com.lightdecoder.imessage.direct.DirectLink
+import com.lightdecoder.imessage.direct.DirectPrefs
+import com.lightdecoder.relay.RelayException
+import com.lightdecoder.wa.WaErrors
+import java.io.File
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Test
+import org.junit.runner.RunWith
+
+/** Through the iMessage library no text sends the user to the OpenBubbles app; without it, the words are as they were. */
+@RunWith(AndroidJUnit4::class)
+class DirectWordingTest {
+
+    private val context: Context = ApplicationProvider.getApplicationContext()
+
+    @After
+    fun tearDown() {
+        DirectPrefs.setRegistered(context, false)
+        DirectLink.resetForTesting()
+        IMessageManager.resetForTesting()
+    }
+
+    @Test
+    fun throughTheLibraryNoTextMentionsOpenBubbles() {
+        val im = ChatService.IMESSAGE
+        val direct = listOf(
+            ServiceUi.emptyInbox(im, true), ServiceUi.failedOnPhone(im, true), ServiceUi.resendBody(im, true),
+            ServiceUi.mediaNeedsConnection(im, true), ServiceUi.contactsNoMatch(im, true), ServiceUi.deleteConversationBody(im, true),
+        ) + listOf(
+            RelayException.NOT_PAIRED, IMessageErrors.NO_REPLY_BUTTON, IMessageErrors.HAND_OFF, WaErrors.UNSUPPORTED, "internal",
+        ).map { ChatErrors.messageRes(im, it, direct = true) } + listOf(
+            R.string.imessage_channel_messages_description_direct, R.string.blue_bubbles_on_body_direct,
+            R.string.imessage_delete_message_question_direct, R.string.imessage_light_group_direct, R.string.imessage_light_unreachable,
+            R.string.imessage_light_direct, R.string.imessage_link_none_direct, R.string.imessage_check_new_chat_direct,
+            R.string.imessage_check_step_sent_direct, R.string.imessage_check_step_confirmed_direct, R.string.imessage_check_not_confirmed_direct,
+            R.string.imessage_read_receipts, R.string.imessage_read_receipts_help, R.string.imessage_status_retrying,
+            R.string.imessage_service_retrying, R.string.imessage_receipt_delivered, R.string.imessage_receipt_read,
+            R.string.imessage_media_waiting_direct, R.string.imessage_media_not_here_direct, R.string.imessage_direct_no_own_address,
+        )
+        for (res in direct) {
+            val text = context.getString(res)
+            assertFalse(text, text.contains("OpenBubbles"))
+        }
+        assertEquals("Delivered", context.getString(R.string.imessage_receipt_delivered))
+        assertEquals("Read 9:41", context.getString(R.string.imessage_receipt_read_at, "9:41"))
+        assertEquals(
+            "When this is on, people are told when you have read their messages (one-to-one chats).",
+            context.getString(R.string.imessage_read_receipts_help),
+        )
+    }
+
+    @Test
+    fun withoutTheLibraryTheWordsAreAsTheyWere() {
+        val im = ChatService.IMESSAGE
+        assertEquals(R.string.imessage_failed_detail, ServiceUi.failedOnPhone(im, false))
+        assertEquals(R.string.imessage_resend_body, ServiceUi.resendBody(im, false))
+        assertEquals(R.string.imessage_error_hand_off, ChatErrors.messageRes(im, IMessageErrors.HAND_OFF, direct = false))
+        assertEquals(R.string.imessage_error_no_reply, ChatErrors.messageRes(im, IMessageErrors.NO_REPLY_BUTTON, direct = false))
+        // Through the library only attachments are not there yet.
+        assertEquals(R.string.imessage_no_attachments, ChatErrors.messageRes(im, IMessageErrors.HAND_OFF, direct = true))
+        // The other services are not iMessage's to change.
+        assertEquals(R.string.chat_failed_phone_detail, ServiceUi.failedOnPhone(ChatService.MESSAGES, true))
+        assertEquals(R.string.chat_resend_body, ServiceUi.resendBody(ChatService.MESSAGES, true))
+        assertFalse(ServiceUi.direct(context, ChatService.MESSAGES))
+        // And the message for a code follows the mode.
+        assertEquals(context.getString(R.string.imessage_error_internal), ChatErrors.message(context, im, "internal"))
+    }
+
+    @Test
+    fun iMessagesSettingsAreTheIMessageScreenThroughTheLibrary() {
+        assertEquals(ConversationsActivity::class.java.name, ServiceUi.status(context, ChatService.IMESSAGE).component?.className)
+        DirectPrefs.setRegistered(context, true)
+        DirectLibrary.REQUIRED.forEach { File(DirectLibrary.dir(context), it).apply { parentFile?.mkdirs(); writeText("") } }
+        assertEquals(
+            com.lightdecoder.ui.imessage.DirectSetupActivity::class.java.name,
+            ServiceUi.status(context, ChatService.IMESSAGE).component?.className,
+        )
+        assertEquals(context.getString(R.string.imessage_error_internal_direct), ChatErrors.message(context, ChatService.IMESSAGE, "internal"))
+        assertEquals(context.getString(R.string.imessage_no_attachments), ChatErrors.message(context, ChatService.IMESSAGE, IMessageErrors.HAND_OFF))
+    }
+
+    @Test
+    fun theTimeUnderAReadIMessageReadsAsOnAnIphone() {
+        val zone = java.util.TimeZone.getTimeZone("UTC")
+        val now = 1_700_000_000_000L
+        val today = TimeFormat.receiptTime(context, now - 60_000, now, zone, java.util.Locale.US)
+        assertEquals(TimeFormat.clock(context, now - 60_000, zone, java.util.Locale.US), today)
+        assertEquals(context.getString(R.string.chat_day_yesterday), TimeFormat.receiptTime(context, now - 24 * 3_600_000L, now, zone, java.util.Locale.US))
+        assertEquals(
+            TimeFormat.listTime(context, now - 3 * 24 * 3_600_000L, now, zone, java.util.Locale.US),
+            TimeFormat.receiptTime(context, now - 3 * 24 * 3_600_000L, now, zone, java.util.Locale.US),
+        )
+    }
+}

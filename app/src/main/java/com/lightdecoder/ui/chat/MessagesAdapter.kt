@@ -29,7 +29,7 @@ import com.lightdecoder.relay.ReactionDto
 /**
  * Draws a thread: day headers, incoming and outgoing bubbles (sender name in
  * groups, reply quote, media, text, "Edited", time and delivery status,
- * reactions), and system notices.
+ * reactions, an iPhone's "Delivered" / "Read"), and system notices.
  */
 class MessagesAdapter(
     private val media: MediaLoader,
@@ -45,6 +45,13 @@ class MessagesAdapter(
 
     /** Which of the user's own messages are iMessages, in a conversation that shows both kinds (Blue Bubbles). */
     var blueFor: (MessageRow) -> Boolean = { false }
+
+    /**
+     * The user's messages whose receipts come from Apple (iMessages through the iMessage
+     * library): no sent, delivered or read ticks, "Delivered" or "Read …" under the latest instead
+     * ([ThreadItem.Message.receipt]), as on an iPhone. Sending and failure marks stay.
+     */
+    var appleReceipts: (MessageRow) -> Boolean = { false }
 
     interface Callbacks {
         fun onMessageLongPress(row: MessageRow)
@@ -222,7 +229,11 @@ class MessagesAdapter(
         val tick = MessageStatus.tickFor(row)
         // A send that may have gone out all the same has its own words: "Not sent" would invite a resend.
         val unconfirmed = MessageStatus.outcomeUnknown(row)
-        bindTick(holder, tick, metaColor, unconfirmed)
+        val shownTick = if (tick in RECEIPT_TICKS && appleReceipts(row)) Tick.NONE else tick
+        bindTick(holder, shownTick, metaColor, unconfirmed)
+        val receipt = item.receipt?.let { receiptText(context, it) }
+        b.receipt.visibility = if (receipt == null) View.GONE else View.VISIBLE
+        b.receipt.text = receipt.orEmpty()
         // Pictures sent together: one time line, under the last of them (a failed one keeps its own).
         b.meta.visibility = if (item.stackedWithNext && tick != Tick.FAILED) View.GONE else View.VISIBLE
 
@@ -259,7 +270,7 @@ class MessagesAdapter(
         if (tick != Tick.FAILED) b.bubble.isClickable = false
         ViewCompat.replaceAccessibilityAction(b.bubble, AccessibilityActionCompat.ACTION_CLICK, failedTapLabel, null)
 
-        b.bubble.contentDescription = describe(holder, item, tick)
+        b.bubble.contentDescription = describe(holder, item, shownTick, receipt)
         // TalkBack users cannot swipe a bubble: offer reply as an action.
         ViewCompat.replaceAccessibilityAction(
             b.bubble, AccessibilityActionCompat.ACTION_LONG_CLICK, context.getString(R.string.chat_message_actions), null,
@@ -510,8 +521,15 @@ class MessagesAdapter(
         }
     }
 
-    /** What TalkBack reads for a bubble: who, what, when, and how far it got. */
-    private fun describe(holder: MessageHolder, item: ThreadItem.Message, tick: Tick): String {
+    /** "Delivered", "Read 9:41" (or just "Read" when it is not known when). */
+    private fun receiptText(context: android.content.Context, receipt: Receipt): String = when {
+        !receipt.read -> context.getString(R.string.imessage_receipt_delivered)
+        receipt.readAtMs <= 0 -> context.getString(R.string.imessage_receipt_read)
+        else -> context.getString(R.string.imessage_receipt_read_at, TimeFormat.receiptTime(context, receipt.readAtMs))
+    }
+
+    /** What TalkBack reads for a bubble: who, what, when, and how far it got ([receipt] when it says). */
+    private fun describe(holder: MessageHolder, item: ThreadItem.Message, tick: Tick, receipt: String?): String {
         val context = holder.binding.root.context
         val row = item.row
         val who = if (row.isOutgoing) context.getString(R.string.chat_you)
@@ -526,6 +544,7 @@ class MessagesAdapter(
         if (row.editedAtMs > 0) parts += context.getString(R.string.imessage_edited)
         parts += TimeFormat.clock(context, row.timestampMs)
         holder.binding.statusIcon.contentDescription?.takeIf { tick != Tick.NONE }?.let { parts += it.toString() }
+        receipt?.let { parts += it }
         return parts.joinToString(", ")
     }
 
@@ -539,6 +558,9 @@ class MessagesAdapter(
 
         /** How Material dims a control that cannot be used. */
         const val DISABLED_ALPHA = 0.38f
+
+        /** The ticks that receipts in words stand in for ([appleReceipts]). */
+        val RECEIPT_TICKS = setOf(Tick.SENT, Tick.DELIVERED, Tick.READ)
 
         /** Longest side of a picture in a bubble (decoded at this size or the bubble's width, shown up to it). */
         const val MEDIA_MAX_SIDE_DP = 480

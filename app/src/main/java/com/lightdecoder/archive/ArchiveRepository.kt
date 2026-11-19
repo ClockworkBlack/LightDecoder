@@ -240,9 +240,16 @@ class ArchiveRepository private constructor(
      * [status] or beyond keeps what it has (receipts arrive late, twice and
      * out of order). Incoming messages and local copies still being sent are
      * left alone. Returns the ids that are stored at all, changed or not, so
-     * the caller knows which receipts came before their message.
+     * the caller knows which receipts came before their message; the ones
+     * that did move forward are also added to [advanced], if given.
      */
-    fun advanceMessageStatus(messageIds: Collection<String>, status: String, statusCode: Int, rankOf: (String) -> Int): Set<String> =
+    fun advanceMessageStatus(
+        messageIds: Collection<String>,
+        status: String,
+        statusCode: Int,
+        rankOf: (String) -> Int,
+        advanced: MutableCollection<String>? = null,
+    ): Set<String> =
         if (messageIds.isEmpty()) emptySet() else write { b ->
             val found = HashSet<String>()
             val target = rankOf(status)
@@ -261,6 +268,7 @@ class ArchiveRepository private constructor(
                     put("updated_at", b.now)
                 }, "message_id = ?", arrayOf(id))
                 b.changed(Kind.MESSAGES, conversationId)
+                advanced?.add(id)
             }
             found
         }

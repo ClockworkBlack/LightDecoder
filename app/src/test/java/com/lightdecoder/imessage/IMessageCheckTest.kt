@@ -89,6 +89,24 @@ class IMessageCheckTest {
         assertEquals("my own text is not a reply", Reply.NONE, p.reply)
     }
 
+    @Test
+    fun throughTheLibraryItIsSentOnceItLeavesAndConfirmedOnceAppleSaysSo() {
+        // The local copy while the library sends it: sent from here, not at Apple yet.
+        val sending = IMessageCheck.progress(text, sentAt, listOf(row("tmp:t1", text, sentAt + 10, out = true)), emptyList())
+        assertTrue(sending.handedOver)
+        assertFalse(sending.inOpenBubbles)
+        // Apple confirmed it: the message with its GUID.
+        val confirmed = IMessageCheck.progress(text, sentAt, listOf(row("imsg:G1", text, sentAt + 900, out = true)), emptyList())
+        assertTrue(confirmed.handedOver)
+        assertTrue(confirmed.inOpenBubbles)
+        // A copy that failed to go was not handed over.
+        val failed = IMessageCheck.progress(
+            text, sentAt, listOf(row("tmp:t2", text, sentAt + 10, out = true).copy(localState = com.lightdecoder.archive.LocalState.FAILED)), emptyList(),
+        )
+        assertFalse(failed.handedOver)
+        assertFalse(failed.inOpenBubbles)
+    }
+
     private fun row(id: String, text: String, ts: Long, out: Boolean = false) = MessageRow(
         id = id, conversationId = "c", tmpId = "", senderId = if (out) "" else "p1", senderName = "", isOutgoing = out,
         timestampMs = ts, direction = if (out) "out" else "in", status = "", statusCode = 0, errorText = "", transport = "",

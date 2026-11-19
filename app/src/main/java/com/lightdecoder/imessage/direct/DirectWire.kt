@@ -202,7 +202,23 @@ object DirectWire {
 
     fun error(message: String): JSONObject = JSONObject().put("error", message)
 
+    /**
+     * The answer to a request that failed with [e], in words; marked when Apple did not answer in
+     * time ([DirectEngine.Unconfirmed]), since what was asked may have gone through all the same.
+     */
+    fun failure(e: Throwable): JSONObject =
+        error(DirectEngine.readable(e)).apply { if (e is DirectEngine.Unconfirmed) put(KEY_UNCONFIRMED, true) }
+
     fun errorOf(o: JSONObject): String? = o.optStringOrNull("error")
+
+    /**
+     * Whether the failure [o] leaves it open whether the request went through: Apple did not
+     * confirm it, or the other process stopped or did not answer while it was asked.
+     */
+    fun unconfirmed(o: JSONObject): Boolean =
+        errorOf(o) != null && (o.optBoolean(KEY_UNCONFIRMED) || errorOf(o) == DirectIpc.Client.DIED || errorOf(o) == DirectIpc.Client.NO_ANSWER)
+
+    private const val KEY_UNCONFIRMED = "unconfirmed"
 
     fun encode(u: DirectArchive.Update): JSONObject = when (u) {
         is DirectArchive.Update.Upsert -> JSONObject().put("kind", "upsert")

@@ -20,10 +20,14 @@ import com.lightdecoder.relay.MessageNotifier
 import com.lightdecoder.relay.ParticipantDto
 import com.lightdecoder.relay.RelayException
 import com.lightdecoder.relay.RelayState
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
@@ -47,6 +51,10 @@ import java.util.UUID
  *    with the message filled in ([handOff]);
  *  - there are no reactions, typing or delivery reports.
  *
+ * With OpenBubbles' library registered ([com.lightdecoder.imessage.direct.DirectLink.active],
+ * "direct mode") none of that applies: messages, tapbacks, edits, typing and read receipts go
+ * straight to Apple through it, and the OpenBubbles app is never opened.
+ *
  * [isPaired] is whether "Blue Bubbles" is on. Nothing runs while it is off:
  * the listener drops OpenBubbles' notifications unread.
  */
@@ -67,8 +75,11 @@ class IMessageManager private constructor(
     private val _typing = MutableStateFlow<Map<String, Set<String>>>(emptyMap())
     override val typing: StateFlow<Map<String, Set<String>>> = _typing.asStateFlow()
 
-    /** Who is typing where (direct mode): conversation id -> participant id -> name. */
-    private val typers = HashMap<String, LinkedHashMap<String, String>>()
+    /** Who is typing where (direct mode). */
+    private val typers = TypingBoard()
+
+    /** Forgets typists nothing more was heard from ([TypingBoard.EXPIRY_MS]). */
+    private val typingScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     override val presence: StateFlow<Map<String, Presence>> = MutableStateFlow(emptyMap())
     override val backfill: StateFlow<BackfillProgress> = MutableStateFlow(BackfillProgress(running = false, 0, 0, 0))
 
@@ -102,8 +113,20 @@ class IMessageManager private constructor(
         }
     }
 
-    /** "OpenBubbles com.openbubbles.messaging 1.15.0; notification access yes": what Blue Bubbles needs. */
+    /**
+     * "OpenBubbles com.openbubbles.messaging 1.15.0; notification access yes": what Blue Bubbles
+     * needs. Through the iMessage library, the library's state instead: registered once on this
+     * phone, and what its process last said of it ("connected to Apple", or why not).
+     */
     fun setupSummary(): String {
+        if (direct.active) {
+            val library = com.lightdecoder.imessage.direct.DirectLibrary
+            val where = if (library.isBundled(appContext)) "included in this build" else "imported"
+            val status = com.lightdecoder.imessage.direct.DirectPrefs.lastStatus(appContext)
+                ?.let { (text, at) -> "$text (${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US).format(java.util.Date(at))})" }
+                ?: "none yet"
+            return "iMessage library $where (${library.processAbi()}); registered on this phone; last status: $status"
+        }
         val pkg = OpenBubbles.installedPackage(appContext)
         val version = pkg?.let { runCatching { appContext.packageManager.getPackageInfo(it, 0).versionName }.getOrNull() }
         return "OpenBubbles " + (if (pkg == null) "not installed" else "$pkg ${version.orEmpty()}".trimEnd()) +
@@ -330,6 +353,11 @@ class IMessageManager private constructor(
         val tmpId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
         repo.insertLocalOutgoing(tmpId, conversationId, body, null, null, null, null, now)
+        // Through the library there is no Reply button to fall back on: the chat cannot be reached.
+        if (direct.active) {
+            repo.setLocalState(tmpId, LocalState.FAILED, IMessageErrors.NO_REPLY_BUTTON)
+            throw RelayException(IMessageErrors.NO_REPLY_BUTTON, "this chat cannot be reached through the iMessage library")
+        }
         if (!deliver(tmpId, conversationId, body)) throw RelayException(IMessageErrors.NO_REPLY_BUTTON, "no reply button for this chat")
         return tmpId
     }
@@ -371,12 +399,17 @@ class IMessageManager private constructor(
             }
         }
 
-    /** Pictures and files go through OpenBubbles' own screen ([handOff]). */
+    /**
+     * Pictures and files go through OpenBubbles' own screen ([handOff]). Through the iMessage
+     * library they cannot be sent yet ([IMessageErrors.HAND_OFF] says so in its words).
+     */
     override fun sendMedia(conversationId: String, uri: Uri, caption: String?, replyToId: String?): String =
-        throw RelayException(IMessageErrors.HAND_OFF, "attachments are sent in OpenBubbles")
+        throw RelayException(IMessageErrors.HAND_OFF, if (direct.active) "no attachments through the iMessage library yet" else "attachments are sent in OpenBubbles")
 
     override fun retry(tmpId: String) {
         if (direct.retry(tmpId)) return
+        // Through the library a chat it cannot reach has no Reply button to fall back on either.
+        if (direct.active) return
         val row = repo.message(MessageRow.tmpMessageId(tmpId)) ?: return
         if (row.localState != LocalState.FAILED || row.text.isEmpty()) return
         repo.setLocalState(tmpId, LocalState.SENDING)
@@ -391,10 +424,15 @@ class IMessageManager private constructor(
      * Opens OpenBubbles with [text] and [attachments] (content uris this app
      * can hand over, with their types) filled in for [conversationId]: its
      * chat, or failing that a new chat with the person's address. The user
-     * sends it there. False if OpenBubbles is not installed or could not be opened.
+     * sends it there. False if OpenBubbles is not installed or could not be opened, and always
+     * through the iMessage library, which never hands anything to the OpenBubbles app.
      */
-    fun handOff(context: Context, conversationId: String, text: String, attachments: List<Pair<Uri, String>> = emptyList()): Boolean =
-        handOffNow(context, conversationId, text, attachments).also { ok ->
+    fun handOff(context: Context, conversationId: String, text: String, attachments: List<Pair<Uri, String>> = emptyList()): Boolean {
+        if (direct.active) {
+            IMessageLog.add(appContext, "${IMessageLog.chatRef(conversationId)}: kept here (the iMessage library opens no other app)")
+            return false
+        }
+        return handOffNow(context, conversationId, text, attachments).also { ok ->
             val what = (if (text.isNotBlank()) "text" else "") +
                 (if (attachments.isNotEmpty()) (if (text.isNotBlank()) " + " else "") + "${attachments.size} file(s) " +
                     attachments.joinToString(",", "(", ")") { it.second.substringBefore('/') } else "")
@@ -404,6 +442,7 @@ class IMessageManager private constructor(
                     if (ok) "" else ": FAILED (OpenBubbles not installed or would not open)",
             )
         }
+    }
 
     private fun handOffNow(context: Context, conversationId: String, text: String, attachments: List<Pair<Uri, String>>): Boolean {
         val pkg = OpenBubbles.installedPackage(appContext) ?: return false
@@ -415,9 +454,12 @@ class IMessageManager private constructor(
         }
     }
 
-    /** Opens OpenBubbles on a new chat with [address] (a number or an email address) and [text] filled in. */
+    /**
+     * Opens OpenBubbles on a new chat with [address] (a number or an email address) and [text]
+     * filled in. Never through the iMessage library (that starts chats itself, [startConversation]).
+     */
     fun startInOpenBubbles(context: Context, address: String, text: String = ""): OpenBubbles.NewChat =
-        OpenBubbles.openNewChat(context, address, text)
+        if (direct.active) OpenBubbles.NewChat.FAILED else OpenBubbles.openNewChat(context, address, text)
 
     /** The other person's number or email address in a stored one-to-one chat. */
     fun addressOf(conversationId: String): String? {
@@ -451,22 +493,32 @@ class IMessageManager private constructor(
 
     // ============================== the rest of the backend ==============================
 
-    override fun typing(conversationId: String) = Unit
+    /** The user is typing in [conversationId]: through the iMessage library the chat is told (throttled there). */
+    override fun typing(conversationId: String) {
+        if (direct.active) direct.typing(conversationId)
+    }
+
+    /** The user emptied [conversationId]'s composer: through the iMessage library the chat is told the typing stopped. */
+    fun stopTyping(conversationId: String) {
+        if (direct.active) direct.stopTyping(conversationId)
+    }
 
     /**
      * [participantId] ([name]) started or stopped typing in [conversationId], as the iMessage
-     * library heard it; [typing] follows. A message from them also stops it.
+     * library heard it; [typing] follows. A message from them also stops it, and someone nothing
+     * more is heard from stops showing after a minute ([TypingBoard]).
      */
     fun noteTyping(conversationId: String, participantId: String, name: String, typing: Boolean) {
         synchronized(typers) {
-            val here = typers[conversationId]
-            if (typing) {
-                typers.getOrPut(conversationId) { LinkedHashMap() }[participantId] = name.ifBlank { participantId }
-            } else {
-                if (here?.remove(participantId) == null) return
-                if (here.isEmpty()) typers.remove(conversationId)
+            if (typers.note(conversationId, participantId, name, typing, System.currentTimeMillis())) _typing.value = typers.shown()
+        }
+        if (typing) {
+            typingScope.launch {
+                delay(TypingBoard.EXPIRY_MS)
+                synchronized(typers) {
+                    if (typers.expire(System.currentTimeMillis())) _typing.value = typers.shown()
+                }
             }
-            _typing.value = typers.mapValues { (_, people) -> people.values.toSet() }
         }
     }
     override fun watchPresence(conversationId: String) = Unit
@@ -498,8 +550,13 @@ class IMessageManager private constructor(
         direct.edit(messageId, body)
     }
 
-    /** Marks it read here and, through OpenBubbles' Mark As Read button, in OpenBubbles (which then tells the sender if it is set to). */
+    /**
+     * Marks it read here and, through OpenBubbles' Mark As Read button, in OpenBubbles (which then
+     * tells the sender if it is set to). Through the iMessage library Apple is told instead
+     * ([com.lightdecoder.imessage.direct.DirectLink.markRead]).
+     */
     override suspend fun markRead(conversationId: String): Unit = withContext(Dispatchers.IO) {
+        if (direct.active) return@withContext direct.markRead(conversationId)
         runCatching { repo.markConversationRead(conversationId) }
         MessageNotifier.cancel(appContext, conversationId, ChatService.IMESSAGE)
         val pressed = runCatching { IMessageReplies.markRead(appContext, conversationId) }.getOrDefault(false)
@@ -549,8 +606,17 @@ class IMessageManager private constructor(
         ContactsResult(runCatching { repo.contacts() }.getOrDefault(emptyList()), fromPhone = false)
     }
 
-    override suspend fun startConversation(numbers: List<String>, groupName: String?): String =
-        throw RelayException(IMessageErrors.HAND_OFF, "new chats start in OpenBubbles")
+    /**
+     * New chats start in OpenBubbles. Through the iMessage library, a chat with one person is
+     * the stored one or a new one once Apple says they have iMessage; groups come later.
+     */
+    override suspend fun startConversation(numbers: List<String>, groupName: String?): String = withContext(Dispatchers.IO) {
+        if (!direct.active) throw RelayException(IMessageErrors.HAND_OFF, "new chats start in OpenBubbles")
+        val address = numbers.map { it.trim() }.filter { it.isNotEmpty() }.distinct().singleOrNull()
+            ?: throw com.lightdecoder.imessage.direct.DirectEngine.ImessageError(appContext.getString(com.lightdecoder.R.string.imessage_direct_no_new_groups))
+        direct.conversationFor(address)
+            ?: throw com.lightdecoder.imessage.direct.DirectEngine.ImessageError(appContext.getString(com.lightdecoder.R.string.imessage_not_on_imessage, address))
+    }
 
     override suspend fun markNotSpam(conversationId: String): Unit = throw RelayException(WA_UNSUPPORTED, "no spam folder")
 
@@ -627,7 +693,7 @@ object IMessageErrors {
     /** This chat has no Reply button to send through: it has to be sent in OpenBubbles. */
     const val NO_REPLY_BUTTON = "no_reply_button"
 
-    /** This is done in OpenBubbles' own screen (attachments, new chats). */
+    /** This is done in OpenBubbles' own screen (attachments, new chats); through the iMessage library, attachments cannot be sent yet. */
     const val HAND_OFF = "hand_off"
 }
 

@@ -116,6 +116,8 @@ class DirectService : Service() {
     }
 
     private fun update(status: DirectEngine.Status) {
+        // For the main process's logs: it cannot ask the engine without starting it.
+        DirectPrefs.setLastStatus(this, DirectEngine.describe(status))
         try {
             getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(status))
         } catch (e: SecurityException) {
@@ -131,6 +133,7 @@ class DirectService : Service() {
                 when (status) {
                     is DirectEngine.Status.Registered -> getString(R.string.imessage_service_on)
                     is DirectEngine.Status.Working -> status.step + "…"
+                    is DirectEngine.Status.Retrying -> getString(R.string.imessage_service_retrying, status.error)
                     is DirectEngine.Status.Failed -> getString(R.string.imessage_service_failed, status.error)
                     else -> getString(R.string.imessage_service_starting)
                 },

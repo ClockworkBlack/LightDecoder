@@ -35,6 +35,8 @@ sealed class ThreadItem {
          * with the time under the last picture only.
          */
         val stackedWithNext: Boolean = false,
+        /** "Delivered" or "Read …" under it ([ThreadItems.receipts]), else null. */
+        val receipt: Receipt? = null,
     ) : ThreadItem() {
         /**
          * For DiffUtil. MessageRow's byte arrays compare by reference, so a
@@ -46,13 +48,38 @@ sealed class ThreadItem {
                 showSender == other.showSender &&
                 highlighted == other.highlighted &&
                 stackedWithNext == other.stackedWithNext &&
+                receipt == other.receipt &&
                 row.copy(media = emptyList()) == other.row.copy(media = emptyList()) &&
                 row.media.map(::mediaSignature) == other.row.media.map(::mediaSignature)
     }
 }
 
+/**
+ * What an iPhone writes under one of the user's iMessages: "Delivered", or "Read" with when
+ * ([readAtMs], 0 when that is not known).
+ */
+data class Receipt(val read: Boolean, val readAtMs: Long = 0)
+
 /** Turns a thread's messages into what the list draws. Pure, so it can be tested. */
 object ThreadItems {
+
+    /**
+     * Which of the user's messages say "Read" or "Delivered" under them, as on an iPhone: the
+     * latest one that was read, and the latest one delivered after it (delivered, not read yet).
+     * Only messages [hasReceipts] picks (iMessages that went through the iMessage library, whose
+     * receipts come from Apple); the rest keep their ticks. Message id -> read (true) or delivered.
+     *
+     * @param messages oldest first
+     */
+    fun receipts(messages: List<MessageRow>, hasReceipts: (MessageRow) -> Boolean): Map<String, Boolean> {
+        val mine = messages.filter { it.isOutgoing && it.direction == "out" && !it.isLocal && hasReceipts(it) }
+        val lastRead = mine.indexOfLast { MessageStatus.tickFor(it) == Tick.READ }
+        val lastDelivered = mine.indexOfLast { MessageStatus.tickFor(it) == Tick.DELIVERED }
+        val marks = LinkedHashMap<String, Boolean>()
+        if (lastRead >= 0) marks[mine[lastRead].id] = true
+        if (lastDelivered > lastRead) marks[mine[lastDelivered].id] = false
+        return marks
+    }
 
     /**
      * The key that follows a message from "being sent" to "sent": the local
@@ -74,6 +101,8 @@ object ThreadItems {
         highlightId: String?,
         dayStart: (Long) -> Long,
         dayLabel: (Long) -> String,
+        /** "Delivered" / "Read …" under messages, by id ([receipts]). */
+        receipts: Map<String, Receipt> = emptyMap(),
     ): List<ThreadItem> {
         val items = ArrayList<ThreadItem>(messages.size + 16)
         if (header != null) items.add(header)
@@ -105,6 +134,7 @@ object ThreadItems {
                     showSender = showSender,
                     highlighted = highlightId != null && row.id == highlightId,
                     stackedWithNext = messages.getOrNull(index + 1)?.let { stacks(row, it, dayStart) } == true,
+                    receipt = receipts[row.id],
                 )
             )
             previous = row

@@ -7,22 +7,28 @@ import com.lightdecoder.archive.ArchiveRepository
 import com.lightdecoder.archive.LocalState
 import com.lightdecoder.archive.MessageRow
 import com.lightdecoder.chat.ChatService
+import com.lightdecoder.imessage.IMessageAddress
 import com.lightdecoder.imessage.IMessageLog
 import com.lightdecoder.imessage.IMessageManager
 import com.lightdecoder.relay.ConversationDto
 import com.lightdecoder.relay.Folder
 import com.lightdecoder.relay.MessageDto
 import com.lightdecoder.relay.MessageNotifier
+import com.lightdecoder.relay.Outbox
 import com.lightdecoder.relay.ParticipantDto
 import com.lightdecoder.relay.PartDto
 import com.lightdecoder.relay.RelayException
 import com.lightdecoder.relay.RelayManager
+import com.lightdecoder.reactions.ReadTimes
 import com.lightdecoder.ui.chat.EditRule
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -39,12 +45,19 @@ import uniffi.rust_bridge.Reaction
  * reused, so its history and the new messages stay together. New chats get `imsg:` ids
  * ([DirectArchive]); messages sent or received here are `imsg:<GUID>`, the GUID Apple knows them by.
  *
- * [IMessageManager] hands sends, retries, unsends, edits and tapbacks here while [active]; [DirectSinkService]
- * hands over what Apple sent ([apply]). What arrives for a message that is not stored yet (a
- * receipt for a message whose send has not returned yet) is held for a while ([HeldUpdates]) and
- * applied once it is.
+ * [IMessageManager] hands sends, retries, unsends, edits, tapbacks, typing and read receipts here
+ * while [active]; [DirectSinkService] hands over what Apple sent ([apply]). What arrives for a
+ * message that is not stored yet (a receipt for a message whose send has not returned yet) is held
+ * for a while ([HeldUpdates]) and applied once it is.
  */
-class DirectLink private constructor(private val app: Context, requests: Requests?) {
+class DirectLink private constructor(
+    private val app: Context,
+    requests: Requests?,
+    /** How long after the last keystroke the chat is told the user stopped typing. */
+    private val typingIdleMs: Long = TYPING_IDLE_MS,
+    /** How often the chat is told again, while the user goes on typing, that they are. */
+    typingRepeatMs: Long = TYPING_REPEAT_MS,
+) {
 
     /** Asks the ":imessage" process ([DirectIpc.Client]); tests answer in its place. */
     internal fun interface Requests {
@@ -63,8 +76,21 @@ class DirectLink private constructor(private val app: Context, requests: Request
     /** Changes waiting for their message to be stored. */
     private val held = HeldUpdates()
 
+    /** When the chats were last told the user is typing ([typing]). */
+    private val typingThrottle = TypingThrottle(typingRepeatMs)
+
+    /** Typing changes for Apple, sent one at a time in the order they happened. */
+    private val typingOut = Channel<TypingNotice>(Channel.UNLIMITED)
+
+    /** The GUIDs of the messages a read receipt went for ([markRead]): each goes once. */
+    private val readSent = OnceSet()
+
+    /** Addresses Apple was asked about when their conversation opened ([reachOnce]), and when. */
+    private val reachAsked = HashMap<String, Long>()
+
     init {
         if (active) scope.launch { failInterruptedSends() }
+        scope.launch { for (notice in typingOut) tell(notice) }
     }
 
     // --- where a message goes ------------------------------------------------------------------
@@ -92,22 +118,52 @@ class DirectLink private constructor(private val app: Context, requests: Request
 
     /**
      * The iMessage chat with [address] (number or email) if that address is on iMessage: the stored
-     * one, or a new one. Null when the library is not set up or Apple says it cannot get iMessages.
+     * one, or a new one. Null when the library is not set up or Apple says it cannot get iMessages;
+     * throws [DirectEngine.ImessageError] when Apple could not be asked.
      */
     suspend fun conversationFor(address: String): String? {
         if (!active) return null
         manager.conversationWith(address)?.let { return it }
         val reply = requests.call(DirectWire.REACH, DirectWire.reach(address), REACH_TIMEOUT_MS)
+        // The library could not be asked: that says nothing about whether they have iMessage.
+        DirectWire.errorOf(reply)?.let { throw DirectEngine.ImessageError(it) }
         val dto = reply.optJSONObject("conversation")?.let(ConversationDto::fromJson) ?: return null
         val stored = toArchive(dto)
         repo.upsertConversation(stored)
         return stored.id
     }
 
+    /**
+     * As an iPhone does when a conversation with [address] opens: Apple is asked whether they have
+     * iMessage, and if they do their iMessage chat is made ([conversationFor]), so what is typed
+     * there goes blue. Asked at most once in [REACH_AGAIN_MS] per address ([now] is the time);
+     * asked again next time when Apple could not be asked. Their iMessage chat, or null.
+     */
+    suspend fun reachOnce(address: String, now: Long = System.currentTimeMillis()): String? {
+        if (!active) return null
+        val key = IMessageAddress.key(address) ?: return null
+        synchronized(reachAsked) {
+            val at = reachAsked[key]
+            if (at != null && now - at < REACH_AGAIN_MS) return null
+            reachAsked[key] = now
+        }
+        var answered = false
+        try {
+            return conversationFor(address).also { answered = true }
+        } catch (e: DirectEngine.ImessageError) {
+            Log.i(TAG, "could not ask Apple about a conversation's person: ${e.message}")
+            return null
+        } finally {
+            if (!answered) synchronized(reachAsked) { reachAsked.remove(key) }
+        }
+    }
+
     // --- sending ----------------------------------------------------------------------------------
 
     /** Like every send in the app: a local copy now ("tmp:<tmpId>"), the sent message once Apple confirms it. */
     fun sendText(conversationId: String, text: String, replyToId: String?): String {
+        // The message ends the typing indicator on their side: no "stopped typing" after it.
+        typingThrottle.sent(conversationId)
         val tmpId = UUID.randomUUID().toString()
         repo.insertLocalOutgoing(tmpId, conversationId, text, null, null, null, replyToId, System.currentTimeMillis())
         scope.launch { deliver(tmpId, conversationId, text, replyToId) }
@@ -133,7 +189,9 @@ class DirectLink private constructor(private val app: Context, requests: Request
             val replyGuid = replyToId?.let(DirectArchive::guidOf)
             val replyPart = replyGuid?.let { DirectWire.replyPart(repo.message(replyToId)?.text.orEmpty()) }
             val reply = requests.call(DirectWire.SEND, DirectWire.send(target, text, replyGuid, replyPart), SEND_TIMEOUT_MS)
-            DirectWire.errorOf(reply)?.let { throw DirectEngine.ImessageError(it) }
+            DirectWire.errorOf(reply)?.let {
+                throw if (DirectWire.unconfirmed(reply)) DirectEngine.Unconfirmed(it) else DirectEngine.ImessageError(it)
+            }
             val sent = DirectWire.SendReply.fromJson(reply)
             val messageId = DirectArchive.messageId(sent.guid)
             val stored = MessageDto(
@@ -161,7 +219,9 @@ class DirectLink private constructor(private val app: Context, requests: Request
         } catch (e: Exception) {
             Log.w(TAG, "direct send failed", e)
             IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: library send FAILED: ${DirectEngine.readable(e)}")
-            repo.setLocalState(tmpId, LocalState.FAILED, DirectEngine.readable(e))
+            // Apple not answering in time leaves it open whether it went: the user is asked before
+            // it is sent again (MessageStatus.outcomeUnknown), as for any send that may have gone.
+            repo.setLocalState(tmpId, LocalState.FAILED, if (e is DirectEngine.Unconfirmed) Outbox.UNCONFIRMED else DirectEngine.readable(e))
         }
     }
 
@@ -296,15 +356,100 @@ class DirectLink private constructor(private val app: Context, requests: Request
         }
     }
 
-    /** Local copies a previous run was still sending: Apple's answer was lost with it. */
+    /**
+     * Local copies a previous run was still sending: Apple's answer was lost with it, so they may
+     * have gone; a retry asks first ([Outbox.INTERRUPTED], see MessageStatus.outcomeUnknown).
+     */
     private fun failInterruptedSends() {
         try {
             repo.recentOutgoing(limit = 500)
                 .filter { it.isLocal && it.localState != LocalState.FAILED && it.localState != LocalState.SYNCED }
                 .filter { canSend(it.conversationId) }
-                .forEach { repo.setLocalState(it.tmpId, LocalState.FAILED, app.getString(R.string.imessage_interrupted)) }
+                .forEach { repo.setLocalState(it.tmpId, LocalState.FAILED, Outbox.INTERRUPTED) }
         } catch (e: RuntimeException) {
             Log.w(TAG, "could not check interrupted sends", e)
+        }
+    }
+
+    // --- typing and read receipts ---------------------------------------------------------------
+
+    /**
+     * The user typed in [conversationId]'s composer. As an iPhone does, the chat is told the user is
+     * typing at once and again every 50 seconds while it goes on, and that the user stopped once
+     * nothing was typed for 5 seconds ([TypingThrottle]).
+     */
+    fun typing(conversationId: String) {
+        if (!active) return
+        val at = System.currentTimeMillis()
+        typingThrottle.keystroke(conversationId, at)?.let { turn -> typingOut.trySend(TypingNotice(conversationId, true, turn)) }
+        scope.launch {
+            delay(typingIdleMs)
+            if (typingThrottle.idle(conversationId, at)) typingOut.trySend(TypingNotice(conversationId, false))
+        }
+    }
+
+    /** The user emptied [conversationId]'s composer: the chat is told the user stopped typing, if it was told otherwise. */
+    fun stopTyping(conversationId: String) {
+        if (typingThrottle.cleared(conversationId)) typingOut.trySend(TypingNotice(conversationId, false))
+    }
+
+    /** A typing change for Apple: [typing] or stopped, in [conversationId]; "typing" for the [turn] of typing it began ([TypingThrottle]). */
+    private class TypingNotice(val conversationId: String, val typing: Boolean, val turn: Int = 0)
+
+    private suspend fun tell(notice: TypingNotice) {
+        val chat = notice.conversationId
+        // Typing that ended while this waited (a message went, the composer was emptied, a pause):
+        // it would come after the message, or after "stopped", and leave the bubble showing.
+        if (notice.typing && !typingThrottle.current(chat, notice.turn)) return
+        sendTyping(chat, notice.typing)
+        // A message went while this was on its way, and may have reached them first: nothing
+        // else ends the bubble it would leave under the message.
+        if (notice.typing && typingThrottle.endedBySend(chat, notice.turn)) sendTyping(chat, false)
+    }
+
+    /** Apple does not answer typing: nothing waits for it, and a failure is only logged. */
+    private suspend fun sendTyping(conversationId: String, typing: Boolean) {
+        try {
+            val target = targetOf(conversationId) ?: return
+            val reply = requests.call(DirectWire.TYPING, DirectWire.typing(target, typing), NOTICE_TIMEOUT_MS)
+            DirectWire.errorOf(reply)?.let { Log.i(TAG, "typing not sent: $it") }
+        } catch (e: Exception) {
+            Log.w(TAG, "typing not sent", e)
+        }
+    }
+
+    /**
+     * The user read [conversationId]: it is read here and its notification goes. Apple is told once
+     * per latest message, for the user's other devices (they clear it too) and, with read receipts
+     * on (the iMessage screen's setting, read by the library), for the other person of a one-to-one
+     * chat, who then sees "Read".
+     */
+    suspend fun markRead(conversationId: String) {
+        runCatching { repo.markConversationRead(conversationId) }
+        MessageNotifier.cancel(app, conversationId, ChatService.IMESSAGE)
+        if (!active) return
+        val (guid, target) = try {
+            val guid = repo.latestIncomingMessageId(conversationId, DirectArchive.PREFIX)?.let(DirectArchive::guidOf) ?: return
+            guid to (targetOf(conversationId) ?: return)
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "read receipt not sent", e)
+            return
+        }
+        if (!readSent.claim(guid)) return
+        var told = false
+        try {
+            // Once asked, it goes even if the screen that read the chat closes meanwhile.
+            withContext(NonCancellable) {
+                val error = DirectWire.errorOf(requests.call(DirectWire.READ, DirectWire.read(target, guid), NOTICE_TIMEOUT_MS))
+                if (error == null) told = true else Log.i(TAG, "read receipt not sent: $error")
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "read receipt not sent", e)
+        } finally {
+            // Not gone: the next look at the chat tries again.
+            if (!told) readSent.release(guid)
         }
     }
 
@@ -335,9 +480,11 @@ class DirectLink private constructor(private val app: Context, requests: Request
             pinned = existing?.pinned == true,
             muted = existing?.muted == true,
             avatarColor = existing?.avatarColor.orEmpty(),
-            // A stored chat's latest message (time, id, snippet) moves with its messages only
-            // (ArchiveRepository.upsertMessage); given a time here, they would be written blank.
-            lastMessageTs = if (existing == null) c.lastMessageTs else 0,
+            // A chat's latest message (time, id, snippet) moves with its messages only
+            // (ArchiveRepository.upsertMessage). Given a time here, a stored chat's would be written
+            // blank, and a chat just made ([conversationFor], nothing in it yet) would go to the top
+            // of the list (and its Messages conversation with it) with nothing to show.
+            lastMessageTs = 0,
             defaultOutgoingId = c.defaultOutgoingId.ifBlank { existing?.defaultOutgoingId.orEmpty() },
             participants = listOf(ParticipantDto(id = ME, isMe = true)) + people,
         )
@@ -353,9 +500,14 @@ class DirectLink private constructor(private val app: Context, requests: Request
             is DirectArchive.Update.Upsert -> upsert(update)
             is DirectArchive.Update.Remove -> repo.applyDeletion(update.messageId)
             is DirectArchive.Update.Receipt -> {
+                val advanced = HashSet<String>()
                 val stored = repo.advanceMessageStatus(
-                    update.messageIds, update.status, DirectArchive.statusCode(update.status), DirectArchive::statusRank,
+                    update.messageIds, update.status, DirectArchive.statusCode(update.status), DirectArchive::statusRank, advanced,
                 )
+                // "Read 9:41" under the message: when it was seen to be read. Only a message this
+                // receipt made read: one read before (the same receipt handed over again, or a
+                // message read before read times were kept) keeps its time, or has none.
+                if (update.status == DirectArchive.STATUS_READ) noteRead(advanced)
                 for (id in update.messageIds - stored) hold(id, DirectArchive.Update.Receipt(listOf(id), update.status))
             }
             is DirectArchive.Update.Edit -> edit(update)
@@ -410,6 +562,17 @@ class DirectLink private constructor(private val app: Context, requests: Request
                 "${IMessageLog.chatRef(conversation.id)}: " +
                     (if (incoming) "received" else "sent from another device") + " through the iMessage library",
             )
+        }
+    }
+
+    private fun noteRead(messageIds: Collection<String>) {
+        if (messageIds.isEmpty()) return
+        val now = System.currentTimeMillis()
+        try {
+            val times = ReadTimes.get(app)
+            for (id in messageIds) times.note(ChatService.IMESSAGE, id, now, live = true)
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "read time not kept", e)
         }
     }
 
@@ -649,6 +812,18 @@ class DirectLink private constructor(private val app: Context, requests: Request
         private const val SEND_TIMEOUT_MS = 90_000L
         private const val REACH_TIMEOUT_MS = 25_000L
 
+        /** Apple is asked again about a conversation's person ([reachOnce]) after this long: they may have got iMessage since. */
+        const val REACH_AGAIN_MS = 6 * 60 * 60 * 1000L
+
+        /** Typing and read receipts wait for no answer from Apple: only for the session coming up. */
+        private const val NOTICE_TIMEOUT_MS = 30_000L
+
+        /** "Stopped typing" goes this long after the last keystroke, as on an iPhone. */
+        const val TYPING_IDLE_MS = 5_000L
+
+        /** While the user goes on typing, the chat is told again this often. */
+        const val TYPING_REPEAT_MS = 50_000L
+
         @Volatile
         private var instance: DirectLink? = null
 
@@ -659,9 +834,15 @@ class DirectLink private constructor(private val app: Context, requests: Request
             }
 
         /** Tests: a fresh link whose requests [requests] answers, instead of the ":imessage" process. */
-        internal fun installForTesting(context: Context, requests: Requests): DirectLink = synchronized(this) {
-            DirectLink(context.applicationContext, requests).also { instance = it }
-        }
+        internal fun installForTesting(
+            context: Context,
+            typingIdleMs: Long = TYPING_IDLE_MS,
+            typingRepeatMs: Long = TYPING_REPEAT_MS,
+            requests: Requests,
+        ): DirectLink =
+            synchronized(this) {
+                DirectLink(context.applicationContext, requests, typingIdleMs, typingRepeatMs).also { instance = it }
+            }
 
         internal fun resetForTesting() = synchronized(this) {
             instance = null
@@ -699,5 +880,97 @@ internal class HeldUpdates(private val windowMs: Long = 2 * 60 * 1000L, private 
             list.removeAll { (at, _) -> nowMs - at > windowMs }
             if (list.isEmpty()) lists.remove()
         }
+    }
+}
+
+/**
+ * When to tell a chat the user is typing, as an iPhone does: on the first keystroke, again every
+ * [repeatMs] while typing goes on, and "stopped" once nothing more was typed for a while (the
+ * caller waits, then asks [idle]) or the composer was emptied. A sent message ends it without a
+ * "stopped". Times are passed in.
+ *
+ * Each stretch of typing in a chat is a turn, counted from 0; a send, a clear or a pause ends it.
+ * A "typing" that waited to go is out of date once its turn ended ([current]), and one that was on
+ * its way when a message went may have reached them after the message ([endedBySend]).
+ */
+internal class TypingThrottle(private val repeatMs: Long = DirectLink.TYPING_REPEAT_MS) {
+
+    /** When "typing" last went, by chat: only chats that were told the user is typing. */
+    private val told = HashMap<String, Long>()
+    private val lastKeystroke = HashMap<String, Long>()
+
+    /** The turn of typing each chat is in: how many of its turns ended. */
+    private val turns = HashMap<String, Int>()
+
+    /** The turn a sent message ended, by chat. */
+    private val sentIn = HashMap<String, Int>()
+
+    /** A keystroke in [conversationId] at [nowMs]: the turn of typing it is in when "typing" should go now, else null. */
+    @Synchronized
+    fun keystroke(conversationId: String, nowMs: Long): Int? {
+        lastKeystroke[conversationId] = nowMs
+        val at = told[conversationId]
+        if (at != null && nowMs - at < repeatMs) return null
+        told[conversationId] = nowMs
+        return turnOf(conversationId)
+    }
+
+    /** A while after the keystroke at [keystrokeMs]: true when "stopped typing" should go now (nothing typed since). */
+    @Synchronized
+    fun idle(conversationId: String, keystrokeMs: Long): Boolean {
+        if (lastKeystroke[conversationId] != keystrokeMs) return false
+        return forget(conversationId)
+    }
+
+    /** The composer was emptied: true when "stopped typing" should go now. */
+    @Synchronized
+    fun cleared(conversationId: String): Boolean = forget(conversationId)
+
+    /** A message went: it ends the typing on the other side, nothing more to send. */
+    @Synchronized
+    fun sent(conversationId: String) {
+        val turn = turnOf(conversationId)
+        if (forget(conversationId)) sentIn[conversationId] = turn
+    }
+
+    /** Whether [turn] of [conversationId]'s typing is still going on: its "typing" is not out of date. */
+    @Synchronized
+    fun current(conversationId: String, turn: Int): Boolean = turnOf(conversationId) == turn
+
+    /** Whether a sent message ended [turn] of [conversationId]'s typing (asked once). */
+    @Synchronized
+    fun endedBySend(conversationId: String, turn: Int): Boolean {
+        if (sentIn[conversationId] != turn) return false
+        sentIn.remove(conversationId)
+        return true
+    }
+
+    private fun turnOf(conversationId: String): Int = turns[conversationId] ?: 0
+
+    /** Ends the chat's turn of typing: true when it was told the user is typing. */
+    private fun forget(conversationId: String): Boolean {
+        lastKeystroke.remove(conversationId)
+        if (told.remove(conversationId) == null) return false
+        turns[conversationId] = turnOf(conversationId) + 1
+        return true
+    }
+}
+
+/** Keys done once each ([claim]), the most recent [max] remembered. */
+internal class OnceSet(private val max: Int = 500) {
+    private val done = LinkedHashSet<String>()
+
+    /** True the first time [key] is claimed (and after it was [release]d). */
+    @Synchronized
+    fun claim(key: String): Boolean {
+        if (!done.add(key)) return false
+        while (done.size > max) done.remove(done.first())
+        return true
+    }
+
+    /** It did not get done after all: the next [claim] of it is the first again. */
+    @Synchronized
+    fun release(key: String) {
+        done.remove(key)
     }
 }

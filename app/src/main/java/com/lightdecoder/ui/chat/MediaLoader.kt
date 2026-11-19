@@ -85,6 +85,12 @@ class MediaLoader(
         private set
 
     /**
+     * The label over an iMessage picture a notification only named ("Picture from OpenBubbles ·
+     * tap"); through the iMessage library one that names no other app ([ThreadActivity] sets it).
+     */
+    var awaitingLabel: Int = R.string.imessage_media_waiting
+
+    /**
      * Shows [part] in [view]. [status], if given, is the "Connect to load"
      * label over it: shown while the picture can only be downloaded with the
      * link connected, hidden otherwise.
@@ -100,7 +106,7 @@ class MediaLoader(
         if (awaitsFile(part)) {
             showLoading(view)
             settle(view)
-            (status as? android.widget.TextView)?.setText(com.lightdecoder.R.string.imessage_media_waiting)
+            (status as? android.widget.TextView)?.setText(awaitingLabel)
             status?.visibility = View.VISIBLE
             return
         }

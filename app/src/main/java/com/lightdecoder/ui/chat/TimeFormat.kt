@@ -51,6 +51,20 @@ object TimeFormat {
         return pattern(skeleton(locale, skeleton), timestampMs, zone, locale)
     }
 
+    /**
+     * When one of the user's iMessages was read, as an iPhone writes it under the message
+     * ("Read 9:41", "Read Yesterday"): the time today, "Yesterday", then as in the conversation list.
+     */
+    fun receiptTime(
+        context: Context,
+        timestampMs: Long,
+        nowMs: Long = System.currentTimeMillis(),
+        zone: TimeZone = TimeZone.getDefault(),
+        locale: Locale = Locale.getDefault(),
+    ): String =
+        if (daysBetween(timestampMs, nowMs, zone) == 1) context.getString(R.string.chat_day_yesterday)
+        else listTime(context, timestampMs, nowMs, zone, locale)
+
     /** The label of the day header above a group of messages. */
     fun dayLabel(
         context: Context,

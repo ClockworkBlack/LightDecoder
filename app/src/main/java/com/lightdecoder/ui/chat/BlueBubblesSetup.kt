@@ -16,7 +16,8 @@ import com.lightdecoder.messenger.MessengerNotificationListener
  * Ticking it checks what it needs, in order, and only turns it on once both
  * are there: the OpenBubbles app (offered from the Play Store), and
  * notification access for LightDecoder (the system setting is opened, and
- * Blue Bubbles comes on when the user comes back with it granted).
+ * Blue Bubbles comes on when the user comes back with it granted). With the
+ * iMessage library set up it needs neither, and comes on at once.
  * Unticking turns it off at once; the chats already stored stay, hidden.
  */
 internal class BlueBubblesSetup(
@@ -35,6 +36,8 @@ internal class BlueBubblesSetup(
 
     private fun turnOn() {
         when {
+            // Through the iMessage library: neither the OpenBubbles app nor its notifications are needed.
+            direct() -> enable()
             !OpenBubbles.isInstalled(activity) -> MaterialAlertDialogBuilder(activity)
                 .setTitle(R.string.blue_bubbles_need_app_title)
                 .setMessage(R.string.blue_bubbles_need_app_body)
@@ -63,15 +66,18 @@ internal class BlueBubblesSetup(
 
     private fun enable() {
         IMessageManager.get(activity).setEnabled(true)
+        val direct = direct()
         // What OpenBubbles shows right now comes in without waiting for the next message.
-        MessengerNotificationListener.requestIMessageScan()
+        if (!direct) MessengerNotificationListener.requestIMessageScan()
         MaterialAlertDialogBuilder(activity)
             .setTitle(R.string.blue_bubbles_on_title)
-            .setMessage(R.string.blue_bubbles_on_body)
+            .setMessage(if (direct) R.string.blue_bubbles_on_body_direct else R.string.blue_bubbles_on_body)
             .setPositiveButton(android.R.string.ok, null)
             .show()
         onChanged()
     }
+
+    private fun direct(): Boolean = com.lightdecoder.imessage.direct.DirectLink.get(activity).active
 
     private fun turnOff() {
         IMessageManager.get(activity).setEnabled(false)

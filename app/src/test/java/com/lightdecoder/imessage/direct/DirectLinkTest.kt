@@ -13,13 +13,16 @@ import com.lightdecoder.imessage.IMessagePrefs
 import com.lightdecoder.relay.ConversationDto
 import com.lightdecoder.relay.MessageNotifier
 import com.lightdecoder.relay.ParticipantDto
+import com.lightdecoder.ui.chat.IMessageLight
 import java.io.File
 import java.util.Collections
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -72,6 +75,7 @@ class DirectLinkTest {
         MessageNotifier.cancelAll(context, ChatService.IMESSAGE)
         IMessagePrefs.setEnabled(context, false)
         DirectPrefs.setRegistered(context, false)
+        DirectPrefs.setLastStatus(context, "")
         DirectLink.resetForTesting()
         IMessageManager.resetForTesting()
         ArchiveRepository.resetForTesting()
@@ -930,6 +934,371 @@ class DirectLinkTest {
         assertEquals("Emphasized “hi”", DirectLink.tapbackNotice(context, "‼️", quoted))
         assertEquals("Questioned “hi”", DirectLink.tapbackNotice(context, "❓", quoted))
         assertEquals("Reacted 🎉 to a message", DirectLink.tapbackNotice(context, "🎉", "a message"))
+    }
+
+    // --- typing and read receipts out, sends that may have gone (phase 3) ----------------------------
+
+    @Test
+    fun theChatIsToldTheUserIsTypingAndThatTheyStopped() {
+        directModeOn()
+        val asked = Collections.synchronizedList(ArrayList<Pair<Int, JSONObject>>())
+        val link = DirectLink.installForTesting(context, typingIdleMs = 400) { what, request, _ ->
+            asked += what to request
+            if (what == DirectWire.SEND) DirectWire.sent("TS1", 1_700_000_005_000L) else DirectWire.ok()
+        }
+        link.apply(incoming("T0", bob, "hi"))
+        val chat = "imsg:$bob"
+        fun typings() = synchronized(asked) { asked.filter { it.first == DirectWire.TYPING }.map { it.second.getBoolean("typing") } }
+        // Two keystrokes: "typing" once, to the chat's person; "stopped" once it is quiet.
+        link.typing(chat)
+        link.typing(chat)
+        waitFor("typing") { typings().isNotEmpty() }
+        assertEquals(true, typings().first())
+        val typing = synchronized(asked) { asked.first { it.first == DirectWire.TYPING }.second }
+        assertEquals(listOf(bob), DirectWire.Target.fromJson(typing.getJSONObject("target")).participants)
+        waitFor("stopped, once quiet") { typings() == listOf(true, false) }
+        // The composer emptied: stopped at once, once.
+        link.typing(chat)
+        waitFor("typing again") { typings().size == 3 }
+        link.stopTyping(chat)
+        link.stopTyping(chat)
+        waitFor("stopped") { typings() == listOf(true, false, true, false) }
+        // A message ends it: no "stopped" after it.
+        link.typing(chat)
+        waitFor("typing again") { typings().size == 5 }
+        link.sendText(chat, "here", null)
+        waitFor("sent") { repo.message("imsg:TS1") != null }
+        Thread.sleep(600)
+        assertEquals(listOf(true, false, true, false, true), typings())
+    }
+
+    @Test
+    fun readingAChatTellsAppleOncePerLatestMessageTheyWrote() {
+        directModeOn()
+        val asked = Collections.synchronizedList(ArrayList<Pair<Int, JSONObject>>())
+        var refuse = true
+        val link = fakeLink(asked) { what, _ -> if (what == DirectWire.READ && refuse) DirectWire.error("not connected") else DirectWire.ok() }
+        link.apply(incoming("R1", bob, "first", ts = 1_700_000_000_000L))
+        link.apply(incoming("R2", bob, "second", ts = 1_700_000_001_000L))
+        sentHere("R3", "mine, after", ts = 1_700_000_002_000L)
+        val chat = "imsg:$bob"
+        assertTrue(repo.conversation(chat)!!.unread)
+        // Refused (not connected): read here all the same, and asked again next time.
+        runBlocking { link.markRead(chat) }
+        assertFalse(repo.conversation(chat)!!.unread)
+        refuse = false
+        runBlocking { link.markRead(chat) }
+        assertEquals(listOf(DirectWire.READ, DirectWire.READ), asked.map { it.first })
+        assertEquals("their latest message, not the user's", "R2", asked.last().second.getString("guid"))
+        // Once per message.
+        runBlocking { link.markRead(chat) }
+        assertEquals(2, asked.size)
+        link.apply(incoming("R4", bob, "third", ts = 1_700_000_003_000L))
+        runBlocking { link.markRead(chat) }
+        assertEquals("R4", asked.last().second.getString("guid"))
+        assertEquals(3, asked.size)
+        // Through the IMessage backend the same.
+        link.apply(incoming("R5", bob, "fourth", ts = 1_700_000_004_000L))
+        runBlocking { IMessageManager.get(context).markRead(chat) }
+        assertEquals("R5", asked.last().second.getString("guid"))
+    }
+
+    @Test
+    fun theirReadReceiptKeepsWhenTheMessageWasRead() {
+        com.lightdecoder.reactions.ReadTimes.resetForTesting()
+        try {
+            val link = DirectLink.get(context)
+            link.apply(incoming("B0", bob, "hi"))
+            sentHere("RT1", "mine")
+            val before = System.currentTimeMillis()
+            link.apply(event("RT1", bob, PushChatMessage.Read))
+            assertEquals(DirectArchive.STATUS_READ, repo.message("imsg:RT1")!!.status)
+            val times = com.lightdecoder.reactions.ReadTimes.get(context)
+            val time = times.timeFor(ChatService.IMESSAGE, "imsg:RT1")!!
+            assertTrue(time.atMs >= before)
+            // Read again later (Apple's journal after a restart): the first time stays.
+            link.apply(event("RT1", bob, PushChatMessage.Read))
+            assertEquals(time, times.timeFor(ChatService.IMESSAGE, "imsg:RT1"))
+            // Delivered only: no read time.
+            sentHere("RT2", "mine too", ts = 1_700_000_001_000L)
+            link.apply(event("RT2", bob, PushChatMessage.Delivered))
+            assertNull(times.timeFor(ChatService.IMESSAGE, "imsg:RT2"))
+        } finally {
+            com.lightdecoder.reactions.ReadTimes.resetForTesting()
+        }
+    }
+
+    @Test
+    fun aSendThatMayHaveGoneAsksBeforeItGoesAgain() {
+        DirectLink.get(context).apply(incoming("B0", bob, "hi"))
+        val chat = "imsg:$bob"
+        // Being sent when the app stopped.
+        repo.insertLocalOutgoing("t-cut", chat, "cut short", null, null, null, null, NOW)
+        repo.setLocalState("t-cut", com.lightdecoder.archive.LocalState.SENDING)
+        directModeOn()
+        DirectLink.installForTesting(context) { _, _, _ -> DirectWire.ok() }
+        fun local(tmpId: String) = repo.message(MessageRow.tmpMessageId(tmpId))!!
+        waitFor("marked failed") { local("t-cut").localState == com.lightdecoder.archive.LocalState.FAILED }
+        assertTrue("interrupted: it may have gone", com.lightdecoder.ui.chat.MessageStatus.outcomeUnknown(local("t-cut")))
+        // Apple did not confirm it in time: the same.
+        val late = DirectLink.installForTesting(context) { what, _, _ ->
+            if (what == DirectWire.SEND) DirectWire.failure(DirectEngine.Unconfirmed("Apple did not confirm the message within 45 seconds.")) else DirectWire.ok()
+        }.sendText(chat, "late", null)
+        waitFor("not confirmed") { local(late).localState == com.lightdecoder.archive.LocalState.FAILED }
+        assertTrue(com.lightdecoder.ui.chat.MessageStatus.outcomeUnknown(local(late)))
+        // Refused by Apple: it did not go, and goes again without asking.
+        val refused = DirectLink.installForTesting(context) { what, _, _ ->
+            if (what == DirectWire.SEND) DirectWire.error("Apple refused the message: no") else DirectWire.ok()
+        }.sendText(chat, "refused", null)
+        waitFor("refused") { local(refused).localState == com.lightdecoder.archive.LocalState.FAILED }
+        assertFalse(com.lightdecoder.ui.chat.MessageStatus.outcomeUnknown(local(refused)))
+    }
+
+    @Test
+    fun askingAppleAboutSomeoneSaysWhenTheLibraryCouldNotBeAsked() {
+        directModeOn()
+        var answer = DirectWire.error(DirectIpc.Client.UNREACHABLE)
+        val link = DirectLink.installForTesting(context) { _, _, _ -> answer }
+        try {
+            runBlocking { link.conversationFor("+15557777777") }
+            fail("not asked, yet answered")
+        } catch (e: DirectEngine.ImessageError) {
+            assertEquals(DirectIpc.Client.UNREACHABLE, e.message)
+        }
+        // Asked: not on iMessage.
+        answer = JSONObject()
+        assertNull(runBlocking { link.conversationFor("+15557777777") })
+    }
+
+    @Test
+    fun throughTheLibraryTheIMessageBackendNeverHandsOff() {
+        com.lightdecoder.imessage.IMessageLog.clear(context)
+        directModeOn()
+        val asked = Collections.synchronizedList(ArrayList<Pair<Int, JSONObject>>())
+        val link = fakeLink(asked) { what, _ -> if (what == DirectWire.REACH) JSONObject() else DirectWire.ok() }
+        val manager = IMessageManager.get(context)
+        link.apply(incoming("B0", bob, "hi"))
+        val chat = "imsg:$bob"
+        // Typing goes to Apple.
+        manager.typing(chat)
+        waitFor("typing") { synchronized(asked) { asked.any { it.first == DirectWire.TYPING } } }
+        // Nothing opens the OpenBubbles app.
+        assertFalse(manager.handOff(context, chat, "hi"))
+        assertEquals(com.lightdecoder.imessage.OpenBubbles.NewChat.FAILED, manager.startInOpenBubbles(context, "+15559876543"))
+        // Attachments: not yet, said in iMessage's words.
+        try {
+            manager.sendMedia(chat, android.net.Uri.parse("content://x/1"), null, null)
+            fail("sent a file")
+        } catch (e: com.lightdecoder.relay.RelayException) {
+            assertEquals(com.lightdecoder.imessage.IMessageErrors.HAND_OFF, e.code)
+            assertEquals(context.getString(com.lightdecoder.R.string.imessage_no_attachments), com.lightdecoder.ui.chat.ChatErrors.message(context, ChatService.IMESSAGE, e))
+        }
+        // A chat the library cannot reach: kept here as failed, not sent through a Reply button.
+        repo.upsertConversation(
+            ConversationDto(
+                id = "iMessage;+;chat123", isGroup = true, name = "Trip", type = IMessageManager.TRANSPORT,
+                participants = listOf(
+                    ParticipantDto(id = "me", isMe = true),
+                    ParticipantDto(id = "+15551234567", number = "+15551234567"),
+                    ParticipantDto(id = "+15559876543", number = "+15559876543"),
+                ),
+            ),
+        )
+        try {
+            manager.sendText("iMessage;+;chat123", "hi all", null)
+            fail("sent to a chat the library cannot reach")
+        } catch (e: com.lightdecoder.relay.RelayException) {
+            assertEquals(com.lightdecoder.imessage.IMessageErrors.NO_REPLY_BUTTON, e.code)
+        }
+        val failed = repo.messages("iMessage;+;chat123").single()
+        assertEquals(com.lightdecoder.archive.LocalState.FAILED, failed.localState)
+        // Tried again: still nothing to send it through, and no Reply button tried.
+        manager.retry(failed.tmpId)
+        assertEquals(failed, repo.messages("iMessage;+;chat123").single())
+        assertTrue("nothing asked of the library for it", synchronized(asked) { asked.none { it.first == DirectWire.SEND } })
+        // New chats: with one person once Apple says they have iMessage; groups not yet.
+        try {
+            runBlocking { manager.startConversation(listOf("+15557777777"), null) }
+            fail("a chat with someone not on iMessage")
+        } catch (e: DirectEngine.ImessageError) {
+            assertEquals("+15557777777 is not on iMessage.", e.message)
+        }
+        try {
+            runBlocking { manager.startConversation(listOf("+15557777777", "+15558888888"), "Trip") }
+            fail("a group")
+        } catch (e: DirectEngine.ImessageError) {
+            assertEquals(context.getString(com.lightdecoder.R.string.imessage_direct_no_new_groups), e.message)
+        }
+        assertEquals(chat, runBlocking { manager.startConversation(listOf("+1 555 987 6543"), null) })
+        // What the logs and the problem report say of it names the library, not OpenBubbles.
+        assertTrue(manager.setupSummary(), manager.setupSummary().startsWith("iMessage library"))
+        // What the library's own process last said, not a fixed "registered with Apple".
+        assertTrue(manager.setupSummary(), manager.setupSummary().endsWith("last status: none yet"))
+        DirectPrefs.setLastStatus(context, DirectEngine.describe(DirectEngine.Status.Retrying("busy", 30)))
+        assertTrue(manager.setupSummary(), manager.setupSummary().contains("last status: not connected, Apple's library tries again in 30 s: busy ("))
+        assertFalse(com.lightdecoder.imessage.IMessageLog.read(context).any { it.contains("OpenBubbles") })
+    }
+
+    @Test
+    fun aTypingNoticeOvertakenByAMessageIsDroppedOrFollowedByStopped() {
+        directModeOn()
+        val asked = Collections.synchronizedList(ArrayList<Pair<Int, JSONObject>>())
+        val slow = java.util.concurrent.CountDownLatch(1)
+        val link = DirectLink.installForTesting(context, typingIdleMs = 60_000) { what, request, _ ->
+            asked += what to request
+            when (what) {
+                // The first "typing" takes a while to go (the session coming up).
+                DirectWire.TYPING -> {
+                    if (synchronized(asked) { asked.count { it.first == DirectWire.TYPING } } == 1) slow.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                    DirectWire.ok()
+                }
+                DirectWire.SEND -> DirectWire.sent("G-" + request.getString("text"), 1_700_000_005_000L)
+                else -> DirectWire.ok()
+            }
+        }
+        link.apply(incoming("A0", alice, "hi"))
+        link.apply(incoming("B0", bob, "hi"))
+        val toAlice = "imsg:$alice"
+        val toBob = "imsg:$bob"
+        fun typings() = synchronized(asked) {
+            asked.filter { it.first == DirectWire.TYPING }
+                .map { DirectWire.Target.fromJson(it.second.getJSONObject("target")).participants.single() to it.second.getBoolean("typing") }
+        }
+        // Typing to Alice is on its way; typing to Bob waits behind it.
+        link.typing(toAlice)
+        waitFor("typing to Alice asked") { typings().isNotEmpty() }
+        link.typing(toBob)
+        // A message to each goes before either typing is through.
+        link.sendText(toBob, "b", null)
+        link.sendText(toAlice, "a", null)
+        waitFor("both sent") { repo.message("imsg:G-a") != null && repo.message("imsg:G-b") != null }
+        slow.countDown()
+        // Alice's "typing" may have reached her after the message: "stopped" follows it. Bob's,
+        // still waiting, never goes. (Typing to Alice again shows Bob's turn has been passed.)
+        waitFor("stopped after the message") { typings().size == 2 }
+        link.typing(toAlice)
+        waitFor("typing again") { typings().size == 3 }
+        assertEquals(listOf(alice to true, alice to false, alice to true), typings())
+    }
+
+    @Test
+    fun aReadReceiptThatFailedOrWasLeftGoesAgainAndOneOnItsWayGoesOnWhenTheScreenCloses() {
+        directModeOn()
+        val asked = Collections.synchronizedList(ArrayList<Pair<Int, JSONObject>>())
+        var fail = true
+        val held = java.util.concurrent.CountDownLatch(1)
+        val link = fakeLink(asked) { what, _ ->
+            if (what == DirectWire.READ && fail) throw IllegalStateException("the other process went away")
+            if (what == DirectWire.READ) held.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            DirectWire.ok()
+        }
+        link.apply(incoming("RR1", bob, "first"))
+        val chat = "imsg:$bob"
+        // It failed: not counted as gone.
+        runBlocking { link.markRead(chat) }
+        fail = false
+        // The screen that asked closes while Apple is being told: it is told all the same, and counted.
+        val reading = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch { link.markRead(chat) }
+        waitFor("asked again") { asked.size == 2 }
+        reading.cancel()
+        held.countDown()
+        runBlocking { reading.join() }
+        runBlocking { link.markRead(chat) }
+        assertEquals("tried again after the failure, then once", 2, asked.count { it.first == DirectWire.READ })
+    }
+
+    @Test
+    fun aReadTimeIsKeptOnlyWhenTheReceiptMakesTheMessageRead() {
+        com.lightdecoder.reactions.ReadTimes.resetForTesting()
+        try {
+            val link = DirectLink.get(context)
+            link.apply(incoming("B0", bob, "hi"))
+            sentHere("OLD", "read before read times were kept")
+            repo.advanceMessageStatus(listOf("imsg:OLD"), DirectArchive.STATUS_READ, 11, DirectArchive::statusRank)
+            // Apple's journal hands the receipt over again after a restart: no time is made up for it.
+            link.apply(event("OLD", bob, PushChatMessage.Read))
+            assertNull(com.lightdecoder.reactions.ReadTimes.get(context).timeFor(ChatService.IMESSAGE, "imsg:OLD"))
+            // One the receipt makes read: when.
+            sentHere("NEW", "mine, sent just now", ts = 1_700_000_001_000L)
+            link.apply(event("NEW", bob, PushChatMessage.Delivered))
+            assertNull(com.lightdecoder.reactions.ReadTimes.get(context).timeFor(ChatService.IMESSAGE, "imsg:NEW"))
+            link.apply(event("NEW", bob, PushChatMessage.Read))
+            assertNotNull(com.lightdecoder.reactions.ReadTimes.get(context).timeFor(ChatService.IMESSAGE, "imsg:NEW"))
+        } finally {
+            com.lightdecoder.reactions.ReadTimes.resetForTesting()
+        }
+    }
+
+    @Test
+    fun appleIsAskedAboutAConversationsPersonOnceInAWhile() {
+        directModeOn()
+        val asked = Collections.synchronizedList(ArrayList<Pair<Int, JSONObject>>())
+        var answer: JSONObject = DirectWire.error(DirectIpc.Client.UNREACHABLE)
+        val link = fakeLink(asked) { _, _ -> answer }
+        val reaches = { asked.count { it.first == DirectWire.REACH } }
+        // Could not be asked: asked again next time.
+        assertNull(runBlocking { link.reachOnce("+1 555 777 7777", now = 1_000) })
+        answer = JSONObject()
+        assertNull(runBlocking { link.reachOnce("+1 555 777 7777", now = 2_000) })
+        assertEquals(2, reaches())
+        // Not on iMessage: not asked again for a while (also not under another spelling of the number).
+        assertNull(runBlocking { link.reachOnce("+15557777777", now = 3_000) })
+        assertEquals(2, reaches())
+        assertNull("no address", runBlocking { link.reachOnce("Mom", now = 3_000) })
+        assertEquals(2, reaches())
+        // Later they may have got it: asked again, and their chat made, at the bottom of the list
+        // until something is written in it.
+        answer = JSONObject().put(
+            "conversation",
+            ConversationDto(
+                id = "imsg:tel:+15557777777", name = "+15557777777", type = DirectArchive.TRANSPORT, lastMessageTs = 1_700_000_000_000L,
+                participants = listOf(
+                    ParticipantDto(id = "tel:+15557777777", number = "+15557777777"),
+                    ParticipantDto(id = me, isMe = true),
+                ),
+            ).toJson(),
+        )
+        val chat = runBlocking { link.reachOnce("+15557777777", now = 2_000 + DirectLink.REACH_AGAIN_MS) }
+        assertEquals("imsg:tel:+15557777777", chat)
+        assertEquals(3, reaches())
+        assertEquals(0L, repo.conversation(chat!!)!!.lastMessageTs)
+        assertTrue(link.canSend(chat))
+    }
+
+    @Test
+    fun theLightSaysHowAConversationSendsThroughTheLibrary() {
+        directModeOn()
+        IMessagePrefs.setEnabled(context, true)
+        val link = fakeLink(Collections.synchronizedList(ArrayList()))
+        link.apply(incoming("B0", bob, "hi"))
+        repo.upsertConversation(
+            ConversationDto(
+                id = "iMessage;+;chat123", isGroup = true, name = "Trip", type = IMessageManager.TRANSPORT,
+                participants = listOf(
+                    ParticipantDto(id = "me", isMe = true),
+                    ParticipantDto(id = "+15551234567", number = "+15551234567"),
+                    ParticipantDto(id = "+15559876543", number = "+15559876543"),
+                ),
+            ),
+        )
+        assertEquals(
+            IMessageLight.Reading(IMessageLight.State.ACTIVE, com.lightdecoder.R.string.imessage_light_direct),
+            IMessageLight.forConversation(context, "imsg:$bob", isGroup = false),
+        )
+        // A chat the library cannot reach (a group from OpenBubbles' notifications): a problem, not "one tap in OpenBubbles".
+        assertEquals(
+            IMessageLight.Reading(IMessageLight.State.PROBLEM, com.lightdecoder.R.string.imessage_light_unreachable),
+            IMessageLight.forConversation(context, "iMessage;+;chat123", isGroup = true),
+        )
+        // A Messages group: texts, and where iMessage groups are.
+        assertEquals(
+            IMessageLight.Reading(IMessageLight.State.OFF, com.lightdecoder.R.string.imessage_light_group_direct),
+            IMessageLight.forConversation(context, null, isGroup = true),
+        )
+        assertEquals(
+            IMessageLight.Reading(IMessageLight.State.OFF, com.lightdecoder.R.string.imessage_light_no_chat),
+            IMessageLight.forConversation(context, null, isGroup = false),
+        )
     }
 
     /** Polls, for work the link does on its own threads. */

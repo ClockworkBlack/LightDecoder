@@ -57,6 +57,21 @@ object DirectPrefs {
         shownMarker(context).apply { parentFile?.mkdirs() }.writeText("1")
     }
 
+    private fun statusFile(context: Context) = File(context.filesDir, "imessage/status")
+
+    /**
+     * What the ":imessage" process last said of iMessage ([DirectEngine.describe]), and when it
+     * said it; null if it never did. A file, for the main process's logs and problem report.
+     */
+    fun lastStatus(context: Context): Pair<String, Long>? = runCatching {
+        val f = statusFile(context)
+        f.readText().trim().takeIf { it.isNotEmpty() }?.let { it to f.lastModified() }
+    }.getOrNull()
+
+    fun setLastStatus(context: Context, text: String) {
+        runCatching { statusFile(context).apply { parentFile?.mkdirs() }.writeText(text) }
+    }
+
     /** Set once Apple reported a registration; the background service runs while it is. */
     fun registered(context: Context): Boolean = marker(context).isFile
 

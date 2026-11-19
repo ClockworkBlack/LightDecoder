@@ -24,7 +24,7 @@ import com.lightdecoder.relay.RelayState
 object IMessageLight {
 
     enum class State(val colorRes: Int) {
-        /** iMessage in use: blue (in a conversation, sent silently through OpenBubbles). */
+        /** iMessage in use: blue (in a conversation, sent straight from here: the library, or silently through OpenBubbles). */
         ACTIVE(R.color.imessage_blue),
 
         /** iMessage, but through OpenBubbles' own screen (one tap there): amber. */
@@ -48,14 +48,23 @@ object IMessageLight {
         return Reading(State.ACTIVE, R.string.imessage_light_on)
     }
 
-    /** How a Messages conversation sends: [companion] is its iMessage chat, if it has one. */
+    /**
+     * How a conversation sends: [companion] is its iMessage chat (the conversation itself when it
+     * is one), if it has one. Through the iMessage library a chat it can reach is blue, groups
+     * included (made by the library, they have their iMessage group id), and one it cannot reach
+     * is a problem, never "one tap in OpenBubbles".
+     */
     fun forConversation(context: Context, companion: String?, isGroup: Boolean): Reading {
         if (!IMessagePrefs.enabled(context)) return Reading(State.OFF, R.string.imessage_light_off)
-        val direct = com.lightdecoder.imessage.direct.DirectLink.get(context).active
-        if (!direct) problem(context)?.let { return Reading(State.PROBLEM, it) }
+        val link = com.lightdecoder.imessage.direct.DirectLink.get(context)
+        if (link.active) {
+            if (companion == null) return Reading(State.OFF, if (isGroup) R.string.imessage_light_group_direct else R.string.imessage_light_no_chat)
+            return if (link.canSend(companion)) Reading(State.ACTIVE, R.string.imessage_light_direct)
+            else Reading(State.PROBLEM, R.string.imessage_light_unreachable)
+        }
+        problem(context)?.let { return Reading(State.PROBLEM, it) }
         if (isGroup) return Reading(State.OFF, R.string.imessage_light_group)
         if (companion == null) return Reading(State.OFF, R.string.imessage_light_no_chat)
-        if (com.lightdecoder.imessage.direct.DirectLink.get(context).canSend(companion)) return Reading(State.ACTIVE, R.string.imessage_light_direct)
         return if (IMessageReplies.canReply(companion)) Reading(State.ACTIVE, R.string.imessage_light_silent)
         else Reading(State.HAND_OFF, R.string.imessage_light_hand_off)
     }

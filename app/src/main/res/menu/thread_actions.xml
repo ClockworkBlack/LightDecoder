@@ -22,7 +22,7 @@
         android:title="@string/chat_stop_reading"
         android:visible="false"
         app:showAsAction="ifRoom" />
-    <!-- A Messages conversation with Blue Bubbles on: its person's iMessage chat (here, or new in OpenBubbles). -->
+    <!-- A Messages conversation with Blue Bubbles on: its person's iMessage chat (here, or new: through the iMessage library, or in OpenBubbles). -->
     <item
         android:id="@+id/action_send_imessage"
         android:title="@string/imessage_send_imessage"
@@ -45,7 +45,7 @@
         android:title="@string/imessage_unlink"
         android:visible="false"
         app:showAsAction="never" />
-    <!-- An iMessage chat: the same chat in OpenBubbles. -->
+    <!-- An iMessage chat: the same chat in OpenBubbles (not through the iMessage library, which opens no other app). -->
     <item
         android:id="@+id/action_open_openbubbles"
         android:title="@string/imessage_open_in_openbubbles"

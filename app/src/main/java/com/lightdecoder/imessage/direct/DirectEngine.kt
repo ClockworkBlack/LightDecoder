@@ -67,11 +67,17 @@ class DirectEngine private constructor(private val app: Context) {
         object NotRegistered : Status()
         data class Working(val step: String) : Status()
         data class Registered(val handles: List<String>) : Status()
+
+        /** Apple's registration failed for now; the library tries again by itself in [retryWaitSec]. */
+        data class Retrying(val error: String, val retryWaitSec: Long) : Status()
         data class Failed(val error: String) : Status()
     }
 
     /** A failure the screens show as it is. */
-    class ImessageError(message: String) : Exception(message)
+    open class ImessageError(message: String) : Exception(message)
+
+    /** Apple did not answer in time: what was asked may have gone through all the same. */
+    class Unconfirmed(message: String) : ImessageError(message)
 
     /** Stores an archive change in the main process; true once it is stored. */
     fun interface Sink {
@@ -235,15 +241,12 @@ class DirectEngine private constructor(private val app: Context) {
             DirectPrefs.setRegistered(app, false)
             return
         }
-        _status.value = when (val reg = uniffi.rust_bridge.getRegState(s)) {
-            is RegisterState.Registered -> {
-                handles.value = uniffi.rust_bridge.getHandles(s)
-                DirectPrefs.setRegistered(app, true)
-                Status.Registered(myHandles)
-            }
-            is RegisterState.Registering -> Status.Working("Registering with Apple")
-            is RegisterState.Failed -> Status.Failed(reg.error)
+        val reg = uniffi.rust_bridge.getRegState(s)
+        if (reg is RegisterState.Registered) {
+            handles.value = uniffi.rust_bridge.getHandles(s)
+            DirectPrefs.setRegistered(app, true)
         }
+        _status.value = statusOf(reg, myHandles)
     }
 
     /**
@@ -338,9 +341,9 @@ class DirectEngine private constructor(private val app: Context) {
         start()
         return withTimeoutOrNull(SESSION_WAIT_MS) {
             while (session == null || !isRegistered) {
-                if (_status.value is Status.Failed || _status.value is Status.LibraryMissing || _status.value is Status.NotRegistered) {
-                    if (started) break
-                }
+                // Not coming up soon: a failure (also one Apple's library retries later by itself).
+                val down = _status.value.let { it is Status.Failed || it is Status.Retrying || it is Status.LibraryMissing || it is Status.NotRegistered }
+                if (down && started) break
                 delay(200)
             }
             session
@@ -351,28 +354,22 @@ class DirectEngine private constructor(private val app: Context) {
 
     /**
      * The conversation with [recipient] if that address is on iMessage: as the archive should
-     * store it (names are the addresses; the main process puts contact names in). Null otherwise.
+     * store it (names are the addresses; the main process puts contact names in). Null when Apple
+     * says it is not (or it is no address at all). Throws when Apple could not be asked (not
+     * connected, no address of the user's own to ask from, Apple's lookup failed): that says
+     * nothing about whether they have iMessage.
      */
     suspend fun reach(recipient: String): ConversationDto? {
-        val s = try {
-            requireSession()
-        } catch (e: ImessageError) {
-            return null
-        }
         val to = Handles.normalize(recipient) ?: return null
-        val from = Handles.preferredSender(myHandles) ?: return null
-        val reachable = try {
-            uniffi.rust_bridge.validateTargets(s, listOf(to), from)
-        } catch (e: RustBridgeException) {
-            return null
-        }
+        val s = requireSession()
+        val from = Handles.preferredSender(myHandles) ?: throw ImessageError(app.getString(R.string.imessage_direct_no_own_address))
+        val reachable = uniffi.rust_bridge.validateTargets(s, listOf(to), from)
         if (to !in reachable) return null
         return ConversationDto(
             id = DirectArchive.conversationId(listOf(to, from), myHandles.toSet(), null),
             name = Handles.display(to),
             type = DirectArchive.TRANSPORT,
             defaultOutgoingId = from,
-            lastMessageTs = System.currentTimeMillis(),
             participants = listOf(
                 ParticipantDto(id = to, name = Handles.display(to), number = Handles.display(to), formattedNumber = Handles.display(to)),
                 ParticipantDto(id = from, number = Handles.display(from), formattedNumber = Handles.display(from), isMe = true),
@@ -523,7 +520,7 @@ class DirectEngine private constructor(private val app: Context) {
                 return
             }
             val answer = withTimeoutOrNull(CONFIRM_TIMEOUT_MS) { waiter.await() }
-                ?: throw ImessageError(app.getString(what.notConfirmed, (CONFIRM_TIMEOUT_MS / 1000).toInt()))
+                ?: throw Unconfirmed(app.getString(what.notConfirmed, (CONFIRM_TIMEOUT_MS / 1000).toInt()))
             if (answer.isNotEmpty()) throw ImessageError(app.getString(what.refused, answer))
         } finally {
             confirms.remove(inst.id)
@@ -543,11 +540,8 @@ class DirectEngine private constructor(private val app: Context) {
                 when (event) {
                     is PushEvent.SendConfirm -> confirms[event.uuid]?.complete(event.error ?: "")
                     is PushEvent.RegistrationState -> {
-                        _status.value = when (val r = event.v1) {
-                            is RegisterState.Registered -> (status.value as? Status.Registered) ?: Status.Registered(myHandles)
-                            is RegisterState.Registering -> Status.Working("Registering with Apple")
-                            is RegisterState.Failed -> Status.Failed(r.error)
-                        }
+                        _status.value = (status.value as? Status.Registered)?.takeIf { event.v1 is RegisterState.Registered }
+                            ?: statusOf(event.v1, myHandles)
                         scope.launch { refreshHandles() }
                     }
                     else -> Unit
@@ -588,6 +582,27 @@ class DirectEngine private constructor(private val app: Context) {
         /** The public registration relay the iPhone relay apps use by default, and its public token. */
         const val DEFAULT_RELAY_HOST = "https://registration-relay.beeper.com"
         const val DEFAULT_RELAY_TOKEN = "5c175851953ecaf5209185d897591badb6c3e712"
+
+        /**
+         * What the screens show for Apple's registration state [reg]. A failure Apple's library
+         * retries by itself ([RegisterState.Failed.retryWait] set) is not "not working", as in
+         * OpenBubbles: only one it does not retry is.
+         */
+        fun statusOf(reg: RegisterState, handles: List<String>): Status = when (reg) {
+            is RegisterState.Registered -> Status.Registered(handles)
+            is RegisterState.Registering -> Status.Working("Registering with Apple")
+            is RegisterState.Failed -> reg.retryWait?.let { Status.Retrying(reg.error, it.toLong()) } ?: Status.Failed(reg.error)
+        }
+
+        /** [status] in a few words, for the logs and the problem report. */
+        fun describe(status: Status): String = when (status) {
+            is Status.Registered -> "connected to Apple"
+            is Status.Working -> "working: ${status.step}"
+            is Status.Retrying -> "not connected, Apple's library tries again in ${status.retryWaitSec} s: ${status.error}"
+            is Status.Failed -> "not working: ${status.error}"
+            is Status.LibraryMissing -> "library files missing"
+            Status.NotRegistered -> "not registered"
+        }
 
         fun readable(e: Throwable): String = when (e) {
             is ImessageError -> e.message ?: "Unknown error"

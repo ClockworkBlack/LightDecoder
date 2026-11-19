@@ -30,6 +30,7 @@ import kotlinx.coroutines.withContext
  * iMessage setup, from the Messages tab's menu (docs/imessage-openbubbles.md): import OpenBubbles'
  * files, then register this phone's number with the iPhone relay's code. The status is green
  * only once Apple reports the registration. iMessage conversations are then in the Messages tab.
+ * Runs in the ":imessage" process, with the library's own settings (read receipts).
  */
 class DirectSetupActivity : AppCompatActivity() {
 
@@ -76,6 +77,9 @@ class DirectSetupActivity : AppCompatActivity() {
         binding.importLibrary.setOnClickListener { pickFiles.launch(arrayOf("*/*")) }
         binding.register.setOnClickListener { onRegister() }
         binding.pasteReply.setOnClickListener { askForReply() }
+        // Off by default, as on an iPhone; the library reads it for every read receipt.
+        binding.switchReadReceipts.isChecked = DirectPrefs.sendReadReceipts(this)
+        binding.switchReadReceipts.setOnCheckedChangeListener { _, on -> DirectPrefs.setSendReadReceipts(this, on) }
 
         showLibrary()
         engine.start()
@@ -142,6 +146,11 @@ class DirectSetupActivity : AppCompatActivity() {
             is Status.NotRegistered -> Triple(GREY, getString(R.string.imessage_status_not_registered), getString(R.string.imessage_status_not_registered_body))
             is Status.Working -> Triple(AMBER, status.step + "…", getString(R.string.imessage_status_working_body))
             is Status.Registered -> Triple(GREEN, getString(R.string.imessage_status_registered), status.handles.joinToString(", ") { Handles.display(it) })
+            // Apple's library tries again by itself: not "not working".
+            is Status.Retrying -> Triple(
+                AMBER, getString(R.string.imessage_status_retrying),
+                getString(R.string.imessage_status_retrying_body, status.error, status.retryWaitSec.coerceIn(0, Int.MAX_VALUE.toLong()).toInt()),
+            )
             is Status.Failed -> Triple(RED, getString(R.string.imessage_status_failed), status.error)
         }
         binding.statusDot.backgroundTintList = ColorStateList.valueOf(color)

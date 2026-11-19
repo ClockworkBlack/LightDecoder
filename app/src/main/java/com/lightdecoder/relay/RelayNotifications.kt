@@ -143,12 +143,18 @@ object RelayNotifications {
         ).apply { description = context.getString(R.string.mail_channel_messages_description) },
     )
 
+    /** Through the iMessage library its messages do not come from OpenBubbles, and the description says so. */
     private fun iMessageChannels(context: Context): List<NotificationChannel> = listOf(
         NotificationChannel(
             CHANNEL_IMESSAGE_MESSAGES,
             context.getString(R.string.imessage_channel_messages),
             NotificationManager.IMPORTANCE_HIGH,
-        ).apply { description = context.getString(R.string.imessage_channel_messages_description) },
+        ).apply {
+            description = context.getString(
+                if (com.lightdecoder.imessage.direct.DirectEngine.isSetUp(context)) R.string.imessage_channel_messages_description_direct
+                else R.string.imessage_channel_messages_description,
+            )
+        },
     )
 
     private fun whatsAppChannels(context: Context): List<NotificationChannel> = listOf(
