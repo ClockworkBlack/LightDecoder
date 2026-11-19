@@ -12,6 +12,7 @@ import com.lightdecoder.archive.ArchiveRepository
 import com.lightdecoder.archive.ContactRow
 import com.lightdecoder.archive.MediaCache
 import com.lightdecoder.archive.MediaRow
+import com.lightdecoder.archive.LocalState
 import com.lightdecoder.archive.MessageRow
 import com.lightdecoder.capture.StickerCapture
 import com.lightdecoder.chat.Capability
@@ -800,6 +801,8 @@ class RelayManager private constructor(
      * connected, surviving restarts.
      */
     override fun sendText(conversationId: String, text: String, replyToId: String?): String {
+        // An iMessage conversation of this tab: sent over iMessage, not through the phone.
+        if (com.lightdecoder.imessage.ImessageArchive.isImessage(conversationId)) return com.lightdecoder.imessage.ImessageEngine.get(app).sendText(conversationId, text, replyToId)
         val tmpId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
         onIntake("queue a message") { outbox.enqueueText(tmpId, conversationId, text, replyToId, now) }
@@ -808,6 +811,14 @@ class RelayManager private constructor(
 
     /** Like [sendText] for an attachment (at most 100 MB), copied into app storage first. */
     override fun sendMedia(conversationId: String, uri: Uri, caption: String?, replyToId: String?): String {
+        if (com.lightdecoder.imessage.ImessageArchive.isImessage(conversationId)) {
+            // Attachments over iMessage are not built yet: say so on a local copy instead of
+            // sending the picture by SMS behind the user's back.
+            val tmpId = UUID.randomUUID().toString()
+            repo.insertLocalOutgoing(tmpId, conversationId, caption.orEmpty(), null, null, null, replyToId, System.currentTimeMillis())
+            repo.setLocalState(tmpId, LocalState.FAILED, app.getString(com.lightdecoder.R.string.imessage_no_attachments))
+            return tmpId
+        }
         val tmpId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
         // The picture alone, then its text as a message of its own, as Google's apps
@@ -822,18 +833,25 @@ class RelayManager private constructor(
         return tmpId
     }
 
+    /** Whether a local copy being sent belongs to an iMessage conversation. */
+    private fun isImessageTmp(tmpId: String): Boolean =
+        repo.message(MessageRow.tmpMessageId(tmpId))?.conversationId?.let { com.lightdecoder.imessage.ImessageArchive.isImessage(it) } == true
+
     /** Sends a failed message again. */
     override fun retry(tmpId: String) {
+        if (isImessageTmp(tmpId)) return com.lightdecoder.imessage.ImessageEngine.get(app).retry(tmpId)
         onIntake("retry a message") { outbox.retry(tmpId) }
     }
 
     /** Drops a failed (or still queued) message and its local copy. */
     override fun discardFailed(tmpId: String) {
+        if (isImessageTmp(tmpId)) return com.lightdecoder.imessage.ImessageEngine.get(app).discard(tmpId)
         onIntake("discard a message") { outbox.discard(tmpId) }
     }
 
     /** Adds, switches or (with [remove]) removes the user's reaction on a message. */
     override suspend fun react(messageId: String, emoji: String, remove: Boolean): Unit = withContext(Dispatchers.IO) {
+        if (com.lightdecoder.imessage.ImessageArchive.isImessage(messageId)) throw RelayException(RelayException.INTERNAL, app.getString(com.lightdecoder.R.string.imessage_no_reactions))
         val mine = repo.message(messageId)?.reactions?.firstOrNull { it.fromMe }
         val action = when {
             remove -> "remove"
@@ -851,6 +869,8 @@ class RelayManager private constructor(
     override suspend fun markRead(conversationId: String): Unit = withContext(Dispatchers.IO) {
         repo.markConversationRead(conversationId)
         MessageNotifier.cancel(app, conversationId)
+        // iMessage: read here only (no read receipt is sent, as on an iPhone with them off).
+        if (com.lightdecoder.imessage.ImessageArchive.isImessage(conversationId)) return@withContext
         val latest = repo.messages(conversationId, limit = 50).lastOrNull { !it.isLocal && it.direction == "in" }
             ?: return@withContext
         if (!_state.value.isOnline) return@withContext
@@ -863,6 +883,7 @@ class RelayManager private constructor(
 
     /** Tells the phone the user is typing; at most one ping per conversation every 5 s. */
     override fun typing(conversationId: String) {
+        if (com.lightdecoder.imessage.ImessageArchive.isImessage(conversationId)) return
         if (!_state.value.isOnline) return
         val now = System.nanoTime() / 1_000_000
         val last = typingSentAt[conversationId]
@@ -889,8 +910,17 @@ class RelayManager private constructor(
      * logged out) it is deleted here only, and the phone keeps it.
      */
     override suspend fun deleteMessage(messageId: String) {
+        // iMessage: deleted here only ("Unsend" takes one back from everyone, within 2 minutes).
+        if (com.lightdecoder.imessage.ImessageArchive.isImessage(messageId)) {
+            withContext(Dispatchers.IO) { repo.applyDeletion(messageId) }
+            return
+        }
         if (messageId.startsWith(MessageRow.TMP_PREFIX)) {
             val tmpId = messageId.removePrefix(MessageRow.TMP_PREFIX)
+            if (isImessageTmp(tmpId)) {
+                withContext(Dispatchers.IO) { com.lightdecoder.imessage.ImessageEngine.get(app).discard(tmpId) }
+                return
+            }
             onIntakeAndWait { outbox.discard(tmpId) }
             return
         }
@@ -905,6 +935,10 @@ class RelayManager private constructor(
     }
 
     override suspend fun setArchived(conversationId: String, archived: Boolean): Unit = withContext(Dispatchers.IO) {
+        if (com.lightdecoder.imessage.ImessageArchive.isImessage(conversationId)) {
+            repo.setConversationFolder(conversationId, if (archived) Folder.ARCHIVE else Folder.INBOX)
+            return@withContext
+        }
         requireBridge().setConversationStatus(conversationId, if (archived) "archived" else "active")
         repo.setConversationFolder(conversationId, if (archived) Folder.ARCHIVE else Folder.INBOX)
     }
@@ -921,6 +955,10 @@ class RelayManager private constructor(
     }
 
     override suspend fun setMuted(conversationId: String, muted: Boolean): Unit = withContext(Dispatchers.IO) {
+        if (com.lightdecoder.imessage.ImessageArchive.isImessage(conversationId)) {
+            repo.setConversationMuted(conversationId, muted)
+            return@withContext
+        }
         requireBridge().setConversationMuted(conversationId, muted)
         repo.setConversationMuted(conversationId, muted)
     }
@@ -930,6 +968,11 @@ class RelayManager private constructor(
      * Without a pairing it is deleted here only, and the phone keeps it.
      */
     override suspend fun deleteConversation(conversationId: String) {
+        if (com.lightdecoder.imessage.ImessageArchive.isImessage(conversationId)) {
+            withContext(Dispatchers.IO) { repo.deleteConversationLocal(conversationId) }
+            MessageNotifier.cancel(app, conversationId)
+            return
+        }
         if (!paired) {
             deleteLocally { repo.deleteConversationLocal(conversationId) }
         } else {
@@ -1007,6 +1050,11 @@ class RelayManager private constructor(
 
     /** Opens (or creates) the conversation with these numbers and returns its id. */
     override suspend fun startConversation(numbers: List<String>, groupName: String?): String = withContext(Dispatchers.IO) {
+        // One person who can get iMessages, with iMessage set up here: an iMessage conversation,
+        // as an iPhone would choose. Anyone else (or iMessage off, or not reachable): SMS/RCS.
+        if (numbers.size == 1 && com.lightdecoder.imessage.ImessageEngine.isSetUp(app)) {
+            com.lightdecoder.imessage.ImessageEngine.get(app).conversationFor(numbers.first())?.let { return@withContext it }
+        }
         val since = gate.epoch()
         val conversation = requireBridge().getOrCreateConversation(numbers, groupName?.trim()?.ifEmpty { null })
         gate.ifCurrent(since) { repo.upsertConversation(conversation) }

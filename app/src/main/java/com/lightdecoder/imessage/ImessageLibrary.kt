@@ -31,7 +31,8 @@ object ImessageLibrary {
     val PINS = listOf(
         Pin(BRIDGE, "arm64-v8a", "b6dfe8ce44395ca48e041657dc990a534fdaa7acfda1c1d8f2e269d8e332c997"),
         Pin(BRIDGE, "armeabi-v7a", "7d62838458723fa2b6fa2a65e48b55f95455cca2fec7ab47ca765daed998e05e"),
-        // libheifdec.so: pins added when the owner's copies are checked (see HEIF_PIN_NOTE).
+        Pin(HEIF, "arm64-v8a", "bdabf750465540846ca40b032e64666fb9a5b96b554795e1d809dcfbcb5cb17c"),
+        // libheifdec.so for 32-bit ARM: not checked yet (see HEIF_PIN_NOTE).
     )
 
     /**

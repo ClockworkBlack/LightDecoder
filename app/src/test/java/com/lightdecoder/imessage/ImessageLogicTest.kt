@@ -1,8 +1,6 @@
 package com.lightdecoder.imessage
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import java.io.File
-import java.nio.file.Files
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -15,49 +13,16 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class ImessageLogicTest {
 
-    // --- unsend window and the GUID store ---------------------------------------------------
+    // --- unsend window ---------------------------------------------------------------------
 
     @Test
     fun theUnsendWindowIsTwoMinutes() {
         val sent = 1_000_000L
-        assertTrue(SentGuids.canUnsend(sent, sent))
-        assertTrue(SentGuids.canUnsend(sent, sent + 119_999))
-        assertFalse(SentGuids.canUnsend(sent, sent + 120_000))
-        assertEquals(90_000L, SentGuids.remaining(sent, sent + 30_000))
-        assertEquals(0L, SentGuids.remaining(sent, sent + 500_000))
-    }
-
-    @Test
-    fun theStoreKeepsOnlyGuidPartAndTime() {
-        val file = File(Files.createTempDirectory("sent").toFile(), "sent_guids.json")
-        val store = SentGuids(file)
-        store.add(SentGuids.Entry("GUID-1", 0, 1000), now = 1000)
-        store.add(SentGuids.Entry("GUID-2", 1, 2000), now = 2000)
-        assertEquals(listOf("GUID-1", "GUID-2"), store.all(now = 3000).map { it.guid })
-        assertEquals(SentGuids.Entry("GUID-2", 1, 2000), store.find("GUID-2"))
-        // On disk: only these three fields per entry, nothing about content or recipients.
-        val text = file.readText()
-        val keys = Regex("\"(\\w+)\":").findAll(text).map { it.groupValues[1] }.toSet()
-        assertEquals(setOf("guid", "part", "sentAt"), keys)
-        store.remove("GUID-1")
-        assertNull(store.find("GUID-1"))
-    }
-
-    @Test
-    fun oldEntriesAreDropped() {
-        val file = File(Files.createTempDirectory("sent").toFile(), "sent_guids.json")
-        val store = SentGuids(file)
-        store.add(SentGuids.Entry("OLD", 0, 0), now = 0)
-        assertEquals(emptyList<SentGuids.Entry>(), store.all(now = SentGuids.KEEP_MS))
-        store.add(SentGuids.Entry("NEW", 0, SentGuids.KEEP_MS), now = SentGuids.KEEP_MS)
-        assertEquals(listOf("NEW"), store.all(now = SentGuids.KEEP_MS).map { it.guid })
-    }
-
-    @Test
-    fun aDamagedStoreReadsAsEmpty() {
-        val file = File(Files.createTempDirectory("sent").toFile(), "sent_guids.json")
-        file.writeText("{not json")
-        assertEquals(emptyList<SentGuids.Entry>(), SentGuids(file).all())
+        assertTrue(UnsendWindow.canUnsend(sent, sent))
+        assertTrue(UnsendWindow.canUnsend(sent, sent + 119_999))
+        assertFalse(UnsendWindow.canUnsend(sent, sent + 120_000))
+        assertEquals(90_000L, UnsendWindow.remaining(sent, sent + 30_000))
+        assertEquals(0L, UnsendWindow.remaining(sent, sent + 500_000))
     }
 
     // --- phone registration by SMS -----------------------------------------------------------
@@ -135,10 +100,19 @@ class ImessageLogicTest {
     }
 
     @Test
-    fun anUnpinnedHeifDecoderForThisCpuIsAcceptedAndShownForPinning() {
-        val elf = ElfInfo("arm64-v8a", "libheifdec.so", exportsHeifDecoder = true, exportsRustBridge = false)
-        val r = ImessageLibrary.classify("ab".repeat(32), elf, "arm64-v8a")
-        assertEquals(ImessageLibrary.ImportResult.Installed(ImessageLibrary.HEIF, false, "ab".repeat(32)), r)
+    fun anUnpinnedHeifDecoderIsAcceptedOnlyWhereNoneIsPinned() {
+        val v7 = ElfInfo("armeabi-v7a", "libheifdec.so", exportsHeifDecoder = true, exportsRustBridge = false)
+        assertEquals(
+            ImessageLibrary.ImportResult.Installed(ImessageLibrary.HEIF, false, "ab".repeat(32)),
+            ImessageLibrary.classify("ab".repeat(32), v7, "armeabi-v7a"),
+        )
+        val arm64 = ElfInfo("arm64-v8a", "libheifdec.so", exportsHeifDecoder = true, exportsRustBridge = false)
+        assertTrue(ImessageLibrary.classify("ab".repeat(32), arm64, "arm64-v8a") is ImessageLibrary.ImportResult.Refused)
+        val pinned = ImessageLibrary.PINS.first { it.name == ImessageLibrary.HEIF && it.abi == "arm64-v8a" }
+        assertEquals(
+            ImessageLibrary.ImportResult.Installed(ImessageLibrary.HEIF, true, pinned.sha256),
+            ImessageLibrary.classify(pinned.sha256, arm64, "arm64-v8a"),
+        )
     }
 
     @Test
@@ -153,15 +127,5 @@ class ImessageLogicTest {
     @Test
     fun theHeifDecoderLoadsBeforeTheBridge() {
         assertEquals(listOf(ImessageLibrary.HEIF, ImessageLibrary.BRIDGE), ImessageLibrary.REQUIRED)
-    }
-
-    // --- process ------------------------------------------------------------------------------
-
-    @Test
-    fun onlyTheImessageProcessIsRecognised() {
-        assertTrue(ImessageProcess.isImessageProcess("com.lightdecoder:imessage", "com.lightdecoder"))
-        assertFalse(ImessageProcess.isImessageProcess("com.lightdecoder", "com.lightdecoder"))
-        assertFalse(ImessageProcess.isImessageProcess("com.lightdecoder:discord", "com.lightdecoder"))
-        assertFalse(ImessageProcess.isImessageProcess(null, "com.lightdecoder"))
     }
 }

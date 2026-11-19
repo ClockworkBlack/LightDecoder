@@ -23,9 +23,9 @@ object Features {
     const val MESSENGER = true
 
     /**
-     * The iMessage tab: OpenBubbles' library, imported by the user, in its own ":imessage"
-     * process (docs/imessage-openbubbles.md). Nothing loads or connects until the user imports
-     * the files and registers.
+     * iMessage inside the Messages tab, through OpenBubbles' library that the user imports
+     * (docs/imessage-openbubbles.md). Set up from the Messages tab's menu; nothing loads or
+     * connects until the user imports the files and registers.
      */
     const val IMESSAGE = true
 

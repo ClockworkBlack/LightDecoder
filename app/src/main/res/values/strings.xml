@@ -99,9 +99,7 @@
     <string name="alert_text">Tap to view</string>
 
     <!-- iMessage (ui/imessage/ImessageActivity, docs/imessage-openbubbles.md) -->
-    <string name="imessage_tab">iMessage</string>
     <string name="imessage_title">iMessage</string>
-    <string name="imessage_channel">iMessage</string>
     <string name="imessage_library_title">1. OpenBubbles files</string>
     <string name="imessage_library_missing">LightDecoder uses OpenBubbles\' iMessage library, which it does not include. Import these files from the OpenBubbles 2.0.0 app (its lib/%2$s folder): %1$s.</string>
     <string name="imessage_library_ready">Imported (OpenBubbles 2.0.0, %1$s).</string>
@@ -127,18 +125,19 @@
     <string name="imessage_status_working_body">This can take a minute.</string>
     <string name="imessage_status_registered">iMessage is on</string>
     <string name="imessage_status_failed">iMessage is not working</string>
-    <string name="imessage_send_title">3. Send</string>
-    <string name="imessage_to">To (phone number or email)</string>
-    <string name="imessage_message">Message</string>
-    <string name="imessage_send">Send</string>
-    <string name="imessage_sent">Sent. GUID %1$s</string>
-    <string name="imessage_send_failed">Not sent: %1$s</string>
-    <string name="imessage_sent_empty">Messages you send here can be unsent for 2 minutes. Only their GUIDs are kept, never what they said.</string>
-    <string name="imessage_sent_row">%1$s · %2$s</string>
-    <string name="imessage_unsend">Unsend (%1$d:%2$02d)</string>
+    <string name="imessage_menu">iMessage…</string>
+    <string name="imessage_where">Once iMessage is on, iMessage conversations are in the Messages tab with your texts, and LightDecoder stays connected in the background so they arrive whether it is open or not. A new conversation with someone who has iMessage starts as an iMessage.</string>
+    <string name="imessage_service_channel">iMessage connection</string>
+    <string name="imessage_service_on">Connected. iMessages arrive in Messages.</string>
+    <string name="imessage_service_starting">Connecting…</string>
+    <string name="imessage_service_failed">Not working: %1$s</string>
+    <string name="imessage_no_attachments">Pictures and files can\'t be sent over iMessage from LightDecoder yet.</string>
+    <string name="imessage_no_reactions">Reactions can\'t be sent over iMessage from LightDecoder yet.</string>
+    <string name="imessage_interrupted">LightDecoder stopped before Apple confirmed this message. It may have been sent; sending again could send it twice.</string>
+    <string name="imessage_action_unsend">Unsend</string>
+    <string name="imessage_action_unsend_left">Unsend (%1$d:%2$02d left)</string>
     <string name="imessage_unsending">Unsending…</string>
-    <string name="imessage_unsend_expired">Too late</string>
-    <string name="imessage_unsent_title">Unsent</string>
-    <string name="imessage_unsent_body">Apple accepted the unsend. The message disappears for people on iOS 16 or later; on older versions they may still see it.</string>
+    <string name="imessage_unsent_toast">Unsent. It disappears for people on iOS 16 or later; on older versions they may still see it.</string>
+    <string name="imessage_unsend_failed_title">Couldn\'t unsend</string>
     <string name="imessage_unsend_failed">Couldn\'t unsend: %1$s</string>
 </resources>

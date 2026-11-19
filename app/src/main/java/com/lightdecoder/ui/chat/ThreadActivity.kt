@@ -1465,6 +1465,20 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             sheet.dismiss()
             confirmDeleteMessage(row)
         }
+        // One of the user's iMessages, sent less than 2 minutes ago: Unsend.
+        val unsendLeft = if (real && row.isOutgoing && com.lightdecoder.imessage.ImessageArchive.isImessage(row.id)) {
+            com.lightdecoder.imessage.UnsendWindow.remaining(row.timestampMs, System.currentTimeMillis())
+        } else {
+            0L
+        }
+        b.actionUnsend.visibility = if (unsendLeft > 0) View.VISIBLE else View.GONE
+        if (unsendLeft > 0) {
+            b.actionUnsend.text = getString(R.string.imessage_action_unsend_left, unsendLeft / 60000, (unsendLeft / 1000) % 60)
+        }
+        b.actionUnsend.setOnClickListener {
+            sheet.dismiss()
+            if (isShown(row)) unsend(row)
+        }
         sheet.setContentView(b.root)
         sheet.setOnDismissListener { if (actionSheet === sheet) actionSheet = null }
         actionSheet = sheet
@@ -1694,6 +1708,28 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         builder.setNegativeButton(android.R.string.cancel, null)
             .show()
             .let(::trackConfirm)
+    }
+
+    /**
+     * Unsend of an iMessage: Apple's answer is waited for, and shown when it is no (too late, not
+     * connected, refused, no answer). It disappears for people on iOS 16 or later.
+     */
+    private fun unsend(row: MessageRow) {
+        val engine = com.lightdecoder.imessage.ImessageEngine.get(this)
+        toast(getString(R.string.imessage_unsending))
+        lifecycleScope.launch {
+            try {
+                engine.unsend(row.id)
+                toast(getString(R.string.imessage_unsent_toast))
+            } catch (e: Exception) {
+                MaterialAlertDialogBuilder(this@ThreadActivity)
+                    .setTitle(R.string.imessage_unsend_failed_title)
+                    .setMessage(getString(R.string.imessage_unsend_failed, com.lightdecoder.imessage.ImessageEngine.readable(e)))
+                    .setPositiveButton(android.R.string.ok, null)
+                    .show()
+                    .let(::trackConfirm)
+            }
+        }
     }
 
     /** "Delete for everyone" is the one thing [ChatBackend] leaves to the service's own manager. */

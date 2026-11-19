@@ -133,6 +133,23 @@
         android:drawableStart="@drawable/ic_delete"
         android:text="@string/chat_action_discard" />
 
+    <!-- iMessage only: take one of the user's messages back from everyone, within 2 minutes. -->
+    <TextView
+        android:id="@+id/actionUnsend"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?attr/selectableItemBackground"
+        android:clickable="true"
+        android:drawablePadding="20dp"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:minHeight="52dp"
+        android:paddingHorizontal="24dp"
+        android:textAppearance="?attr/textAppearanceBodyLarge"
+        android:drawableStart="@drawable/ic_close"
+        android:text="@string/imessage_action_unsend"
+        android:visibility="gone" />
+
     <TextView
         android:id="@+id/actionDelete"
         android:layout_width="match_parent"

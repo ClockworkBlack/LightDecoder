@@ -274,7 +274,6 @@ class ConversationsActivity : AppCompatActivity() {
         // Messenger's tab goes right before WhatsApp's. Like Discord's it is not a service of this
         // screen and opens its own.
         com.lightdecoder.ui.messenger.MessengerTab.add(tabs)
-        com.lightdecoder.ui.imessage.ImessageTab.add(tabs)
         switcher = ServiceTabStrip.attachSwitcher(tabs, binding.root.findViewById(R.id.servicesMenu)) {
             getString(ServiceUi.tabLabel(backend.service))
         }
@@ -288,8 +287,6 @@ class ConversationsActivity : AppCompatActivity() {
                         this@ConversationsActivity,
                         if (com.lightdecoder.ui.messenger.MessengerTab.isTab(tab)) {
                             com.lightdecoder.ui.messenger.MessengerTab.intent(this@ConversationsActivity)
-                        } else if (com.lightdecoder.ui.imessage.ImessageTab.isTab(tab)) {
-                            com.lightdecoder.ui.imessage.ImessageTab.intent(this@ConversationsActivity)
                         } else {
                             Intent(this@ConversationsActivity, DiscordActivity::class.java)
                         },
@@ -591,6 +588,9 @@ class ConversationsActivity : AppCompatActivity() {
         menu.findItem(R.id.action_delete_archive)?.isVisible = !paired && !archiveEmpty
         menu.findItem(R.id.action_refresh)?.isVisible = paired && folder.listable
         menu.findItem(R.id.action_empty_deleted)?.isVisible = folder == Folder.DELETED && hasDeleted && searchQuery == null
+        // iMessage is part of the Messages tab: set up from here.
+        menu.findItem(R.id.action_imessage)?.isVisible =
+            com.lightdecoder.chat.Features.IMESSAGE && backend.service == ChatService.MESSAGES
         return super.onPrepareOptionsMenu(menu)
     }
 
@@ -599,6 +599,7 @@ class ConversationsActivity : AppCompatActivity() {
             android.R.id.home -> finish()
             R.id.action_refresh -> refreshFromPhone()
             R.id.action_link_status -> startActivity(ServiceUi.status(this, backend.service))
+            R.id.action_imessage -> startActivity(Intent(this, com.lightdecoder.ui.imessage.ImessageActivity::class.java))
             R.id.action_delete_archive -> LocalArchive.confirmDelete(this, backend) { reload() }
             R.id.action_empty_deleted -> confirmEmptyDeleted()
             else -> return super.onOptionsItemSelected(item)

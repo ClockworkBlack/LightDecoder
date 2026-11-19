@@ -200,16 +200,20 @@
             not reloaded.
         -->
         <!--
-            iMessage, through OpenBubbles' library that the user imports
-            (docs/imessage-openbubbles.md). Its own process (":imessage", see
-            imessage/ImessageProcess): the library is never loaded into the
-            app's main process. Not exported.
+            iMessage setup (import OpenBubbles' files, register this phone's
+            number), opened from the Messages tab's menu. iMessage conversations
+            themselves are in the Messages tab (docs/imessage-openbubbles.md).
+            Not exported.
         -->
         <activity
             android:name=".ui.imessage.ImessageActivity"
             android:exported="false"
-            android:process=":imessage"
             android:windowSoftInputMode="adjustResize" />
+        <!-- Keeps iMessage connected in the background once it is set up. -->
+        <service
+            android:name=".imessage.ImessageService"
+            android:exported="false"
+            android:foregroundServiceType="remoteMessaging" />
         <activity
             android:name=".ui.messenger.MessengerActivity"
             android:exported="false" />

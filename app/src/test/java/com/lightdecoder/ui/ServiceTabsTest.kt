@@ -79,7 +79,7 @@ class ServiceTabsTest {
                 arrow.performClick()
                 val popup = org.robolectric.shadows.ShadowPopupMenu.getLatestPopupMenu()!!
                 val items = (0 until popup.menu.size()).map { popup.menu.getItem(it) }
-                assertEquals(listOf("Messages", "Discord", "Messenger", "WhatsApp", "iMessage"), items.map { it.title.toString() })
+                assertEquals(listOf("Messages", "Discord", "Messenger", "WhatsApp"), items.map { it.title.toString() })
                 assertTrue("the one showing is ticked", items[0].isChecked)
                 // Straight to WhatsApp.
                 org.robolectric.Shadows.shadowOf(popup).onMenuItemClickListener.onMenuItemClick(items[3])
@@ -116,7 +116,7 @@ class ServiceTabsTest {
             scenario.onActivity { activity ->
                 // Discord's tab sits right of Messages; it is not a service (it opens its own screen).
                 // Messenger's tab sits before WhatsApp's; like Discord's it is not a service.
-                assertEquals(listOf("Messages", "Discord", "Messenger", "WhatsApp", "iMessage"), tabTexts(activity.findViewById(R.id.services)))
+                assertEquals(listOf("Messages", "Discord", "Messenger", "WhatsApp"), tabTexts(activity.findViewById(R.id.services)))
                 assertEquals("Google Messages first", 0, activity.findViewById<TabLayout>(R.id.services).selectedTabPosition)
             }
             scenario.waitFor("the Messages inbox") { titles(it) == listOf("Alice", "Bob") }

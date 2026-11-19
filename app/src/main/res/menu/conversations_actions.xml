@@ -17,6 +17,10 @@
         app:showAsAction="never" />
     <!-- Only in the local Deleted folder, while it holds something. -->
     <item
+        android:id="@+id/action_imessage"
+        android:title="@string/imessage_menu"
+        app:showAsAction="never" />
+    <item
         android:id="@+id/action_empty_deleted"
         android:title="@string/chat_empty_deleted_folder"
         android:visible="false"
