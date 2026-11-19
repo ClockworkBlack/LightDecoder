@@ -39,8 +39,8 @@ android {
         applicationId = "com.lightdecoder"
         minSdk = 26
         targetSdk = 36
-        versionCode = 65
-        versionName = "0.5.55"
+        versionCode = 66
+        versionName = "0.5.56"
         // On-device tests (app/src/androidTest): the Blue Bubbles round trip against the
         // stand-in OpenBubbles app (:fakebubbles), run on an emulator by .github/workflows/device-test.yml.
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -332,16 +332,24 @@ val bundleLicenses by tasks.registering {
     // used here under Apache-2.0. The uniffi bindings it runs (app/src/main/java/uniffi) come from
     // uniffi-bindgen's MPL-2.0 templates.
     val jnaLibrary = Regex("net\\.java\\.dev\\.jna:jna")
-    // Shizuku API (the iMessage setup's "Use Shizuku" button, which allows SIM verification): MIT.
-    val shizukuLibrary = Regex("dev\\.rikka\\.shizuku:[^:]+")
-    val shizukuLicense = rootProject.file("third_party/licenses/MIT-shizuku-api.txt")
+    // The built-in ADB client that allows SIM verification (imessage/direct/AdbGrant): libadb-android
+    // and spake2-java are compiled in from their submodules; Bouncy Castle (its own MIT-style licence)
+    // and Conscrypt (Apache-2.0) come from Maven.
+    val bouncyLibrary = Regex("org\\.bouncycastle:[^:]+")
+    val bouncyLicense = rootProject.file("third_party/licenses/BouncyCastle.txt")
+    val adbLicenses = listOf(
+        rootProject.file("third_party/libadb-android/LICENSES/Apache-2.0"),
+        rootProject.file("third_party/libadb-android/LICENSES/BSD-3-Clause"),
+        rootProject.file("third_party/libadb-android/LICENSES/MIT"),
+    )
+    val spakeLicense = rootProject.file("third_party/spake2-java/LICENSE")
     val mplLicense = rootProject.file("third_party/licenses/MPL-2.0-uniffi.txt")
     val mailLibrary = Regex("com\\.sun\\.mail:(android-mail|android-activation)")
     val apacheLibrary = Regex(
         "(androidx\\.[^:]+|com\\.google\\.android\\.material|org\\.jetbrains\\.kotlinx?):[^:]+" +
             "|org\\.jetbrains:annotations|org\\.jspecify:jspecify" +
             "|com\\.google\\.guava:(listenablefuture|guava|failureaccess)|com\\.google\\.errorprone:error_prone_annotations" +
-            "|com\\.google\\.zxing:core",
+            "|com\\.google\\.zxing:core|org\\.conscrypt:conscrypt-android",
     )
     val androidLibraries = provider { configurations.getByName("releaseRuntimeClasspath") }.map { classpath ->
         classpath.incoming.resolutionResult.allComponents
@@ -351,7 +359,7 @@ val bundleLicenses by tasks.registering {
     }
     inputs.files(buildGoBridge).withPropertyName("goBridge")
     inputs.file(notice).withPropertyName("notice")
-    inputs.files(fixed.map { it.third } + apacheLicense + mailLicense + mailNotice + onnxLicense + mattingLicense + mplLicense + shizukuLicense).withPropertyName("licenseFiles")
+    inputs.files(fixed.map { it.third } + apacheLicense + mailLicense + mailNotice + onnxLicense + mattingLicense + mplLicense + bouncyLicense + adbLicenses + spakeLicense).withPropertyName("licenseFiles")
     // Licence files and PATCHES.md of Go modules replaced by a copy in the repository.
     inputs.files(fileTree(File(goModuleDir, "third_party")) { exclude("**/*.go") })
         .withPropertyName("replacedGoModules").withPathSensitivity(PathSensitivity.RELATIVE)
@@ -390,9 +398,9 @@ val bundleLicenses by tasks.registering {
         val mail = libraries.filter { mailLibrary.matches(it.substringBeforeLast(':')) }
         val onnx = libraries.filter { onnxLibrary.matches(it.substringBeforeLast(':')) }
         val jna = libraries.filter { jnaLibrary.matches(it.substringBeforeLast(':')) }
-        val shizuku = libraries.filter { shizukuLibrary.matches(it.substringBeforeLast(':')) }
+        val bouncy = libraries.filter { bouncyLibrary.matches(it.substringBeforeLast(':')) }
         val unknown = libraries.filterNot {
-            apacheLibrary.matches(it.substringBeforeLast(':')) || it in mail || it in onnx || it in jna || it in shizuku
+            apacheLibrary.matches(it.substringBeforeLast(':')) || it in mail || it in onnx || it in jna || it in bouncy
         }
         if (unknown.isNotEmpty()) {
             throw GradleException(
@@ -408,7 +416,7 @@ val bundleLicenses by tasks.registering {
                 "AndroidX, Material Components, Kotlin standard library, kotlinx.coroutines (Apache-2.0, in classes.dex)",
                 listOf(apacheLicense),
                 intro = "These libraries are under the Apache License 2.0, below:\n\n" +
-                    (libraries - mail.toSet() - onnx.toSet() - jna.toSet() - shizuku.toSet()).joinToString("\n") { "  $it" },
+                    (libraries - mail.toSet() - onnx.toSet() - jna.toSet() - bouncy.toSet()).joinToString("\n") { "  $it" },
             ),
         )
         if (onnx.isNotEmpty()) {
@@ -448,13 +456,24 @@ val bundleLicenses by tasks.registering {
                 ),
             )
         }
-        if (shizuku.isNotEmpty()) {
-            File(licenses, "48-shizuku-api.txt").writeText(
-                licenceText(
-                    "Shizuku API (in classes.dex): MIT",
-                    listOf(shizukuLicense),
-                    intro = shizuku.joinToString("\n") { "  $it" } + "\nhttps://github.com/RikkaApps/Shizuku-API",
-                ),
+        File(licenses, "48-libadb-android.txt").writeText(
+            licenceText(
+                "libadb-android (in classes.dex): Apache-2.0, chosen from GPL-3.0-or-later / Apache-2.0; parts BSD-3-Clause (AOSP) and MIT",
+                adbLicenses,
+                intro = "Copyright (c) Muntashir Al-Islam and contributors. https://github.com/MuntashirAkon/libadb-android (3.1.1, unmodified)",
+            ),
+        )
+        File(licenses, "49-spake2-java.txt").writeText(
+            licenceText(
+                "spake2-java (in classes.dex): LGPL-3.0",
+                listOf(spakeLicense),
+                intro = "Copyright (c) Muntashir Al-Islam. https://github.com/MuntashirAkon/spake2-java (2.2.1, unmodified; " +
+                    "its source is the pinned submodule third_party/spake2-java)",
+            ),
+        )
+        if (bouncy.isNotEmpty()) {
+            File(licenses, "50-bouncycastle.txt").writeText(
+                licenceText("Bouncy Castle (in classes.dex)", listOf(bouncyLicense), intro = bouncy.joinToString("\n") { "  $it" }),
             )
         }
         if (jna.isNotEmpty()) {
@@ -622,6 +641,9 @@ val bundleLicenses by tasks.registering {
 }
 
 android.sourceSets["main"].assets.srcDir(generatedLicensesDir)
+// The ADB client and its pairing maths, from their pinned submodules (plain Java, no native code).
+android.sourceSets["main"].java.srcDir(rootProject.file("third_party/libadb-android/libadb/src/main/java"))
+android.sourceSets["main"].java.srcDir(rootProject.file("third_party/spake2-java/java/src/main/java"))
 
 // --- iMessage: OpenBubbles' libraries, built in from outside the repository ---------
 //
@@ -714,10 +736,11 @@ dependencies {
     // iMessage: the uniffi bindings (uniffi/rust_bridge) call OpenBubbles' library through JNA
     // (Apache-2.0 / LGPL-2.1; LightDecoder uses it under Apache-2.0). The aar brings libjnidispatch.so.
     implementation("net.java.dev.jna:jna:5.17.0@aar")
-    // iMessage setup: "Use Shizuku" runs the one shell command that allows SIM verification
-    // (imessage/direct/ShizukuGrant). MIT.
-    implementation("dev.rikka.shizuku:api:13.1.5")
-    implementation("dev.rikka.shizuku:provider:13.1.5")
+    // The built-in ADB client (imessage/direct/AdbGrant): libadb-android and spake2-java are compiled
+    // from third_party/ (source sets below); these are what they need. Conscrypt gives the TLS 1.3
+    // key export that ADB pairing uses.
+    implementation("org.bouncycastle:bcprov-jdk15to18:1.81")
+    implementation("org.conscrypt:conscrypt-android:2.5.3")
     // Runs the sticker maker's subject-finding model (assets/models/u2netp.onnx) on the phone.
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
     // The same runtime for the computer the unit tests run on.

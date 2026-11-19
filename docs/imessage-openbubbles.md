@@ -16,7 +16,8 @@ archive" or "imsg: in RelayManager", that was the 0.5.28 design and is replaced 
 ## Phone-number verification (0.5.55): SIM first, then SMS
 OpenBubbles 2.0.0's order (`PhoneNumberPage.subscribeSubscription`, default `smsLess = true`):
 1. **SIM ("SMS-less", `SimAuth`)**: needs the app-op `USE_ICC_AUTH_WITH_DEVICE_IDENTIFIER` (user grants
-   it from a shell: Shizuku or adb). mccmnc, IMSI and IMEI of the SIM; subscriber =
+   it from a shell: `AdbGrant`, LightDecoder's own ADB client over the phone's Wireless debugging,
+   or adb on a computer). mccmnc, IMSI and IMEI of the SIM; subscriber =
    `0<IMSI>@nai.epc.mnc<MNC>.mcc<MCC>.3gppnetwork.org`; the library's `getEntitlements(config, conn,
    mccmnc, subscriber, imei, callback)` talks to the carrier's entitlement server (address in Apple's
    carrier bundle) and calls back with an EAP-AKA challenge; `EapAka.respond` asks the SIM

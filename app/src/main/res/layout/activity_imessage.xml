@@ -217,18 +217,58 @@
                         android:orientation="horizontal">
 
                         <com.google.android.material.button.MaterialButton
-                            android:id="@+id/useShizuku"
+                            android:id="@+id/allowHere"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:layout_marginEnd="8dp"
-                            android:text="@string/imessage_sim_use_shizuku" />
+                            android:text="@string/imessage_sim_allow_here" />
 
                         <com.google.android.material.button.MaterialButton
-                            android:id="@+id/getShizuku"
+                            android:id="@+id/openDeveloper"
                             style="@style/Widget.Material3.Button.TonalButton"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="@string/imessage_sim_get_shizuku" />
+                            android:text="@string/imessage_sim_open_settings" />
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/adbState"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:accessibilityLiveRegion="polite"
+                        android:textAppearance="?attr/textAppearanceBodyMedium"
+                        android:visibility="gone" />
+
+                    <LinearLayout
+                        android:id="@+id/codeRow"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal"
+                        android:visibility="gone">
+
+                        <com.google.android.material.textfield.TextInputLayout
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginEnd="8dp"
+                            android:layout_weight="1"
+                            android:hint="@string/imessage_sim_code_hint">
+
+                            <com.google.android.material.textfield.TextInputEditText
+                                android:id="@+id/pairCode"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:inputType="number"
+                                android:maxLength="6" />
+                        </com.google.android.material.textfield.TextInputLayout>
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/pairSend"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/imessage_sim_code_send" />
                     </LinearLayout>
 
                     <TextView

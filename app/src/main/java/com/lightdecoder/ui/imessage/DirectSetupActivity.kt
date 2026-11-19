@@ -20,7 +20,8 @@ import com.lightdecoder.imessage.direct.DirectEngine
 import com.lightdecoder.imessage.direct.DirectEngine.Status
 import com.lightdecoder.imessage.direct.DirectLibrary
 import com.lightdecoder.imessage.direct.DirectPrefs
-import com.lightdecoder.imessage.direct.ShizukuGrant
+import com.lightdecoder.imessage.direct.AdbGrant
+import com.lightdecoder.imessage.direct.AdbPairService
 import com.lightdecoder.imessage.direct.SimAuth
 import com.lightdecoder.imessage.direct.SmsPhoneVerifier
 import com.lightdecoder.ui.applySystemBarPadding
@@ -61,6 +62,11 @@ class DirectSetupActivity : AppCompatActivity() {
         }
     }
 
+    private val askNotifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        AdbPairService.start(this)
+        openDeveloperOptions()
+    }
+
     private val askSms = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { granted ->
         if (granted.values.all { it }) startRegistration() else showError(getString(R.string.imessage_sms_needed))
     }
@@ -78,13 +84,14 @@ class DirectSetupActivity : AppCompatActivity() {
         binding.importLibrary.setOnClickListener { pickFiles.launch(arrayOf("*/*")) }
         binding.register.setOnClickListener { onRegister() }
         binding.pasteReply.setOnClickListener { askForReply() }
-        binding.useShizuku.setOnClickListener { useShizuku() }
-        binding.getShizuku.setOnClickListener {
-            try {
-                startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(ShizukuGrant.PLAY_STORE)))
-            } catch (e: android.content.ActivityNotFoundException) {
-                showError(ShizukuGrant.PLAY_STORE)
-            }
+        binding.allowHere.setOnClickListener { allowFromThisPhone() }
+        binding.openDeveloper.setOnClickListener { openDeveloperOptions() }
+        binding.pairSend.setOnClickListener {
+            AdbPairService.submitCode(this, binding.pairCode.text?.toString().orEmpty())
+            binding.pairCode.text = null
+        }
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) { AdbPairService.state.collect { showAdb(it) } }
         }
         binding.adbCommand.setOnClickListener {
             (getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager)
@@ -103,7 +110,7 @@ class DirectSetupActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        showSim() // back from Shizuku, or after the adb command
+        showSim() // back from Settings, or after the adb command
     }
 
     /** Whether the SIM way of verifying the number is allowed, and how to allow it. */
@@ -115,21 +122,46 @@ class DirectSetupActivity : AppCompatActivity() {
         binding.adbCommand.text = getString(R.string.imessage_sim_adb, SimAuth.adbCommand(this))
     }
 
-    private fun useShizuku() {
-        binding.useShizuku.isEnabled = false
-        lifecycleScope.launch {
-            val result = ShizukuGrant.grant(this@DirectSetupActivity)
-            binding.useShizuku.isEnabled = true
-            showSim()
-            showError(
-                when (result) {
-                    ShizukuGrant.Result.Granted -> getString(R.string.imessage_sim_granted)
-                    ShizukuGrant.Result.NotRunning -> getString(R.string.imessage_sim_not_running)
-                    ShizukuGrant.Result.Refused -> getString(R.string.imessage_sim_refused)
-                    is ShizukuGrant.Result.Failed -> getString(R.string.imessage_sim_failed, result.why)
-                },
-            )
+    /** Starts watching for Wireless debugging's pairing offer and sends the user to its screen. */
+    private fun allowFromThisPhone() {
+        if (!AdbGrant.supported) {
+            showError(getString(R.string.imessage_sim_needs_11))
+            return
         }
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            askNotifications.launch(Manifest.permission.POST_NOTIFICATIONS) // the code is asked for in a notification
+            return
+        }
+        AdbPairService.start(this)
+        openDeveloperOptions()
+    }
+
+    private fun openDeveloperOptions() {
+        for (action in listOf(android.provider.Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS, android.provider.Settings.ACTION_SETTINGS)) {
+            try {
+                startActivity(android.content.Intent(action))
+                return
+            } catch (e: android.content.ActivityNotFoundException) {
+                // Developer options are hidden: plain Settings next.
+            }
+        }
+    }
+
+    private fun showAdb(state: AdbPairService.State) {
+        val text = when (state) {
+            AdbPairService.State.Idle -> null
+            AdbPairService.State.Searching -> getString(R.string.imessage_adb_searching)
+            is AdbPairService.State.CodeWanted -> getString(R.string.imessage_adb_code_wanted)
+            AdbPairService.State.Working -> getString(R.string.imessage_adb_working)
+            AdbPairService.State.Done -> getString(R.string.imessage_adb_done)
+            is AdbPairService.State.Failed -> getString(R.string.imessage_adb_failed, state.why)
+        }
+        binding.adbState.text = text
+        binding.adbState.visibility = if (text == null || SimAuth.allowed(this)) View.GONE else View.VISIBLE
+        binding.codeRow.visibility = if (state is AdbPairService.State.CodeWanted) View.VISIBLE else View.GONE
+        if (state is AdbPairService.State.Done) showSim()
     }
 
     private fun showLibrary() {

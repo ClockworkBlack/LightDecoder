@@ -133,16 +133,27 @@
     <string name="imessage_paste_not_reply">That is not Apple\'s reply: it should start with REG-RESP and contain r=, n= and s=.</string>
     <string name="imessage_paste_other_request">That reply is for an earlier attempt (its r= number differs). Use the reply to the latest verification text.</string>
     <string name="imessage_sim_title">Verify with the SIM (no text message)</string>
-    <string name="imessage_sim_body_off">On many carriers Apple never answers the verification text, and the number is verified with the SIM instead (OpenBubbles calls this SMS-less activation). Android lets an app do that only after you allow it once, from a shell:\n\n• Without a computer: install Shizuku, open it, choose \u201cStart via Wireless debugging\u201d and follow its guide. Then tap Use Shizuku here.\n• With a computer: run the command below.\n\nIf you did this for OpenBubbles before, it is the same step, for LightDecoder.</string>
     <string name="imessage_sim_body_on">Allowed. Registration verifies the number with the SIM first, and by text only if your carrier has no SIM verification.</string>
-    <string name="imessage_sim_use_shizuku">Use Shizuku</string>
-    <string name="imessage_sim_get_shizuku">Get Shizuku</string>
     <string name="imessage_sim_adb">%1$s\n(tap to copy)</string>
     <string name="imessage_sim_copied">Command copied</string>
-    <string name="imessage_sim_not_running">Shizuku is not running. Install it from the Play Store (Get Shizuku), open it and start it with \u201cStart via Wireless debugging\u201d: its guide walks you through it. Then come back and tap Use Shizuku.</string>
-    <string name="imessage_sim_refused">Shizuku did not give LightDecoder permission. Tap Use Shizuku again and choose Allow.</string>
-    <string name="imessage_sim_failed">Shizuku could not allow it: %1$s</string>
-    <string name="imessage_sim_granted">Allowed. Now tap Register.</string>
+    <string name="imessage_sim_body_off">On many carriers Apple never answers the verification text, and the number is verified with the SIM instead. Android lets an app do that only after you allow it once. LightDecoder can do that itself through Android\'s Wireless debugging (Android 11 or later, on Wi\u2011Fi):\n\n1. Tap Allow from this phone.\n2. In Settings, open Developer options → Wireless debugging and turn it on. (No Developer options? Settings → About phone → Software information, tap Build number 7 times.)\n3. Tap \u201cPair device with pairing code\u201d. Leave that window open.\n4. A LightDecoder notification asks for the code: pull it down and type the 6 digits there.\n\nLightDecoder then runs one command (the one shown below) and nothing else. You can turn Wireless debugging off afterwards.</string>
+    <string name="imessage_sim_allow_here">Allow from this phone</string>
+    <string name="imessage_sim_open_settings">Open Developer options</string>
+    <string name="imessage_sim_code_hint">Pairing code (if you use split screen)</string>
+    <string name="imessage_sim_code_send">Pair</string>
+    <string name="imessage_sim_needs_11">Doing this from the phone needs Android 11 or later. Use the command below from a computer.</string>
+    <string name="imessage_adb_channel">Allowing SIM verification</string>
+    <string name="imessage_adb_title">LightDecoder: allow SIM verification</string>
+    <string name="imessage_adb_searching">In Settings → Developer options → Wireless debugging, tap \u201cPair device with pairing code\u201d.</string>
+    <string name="imessage_adb_code_wanted">Pairing offer found. Enter its 6-digit code here.</string>
+    <string name="imessage_adb_enter_code">Enter code</string>
+    <string name="imessage_adb_code_label">6-digit pairing code</string>
+    <string name="imessage_adb_working">Pairing and allowing…</string>
+    <string name="imessage_adb_done">SIM verification is allowed. Go back to LightDecoder and tap Register. You can turn Wireless debugging off.</string>
+    <string name="imessage_adb_failed">Not allowed yet: %1$s</string>
+    <string name="imessage_adb_no_offer">the pairing offer is gone. Tap \u201cPair device with pairing code\u201d again and keep that window open.</string>
+    <string name="imessage_adb_bad_code">the code is 6 digits.</string>
+    <string name="imessage_adb_pair_failed">pairing failed (%1$s). Check the code and try again.</string>
     <string name="imessage_menu">iMessage…</string>
     <string name="imessage_where">Once iMessage is on, iMessage conversations are in the Messages tab with your texts, and LightDecoder stays connected in the background so they arrive whether it is open or not. A new conversation with someone who has iMessage starts as an iMessage.</string>
     <string name="imessage_service_channel">iMessage connection</string>

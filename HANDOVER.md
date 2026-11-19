@@ -8,6 +8,19 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
    had earlier chosen "build with a warning", then "pause on Discord", and has now asked for
    the web-view tab only, with no bridge). **Instagram: skipped** (ban risk, like Messenger).
 
+## 0.5.56 (versionCode 66) - SIM verification allowed from the phone itself (no Shizuku)
+- Owner asked for no Shizuku. `imessage/direct/AdbGrant` is a built-in ADB client for this phone's own
+  Wireless debugging (Android 11+): pairs with the six-digit code and runs the one command
+  `appops set --uid <pkg> USE_ICC_AUTH_WITH_DEVICE_IDENTIFIER allow`. `AdbPairService` (":imessage",
+  foreground) finds the pairing offer by mDNS and takes the code in a notification reply (the offer
+  closes when its screen is left); the setup screen also has a code field for split screen.
+- Parts: `third_party/libadb-android` 3.1.1 and `third_party/spake2-java` 2.2.1 (pinned submodules,
+  compiled in as Java sources; Apache-2.0 and LGPL-3.0), Bouncy Castle 1.81, Conscrypt 2.5.3 (TLS 1.3
+  key export for pairing). Shizuku API, its provider and `ShizukuGrant` are removed.
+- Tests: `robolectric.properties` has `conscryptMode=OFF` (Conscrypt's Android natives are not on the
+  host). `AdbGrantTest`. **Pairing against a real phone is not verified.**
+- Next version: 0.5.57 / 67.
+
 ## 0.5.55 (versionCode 65) - phone number verified with the SIM ("SMS-less"), as OpenBubbles does first
 - On the owner's phone Apple never answered the REG-REQ text (0.5.54 sent it in the right form,
   screenshot). OpenBubbles 2.0.0 tries **SIM verification first** and SMS only as the fallback:
