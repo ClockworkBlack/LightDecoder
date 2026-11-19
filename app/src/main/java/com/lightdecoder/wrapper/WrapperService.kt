@@ -214,17 +214,31 @@ class WrapperService : AccessibilityService() {
             mark("reacted")
             return null
         }
-        val title = when (job.kind) {
-            Wrapper.Kind.UNSEND -> "Undo Send"
-            Wrapper.Kind.EDIT -> "Edit"
-            else -> "Reply"
+        val titles = when (job.kind) {
+            Wrapper.Kind.UNSEND -> UNSEND_TITLES
+            Wrapper.Kind.EDIT -> EDIT_TITLES
+            else -> REPLY_TITLES
         }
-        var item = waitFor(MENU_MS) { root -> WrapperNodes.action(root, title) }
-        if (item == null) {
+        val findItem: (UiNode) -> UiNode? = { root -> WrapperNodes.action(root, *titles) ?: WrapperNodes.more(root) }
+        var found = waitFor(MENU_MS, findItem)
+        if (found == null && !stop) {
+            // No menu: the accessibility long press may not have opened it; a real one.
+            mark("menu not open, long-press again")
+            gesture(bubble.bounds.takeUnless { it.isEmpty } ?: press?.bounds ?: Rect(), long = true)
+            found = waitFor(MENU_MS, findItem)
+        }
+        if (found == null) {
+            IMessageLog.add(this, "Wrapper: no ${titles.first()} in OpenBubbles' menu; buttons there: ${root()?.let { WrapperNodes.buttonNames(it) } ?: "no OpenBubbles window"}")
+            return "menu"
+        }
+        var item: UiNode = found
+        if (WrapperNodes.action(root() ?: found, *titles) == null) {
             // Behind the menu's "more" button.
-            val more = root()?.let(WrapperNodes::more) ?: return "menu"
-            click(more)
-            item = waitFor(MENU_MS) { root -> WrapperNodes.action(root, title) } ?: return "menu item"
+            click(found)
+            item = waitFor(MENU_MS) { root -> WrapperNodes.action(root, *titles) } ?: run {
+                IMessageLog.add(this, "Wrapper: no ${titles.first()} behind \"more\"; buttons there: ${root()?.let { WrapperNodes.buttonNames(it) } ?: "none"}")
+                return "menu item"
+            }
         }
         mark("menu")
         val unsentBefore = if (job.kind == Wrapper.Kind.UNSEND) root()?.let(WrapperNodes::unsentCount) ?: 0 else 0
@@ -470,6 +484,9 @@ class WrapperService : AccessibilityService() {
         private const val ATTACH_MS = 600L
         private const val RECEIPT_MS = 900L
         private const val UNSENT_MS = 2_500L
+        private val UNSEND_TITLES = arrayOf("Undo Send", "Unsend", "Undo send message", "Unsend message")
+        private val EDIT_TITLES = arrayOf("Edit", "Edit message")
+        private val REPLY_TITLES = arrayOf("Reply", "Reply in thread")
 
         /** A job under way (a look for receipts is not started then). */
         fun isBusy(): Boolean = running?.busy == true

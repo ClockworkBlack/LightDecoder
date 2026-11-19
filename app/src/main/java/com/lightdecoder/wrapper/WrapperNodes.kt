@@ -87,15 +87,27 @@ object WrapperNodes {
         return null
     }
 
-    /** A menu action by its title ("Reply", "Undo Send", "Edit"): exactly that, any case. */
-    fun action(root: UiNode, title: String): UiNode? {
-        val want = norm(title)
-        return all(root).firstOrNull { norm(said(it)) == want }
+    /** Every name a node has (text, description, tooltip), each line on its own, normalised. */
+    private fun names(n: UiNode): List<String> =
+        listOf(n.text, n.description, n.tooltip).flatMap { it.split('\n') }.map(::norm).filter { it.isNotEmpty() }
+
+    /**
+     * A menu action by one of its [titles] ("Undo Send" or "Unsend"): exactly that, any case, in the node's
+     * text, description or tooltip (Flutter can put "Undo Send" in any of them, or on a line of a merged label).
+     */
+    fun action(root: UiNode, vararg titles: String): UiNode? {
+        val want = titles.map(::norm).toSet()
+        return all(root).firstOrNull { n -> names(n).any { it in want } }
     }
 
     /** The popup's "more" button: Material's "Show menu" tooltip, or the other skins' "More". */
     fun more(root: UiNode): UiNode? =
-        all(root).firstOrNull { norm(said(it)) in MORE_LABELS }
+        all(root).firstOrNull { n -> names(n).any { it in MORE_LABELS } }
+
+    /** The short names of the buttons on screen, for the log when a step finds nothing (what OpenBubbles shows). */
+    fun buttonNames(root: UiNode, max: Int = 24): String =
+        all(root).filter { it.clickable || it.longClickable }.flatMap { names(it).asSequence() }
+            .filter { it.length <= 24 }.distinct().take(max).joinToString(" | ").ifEmpty { "none named" }
 
     /** The message field: the editable node, preferring the one hinted "iMessage". */
     fun field(root: UiNode): UiNode? {
@@ -164,5 +176,5 @@ object WrapperNodes {
     /** Words from the start of a message used to find its bubble. */
     const val MATCH_CHARS = 40
     private const val SLACK_PX = 8
-    private val MORE_LABELS = setOf("show menu", "more", "more options")
+    private val MORE_LABELS = setOf("show menu", "more", "more options", "more actions", "show more", "options")
 }

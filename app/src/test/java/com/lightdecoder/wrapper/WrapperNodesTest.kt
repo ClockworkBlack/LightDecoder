@@ -72,6 +72,14 @@ class WrapperNodesTest {
     }
 
     @Test
+    fun menuNamesAreFoundInAnyFieldOrLineAndListedForTheLog() {
+        val unsend = N(description = "Unsend\nTooltip", clickable = true)
+        val menu = N(kids = listOf(N(text = "Copy", clickable = true), unsend))
+        assertSame("another wording, on a line of a merged label", unsend, WrapperNodes.action(menu, "Undo Send", "Unsend"))
+        assertEquals("copy | unsend | tooltip", WrapperNodes.buttonNames(menu))
+    }
+
+    @Test
     fun theUnsentLinesAreCounted() {
         val chat = N(kids = listOf(N(text = "You unsent a message. Others may still see it"), N(text = "Test"), N(text = "You unsent a message.")))
         assertEquals(2, WrapperNodes.unsentCount(chat))

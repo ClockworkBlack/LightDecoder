@@ -52,7 +52,16 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - Receipt looks: only after the conversation is untouched for 2.5 s (`onUserInteraction` resets it), at
   most every 5 min a chat, never right after a job in that chat; a tap on the still stops a look. No more
   900 ms receipt wait after each job (one read of what is on screen).
-- Not diagnosed: "lost chat history on update" (asked the user for which conversation and the iMessage log).
+- The user's log (OpenBubbles **2.0.0**, not the 1.15 source the labels came from): five Unsends all
+  "stopped at menu" (message found, then neither "Undo Send" nor "more"). Now `WrapperNodes.action` takes
+  several titles (Undo Send / Unsend / ...) and matches text, description, tooltip, each line of a merged
+  label; with no menu after the accessibility long press, a real long-press gesture and a second wait; on
+  failure the log lists the buttons OpenBubbles shows (`WrapperNodes.buttonNames`), to fix the labels.
+- "iMessage history gone after updating to the wrapper build": nothing in either branch deletes the
+  iMessage archive (only "Delete local archive" with Blue Bubbles off), same applicationId and key, DB
+  version unchanged. The 200-line log starts after the loss. Leading guesses: an uninstall before install,
+  or history that LightDecoder never had (it only knows what OpenBubbles' notifications showed). Possible
+  next step offered to the user: a wrapper "import history" that reads older messages off OpenBubbles' chat.
 
 ## 0.5.48-wrapper (versionCode 57) - BRANCH ccr-4fee5e9f-jrrlhu-wrapper: receipts, tapbacks, unsent, wrapper-off prompt
 - On the user's phone, Unsend and Edit fell back to OpenBubbles. In 0.5.46 that happens when the wrapper is
