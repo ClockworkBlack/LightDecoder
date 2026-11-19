@@ -77,7 +77,12 @@
     <string name="imessage_check_done_title">iMessage check for %1$s</string>
     <string name="imessage_check_ended">No reply from %1$s. The check has ended; a reply that comes later still shows in the conversation (a blue bubble from them means iMessage).</string>
     <string name="imessage_check_step_handed">Handed to OpenBubbles</string>
-    <string name="imessage_check_step_tap_send">Tap send in OpenBubbles</string>
+    <string name="imessage_check_step_tap_send">Sent from OpenBubbles (you tap send there)</string>
+    <string name="imessage_check_come_back">After tapping send in OpenBubbles, come straight back here, and do not keep that chat open in OpenBubbles: OpenBubbles shows no notification for a reply in a chat that is open on its screen, so LightDecoder would not see it.</string>
+    <string name="imessage_light_log">iMessage log</string>
+    <string name="imessage_log_title">iMessage log</string>
+    <string name="imessage_log_empty">Nothing logged yet.</string>
+    <string name="imessage_log_clear">Clear log</string>
     <string name="imessage_check_step_openbubbles">In OpenBubbles\u2019 iMessage chat (sent to Apple)</string>
     <string name="imessage_check_step_reply">%1$s replied</string>
     <string name="imessage_check_waiting">Waiting for %1$s to reply\u2026</string>

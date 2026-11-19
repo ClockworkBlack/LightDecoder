@@ -63,7 +63,8 @@ object IMessageChecks {
         conversationId: String,
         name: String,
         companion: String?,
-        address: String?,
+        /** The person's iMessage chat now (null until there is one), the way the conversation screen finds it. */
+        findChat: () -> String?,
         text: String,
         silent: Boolean,
         sentAtMs: Long,
@@ -77,11 +78,17 @@ object IMessageChecks {
         var last = IMessageCheck.Progress(false, false, false, IMessageCheck.Reply.NONE)
         _current.value = Run(conversationId, name, text, silent, sentAtMs, last)
         var slowNoted = false
+        var chatSeen = companion
         job = scope.launch {
             while (true) {
                 val progress = withContext(Dispatchers.IO) {
-                    // A chat OpenBubbles has just started is found by the person's number once it shows up.
-                    val chat = companion ?: address?.let(iMessages::conversationWith)
+                    // Found by number, name or a link made by hand, as the conversation screen finds it:
+                    // a chat OpenBubbles has just started shows up once it notifies about it.
+                    val chat = runCatching { findChat() }.getOrNull() ?: companion
+                    if (chat != null && chat != chatSeen) {
+                        chatSeen = chat
+                        log("found the person's iMessage chat ${IMessageLog.chatRef(chat)}")
+                    }
                     IMessageCheck.progress(
                         text, sentAtMs, chat?.let { iMessages.repo.messages(it, limit = 50) }.orEmpty(),
                         texts.messages(conversationId, limit = 50),
@@ -101,7 +108,11 @@ object IMessageChecks {
                 )
                 if (!slowNoted && waited > SLOW_MS && !progress.done) {
                     slowNoted = true
-                    log("after ${secs}s: handed over ${progress.handedOver}, shown back ${progress.inOpenBubbles}, no reply yet")
+                    log(
+                        "after ${secs}s: handed over ${progress.handedOver}, shown back ${progress.inOpenBubbles}, no reply yet" +
+                            (if (chatSeen == null) "; no iMessage chat with this person seen yet" else "") +
+                            (if (!silent) "; sent from OpenBubbles' screen: a reply while that chat is open there is not notified" else ""),
+                    )
                 }
                 last = progress
                 val giveUp = !progress.done && waited > GIVE_UP_MS

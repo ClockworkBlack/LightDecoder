@@ -84,8 +84,30 @@ object IMessageLight {
                 .setTitle(activity.getString(stateTitle(reading.state)))
                 .setMessage(words)
                 .setPositiveButton(android.R.string.ok, null)
+                .setNeutralButton(R.string.imessage_light_log) { _, _ -> showLog(activity) }
                 .show()
         }
+    }
+
+    /** The iMessage log, newest first, as the other links' activity logs are shown. */
+    fun showLog(activity: Activity) {
+        val lines = com.lightdecoder.imessage.IMessageLog.read(activity)
+        val manager = IMessageManager.get(activity)
+        val head = activity.getString(R.string.imessage_light) + ": " + activity.getString(overall(activity).why).substringBefore("\n") +
+            "\n" + manager.setupSummary()
+        val text = head + "\n\n" + if (lines.isEmpty()) activity.getString(R.string.imessage_log_empty) else lines.joinToString("\n")
+        val view = android.widget.TextView(activity).apply {
+            setText(text)
+            setTextIsSelectable(true)
+            val pad = (20 * resources.displayMetrics.density).toInt()
+            setPadding(pad, pad / 2, pad, 0)
+        }
+        MaterialAlertDialogBuilder(activity)
+            .setTitle(R.string.imessage_log_title)
+            .setView(android.widget.ScrollView(activity).apply { addView(view) })
+            .setPositiveButton(android.R.string.ok, null)
+            .setNeutralButton(R.string.imessage_log_clear) { _, _ -> com.lightdecoder.imessage.IMessageLog.clear(activity) }
+            .show()
     }
 
     private fun stateTitle(state: State): Int = when (state) {

@@ -710,6 +710,36 @@ class BlueBubblesScreenTest {
         }
     }
 
+    @Test
+    fun aCheckStartedBeforeAnyIMessageChatSeesAReplyThatCarriesOnlyTheirName() {
+        two.env.pairedManager()
+        installOpenBubbles()
+        IMessagePrefs.setEnabled(two.app, true)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Nina", lastTs = 1_000, number = "+1 555-123-4567")
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("the conversation") { it.findViewById<View>(R.id.input).isEnabled }
+            scenario.onActivity { activity ->
+                assertTrue("offered before any iMessage chat", menu(activity).findItem(R.id.action_check_imessage).isVisible)
+                activity.startIMessageCheck(com.lightdecoder.imessage.IMessageCheck.TEXT)
+            }
+            // OpenBubbles opened on a new chat with the check filled in; the user taps send there.
+            scenario.waitFor("the check dialog") { it.checkDialog != null }
+            scenario.onActivity { activity ->
+                val lines = steps(activity).lines()
+                assertEquals("\u2022  " + activity.getString(R.string.imessage_check_step_tap_send), lines[0])
+                assertTrue("no steps that could never tick", steps(activity).contains(activity.getString(R.string.imessage_check_come_back)))
+            }
+            // Nina answers; OpenBubbles' notification names her but has no number.
+            iMessage.record(
+                CapturedIMessageChat(ALICE, "m1", "Nina", false, "", listOf(CapturedIMessage("Nina", "", false, "OK", System.currentTimeMillis() + 1_000))),
+                live = true,
+            )
+            val blue = two.app.getString(R.string.imessage_check_blue, "Nina")
+            scenario.waitFor("the verdict") { verdict(it) == blue }
+            assertTrue(com.lightdecoder.imessage.IMessageLog.read(two.app).any { it.contains("found the person's iMessage chat") })
+        }
+    }
+
     private fun steps(activity: Activity): String =
         (activity as ThreadActivity).checkDialog?.findViewById<android.widget.TextView>(R.id.checkSteps)?.text?.toString().orEmpty()
 

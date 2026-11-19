@@ -2451,8 +2451,14 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 log("no usable Reply button: OpenBubbles opened for the user to tap send")
                 handOffToOpenBubbles(im, companion, text, emptyList(), clearComposer = false)
             }
+            val app = applicationContext
             com.lightdecoder.imessage.IMessageChecks.watch(
-                this@ThreadActivity, id, name, companion, address, text, silent, sentAt, im, textRepo,
+                this@ThreadActivity, id, name, companion,
+                findChat = {
+                    BlueBubblesLinks.iMessageFor(app, textRepo.conversation(id), textRepo.participants(id))
+                        ?: address?.let(im::conversationWith)
+                },
+                text, silent, sentAt, im, textRepo,
             )
             showIMessageCheck()
         }
@@ -2500,12 +2506,18 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     private fun checkSteps(p: com.lightdecoder.imessage.IMessageCheck.Progress, name: String, silent: Boolean, waitedMs: Long): String {
         fun line(done: Boolean, text: String) = (if (done) "\u2713  " else "\u2026  ") + text
-        return listOf(
-            line(p.handedOver, getString(if (silent || p.handedOver) R.string.imessage_check_step_handed else R.string.imessage_check_step_tap_send)),
+        // Sent from OpenBubbles' own screen: nothing of it can be seen here until the reply, so no steps that never tick.
+        val steps = if (silent || p.handedOver) listOf(
+            line(p.handedOver, getString(R.string.imessage_check_step_handed)),
             line(p.inOpenBubbles, getString(R.string.imessage_check_step_openbubbles)),
             line(p.done, getString(R.string.imessage_check_step_reply, name)),
-        ).joinToString("\n") + when {
+        ) else listOf(
+            "\u2022  " + getString(R.string.imessage_check_step_tap_send),
+            line(p.done, getString(R.string.imessage_check_step_reply, name)),
+        )
+        return steps.joinToString("\n") + when {
             p.sentAsText -> "\n\n" + getString(R.string.imessage_check_went_as_text)
+            !silent && !p.handedOver && !p.done -> "\n\n" + getString(R.string.imessage_check_come_back)
             !p.inOpenBubbles && waitedMs > com.lightdecoder.imessage.IMessageChecks.SLOW_MS -> "\n\n" + getString(R.string.imessage_check_not_in_openbubbles)
             else -> ""
         }

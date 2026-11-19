@@ -23,6 +23,23 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.41 (versionCode 49) - Check iMessage sees the reply
+- The user saw a check not update when the person replied in iMessage. Three causes, fixed:
+  1. **Finding the chat:** a check started before the person had an iMessage chat in LightDecoder
+     looked for the new chat by number only (`conversationWith`). A notification with only a name
+     was never found. Now `IMessageChecks.watch` takes `findChat`, the same pairing as the screens
+     (`BlueBubblesLinks.iMessageFor`: by hand, number, name), with the number lookup as a fallback,
+     and logs when it finds the chat.
+  2. **Steps that never tick:** a check sent from OpenBubbles' own screen (no Reply button, or a
+     new chat) can never tick "handed to OpenBubbles" or "shown back", since nothing of it is
+     visible here. Those steps are now replaced by "Sent from OpenBubbles (you tap send there)".
+  3. **The reply was never notified:** OpenBubbles posts no notification for a reply in a chat that
+     is open on its screen. The dialog now says to come straight back after tapping send, and the
+     60 s log line says so too.
+- The iMessage light's dialog has an "iMessage log" button: the log, newest first, selectable, with
+  Clear. The screenshots the user sent were the Google Messages and sticker logs, which hold no
+  iMessage lines.
+
 ## 0.5.40 (versionCode 48) - catching every message the notifications allow
 - From OpenBubbles' source (`lib/helpers/types/helpers/message_helper.dart`, `handleNotification`):
   it posts no notification
