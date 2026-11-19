@@ -31,6 +31,8 @@ class LightDecoderApp : Application() {
         if (DiscordProcess.enterIfDiscordProcess(this)) return
         // The same for the process that shows Facebook's messaging page.
         if (com.lightdecoder.messenger.MessengerProcess.enterIfMessengerProcess(this)) return
+        // And for the iMessage screen's process, the only one that loads OpenBubbles' library.
+        if (com.lightdecoder.imessage.ImessageProcess.enterIfImessageProcess(this)) return
         // Also for processes that start with no screen (boot, the link's service):
         // sign-in cookies a killed sign-in left behind go before anything else runs.
         SignInWebData.wipeIfDirty(this)

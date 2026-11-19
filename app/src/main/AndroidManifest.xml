@@ -14,6 +14,14 @@
         WhatsApp's servers.
     -->
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+        iMessage phone-number registration (imessage/SmsPhoneVerifier): one text to the
+        carrier's Apple gateway and Apple's reply. Asked for on the iMessage screen only when the
+        user taps Register; nothing else in the app sends or reads SMS.
+    -->
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
@@ -191,6 +199,17 @@
             it or hand it a URL. Rotation is handled in place so the page is
             not reloaded.
         -->
+        <!--
+            iMessage, through OpenBubbles' library that the user imports
+            (docs/imessage-openbubbles.md). Its own process (":imessage", see
+            imessage/ImessageProcess): the library is never loaded into the
+            app's main process. Not exported.
+        -->
+        <activity
+            android:name=".ui.imessage.ImessageActivity"
+            android:exported="false"
+            android:process=":imessage"
+            android:windowSoftInputMode="adjustResize" />
         <activity
             android:name=".ui.messenger.MessengerActivity"
             android:exported="false" />

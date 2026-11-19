@@ -8,13 +8,20 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
    had earlier chosen "build with a warning", then "pause on Discord", and has now asked for
    the web-view tab only, with no bridge). **Instagram: skipped** (ban risk, like Messenger).
 
-## iMessage via OpenBubbles (2026-11-19, branch ccr-ffe9dbd4-xu00fq): design only
-- Plan, findings and decisions: `docs/imessage-openbubbles.md`. No app code yet.
-- `tools/openbubbles-inspect/inspect.py` reads an OpenBubbles APK and says whether its
-  `librust_lib_bluebubbles.so` matches public source (frb content hash). Waiting on the
-  owner's OpenBubbles 2.0.0 APK files (mirror downloads were blocked here).
-- Owner accepted rustpush's SSPL-1.0 with the iMessage part kept separate; the official
-  library is never committed or bundled.
+## 0.5.28 (versionCode 36) - iMessage tab (OpenBubbles 2.0.0's library, user-imported)
+- Everything about it: `docs/imessage-openbubbles.md` ("What is built"). Code: `imessage/`,
+  `ui/imessage/`, generated bindings `app/src/main/java/uniffi/rust_bridge/` (regenerate with
+  `tools/uniffi-bindgen/gen.sh` if the pinned library changes), tests `imessage/*Test`.
+- Runs in its own ":imessage" process; the library (`librust_bridge.so` + `libheifdec.so` from
+  OpenBubbles 2.0.0, arm64 pinned by SHA-256) is imported by the user and never committed.
+- Registration: relay code -> ... -> phone number by SMS -> `registerIds` -> `startSession`;
+  green = Apple says Registered. `sendImessage` returns the GUID after Apple's SendConfirm;
+  `unsend(guid, part)` within 2 min, clear error otherwise. Only GUID/part/time stored.
+- **Not tried on a phone.** No iMessage inbox or background service yet (incoming messages are
+  notifications while the screen's process runs).
+- The release keystore (.p12) the owner sent is kept outside the repo (`*.p12` is now ignored).
+- Tools: `tools/openbubbles-inspect` (what an OpenBubbles APK's libraries are),
+  `tools/uniffi-bindgen` (bindings from a library). Next version: 0.5.29 / 37.
 
 ## Releases and signing
 - Latest: **0.4.2** (versionCode 6), signed with the permanent release key (CN=LightDecoder,

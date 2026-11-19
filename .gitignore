@@ -20,4 +20,6 @@ local.properties
 # the keystore's location and passwords from the environment or Gradle properties.
 *.jks
 *.keystore
+*.p12
+*.pfx
 /LightDecoder-*.apk

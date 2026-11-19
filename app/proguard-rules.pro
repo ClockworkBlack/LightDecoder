@@ -21,3 +21,10 @@
 # ONNX Runtime (the sticker maker's smart cut-out): its native library finds these
 # classes, their fields and their constructors by name.
 -keep class ai.onnxruntime.** { *; }
+
+# iMessage (uniffi bindings over JNA): JNA binds the native functions to these classes'
+# methods and reads Structure fields and Callback interfaces by name.
+-keep class com.sun.jna.** { *; }
+-keep class * implements com.sun.jna.** { *; }
+-keep class uniffi.rust_bridge.** { *; }
+-dontwarn java.awt.**

@@ -274,6 +274,7 @@ class ConversationsActivity : AppCompatActivity() {
         // Messenger's tab goes right before WhatsApp's. Like Discord's it is not a service of this
         // screen and opens its own.
         com.lightdecoder.ui.messenger.MessengerTab.add(tabs)
+        com.lightdecoder.ui.imessage.ImessageTab.add(tabs)
         switcher = ServiceTabStrip.attachSwitcher(tabs, binding.root.findViewById(R.id.servicesMenu)) {
             getString(ServiceUi.tabLabel(backend.service))
         }
@@ -287,6 +288,8 @@ class ConversationsActivity : AppCompatActivity() {
                         this@ConversationsActivity,
                         if (com.lightdecoder.ui.messenger.MessengerTab.isTab(tab)) {
                             com.lightdecoder.ui.messenger.MessengerTab.intent(this@ConversationsActivity)
+                        } else if (com.lightdecoder.ui.imessage.ImessageTab.isTab(tab)) {
+                            com.lightdecoder.ui.imessage.ImessageTab.intent(this@ConversationsActivity)
                         } else {
                             Intent(this@ConversationsActivity, DiscordActivity::class.java)
                         },

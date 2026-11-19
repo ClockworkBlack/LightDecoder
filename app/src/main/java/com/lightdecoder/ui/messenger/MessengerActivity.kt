@@ -116,6 +116,7 @@ class MessengerActivity : AppCompatActivity() {
             }
         }
         MessengerTab.add(tabs, selected = true)
+        com.lightdecoder.ui.imessage.ImessageTab.add(tabs)
         val messenger = getString(R.string.chat_service_messenger)
         ServiceTabStrip.attachSwitcher(tabs, binding.root.findViewById(R.id.servicesMenu)) { messenger }
         tabs.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
@@ -126,6 +127,7 @@ class MessengerActivity : AppCompatActivity() {
                     service != null -> RelayIntents.conversations(this@MessengerActivity, service)
                         .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
                     tab.tag === DISCORD_TAB -> Intent(this@MessengerActivity, DiscordActivity::class.java)
+                    com.lightdecoder.ui.imessage.ImessageTab.isTab(tab) -> com.lightdecoder.ui.imessage.ImessageTab.intent(this@MessengerActivity)
                     else -> return
                 }
                 ServiceTabStrip.open(this@MessengerActivity, next)
