@@ -37,7 +37,8 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
   Unsend/edit/send live in Dart (`rustpush_service.dart`) behind its own UI. A real link needs a modified
   OpenBubbles (an exported service guarded by LightDecoder's signature, calling into Dart over a
   MethodChannel), built with Flutter + Rust/NDK, replacing the user's install (uninstall, re-register with the
-  relay). Offered to the user; not started.
+  relay). Offered to the user, who put it on hold: the full plan is `docs/openbubbles-link-plan.md`
+  (gates first: whether a source build with placeholder FairPlay certificates can register at all).
 
 ## 0.5.38 (versionCode 46) - iMessages in the right conversation; Unsend
 - **Linking** (`imessage/IMessageLinks.pair`, pure; `BlueBubblesLinks.pairs` builds it from both archives,
