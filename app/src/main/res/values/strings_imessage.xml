@@ -302,6 +302,12 @@
     <string name="imessage_games_help">Play GamePigeon games with iPhone users in Messages. Uses the free OpenPigeon app.</string>
     <!-- %1$s: the games app's name (OpenPigeon). -->
     <string name="imessage_games_not_installed">%1$s is not installed.</string>
+    <string name="imessage_phone_style">iPhone-style chats</string>
+    <string name="imessage_phone_style_help">iMessage chats look as they do on an iPhone: blue and grey bubbles, the name at the top, times between messages. Turn off for the look of the other chats.</string>
+    <string name="imessage_phone_hint_text">Text Message</string>
+    <string name="imessage_phone_header">%1$s, conversation options</string>
+    <string name="imessage_phone_add">Add a picture, sticker or game</string>
+    <string name="imessage_attach_stickers">Stickers</string>
     <string name="imessage_games_get">Get games</string>
     <string name="imessage_games_ready">Ready. Tap a game in a chat, or choose Games when adding a picture.</string>
     <string name="imessage_status_retrying">Trying again soon</string>

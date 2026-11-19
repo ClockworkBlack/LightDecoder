@@ -15,7 +15,11 @@ sealed class ThreadItem {
         override val key: String get() = "header"
     }
 
-    data class Day(val dayStartMs: Long, val label: String) : ThreadItem() {
+    /**
+     * A day's separator ("Today"). In iPhone-style chats, the time between messages instead
+     * ([PhoneStyle.timeHeader]): [dayStartMs] is then the message's own time, and [time] its clock time.
+     */
+    data class Day(val dayStartMs: Long, val label: String, val time: String = "") : ThreadItem() {
         override val key: String get() = "day:$dayStartMs"
     }
 
@@ -37,6 +41,10 @@ sealed class ThreadItem {
         val stackedWithNext: Boolean = false,
         /** "Delivered" or "Read …" under it ([ThreadItems.receipts]), else null. */
         val receipt: Receipt? = null,
+        /** iPhone-style chats: where it is in its sender's run ([PhoneStyle.places]); null otherwise. */
+        val place: PhoneStyle.Place? = null,
+        /** iPhone-style group chats: someone else's message, which leaves room at its side for the sender's picture. */
+        val besideAvatar: Boolean = false,
     ) : ThreadItem() {
         /**
          * For DiffUtil. MessageRow's byte arrays compare by reference, so a
@@ -49,6 +57,8 @@ sealed class ThreadItem {
                 highlighted == other.highlighted &&
                 stackedWithNext == other.stackedWithNext &&
                 receipt == other.receipt &&
+                place == other.place &&
+                besideAvatar == other.besideAvatar &&
                 row.copy(media = emptyList()) == other.row.copy(media = emptyList()) &&
                 row.media.map(::mediaSignature) == other.row.media.map(::mediaSignature)
     }
@@ -103,23 +113,37 @@ object ThreadItems {
         dayLabel: (Long) -> String,
         /** "Delivered" / "Read …" under messages, by id ([receipts]). */
         receipts: Map<String, Receipt> = emptyMap(),
+        /** iPhone-style chats ([PhoneStyle]): times between messages instead of days, and runs with tails. */
+        phone: Boolean = false,
+        /** The clock time of a time header ([phone]). */
+        clock: (Long) -> String = { "" },
     ): List<ThreadItem> {
         val items = ArrayList<ThreadItem>(messages.size + 16)
         if (header != null) items.add(header)
         val usedKeys = HashSet<String>()
         var lastDay = Long.MIN_VALUE
         var previous: MessageRow? = null
+        val places = if (phone) PhoneStyle.places(messages, dayStart) else emptyList()
         for ((index, row) in messages.withIndex()) {
             val day = dayStart(row.timestampMs)
             val newDay = day != lastDay
-            if (newDay) {
+            if (phone) {
+                if (PhoneStyle.timeHeader(previous, row, dayStart)) {
+                    // Keyed by its message's time; two at the same time (out of order) must still differ.
+                    var at = row.timestampMs
+                    while (!usedKeys.add("day:$at")) at++
+                    items.add(ThreadItem.Day(at, dayLabel(day), clock(row.timestampMs)))
+                }
+                lastDay = day
+            } else if (newDay) {
                 items.add(ThreadItem.Day(day, dayLabel(day)))
                 lastDay = day
             }
             val incoming = !row.isOutgoing && row.direction == "in"
             val sameSenderAsBefore = previous != null && !newDay &&
                 previous.direction == row.direction && previous.senderId == row.senderId
-            val showSender = isGroup && incoming && !sameSenderAsBefore
+            val place = places.getOrNull(index)
+            val showSender = isGroup && incoming && (place?.first ?: !sameSenderAsBefore)
             // Keys must be unique, or the list's stable ids clash; fall back to the message id.
             var key = keyFor(row)
             if (!usedKeys.add(key)) {
@@ -135,6 +159,8 @@ object ThreadItems {
                     highlighted = highlightId != null && row.id == highlightId,
                     stackedWithNext = messages.getOrNull(index + 1)?.let { stacks(row, it, dayStart) } == true,
                     receipt = receipts[row.id],
+                    place = place,
+                    besideAvatar = phone && isGroup && incoming,
                 )
             )
             previous = row

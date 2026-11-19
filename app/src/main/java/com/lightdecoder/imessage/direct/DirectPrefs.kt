@@ -68,6 +68,27 @@ object DirectPrefs {
         }
     }
 
+    private fun phoneStyleOffMarker(context: Context) = File(context.filesDir, "imessage/phone-style-off")
+
+    /**
+     * Whether iMessage chats are drawn as on an iPhone ([com.lightdecoder.ui.chat.PhoneStyle]). On by
+     * default. A file, like [gamesOn]: the setup screen sets it, the chat screen (main process) reads it.
+     */
+    fun phoneStyleOn(context: Context): Boolean = !phoneStyleOffMarker(context).isFile
+
+    /** Turns iPhone-style chats on or off (see [phoneStyleOn]). */
+    fun setPhoneStyleOn(context: Context, on: Boolean) {
+        runCatching {
+            val f = phoneStyleOffMarker(context)
+            if (on) {
+                f.delete()
+            } else {
+                f.parentFile?.mkdirs()
+                if (!f.isFile) f.writeText("1")
+            }
+        }
+    }
+
     private fun marker(context: Context) = File(context.filesDir, "imessage/registered")
 
     private fun shownMarker(context: Context) = File(context.filesDir, "imessage/blue-bubbles-turned-on")

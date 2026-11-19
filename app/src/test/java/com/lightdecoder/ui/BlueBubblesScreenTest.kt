@@ -1369,14 +1369,16 @@ class BlueBubblesScreenTest {
                 }
                 // Opened: Apple is told her message was read (the setting decides whether she is).
                 two.waitUntil("the read receipt") { asked(asked, com.lightdecoder.imessage.direct.DirectWire.READ).any { it.getString("guid") == "H1" } }
-                // She types: shown above the composer, until she stops.
+                // She types: shown above the composer (an iPhone-style chat: as a bubble with three dots,
+                // the words for TalkBack), until she stops.
                 iMessage.noteTyping(ALICE_DIRECT, "+15551234567", "Alice", typing = true)
                 scenario.waitFor("her typing") { activity ->
-                    val typing = activity.findViewById<android.widget.TextView>(R.id.typingText)
-                    typing.visibility == View.VISIBLE && typing.text.toString() == activity.getString(R.string.chat_typing_one, "Alice")
+                    val typing = activity.findViewById<View>(R.id.typingDots)
+                    typing.visibility == View.VISIBLE && typing.contentDescription?.toString() == activity.getString(R.string.chat_typing_one, "Alice")
                 }
+                scenario.onActivity { activity -> assertEquals(View.GONE, activity.findViewById<View>(R.id.typingText).visibility) }
                 iMessage.noteTyping(ALICE_DIRECT, "+15551234567", "Alice", typing = false)
-                scenario.waitFor("her typing gone") { it.findViewById<View>(R.id.typingText).visibility == View.GONE }
+                scenario.waitFor("her typing gone") { it.findViewById<View>(R.id.typingDots).visibility == View.GONE }
                 // The user types: her iPhone is told, and told it stopped when the composer is emptied.
                 scenario.onActivity { activity -> activity.findViewById<EditText>(R.id.input).setText("H") }
                 two.waitUntil("typing told") { asked(asked, com.lightdecoder.imessage.direct.DirectWire.TYPING).map { it.getBoolean("typing") } == listOf(true) }
@@ -1671,10 +1673,18 @@ class BlueBubblesScreenTest {
         ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
             scenario.waitFor("her game") { shownTexts(it).contains("Your move") }
             scenario.onActivity { activity ->
-                val before = ShadowDialog.getLatestDialog()
+                // An iPhone-style chat's "+" offers pictures and stickers: no Games among them.
                 activity.findViewById<View>(R.id.attach).performClick()
                 org.robolectric.shadows.ShadowLooper.idleMainLooper()
-                assertTrue("no Photos-or-Games choice", ShadowDialog.getLatestDialog() === before)
+                val choice = latestDialog()
+                assertEquals(
+                    "no Games choice",
+                    listOf("Photos and videos", "Stickers"),
+                    (0 until choice.listView.adapter.count).map { choice.listView.adapter.getItem(it).toString() },
+                )
+                choice.listView.performItemClick(null, 0, 0)
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                val before = ShadowDialog.getLatestDialog()
                 assertNotNull("the photo picker", shadowOf(activity).nextStartedActivity)
                 // Her game's card: not opened in OpenPigeon, nothing bound; it opens on an Apple device.
                 appCardOf(activity, "Your move")!!.findViewById<View>(R.id.bubble).performClick()
@@ -1697,8 +1707,9 @@ class BlueBubblesScreenTest {
                 org.robolectric.shadows.ShadowLooper.idleMainLooper()
                 val choice = latestDialog()
                 val list = choice.listView
+                // (Stickers too: in an iPhone-style chat the "+" is the way to them.)
                 assertEquals(
-                    listOf("Photos and videos", "Games"),
+                    listOf("Photos and videos", "Games", "Stickers"),
                     (0 until list.adapter.count).map { list.adapter.getItem(it).toString() },
                 )
                 assertEquals(null, shadowOf(activity).nextStartedActivityForResult)

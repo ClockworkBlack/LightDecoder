@@ -90,6 +90,8 @@ class DirectWordingTest {
             R.string.imessage_send_later_send_now, R.string.imessage_send_later_cancelled, R.string.imessage_send_later_cancel_failed,
             R.string.imessage_send_later_not_cancellable, R.string.imessage_direct_unschedule_not_confirmed,
             R.string.imessage_direct_unschedule_refused,
+            R.string.imessage_phone_style, R.string.imessage_phone_style_help, R.string.imessage_phone_hint_text,
+            R.string.imessage_phone_header, R.string.imessage_phone_add, R.string.imessage_attach_stickers,
         )
         for (res in direct) {
             val text = context.getString(res)
@@ -109,6 +111,9 @@ class DirectWordingTest {
             "Install OpenPigeon to play GamePigeon games with iPhone users.",
             context.getString(R.string.imessage_app_install, "OpenPigeon", "GamePigeon"),
         )
+        assertEquals("iPhone-style chats", context.getString(R.string.imessage_phone_style))
+        assertEquals("Text Message", context.getString(R.string.imessage_phone_hint_text))
+        assertEquals("iMessage", context.getString(R.string.imessage_compose_hint))
         assertEquals("Delivered", context.getString(R.string.imessage_receipt_delivered))
         assertEquals("Read 9:41", context.getString(R.string.imessage_receipt_read_at, "9:41"))
         assertEquals(

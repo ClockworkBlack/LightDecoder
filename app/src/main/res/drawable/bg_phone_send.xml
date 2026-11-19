@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The round send button of iPhone-style chats: a 32dp disc in a 48dp touch target; tinted blue or green in code. -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:inset="8dp">
+    <shape android:shape="oval">
+        <solid android:color="@android:color/white" />
+    </shape>
+</inset>

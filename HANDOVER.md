@@ -8,6 +8,17 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
    had earlier chosen "build with a warning", then "pause on Discord", and has now asked for
    the web-view tab only, with no bridge). **Instagram: skipped** (ban risk, like Messenger).
 
+## 0.5.63 (versionCode 74) - iPhone-style iMessage chats
+- Owner asked for an iPhone-like thread in iMessage chats. `ui/chat/PhoneStyle.kt` (pure rules + tail
+  and typing-dot views): blue/green/grey bubbles with tails and runs, centred time headers, tapback
+  pills on the bubble corner, centred avatar header, "+" / pill / round send composer, typing dots,
+  group names and initials. Applies with the library set up in iMessage threads and Messages threads
+  that have a companion iMessage chat; setting "iPhone-style chats" (on by default, file flag in
+  DirectPrefs) on the iMessage screen. Other threads are unchanged.
+- Preview PNGs: `./gradlew :app:testDebugUnitTest --tests 'com.lightdecoder.ui.PhoneStyleScreenTest'
+  -Dlightdecoder.uiShots=<folder>`. Not yet seen on a device. Unit tests: 1106 (1 skipped: the
+  screenshot test), all passing. Next version: 0.5.64 / 75.
+
 ## 0.5.62 (versionCode 73) - stock chat backgrounds
 - Owner asked for Messenger-like stock backgrounds plus iPhone's own. Picker (`BackgroundPicker`) with
   Colors (12 palettes sent as TranscriptGradient, rendered natively by iPhones), Dynamic (Aurora,
@@ -15,7 +26,7 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
   designs in `BackgroundThemes`, sent as photo posters), Your photos; preview with Set/Cancel.
 - Incoming gradient/dynamic backgrounds are now shown (own renderers in `BackgroundArt`), not removed;
   unknown dynamic identifiers are logged to IMessageLog. Not yet verified with a real iPhone.
-- Unit tests: 1089, all passing. Next version: 0.5.63 / 74.
+- Unit tests: 1089, all passing.
 
 ## 0.5.61 (versionCode 72) - text effects and formatting, chat backgrounds, Send Later
 - iOS 18 text effects (Big, Small, Shake, Nod, Explode, Ripple, Bloom, Jitter) and bold/italic/underline/

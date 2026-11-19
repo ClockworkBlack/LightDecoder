@@ -8,7 +8,69 @@
     <com.google.android.material.appbar.MaterialToolbar
         android:id="@+id/toolbar"
         android:layout_width="match_parent"
-        android:layout_height="?attr/actionBarSize" />
+        android:layout_height="?attr/actionBarSize">
+
+        <!-- iPhone-style chats: the person's picture with the name under it, in the middle; a tap opens the menu. -->
+        <LinearLayout
+            android:id="@+id/phoneHeader"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:focusable="true"
+            android:gravity="center_horizontal"
+            android:minWidth="48dp"
+            android:orientation="vertical"
+            android:paddingHorizontal="8dp"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/phoneAvatar"
+                android:layout_width="34dp"
+                android:layout_height="34dp"
+                android:gravity="center"
+                android:importantForAccessibility="no"
+                android:maxLines="1"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/phoneName"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="end"
+                    android:importantForAccessibility="no"
+                    android:maxWidth="200dp"
+                    android:maxLines="1"
+                    android:textColor="?attr/colorOnSurface"
+                    android:textSize="12sp" />
+
+                <ImageView
+                    android:layout_width="10dp"
+                    android:layout_height="10dp"
+                    android:layout_marginStart="2dp"
+                    android:importantForAccessibility="no"
+                    android:src="@drawable/ic_phone_chevron"
+                    app:tint="?attr/colorOnSurfaceVariant" />
+            </LinearLayout>
+        </LinearLayout>
+    </com.google.android.material.appbar.MaterialToolbar>
+
+    <!-- iPhone-style chats: a hairline under the bar. -->
+    <View
+        android:id="@+id/phoneHeaderLine"
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="?attr/colorOutlineVariant"
+        android:importantForAccessibility="no"
+        android:visibility="gone" />
 
     <include
         android:id="@+id/banner"
@@ -99,6 +161,16 @@
         android:textAppearance="?attr/textAppearanceLabelMedium"
         android:textColor="?attr/colorOnSurfaceVariant"
         android:textStyle="italic"
+        android:visibility="gone" />
+
+    <!-- iPhone-style chats: someone is typing, as a grey bubble with three moving dots. -->
+    <com.lightdecoder.ui.chat.TypingDotsView
+        android:id="@+id/typingDots"
+        android:layout_width="64dp"
+        android:layout_height="38dp"
+        android:layout_marginStart="12dp"
+        android:layout_marginBottom="2dp"
+        android:accessibilityLiveRegion="polite"
         android:visibility="gone" />
 
     <!-- Replying to … -->
@@ -275,6 +347,7 @@
             android:src="@drawable/ic_sticker" />
 
         <com.google.android.material.textfield.TextInputLayout
+            android:id="@+id/inputBox"
             style="@style/Widget.Material3.TextInputLayout.OutlinedBox.Dense"
             android:layout_width="0dp"
             android:layout_height="wrap_content"

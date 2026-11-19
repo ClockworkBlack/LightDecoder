@@ -23,6 +23,7 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.VisibleForTesting
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.core.view.doOnLayout
 import androidx.lifecycle.Lifecycle
@@ -364,6 +365,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         setUpList()
         effectPlayer = EffectPlayer(this, binding.messages)
         setUpComposer()
+        binding.phoneHeader.setOnClickListener { binding.toolbar.showOverflowMenu() }
+        updatePhoneStyle()
         lifecycleScope.launch { voicePlayer.state.collect { adapter.updateVoiceViews(binding.messages, it) } }
         if (VoicePrefs.readNewAloud(this) && !reader.isAvailable) noteReaderUnavailable()
         savedInstanceState?.getString(STATE_REPLY_TO)?.let(::restoreReply)
@@ -418,10 +421,13 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             it.blueOutgoing = service == ChatService.IMESSAGE
             it.blueFor = { row -> row.id in iMessageIds }
             it.appleReceipts = { row -> appleReceipts(row, manager.service, iMessageIds) }
+            it.phoneStyle = phoneStyle
+            it.onPicture = binding.chatBackground.visibility == View.VISIBLE
             it.voiceDuration = voicePlayer::durationOf
             it.voiceState = voicePlayer.state.value
         }
         binding.messages.adapter = adapter
+        updatePhoneStyle()
         // Until the new link's state is in: cheap to ask, and nothing is tried while "offline".
         paired = manager.isPaired()
         online = false
@@ -573,6 +579,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         MessageNotifier.cancel(this, conversationId, manager.service)
         com.lightdecoder.relay.ReadNotifier.cancel(this, manager.service, conversationId)
         markCompanionVisible()
+        // The setting may have been changed on the iMessage screen meanwhile.
+        if (updatePhoneStyle()) resubmit()
         animateBackground(true)
         // iMessage pictures OpenBubbles has saved meanwhile.
         if (com.lightdecoder.imessage.IMessagePrefs.enabled(this) &&
@@ -625,6 +633,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             it.blueOutgoing = manager.service == ChatService.IMESSAGE
             it.blueFor = { row -> row.id in iMessageIds }
             it.appleReceipts = { row -> appleReceipts(row, manager.service, iMessageIds) }
+            it.phoneStyle = phoneStyle
+            it.onPicture = binding.chatBackground.visibility == View.VISIBLE
             it.voiceDuration = voicePlayer::durationOf
             it.voiceState = voicePlayer.state.value
         }
@@ -853,6 +863,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         iMessageChats = snapshot.iMessageChats
         receipts = snapshot.receipts
         directReachable = snapshot.directReachable
+        updatePhoneStyle()
         media.awaitingLabel = if (snapshot.direct) R.string.imessage_media_waiting_direct else R.string.imessage_media_waiting
         markCompanionVisible()
         val localExhausted = snapshot.rows.size < wanted
@@ -974,6 +985,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val shownReceipts = receipts
         val isGroup = conversation?.isGroup == true
         val highlighted = highlightId
+        val phone = phoneStyle
         lastQuotes = quotes
         val context = applicationContext
         val items = withContext(Dispatchers.Default) {
@@ -987,6 +999,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 dayStart = { TimeFormat.startOfDay(it) },
                 dayLabel = { TimeFormat.dayLabel(context, it) },
                 receipts = shownReceipts,
+                phone = phone,
+                clock = { TimeFormat.clock(context, it) },
             )
         }
         if (seq != submitSeq) return
@@ -1131,7 +1145,14 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         // The person's (or group's) avatar next to the name, as in the conversation list:
         // only redrawn when it changes, and before the title, which is what the rest follows.
         val avatarKey = Triple(title, conv?.id ?: conversationId, conv?.avatarColor.orEmpty())
-        if (avatarKey != shownAvatar) {
+        if (phoneStyle) {
+            // As on an iPhone: the picture in the middle of the bar, the name under it.
+            shownAvatar = null
+            binding.toolbar.logo = null
+            Avatars.bind(binding.phoneAvatar, avatarKey.first, avatarKey.second, avatarKey.third)
+            binding.phoneName.text = title
+            binding.phoneHeader.contentDescription = getString(R.string.imessage_phone_header, title)
+        } else if (avatarKey != shownAvatar) {
             shownAvatar = avatarKey
             val density = resources.displayMetrics.density
             val avatar = Avatars.drawable(this, avatarKey.first, avatarKey.second, avatarKey.third, (TOOLBAR_AVATAR_DP * density).toInt())
@@ -1222,7 +1243,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     private fun renderTyping(names: Set<String>) {
         val visible = names.filter { it.isNotBlank() }
-        binding.typingText.visibility = if (names.isEmpty()) View.GONE else View.VISIBLE
+        // iPhone-style chats: a grey bubble with three dots says it (and the words, to TalkBack).
+        binding.typingText.visibility = if (names.isEmpty() || phoneStyle) View.GONE else View.VISIBLE
+        binding.typingDots.visibility = if (names.isEmpty() || !phoneStyle) View.GONE else View.VISIBLE
+        typingNames = names
         binding.typingText.text = when {
             names.isEmpty() -> ""
             visible.isEmpty() -> getString(R.string.chat_typing_someone)
@@ -1230,7 +1254,131 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             visible.size == 2 -> getString(R.string.chat_typing_two, visible[0], visible[1])
             else -> getString(R.string.chat_typing_many)
         }
+        binding.typingDots.contentDescription = binding.typingText.text
     }
+
+    /** Who is typing, as last drawn ([renderTyping]). */
+    private var typingNames: Set<String> = emptySet()
+
+    // --- iPhone-style chats ----------------------------------------------------
+
+    /** Whether this conversation is drawn as on an iPhone ([PhoneStyle.applies]), as last worked out. */
+    @VisibleForTesting
+    internal var phoneStyle = false
+        private set
+
+    /**
+     * Works out [phoneStyle] again (the setting, the iMessage library, the service, the person's
+     * iMessage chat) and, if it changed, redraws the bar, the composer and every row for it. True if it changed.
+     */
+    private fun updatePhoneStyle(): Boolean {
+        val want = PhoneStyle.applies(
+            com.lightdecoder.imessage.direct.DirectPrefs.phoneStyleOn(this), directMode(), manager.service, companionId != null,
+        )
+        if (want == phoneStyle) return false
+        phoneStyle = want
+        adapter.phoneStyle = want
+        adapter.notifyDataSetChanged()
+        renderPhoneChrome()
+        return true
+    }
+
+    /** The top bar and the composer, as iPhone-style chats have them or as every other conversation does. */
+    private fun renderPhoneChrome() {
+        val phone = phoneStyle
+        val density = resources.displayMetrics.density
+        // The bar: taller, the picture and name in its middle instead of the title beside the arrow.
+        if (toolbarHeight == 0) toolbarHeight = binding.toolbar.layoutParams.height
+        binding.toolbar.layoutParams = binding.toolbar.layoutParams.apply {
+            height = if (phone) (PHONE_BAR_DP * density).toInt() else toolbarHeight
+        }
+        binding.phoneHeader.visibility = if (phone) View.VISIBLE else View.GONE
+        binding.phoneHeaderLine.visibility = binding.phoneHeader.visibility
+        supportActionBar?.setDisplayShowTitleEnabled(!phone)
+        shownAvatar = null
+        if (phone) binding.toolbar.logo = null
+        // An iPhone's white (or black) behind it all; the theme's own surface otherwise.
+        if (phone) binding.root.setBackgroundColor(ContextCompat.getColor(this, R.color.phone_screen)) else binding.root.background = null
+
+        // The composer: a round "+" (pictures, stickers, games), a slim pill, and a round arrow to send.
+        if (composerLook == null) {
+            composerLook = ComposerLook(
+                attachBackground = binding.attach.background,
+                sendBackground = binding.send.background,
+                sendTint = androidx.core.widget.ImageViewCompat.getImageTintList(binding.send),
+                inputPadding = intArrayOf(binding.input.paddingStart, binding.input.paddingTop, binding.input.paddingEnd, binding.input.paddingBottom),
+                inputMinHeight = binding.input.minimumHeight,
+                strokeWidth = binding.inputBox.boxStrokeWidth,
+                strokeWidthFocused = binding.inputBox.boxStrokeWidthFocused,
+                boxMargins = (binding.inputBox.layoutParams as android.widget.LinearLayout.LayoutParams).let { intArrayOf(it.marginStart, it.marginEnd, it.bottomMargin) },
+            )
+        }
+        val look = composerLook!!
+        val box = binding.inputBox.layoutParams as android.widget.LinearLayout.LayoutParams
+        if (phone) {
+            binding.attach.setBackgroundResource(R.drawable.bg_phone_plus)
+            binding.attach.setImageResource(R.drawable.ic_phone_plus)
+            androidx.core.widget.ImageViewCompat.setImageTintList(
+                binding.attach, android.content.res.ColorStateList.valueOf(ContextCompat.getColor(this, R.color.phone_on_plus)),
+            )
+            binding.attach.contentDescription = getString(R.string.imessage_phone_add)
+            binding.stickers.visibility = View.GONE
+            binding.send.setBackgroundResource(R.drawable.bg_phone_send)
+            binding.send.setImageResource(R.drawable.ic_phone_send)
+            androidx.core.widget.ImageViewCompat.setImageTintList(binding.send, null)
+            val side = (PHONE_FIELD_SIDE_DP * density).toInt()
+            val vertical = (PHONE_FIELD_VERTICAL_DP * density).toInt()
+            binding.input.setPaddingRelative(side, vertical, side, vertical)
+            binding.input.minimumHeight = 0
+            binding.input.minHeight = 0
+            binding.inputBox.boxStrokeWidth = density.toInt().coerceAtLeast(1)
+            binding.inputBox.boxStrokeWidthFocused = density.toInt().coerceAtLeast(1)
+            // The pill is lower than the 48dp buttons beside it: in the middle of their height.
+            box.bottomMargin = (PHONE_FIELD_LIFT_DP * density).toInt()
+            box.marginEnd = (PHONE_FIELD_END_DP * density).toInt()
+        } else {
+            binding.attach.background = look.attachBackground
+            binding.attach.setImageResource(R.drawable.ic_attach)
+            androidx.core.widget.ImageViewCompat.setImageTintList(binding.attach, null)
+            binding.attach.contentDescription = getString(R.string.chat_attach)
+            binding.stickers.visibility = View.VISIBLE
+            binding.send.background = look.sendBackground
+            binding.send.backgroundTintList = null
+            binding.send.setImageResource(R.drawable.ic_send)
+            androidx.core.widget.ImageViewCompat.setImageTintList(binding.send, look.sendTint)
+            binding.send.visibility = View.VISIBLE
+            val p = look.inputPadding
+            binding.input.setPaddingRelative(p[0], p[1], p[2], p[3])
+            binding.input.minimumHeight = look.inputMinHeight
+            binding.inputBox.boxStrokeWidth = look.strokeWidth
+            binding.inputBox.boxStrokeWidthFocused = look.strokeWidthFocused
+            box.marginStart = look.boxMargins[0]
+            box.marginEnd = look.boxMargins[1]
+            box.bottomMargin = look.boxMargins[2]
+        }
+        binding.inputBox.layoutParams = box
+        renderTyping(typingNames)
+        // The name and picture, once the conversation is known; the hint and the buttons either way.
+        if (localRowsFor != null) renderConversation() else renderComposerState()
+        updateVoiceInput()
+    }
+
+    /** The bar's height as the layout gave it (0: not read yet). */
+    private var toolbarHeight = 0
+
+    /** The composer as the layout made it, put back when a conversation is not iPhone-style (any more). */
+    private class ComposerLook(
+        val attachBackground: android.graphics.drawable.Drawable?,
+        val sendBackground: android.graphics.drawable.Drawable?,
+        val sendTint: android.content.res.ColorStateList?,
+        val inputPadding: IntArray,
+        val inputMinHeight: Int,
+        val strokeWidth: Int,
+        val strokeWidthFocused: Int,
+        val boxMargins: IntArray,
+    )
+
+    private var composerLook: ComposerLook? = null
 
     /**
      * Tells the phone the conversation was read: when it opens, when it
@@ -1357,6 +1505,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         binding.input.hint = getString(
             when {
                 !paired -> R.string.chat_compose_unpaired
+                // As on an iPhone: "iMessage", or "Text Message" when it would go as a text.
+                phoneStyle -> PhoneStyle.hintRes(typedGoesAsIMessage())
                 companionId != null -> R.string.imessage_compose_hint
                 else -> ServiceUi.composeHint(manager.service)
             }
@@ -1369,13 +1519,42 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         binding.send.isEnabled = paired && hasContent
         // The tint has no disabled state: dim it the way Material dims disabled controls.
         binding.send.alpha = if (binding.send.isEnabled) 1f else DISABLED_ALPHA
+        if (phoneStyle) {
+            // As on an iPhone: the arrow (blue for an iMessage, green for a text) comes with something to
+            // send; until then the microphones are in its place.
+            binding.send.backgroundTintList = android.content.res.ColorStateList.valueOf(
+                ContextCompat.getColor(this, PhoneStyle.sendColorRes(typedGoesAsIMessage())),
+            )
+            showVoiceButtons()
+            val voice = binding.voiceInput.visibility == View.VISIBLE || binding.voiceMessage.visibility == View.VISIBLE
+            binding.send.visibility = if (hasContent || !voice) View.VISIBLE else View.GONE
+        }
     }
+
+    /** Whether what is typed now goes as an iMessage (iPhone-style chats: the hint and the send button's colour). */
+    private fun typedGoesAsIMessage(): Boolean =
+        manager.service == ChatService.IMESSAGE || sendsWithEffects()
+
+    private fun composerHasContent(): Boolean = !binding.input.text.isNullOrBlank() || attachments.isNotEmpty()
+
+    /**
+     * The dictation and voice message buttons, where there are any ([Dictation.isAvailable], a
+     * microphone): in iPhone-style chats only while there is nothing to send yet.
+     */
+    private fun showVoiceButtons() {
+        val room = !(phoneStyle && composerHasContent())
+        binding.voiceInput.visibility = if (canDictate && room) View.VISIBLE else View.GONE
+        binding.voiceMessage.visibility = if (canRecord && room) View.VISIBLE else View.GONE
+    }
+
+    private var canDictate = false
+    private var canRecord = false
 
     // --- voice ------------------------------------------------------------------
 
     /** The dictation button, only when some app can recognise speech. */
     private fun updateVoiceInput() {
-        binding.voiceInput.visibility = if (Dictation.isAvailable(packageManager)) View.VISIBLE else View.GONE
+        canDictate = Dictation.isAvailable(packageManager)
         updateVoiceMessageButton()
     }
 
@@ -1388,7 +1567,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private fun updateVoiceMessageButton() {
         val can = (manager.service == ChatService.MESSAGES || (manager.service == ChatService.IMESSAGE && directMode())) &&
             packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_MICROPHONE)
-        binding.voiceMessage.visibility = if (can) View.VISIBLE else View.GONE
+        canRecord = can
+        showVoiceButtons()
+        if (phoneStyle) updateSendEnabled()
     }
 
     private fun onRecordTapped() {
@@ -1562,6 +1743,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             dictate.launch(Dictation.intent(this))
         } catch (e: ActivityNotFoundException) {
             dictationFor = null
+            canDictate = false
             binding.voiceInput.visibility = View.GONE
             toast(getString(R.string.chat_voice_unavailable))
         }
@@ -1891,6 +2073,18 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         binding.chatBackground.tag = null
         binding.chatBackground.visibility = View.GONE
         binding.chatBackgroundScrim.visibility = View.GONE
+        noteBackgroundShown()
+    }
+
+    /**
+     * Tells the list whether a picture is behind it now: iPhone-style chats then keep their times
+     * and notices in pills and write what is under a bubble in white, so it all stays readable.
+     */
+    private fun noteBackgroundShown() {
+        val on = binding.chatBackground.visibility == View.VISIBLE
+        if (adapter.onPicture == on) return
+        adapter.onPicture = on
+        if (phoneStyle) adapter.notifyDataSetChanged()
     }
 
     /** A gradient or dynamic background, drawn (the aurora moving, unless the system's animations are off). */
@@ -1904,6 +2098,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         binding.chatBackground.tag = key
         binding.chatBackground.visibility = View.VISIBLE
         binding.chatBackgroundScrim.visibility = View.VISIBLE
+        noteBackgroundShown()
         if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) animateBackground(true)
     }
 
@@ -1932,6 +2127,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         if (bitmap == null) {
             binding.chatBackground.visibility = View.GONE
             binding.chatBackgroundScrim.visibility = View.GONE
+            noteBackgroundShown()
             return
         }
         binding.chatBackground.scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
@@ -1939,6 +2135,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         binding.chatBackground.tag = tag
         binding.chatBackground.visibility = View.VISIBLE
         binding.chatBackgroundScrim.visibility = View.VISIBLE
+        noteBackgroundShown()
     }
 
     private fun decodeBackground(file: File, longest: Int): Bitmap? = try {
@@ -2089,17 +2286,21 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      */
     private fun onAttachTapped() {
         val photos = { pickMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) }
-        val chat = gamesChat() ?: return photos()
+        val chat = gamesChat()
+        // iPhone-style chats: the "+" is the one way to everything that can be added, stickers too.
+        if (chat == null && !phoneStyle) return photos()
+        val choices = ArrayList<Pair<Int, () -> Unit>>()
+        choices += R.string.imessage_attach_photos to photos
+        if (chat != null) {
+            choices += R.string.imessage_attach_games to {
+                gamesSheet?.dismiss()
+                gamesSheet = com.lightdecoder.imessage.madrid.MadridHost.get(this).openGames(this, chat)
+            }
+        }
+        if (phoneStyle) choices += R.string.imessage_attach_stickers to { showStickers() }
         confirmDialog?.dismiss()
         confirmDialog = MaterialAlertDialogBuilder(this)
-            .setItems(arrayOf(getString(R.string.imessage_attach_photos), getString(R.string.imessage_attach_games))) { _, which ->
-                if (which == 0) {
-                    photos()
-                } else {
-                    gamesSheet?.dismiss()
-                    gamesSheet = com.lightdecoder.imessage.madrid.MadridHost.get(this).openGames(this, chat)
-                }
-            }
+            .setItems(choices.map { getString(it.first) }.toTypedArray()) { _, which -> choices[which].second() }
             .show()
     }
 
@@ -4002,6 +4203,13 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         private const val MAX_VOICE_RCS_MS = 10 * 60 * 1000
         private const val MAX_VOICE_MMS_MS = 3 * 60 * 1000
         private const val DISABLED_ALPHA = 0.38f
+
+        // iPhone-style chats ([PhoneStyle]): the bar's height, and the composer's pill.
+        private const val PHONE_BAR_DP = 64
+        private const val PHONE_FIELD_SIDE_DP = 14
+        private const val PHONE_FIELD_VERTICAL_DP = 8
+        private const val PHONE_FIELD_LIFT_DP = 5
+        private const val PHONE_FIELD_END_DP = 2
 
         /** How far behind this phone's clock a message may be stamped and still count as arriving now. */
         private const val READ_ALOUD_CLOCK_SLACK_MS = 2 * 60_000L

@@ -12,4 +12,15 @@
     <color name="imessage_light_grey">#FF8E8E93</color>
     <!-- Over a chat's background picture (iOS 26), so the messages and times on it stay readable. -->
     <color name="chat_background_scrim">#33000000</color>
+    <!-- iPhone-style chats (ui.chat.PhoneStyle): the user's iMessages, their texts, and other people's bubbles. -->
+    <color name="phone_screen">#FFFFFFFF</color>
+    <color name="phone_blue">#FF007AFF</color>
+    <color name="phone_green">#FF2DB24C</color>
+    <color name="phone_incoming">#FFE9E9EB</color>
+    <color name="phone_on_incoming">#FF000000</color>
+    <color name="phone_meta">#FF6E6E73</color>
+    <color name="phone_field_stroke">#FFC7C7CC</color>
+    <color name="phone_plus">#FFE9E9EB</color>
+    <color name="phone_on_plus">#FF3C3C43</color>
+    <color name="phone_typing_dot">#FF8E8E93</color>
 </resources>

@@ -57,6 +57,15 @@ class MessagesAdapter(
      */
     var appleReceipts: (MessageRow) -> Boolean = { false }
 
+    /**
+     * iPhone-style chats ([PhoneStyle]): blue, green and grey bubbles with tails, no time or ticks
+     * in them, tapbacks on their corner. Changed, every row must be bound again.
+     */
+    var phoneStyle = false
+
+    /** A picture is behind the messages: iPhone-style times and notices keep their pill, to stay readable on it. */
+    var onPicture = false
+
     interface Callbacks {
         fun onMessageLongPress(row: MessageRow)
         fun onFailedTap(row: MessageRow)
@@ -109,8 +118,15 @@ class MessagesAdapter(
     }
 
     class HeaderHolder(val binding: ItemThreadHeaderBinding) : RecyclerView.ViewHolder(binding.root)
-    class DayHolder(val binding: ItemDayHeaderBinding) : RecyclerView.ViewHolder(binding.root)
-    class SystemHolder(val binding: ItemMessageSystemBinding) : RecyclerView.ViewHolder(binding.root)
+    class DayHolder(val binding: ItemDayHeaderBinding) : RecyclerView.ViewHolder(binding.root) {
+        val pill: android.graphics.drawable.Drawable? = binding.dayLabel.background
+    }
+
+    class SystemHolder(val binding: ItemMessageSystemBinding) : RecyclerView.ViewHolder(binding.root) {
+        val padding = intArrayOf(
+            binding.systemText.paddingStart, binding.systemText.paddingTop, binding.systemText.paddingEnd, binding.systemText.paddingBottom,
+        )
+    }
 
     /** Colours resolved once per holder from the theme, so light and dark both work. */
     class MessageHolder(val binding: ItemMessageBinding) : RecyclerView.ViewHolder(binding.root) {
@@ -139,6 +155,27 @@ class MessagesAdapter(
         )
         val bubbleMinWidth = binding.bubble.minimumWidth
         val metaMarginTop = (binding.meta.layoutParams as android.widget.LinearLayout.LayoutParams).topMargin
+
+        // iPhone-style chats ([PhoneStyle]): their colours, and what the layout gave, to put back.
+        private val density = view.resources.displayMetrics.density
+        val phoneBlue = androidx.core.content.ContextCompat.getColor(view.context, R.color.phone_blue)
+        val phoneGreen = androidx.core.content.ContextCompat.getColor(view.context, R.color.phone_green)
+        val phoneIncoming = androidx.core.content.ContextCompat.getColor(view.context, R.color.phone_incoming)
+        val phoneOnIncoming = androidx.core.content.ContextCompat.getColor(view.context, R.color.phone_on_incoming)
+        val phoneMeta = androidx.core.content.ContextCompat.getColor(view.context, R.color.phone_meta)
+        val phoneBubble by lazy { PhoneBubbleDrawable(density) }
+        val rootPadding = intArrayOf(view.paddingStart, view.paddingTop, view.paddingEnd, view.paddingBottom)
+        val senderColor = binding.sender.currentTextColor
+        val senderMarginStart = (binding.sender.layoutParams as android.widget.LinearLayout.LayoutParams).marginStart
+        val receiptColor = binding.receipt.currentTextColor
+        val bodySpacing = binding.body.letterSpacing
+        val effectColor = binding.effect.currentTextColor
+        val editedMarginEnd = (binding.edited.layoutParams as android.widget.LinearLayout.LayoutParams).marginEnd
+        private val reactionsParams = binding.reactions.layoutParams as android.widget.LinearLayout.LayoutParams
+        val reactionsMargins = intArrayOf(
+            reactionsParams.marginStart, reactionsParams.topMargin, reactionsParams.marginEnd, reactionsParams.bottomMargin,
+        )
+        fun dp(value: Float): Int = (value * density).toInt()
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
@@ -154,7 +191,7 @@ class MessagesAdapter(
     override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
         when (val item = getItem(position)) {
             is ThreadItem.Header -> bindHeader(holder as HeaderHolder, item)
-            is ThreadItem.Day -> (holder as DayHolder).binding.dayLabel.text = item.label
+            is ThreadItem.Day -> bindDay(holder as DayHolder, item)
             is ThreadItem.Message ->
                 if (holder is SystemHolder) bindSystem(holder, item) else bindMessage(holder as MessageHolder, item)
         }
@@ -167,9 +204,43 @@ class MessagesAdapter(
         b.root.visibility = if (item.loading || item.complete) View.VISIBLE else View.GONE
     }
 
+    /** A day's name; in iPhone-style chats the time between messages ("**Today** 9:41 AM"), plain on the screen. */
+    private fun bindDay(holder: DayHolder, item: ThreadItem.Day) {
+        val label = holder.binding.dayLabel
+        val phone = phoneStyle && item.time.isNotEmpty()
+        label.text = if (phone) {
+            android.text.SpannableString("${item.label} ${item.time}").apply {
+                setSpan(android.text.style.StyleSpan(android.graphics.Typeface.BOLD), 0, item.label.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+        } else {
+            item.label
+        }
+        val pill = if (phoneStyle && !onPicture) null else holder.pill
+        if (label.background !== pill) {
+            val padding = intArrayOf(label.paddingStart, label.paddingTop, label.paddingEnd, label.paddingBottom)
+            label.background = pill
+            label.setPaddingRelative(padding[0], padding[1], padding[2], padding[3])
+        }
+    }
+
+    /** A notice; in iPhone-style chats small, grey and upright in the middle (on a picture, in a pill). */
     private fun bindSystem(holder: SystemHolder, item: ThreadItem.Message) {
         val context = holder.binding.root.context
-        holder.binding.systemText.text = item.row.text.ifBlank { context.getString(R.string.chat_system_message) }
+        val text = holder.binding.systemText
+        text.text = item.row.text.ifBlank { context.getString(R.string.chat_system_message) }
+        text.setTypeface(android.graphics.Typeface.DEFAULT, if (phoneStyle) android.graphics.Typeface.NORMAL else android.graphics.Typeface.ITALIC)
+        val pill = phoneStyle && onPicture
+        if (pill != (text.background != null)) {
+            if (pill) {
+                val d = context.resources.displayMetrics.density
+                text.setBackgroundResource(R.drawable.bg_day_header)
+                text.setPaddingRelative((12 * d).toInt(), (4 * d).toInt(), (12 * d).toInt(), (4 * d).toInt())
+            } else {
+                text.background = null
+                val p = holder.padding
+                text.setPaddingRelative(p[0], p[1], p[2], p[3])
+            }
+        }
     }
 
     private fun bindMessage(holder: MessageHolder, item: ThreadItem.Message) {
@@ -182,20 +253,26 @@ class MessagesAdapter(
         (b.column.layoutParams as FrameLayout.LayoutParams).gravity = if (outgoing) Gravity.END else Gravity.START
         b.column.gravity = if (outgoing) Gravity.END else Gravity.START
         val blue = outgoing && (blueOutgoing || blueFor(row))
+        val phone = phoneStyle
         val bubbleColor = when {
+            // As an iPhone tells them apart: the user's iMessages blue, their texts green.
+            phone && blue -> holder.phoneBlue
+            phone && outgoing -> holder.phoneGreen
+            phone -> holder.phoneIncoming
             blue -> holder.blueBubble
             outgoing -> holder.outgoingBubble
             else -> holder.incomingBubble
         }
-        val onOwn = if (blue) holder.onBlue else holder.onOutgoing
-        val textColor = if (outgoing) onOwn else holder.onIncoming
+        val onOwn = if (blue || phone) holder.onBlue else holder.onOutgoing
+        val textColor = if (outgoing) onOwn else if (phone) holder.phoneOnIncoming else holder.onIncoming
         val extra = if (row.extra.isEmpty()) NO_EXTRA else IMessageExtra.parse(row.extra)
         val app = extra.app
         // A picture or sticker on its own has no bubble: it sits on the conversation itself
         // (as on an iPhone), with its time under it in the conversation's own colours.
         val bare = isBare(item) && app == null
-        val metaColor = if (outgoing && !bare) onOwn else holder.incomingMeta
-        bindBubbleShape(holder, bare, outgoing)
+        val metaColor = if (outgoing && !bare) onOwn else if (phone) holder.phoneMeta else holder.incomingMeta
+        bindBubbleShape(holder, bare, outgoing, item.place?.last == true)
+        bindPhoneRow(holder, item, outgoing)
         b.bubble.backgroundTintList = ColorStateList.valueOf(bubbleColor)
         b.body.setTextColor(textColor)
         b.body.setLinkTextColor(textColor)
@@ -272,6 +349,7 @@ class MessagesAdapter(
             }
         )
         if (!edited) b.edited.isClickable = false
+        placeEdited(holder)
         val tick = MessageStatus.tickFor(row)
         // A send that may have gone out all the same has its own words: "Not sent" would invite a resend.
         val unconfirmed = MessageStatus.outcomeUnknown(row)
@@ -286,6 +364,25 @@ class MessagesAdapter(
         b.receipt.text = receipt.orEmpty()
         // Pictures sent together: one time line, under the last of them (a failed one keeps its own).
         b.meta.visibility = if (item.stackedWithNext && tick != Tick.FAILED) View.GONE else View.VISIBLE
+        if (phone) {
+            // As on an iPhone: no time and no ticks in a bubble (the time is between the messages, and in
+            // what TalkBack reads); "Edited" is under it. One still being sent is paler; a failed one says so under it.
+            b.time.visibility = View.GONE
+            b.statusIcon.visibility = View.GONE
+            b.meta.visibility = View.GONE
+            // Under the bubble: small and grey ("Edited" blue); on a picture white, with a shadow to stand out.
+            underBubble(b.receipt, holder.phoneMeta)
+            underBubble(b.edited, holder.phoneBlue)
+            underBubble(b.effect, holder.phoneMeta)
+            underBubble(b.sender, holder.phoneMeta)
+        } else {
+            b.time.visibility = View.VISIBLE
+            underBubble(b.receipt, holder.receiptColor)
+            underBubble(b.effect, holder.effectColor)
+            underBubble(b.sender, holder.senderColor)
+            b.edited.setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)
+        }
+        b.column.alpha = if (phone && tick == Tick.PENDING) PENDING_ALPHA else 1f
 
         // Failure notice under the bubble.
         val retryable = MessageStatus.canRetryLocally(row)
@@ -308,6 +405,7 @@ class MessagesAdapter(
         ViewCompat.replaceAccessibilityAction(b.failedText, AccessibilityActionCompat.ACTION_CLICK, failedTapLabel, null)
 
         bindReactions(holder, row)
+        placeReactions(holder, outgoing)
 
         // Long press anywhere on the bubble (the text view takes its own touches for links).
         val longPress = View.OnLongClickListener {
@@ -434,10 +532,25 @@ class MessagesAdapter(
     }
 
     /** The bubble's background, padding and the time's place: a bubble, or none for a [bare] picture. */
-    private fun bindBubbleShape(holder: MessageHolder, bare: Boolean, outgoing: Boolean) {
+    private fun bindBubbleShape(holder: MessageHolder, bare: Boolean, outgoing: Boolean, tail: Boolean) {
         val b = holder.binding
         val meta = b.meta.layoutParams as android.widget.LinearLayout.LayoutParams
-        if (bare) {
+        if (phoneStyle) {
+            // An iPhone's bubble: the tail's room on its own side (start for others', end for the user's).
+            val shape = holder.phoneBubble
+            val gutter = shape.gutter
+            val side = if (bare) 0 else holder.dp(PHONE_PADDING_SIDE_DP)
+            val vertical = if (bare) 0 else holder.dp(PHONE_PADDING_VERTICAL_DP)
+            shape.tail = tail
+            shape.tailRight = outgoing != (b.root.resources.configuration.layoutDirection == View.LAYOUT_DIRECTION_RTL)
+            b.bubble.background = if (bare) null else shape
+            b.bubble.setPaddingRelative(side + if (outgoing) 0 else gutter, vertical, side + if (outgoing) gutter else 0, vertical)
+            b.bubble.minimumWidth = if (bare) 0 else holder.dp(PHONE_MIN_WIDTH_DP)
+            meta.gravity = if (bare && !outgoing) Gravity.START else Gravity.END
+            meta.topMargin = 0
+            meta.marginStart = if (bare) META_INSET else 0
+            meta.marginEnd = if (bare) META_INSET else 0
+        } else if (bare) {
             b.bubble.background = null
             b.bubble.setPaddingRelative(0, 0, 0, 0)
             b.bubble.minimumWidth = 0
@@ -456,6 +569,114 @@ class MessagesAdapter(
             meta.marginEnd = 0
         }
         b.meta.layoutParams = meta
+    }
+
+    /**
+     * What iPhone-style chats change around a bubble: runs sit close with a gap between them, a
+     * bubble is at most three quarters of the screen wide, a group chat's names are small and
+     * grey, and the sender's picture is beside the last bubble of their run. Otherwise as the layout has it.
+     */
+    private fun bindPhoneRow(holder: MessageHolder, item: ThreadItem.Message, outgoing: Boolean) {
+        val b = holder.binding
+        val phone = phoneStyle
+        val place = item.place
+        val p = holder.rootPadding
+        if (phone) {
+            b.root.setPaddingRelative(
+                holder.dp(PHONE_ROW_SIDE_DP), holder.dp(if (place?.first != false) PHONE_RUN_GAP_DP else PHONE_IN_RUN_GAP_DP),
+                holder.dp(PHONE_ROW_SIDE_DP), holder.dp(PHONE_IN_RUN_GAP_DP),
+            )
+        } else {
+            b.root.setPaddingRelative(p[0], p[1], p[2], p[3])
+        }
+        b.column.maxWidthFraction = if (phone) PHONE_MAX_WIDTH_FRACTION else BubbleLayout.DEFAULT_MAX_WIDTH_FRACTION
+        val beside = phone && item.besideAvatar
+        val column = b.column.layoutParams as FrameLayout.LayoutParams
+        column.marginStart = if (beside) holder.dp(PHONE_AVATAR_ROOM_DP) else 0
+        b.column.layoutParams = column
+        val avatar = beside && place?.last == true
+        b.avatar.visibility = if (avatar) View.VISIBLE else View.GONE
+        if (avatar) {
+            val row = item.row
+            Avatars.bind(b.avatar, row.senderName.ifBlank { "?" }, row.senderId.ifBlank { row.senderName }, "")
+        }
+        val sender = b.sender.layoutParams as android.widget.LinearLayout.LayoutParams
+        sender.marginStart = holder.senderMarginStart + if (phone) holder.phoneBubble.gutter + holder.dp(2f) else 0
+        b.sender.layoutParams = sender
+        b.body.letterSpacing = if (phone) 0f else holder.bodySpacing
+    }
+
+    /** A line above or under a bubble in [color]; in iPhone-style chats over a picture, white with a shadow. */
+    private fun underBubble(view: TextView, color: Int) {
+        val lit = phoneStyle && onPicture
+        view.setTextColor(if (lit) Color.WHITE else color)
+        if (lit) view.setShadowLayer(4f, 0f, 1f, SHADOW) else view.setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)
+    }
+
+    /** "Edited": by the time in the bubble; in iPhone-style chats under the bubble, as on an iPhone. */
+    private fun placeEdited(holder: MessageHolder) {
+        val b = holder.binding
+        val edited = b.edited
+        val phone = phoneStyle
+        if (phone == (edited.parent === b.column)) return
+        (edited.parent as ViewGroup).removeView(edited)
+        val params = edited.layoutParams as android.widget.LinearLayout.LayoutParams
+        if (phone) {
+            val side = holder.dp(PHONE_FOOTER_SIDE_DP)
+            params.marginStart = side
+            params.marginEnd = side
+            params.topMargin = holder.dp(2f)
+            b.column.addView(edited, b.column.indexOfChild(b.bubble) + 1, params)
+        } else {
+            params.marginStart = 0
+            params.marginEnd = holder.editedMarginEnd
+            params.topMargin = 0
+            b.meta.addView(edited, 0, params)
+        }
+    }
+
+    /**
+     * Where the reactions go: under the bubble; in iPhone-style chats on its top corner, as tapbacks
+     * are on an iPhone (the far corner from the tail: left on the user's own, right on others').
+     * The row is then above the bubble in the column and drawn over it, so nothing is cut off: the
+     * list row grows by what sticks out.
+     */
+    private fun placeReactions(holder: MessageHolder, outgoing: Boolean) {
+        val b = holder.binding
+        val phone = phoneStyle
+        val column = b.column
+        val box = b.reactions
+        val at = column.indexOfChild(box)
+        val bubbleAt = column.indexOfChild(b.bubble)
+        if (phone && at > bubbleAt) {
+            column.removeView(box)
+            column.addView(box, column.indexOfChild(b.bubble))
+        } else if (!phone && at < bubbleAt) {
+            column.removeView(box)
+            column.addView(box, column.indexOfChild(b.bubble) + 1)
+        }
+        val params = box.layoutParams as android.widget.LinearLayout.LayoutParams
+        val m = holder.reactionsMargins
+        if (phone) {
+            params.marginStart = 0
+            params.marginEnd = 0
+            // A chip is a 48dp touch target around a 28dp pill: the pill's lower part lies on the bubble.
+            params.topMargin = -holder.dp(PHONE_TAPBACK_LIFT_DP)
+            params.bottomMargin = -holder.dp(PHONE_TAPBACK_OVERLAP_DP)
+            box.alignEnd = !outgoing
+        } else {
+            params.marginStart = m[0]
+            params.topMargin = m[1]
+            params.marginEnd = m[2]
+            params.bottomMargin = m[3]
+        }
+        box.layoutParams = params
+        // Above the bubble in the column, it is still drawn over it.
+        box.translationZ = if (phone) holder.dp(2f).toFloat() else 0f
+        val rtl = b.root.resources.configuration.layoutDirection == View.LAYOUT_DIRECTION_RTL
+        column.cornerChild = if (phone) box else null
+        column.cornerAnchor = if (phone) b.bubble else null
+        column.cornerLeft = outgoing != rtl
     }
 
     /** [unconfirmed]: a failed send that may have gone out ([MessageStatus.outcomeUnknown]). */
@@ -637,7 +858,15 @@ class MessagesAdapter(
             // centre the label in the pill, and the layout's side padding is put back.
             val padStart = chip.paddingStart
             val padEnd = chip.paddingEnd
-            chip.setBackgroundResource(if (reaction.fromMe) R.drawable.bg_reaction_mine_target else R.drawable.bg_reaction_target)
+            chip.setBackgroundResource(
+                when {
+                    phoneStyle && reaction.fromMe -> R.drawable.bg_phone_tapback_mine
+                    phoneStyle -> R.drawable.bg_phone_tapback
+                    reaction.fromMe -> R.drawable.bg_reaction_mine_target
+                    else -> R.drawable.bg_reaction_target
+                }
+            )
+            if (phoneStyle) chip.setTextColor(if (reaction.fromMe) holder.onBlue else holder.phoneOnIncoming)
             chip.setPaddingRelative(padStart, chip.paddingTop, padEnd, chip.paddingBottom)
             chip.contentDescription = box.context.resources.getQuantityString(
                 if (reaction.fromMe) R.plurals.chat_reaction_mine else R.plurals.chat_reaction, count, reaction.emoji, count,
@@ -720,6 +949,21 @@ class MessagesAdapter(
 
         /** The ticks that receipts in words stand in for ([appleReceipts]). */
         val RECEIPT_TICKS = setOf(Tick.SENT, Tick.DELIVERED, Tick.READ)
+
+        // iPhone-style chats ([PhoneStyle]).
+        const val PHONE_MAX_WIDTH_FRACTION = 0.75f
+        const val PHONE_PADDING_SIDE_DP = 13f
+        const val PHONE_PADDING_VERTICAL_DP = 8f
+        const val PHONE_MIN_WIDTH_DP = 46f
+        const val PHONE_ROW_SIDE_DP = 10f
+        const val PHONE_RUN_GAP_DP = 7f
+        const val PHONE_IN_RUN_GAP_DP = 1f
+        const val PHONE_AVATAR_ROOM_DP = 32f
+        const val PHONE_TAPBACK_LIFT_DP = 8f
+        const val PHONE_TAPBACK_OVERLAP_DP = 18f
+        const val PHONE_FOOTER_SIDE_DP = 8f
+        const val PENDING_ALPHA = 0.6f
+        const val SHADOW = 0xB3000000.toInt()
 
         /** Longest side of a picture in a bubble (decoded at this size or the bubble's width, shown up to it). */
         const val MEDIA_MAX_SIDE_DP = 480

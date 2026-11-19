@@ -39,8 +39,8 @@ android {
         applicationId = "com.lightdecoder"
         minSdk = 26
         targetSdk = 36
-        versionCode = 73
-        versionName = "0.5.62"
+        versionCode = 74
+        versionName = "0.5.63"
         // On-device tests (app/src/androidTest): the Blue Bubbles round trip against the
         // stand-in OpenBubbles app (:fakebubbles), run on an emulator by .github/workflows/device-test.yml.
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -758,6 +758,9 @@ val buildHostDecoder by tasks.registering(Exec::class) {
 tasks.withType<Test>().configureEach {
     dependsOn(buildHostDecoder)
     jvmArgs("-Djava.library.path=${hostDecoderDir.get().asFile.path}")
+    // Screenshots of the chat screen for review (PhoneStyleScreenTest) are written only when asked for:
+    // -Dlightdecoder.uiShots=<folder>.
+    System.getProperty("lightdecoder.uiShots")?.let { systemProperty("lightdecoder.uiShots", it) }
     testLogging {
         events("failed", "skipped")
         showStandardStreams = false

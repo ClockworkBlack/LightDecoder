@@ -209,6 +209,21 @@
                         android:text="@string/imessage_read_receipts_help"
                         android:textAppearance="?attr/textAppearanceBodySmall" />
 
+                    <!-- iPhone-style chats (DirectPrefs.phoneStyleOn, read in the main process by the chat screen). -->
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switchPhoneStyle"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:minHeight="48dp"
+                        android:text="@string/imessage_phone_style" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/imessage_phone_style_help"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+
                     <!-- iMessage games (DirectPrefs.gamesOn, read in the main process): OpenPigeon plays them. -->
                     <com.google.android.material.materialswitch.MaterialSwitch
                         android:id="@+id/switchGames"

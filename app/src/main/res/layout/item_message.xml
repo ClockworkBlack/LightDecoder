@@ -6,6 +6,19 @@
     android:paddingHorizontal="12dp"
     android:paddingVertical="2dp">
 
+    <!-- iPhone-style group chats: who sent it, beside the last bubble of their run. -->
+    <TextView
+        android:id="@+id/avatar"
+        android:layout_width="28dp"
+        android:layout_height="28dp"
+        android:layout_gravity="bottom|start"
+        android:gravity="center"
+        android:importantForAccessibility="no"
+        android:maxLines="1"
+        android:textSize="11sp"
+        android:textStyle="bold"
+        android:visibility="gone" />
+
     <com.lightdecoder.ui.chat.BubbleLayout
         android:id="@+id/column"
         android:layout_width="wrap_content"

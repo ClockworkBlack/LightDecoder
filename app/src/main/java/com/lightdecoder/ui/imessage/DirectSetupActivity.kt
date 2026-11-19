@@ -89,6 +89,9 @@ class DirectSetupActivity : AppCompatActivity() {
             DirectPrefs.setGamesOn(this, on)
             showGames()
         }
+        // On by default; the chat screen (main process) reads it.
+        binding.switchPhoneStyle.isChecked = DirectPrefs.phoneStyleOn(this)
+        binding.switchPhoneStyle.setOnCheckedChangeListener { _, on -> DirectPrefs.setPhoneStyleOn(this, on) }
         binding.getGames.setOnClickListener { MadridHost.openStore(this, MadridApps.OPENPIGEON) }
 
         showLibrary()
