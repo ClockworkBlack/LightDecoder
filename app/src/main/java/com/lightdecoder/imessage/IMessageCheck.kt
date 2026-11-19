@@ -40,12 +40,11 @@ object IMessageCheck {
         val done: Boolean get() = reply != Reply.NONE
     }
 
-    /** The check message: [code] tells it apart from anything else in the chat. */
-    fun text(code: String): String = "LightDecoder iMessage check $code. Please reply OK."
-
-    /** A four-digit code. */
-    fun newCode(random: kotlin.random.Random = kotlin.random.Random.Default): String =
-        random.nextInt(1000, 10000).toString()
+    /**
+     * The check message. It is told apart from an earlier one by when it was
+     * sent (only what comes after the send counts).
+     */
+    const val TEXT = "Reply \"OK\" (without quotes) to this to start chatting in iMessage"
 
     /**
      * Where a check of [text] sent at [sentAtMs] has got to.

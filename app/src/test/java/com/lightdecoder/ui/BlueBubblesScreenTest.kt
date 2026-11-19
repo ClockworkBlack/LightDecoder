@@ -428,7 +428,7 @@ class BlueBubblesScreenTest {
                     replies.size == 1
                 }
                 val check = replies.single()
-                assertTrue(check, check.startsWith("LightDecoder iMessage check "))
+                assertEquals(com.lightdecoder.imessage.IMessageCheck.TEXT, check)
                 assertTrue("not as a text", two.env.repo.messages("c1").none { it.text == check })
                 scenario.waitFor("step 1 ticked") { steps(it).lines().first().startsWith("\u2713") }
                 // OpenBubbles shows it back (it went to Apple as an iMessage).
@@ -497,7 +497,7 @@ class BlueBubblesScreenTest {
                 assertTrue(report.contains("== iMessage (Blue Bubbles) =="))
                 assertTrue(report.contains("Blue Bubbles: on"))
                 assertTrue(report.contains("step 2 shown back by OpenBubbles"))
-                for (secret in listOf("Alice", "5551234567", "555-123", check, check.filter(Char::isDigit), ALICE, "OK\n")) {
+                for (secret in listOf("Alice", "5551234567", "555-123", check, ALICE, "OK\n")) {
                     assertFalse("must not be in the log: $secret", log.any { it.contains(secret) })
                     assertFalse("must not be in the report: $secret", report.contains(secret))
                 }

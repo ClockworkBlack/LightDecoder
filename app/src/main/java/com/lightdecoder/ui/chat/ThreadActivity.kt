@@ -2317,7 +2317,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val companion = companionId
         val address = if (companion == null) otherAddress() ?: return toast(getString(R.string.imessage_no_address)) else null
         val name = supportActionBar?.title?.toString().orEmpty()
-        val text = com.lightdecoder.imessage.IMessageCheck.text(com.lightdecoder.imessage.IMessageCheck.newCode())
+        val text = com.lightdecoder.imessage.IMessageCheck.TEXT
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.imessage_check)
             .setMessage(

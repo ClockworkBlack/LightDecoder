@@ -194,7 +194,7 @@ class BlueBubblesDeviceTest {
                 shown.contains("Hi from my iPhone")
             }
             // Blue: she answers by iMessage.
-            val blueCheck = com.lightdecoder.imessage.IMessageCheck.text("1111")
+            val blueCheck = com.lightdecoder.imessage.IMessageCheck.TEXT
             scenario.onActivity { it.startIMessageCheck(blueCheck) }
             waitFor("the check through the Reply button") { replies.contains(blueCheck) }
             waitFor("OpenBubbles to show it back") { checkLine(scenario, 1).startsWith("\u2713") }
@@ -204,9 +204,12 @@ class BlueBubblesDeviceTest {
             scenario.onActivity { it.checkDialog?.dismiss() }
 
             // Green: she answers by text (it arrives in Google Messages).
-            val greenCheck = com.lightdecoder.imessage.IMessageCheck.text("2222")
+            // The same words again: only what comes after this send counts.
+            Thread.sleep(3_000)
+            val greenCheck = com.lightdecoder.imessage.IMessageCheck.TEXT
+            val before = replies.size
             scenario.onActivity { it.startIMessageCheck(greenCheck) }
-            waitFor("the second check through the Reply button") { replies.contains(greenCheck) }
+            waitFor("the second check through the Reply button") { replies.size > before && replies.last() == greenCheck }
             Thread.sleep(1_500)
             ArchiveRepository.get(context, ChatService.MESSAGES).upsertMessage(
                 com.lightdecoder.relay.MessageDto(
@@ -217,7 +220,7 @@ class BlueBubblesDeviceTest {
             val green = context.getString(R.string.imessage_check_green, "Alice")
             waitFor("the verdict: green") { checkVerdict(scenario) == green }
             assertTrue("no check went out as a text", ArchiveRepository.get(context, ChatService.MESSAGES).messages(MESSAGES_ID)
-                .none { it.isOutgoing && it.text.startsWith("LightDecoder iMessage check") })
+                .none { it.isOutgoing && it.text == com.lightdecoder.imessage.IMessageCheck.TEXT })
 
             // The iMessage log on a real Android system: every step, both verdicts, nothing private.
             val log = com.lightdecoder.imessage.IMessageLog.read(context).reversed()
@@ -228,7 +231,7 @@ class BlueBubblesDeviceTest {
             has("step 2 shown back by OpenBubbles")
             has("by iMessage: BLUE on their iPhone")
             has("by text: GREEN on their iPhone")
-            for (secret in listOf("Alice", "5551234567", "Hi from my iPhone", "1111", "2222", GUID)) {
+            for (secret in listOf("Alice", "5551234567", "Hi from my iPhone", "without quotes", GUID)) {
                 assertFalse("must not be in the log: $secret", log.any { it.contains(secret) })
             }
         }

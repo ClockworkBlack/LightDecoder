@@ -23,6 +23,12 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.37 (versionCode 45) - Check iMessage wording
+- The check message is now exactly `Reply "OK" (without quotes) to this to start chatting in iMessage`
+  (`IMessageCheck.TEXT`, user's wording). No code in it any more: a check is told apart from an earlier one
+  by its send time. Sent twice in a row with nothing from them in between, OpenBubbles would drop the second
+  as a repeat reply, so that one goes through OpenBubbles' screen (user taps send).
+
 ## 0.5.36 (versionCode 44) - Check iMessage keeps running when closed
 - The running check lives in `imessage/IMessageChecks` (app-wide, one at a time), not in its dialog. "Close
   (keeps checking)" hides it; "Stop check" ends it; the thread menu reads "Check iMessage (checking...)" and

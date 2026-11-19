@@ -10,15 +10,24 @@ import org.junit.Test
 /** Check iMessage: what the archives say about how far a check got and how the person replied. */
 class IMessageCheckTest {
 
-    private val text = IMessageCheck.text("4821")
+    private val text = IMessageCheck.TEXT
     private val sentAt = 100_000L
 
     @Test
-    fun theCheckMessageCarriesItsCode() {
-        assertEquals("LightDecoder iMessage check 4821. Please reply OK.", text)
-        val code = IMessageCheck.newCode()
-        assertEquals(4, code.length)
-        assertTrue(code.all(Char::isDigit))
+    fun theCheckMessageAsksForAnOk() {
+        assertEquals("Reply \"OK\" (without quotes) to this to start chatting in iMessage", text)
+    }
+
+    @Test
+    fun anEarlierCheckDoesNotCount() {
+        // The same words sent by an earlier check, and its reply, are older than this one.
+        val p = IMessageCheck.progress(
+            text, sentAt,
+            listOf(row("ob:old", text, sentAt - 60_000, out = true), row("ob:oldreply", "OK", sentAt - 50_000)),
+            emptyList(),
+        )
+        assertFalse(p.handedOver)
+        assertEquals(Reply.NONE, p.reply)
     }
 
     @Test
