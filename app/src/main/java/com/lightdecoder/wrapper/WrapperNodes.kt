@@ -10,6 +10,9 @@ import android.graphics.Rect
 interface UiNode {
     val text: String
     val description: String
+
+    /** A tooltip (Android 9+): Flutter puts an icon button's name ("Undo Send", "Show menu") here. */
+    val tooltip: String get() = ""
     val hint: String
     val className: String
     val bounds: Rect
@@ -37,28 +40,31 @@ object WrapperNodes {
 
     private fun norm(s: String) = s.lowercase().replace(Regex("\\s+"), " ").trim()
 
-    /** What a node says: its text, else its description (a Flutter label or tooltip). */
-    fun said(n: UiNode): String = n.text.ifBlank { n.description }
+    /** What a node says: its text, else its description (a Flutter label), else its tooltip. */
+    fun said(n: UiNode): String = n.text.ifBlank { n.description.ifBlank { n.tooltip } }
 
     /**
      * The bubble of the message that reads [text]: the lowest one on screen (the newest) whose words
      * contain the message's first words. Null if it is not on screen.
      */
-    fun message(root: UiNode, text: String): UiNode? {
+    fun message(root: UiNode, text: String, mine: Boolean = false): UiNode? {
         val want = norm(text).take(MATCH_CHARS)
         if (want.isEmpty()) return null
-        return all(root).filter { !it.editable && norm(said(it)).contains(want) }
-            .maxByOrNull { bottomOf(it) }
+        val found = all(root).filter { !it.editable && norm(said(it)).contains(want) }.toList()
+        // The user's own messages sit on the right: with several alike ("Test", "Test"), one of theirs.
+        val middle = boundsOf(root).centerX()
+        val pick = if (mine && middle > 0) found.filter { boundsOf(it).centerX() > middle }.ifEmpty { found } else found
+        return pick.maxByOrNull { boundsOf(it).bottom }
     }
 
-    /** Where a node ends on screen: its own bounds, or (a label with none) its nearest ancestor's. */
-    private fun bottomOf(n: UiNode): Int {
+    /** Where a node is on screen: its own bounds, or (a label with none) its nearest ancestor's. */
+    private fun boundsOf(n: UiNode): Rect {
         var cur: UiNode? = n
         while (cur != null) {
-            if (!cur.bounds.isEmpty) return cur.bounds.bottom
+            if (!cur.bounds.isEmpty) return cur.bounds
             cur = cur.parent
         }
-        return 0
+        return Rect()
     }
 
     /** The node to long-press for [n]: itself or the nearest ancestor that takes a long press. */
@@ -148,6 +154,9 @@ object WrapperNodes {
         }
         return best
     }
+
+    /** How many "You unsent a message" lines are on screen (one more shows once Undo Send has gone). */
+    fun unsentCount(root: UiNode): Int = all(root).count { norm(said(it)).contains("unsent a message") }
 
     /** A list that can scroll back to older messages. */
     fun scrollable(root: UiNode): UiNode? = all(root).filter { it.scrollable }.maxByOrNull { it.bounds.height() }

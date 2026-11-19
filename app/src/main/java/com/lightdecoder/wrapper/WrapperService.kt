@@ -37,8 +37,8 @@ import kotlinx.coroutines.launch
  * Undo Send. It opens the chat, finds the message, long-presses it, picks the
  * action, types, sends, and brings LightDecoder back, behind a cover of
  * LightDecoder's own so OpenBubbles is not seen working. Every step and its
- * time are in the iMessage log; anything not found leaves OpenBubbles open
- * for the user to finish.
+ * time are in the iMessage log; when anything is not found LightDecoder is
+ * brought back all the same, offering to try again or do it in OpenBubbles.
  */
 class WrapperService : AccessibilityService() {
 
@@ -67,14 +67,45 @@ class WrapperService : AccessibilityService() {
         super.onDestroy()
     }
 
-    /** Runs [job]; one at a time. */
+    /** Jobs waiting for the one under way (main thread only). */
+    private val queue = ArrayDeque<Wrapper.Job>()
+
+    /** The job under way, if any. */
+    @Volatile
+    private var current: Wrapper.Job? = null
+
+    /** Set to stop the job under way (a look for receipts the user's own action or a tap overrides). */
+    @Volatile
+    private var stop = false
+
+    /**
+     * Runs [job], one at a time. The user's own jobs come first: a look for receipts under way is
+     * stopped for them, and others wait their turn (they no longer fail as "busy"). A look for receipts
+     * while anything is under way or waiting is dropped.
+     */
     fun run(job: Wrapper.Job) {
-        if (busy) {
-            Wrapper.finish(this, job, Wrapper.Result(false, "busy", 0))
-            return
-        }
-        busy = true
         scope.launch {
+            val now = current
+            if (now != null) {
+                if (job.kind == Wrapper.Kind.STATUS) return@launch
+                if (now.kind == Wrapper.Kind.STATUS) stop = true
+                queue.removeAll { it.kind == Wrapper.Kind.STATUS }
+                queue.addLast(job)
+                return@launch
+            }
+            if (job.kind == Wrapper.Kind.STATUS && queue.isNotEmpty()) return@launch
+            go(job)
+        }
+    }
+
+    private suspend fun go(first: Wrapper.Job) {
+        var job = first
+        // Silent: a still of the screen as it is now stays in front while OpenBubbles works underneath.
+        current = job
+        stop = false
+        busy = true
+        freeze(touchStops = job.kind == Wrapper.Kind.STATUS)
+        while (true) {
             val started = SystemClock.elapsedRealtime()
             val steps = ArrayList<String>()
             var stepAt = started
@@ -83,27 +114,35 @@ class WrapperService : AccessibilityService() {
                 steps += "$name ${now - stepAt}ms"
                 stepAt = now
             }
-            // Silent: a still of the screen as it is now stays in front while OpenBubbles works underneath.
-            freeze()
             val failedAt: String? = try {
                 perform(job, ::mark)
             } catch (e: Exception) {
                 "error ${e.javaClass.simpleName}"
-            }
+            }.let { if (it != null && stop) "stopped for you" else it }
             val total = SystemClock.elapsedRealtime() - started
             IMessageLog.add(
                 this@WrapperService,
                 "Wrapper ${job.kind.name.lowercase()} ${IMessageLog.chatRef(job.chatGuid)}: " +
                     (if (failedAt == null) "done" else "stopped at $failedAt") + " in ${total}ms (${steps.joinToString(", ")})",
             )
-            busy = false
-            if (failedAt == null) {
+            val next = queue.removeFirstOrNull()
+            if (next == null) {
+                // Always back to LightDecoder, done or not: the user is never left in OpenBubbles.
                 bringBack(job)
                 // LightDecoder is drawn again behind the still before it goes: no flash.
                 delay(RETURN_MS)
+                current = null
+                busy = false
+                unfreeze()
+                Wrapper.finish(this@WrapperService, job, Wrapper.Result(failedAt == null, failedAt, total))
+                return
             }
-            unfreeze()
+            // The next one goes on behind the same still, with no trip back to LightDecoder between.
             Wrapper.finish(this@WrapperService, job, Wrapper.Result(failedAt == null, failedAt, total))
+            job = next
+            current = job
+            stop = false
+            touchStops = false
         }
     }
 
@@ -119,8 +158,7 @@ class WrapperService : AccessibilityService() {
         }
         // Whatever was done, OpenBubbles' chat is on screen: what it says under the newest message.
         if (failed == null && job.kind != Wrapper.Kind.STATUS) {
-            waitFor(RECEIPT_MS) { root -> if (WrapperNodes.receipt(root) != null) root else null }
-                ?.let(WrapperNodes::receipt)?.let { Wrapper.receipt(this, job.chatGuid, it) }
+            root()?.let(WrapperNodes::receipt)?.let { Wrapper.receipt(this, job.chatGuid, it) }
         }
         return failed
     }
@@ -143,13 +181,14 @@ class WrapperService : AccessibilityService() {
         waitFor(OPEN_MS) { root -> WrapperNodes.field(root) } ?: return "chat"
         mark("chat")
         // 2. The message replied to (or to unsend), scrolling back to it if need be.
-        var bubble = waitFor(SHORT_MS) { root -> WrapperNodes.message(root, job.targetText) }
+        val mine = job.kind != Wrapper.Kind.REPLY && job.kind != Wrapper.Kind.REACT
+        var bubble = waitFor(SHORT_MS) { root -> WrapperNodes.message(root, job.targetText, mine) }
         var scrolls = 0
         while (bubble == null && scrolls < MAX_SCROLLS) {
             val list = root()?.let(WrapperNodes::scrollable) ?: break
             act(list, AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
             scrolls++
-            bubble = waitFor(SCROLL_MS) { root -> WrapperNodes.message(root, job.targetText) }
+            bubble = waitFor(SCROLL_MS) { root -> WrapperNodes.message(root, job.targetText, mine) }
         }
         bubble ?: return "message"
         mark(if (scrolls > 0) "message (scrolled $scrolls)" else "message")
@@ -188,9 +227,12 @@ class WrapperService : AccessibilityService() {
             item = waitFor(MENU_MS) { root -> WrapperNodes.action(root, title) } ?: return "menu item"
         }
         mark("menu")
+        val unsentBefore = if (job.kind == Wrapper.Kind.UNSEND) root()?.let(WrapperNodes::unsentCount) ?: 0 else 0
         if (!click(item)) return "menu item"
         if (job.kind == Wrapper.Kind.UNSEND) {
-            delay(SETTLE_MS)
+            // Done when OpenBubbles shows one more "You unsent a message".
+            waitFor(UNSENT_MS) { root -> if (WrapperNodes.unsentCount(root) > unsentBefore) root else null }
+                ?: return "undo send not shown"
             mark("undo send")
             return null
         }
@@ -256,6 +298,7 @@ class WrapperService : AccessibilityService() {
     private suspend fun waitFor(timeoutMs: Long, find: (UiNode) -> UiNode?): UiNode? {
         val deadline = SystemClock.elapsedRealtime() + timeoutMs
         while (true) {
+            if (stop) return null
             root()?.let { r -> find(r)?.let { return it } }
             if (SystemClock.elapsedRealtime() > deadline) return null
             delay(POLL_MS)
@@ -302,7 +345,12 @@ class WrapperService : AccessibilityService() {
      * everything, taking touches, so nothing is seen or tapped while OpenBubbles works. Without a
      * screenshot, a plain cover of LightDecoder's own colour.
      */
-    private suspend fun freeze() {
+    /** A look for receipts: a tap on the still stops it and LightDecoder is back at once. */
+    @Volatile
+    private var touchStops = false
+
+    private suspend fun freeze(touchStops: Boolean) {
+        this.touchStops = touchStops
         if (cover != null) return
         val wm = getSystemService(WindowManager::class.java) ?: return
         val still = screenshot()
@@ -320,7 +368,10 @@ class WrapperService : AccessibilityService() {
             }
         }
         // Touches stop here (they would land in OpenBubbles).
-        view.setOnTouchListener { _, _ -> true }
+        view.setOnTouchListener { _, e ->
+            if (this.touchStops && e.actionMasked == android.view.MotionEvent.ACTION_DOWN) stop = true
+            true
+        }
         val p = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
@@ -388,6 +439,8 @@ class WrapperService : AccessibilityService() {
     private class AccNode(val info: AccessibilityNodeInfo, override val parent: UiNode?) : UiNode {
         override val text: String get() = info.text?.toString().orEmpty()
         override val description: String get() = info.contentDescription?.toString().orEmpty()
+        override val tooltip: String
+            get() = if (android.os.Build.VERSION.SDK_INT >= 28) info.tooltipText?.toString().orEmpty() else ""
         override val hint: String get() = info.hintText?.toString().orEmpty()
         override val className: String get() = info.className?.toString().orEmpty()
         override val bounds: Rect by lazy { Rect().also(info::getBoundsInScreen) }
@@ -416,9 +469,11 @@ class WrapperService : AccessibilityService() {
         private const val SHOT_MS = 700L
         private const val ATTACH_MS = 600L
         private const val RECEIPT_MS = 900L
+        private const val UNSENT_MS = 2_500L
 
         /** A job under way (a look for receipts is not started then). */
         fun isBusy(): Boolean = running?.busy == true
+
         private const val RETURN_MS = 250L
     }
 }

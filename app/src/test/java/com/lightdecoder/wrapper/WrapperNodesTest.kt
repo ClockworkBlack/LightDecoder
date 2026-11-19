@@ -22,6 +22,7 @@ class WrapperNodesTest {
         override val longClickable: Boolean = false,
         override val editable: Boolean = false,
         override val scrollable: Boolean = false,
+        override val tooltip: String = "",
         kids: List<N> = emptyList(),
     ) : UiNode {
         override var parent: UiNode? = null
@@ -47,6 +48,33 @@ class WrapperNodesTest {
         assertSame("the lowest on screen, the newest", newDinner, WrapperNodes.message(screen, "dinner   AT 7?"))
         assertNull(WrapperNodes.message(screen, "Something else"))
         assertSame("its bubble takes the long press", newBubble, WrapperNodes.longPressTarget(newDinner))
+    }
+
+    @Test
+    fun iconButtonsAreFoundByTheirTooltip() {
+        // Flutter gives an IconButton's name as its tooltip, not its description.
+        val undo = N(tooltip = "Undo Send", clickable = true)
+        val more = N(tooltip = "Show menu", clickable = true)
+        val menu = N(kids = listOf(N(tooltip = "Reply", clickable = true), undo, more))
+        assertSame(undo, WrapperNodes.action(menu, "Undo Send"))
+        assertSame(more, WrapperNodes.more(menu))
+    }
+
+    @Test
+    fun ofSeveralAlikeTheUsersOwnOnTheRightIsPicked() {
+        val theirs = N(description = "Test")
+        val theirBubble = N(longClickable = true, bounds = Rect(20, 1200, 300, 1300), kids = listOf(theirs))
+        val mine = N(description = "Test")
+        val myBubble = N(longClickable = true, bounds = Rect(780, 1000, 1060, 1100), kids = listOf(mine))
+        val chat = N(bounds = Rect(0, 0, 1080, 2000), kids = listOf(myBubble, theirBubble))
+        assertSame("the newest, whoever sent it", theirs, WrapperNodes.message(chat, "Test"))
+        assertSame("the user's own", mine, WrapperNodes.message(chat, "Test", mine = true))
+    }
+
+    @Test
+    fun theUnsentLinesAreCounted() {
+        val chat = N(kids = listOf(N(text = "You unsent a message. Others may still see it"), N(text = "Test"), N(text = "You unsent a message.")))
+        assertEquals(2, WrapperNodes.unsentCount(chat))
     }
 
     @Test

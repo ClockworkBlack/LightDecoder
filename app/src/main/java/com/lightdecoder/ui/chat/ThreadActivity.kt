@@ -457,6 +457,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         MessageNotifier.cancel(this, conversationId, manager.service)
         com.lightdecoder.relay.ReadNotifier.cancel(this, manager.service, conversationId)
         markCompanionVisible()
+        // A wrapper job that did not go: shown here, with Try again / Do it in OpenBubbles.
+        com.lightdecoder.wrapper.Wrapper.onFailure = wrapperFailure
+        com.lightdecoder.wrapper.Wrapper.takeFailure()?.let(::showWrapperFailure)
+        scheduleReceiptLook()
         // iMessage pictures OpenBubbles has saved meanwhile.
         if (com.lightdecoder.imessage.IMessagePrefs.enabled(this) &&
             (manager.service == ChatService.MESSAGES || manager.service == ChatService.IMESSAGE)
@@ -468,6 +472,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             MessageNotifier.setVisibleConversationId(manager.service, null)
         }
         companionId?.let { if (MessageNotifier.visibleConversationId(ChatService.IMESSAGE) == it) MessageNotifier.setVisibleConversationId(ChatService.IMESSAGE, null) }
+        receiptHandler.removeCallbacks(receiptRunnable)
+        if (com.lightdecoder.wrapper.Wrapper.onFailure === wrapperFailure) com.lightdecoder.wrapper.Wrapper.onFailure = null
         // Nothing is recorded while the screen is not in front: a half-made recording is thrown away.
         if (recorder != null && !isChangingConfigurations) cancelRecording(quietly = false)
         super.onPause()
@@ -700,8 +706,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         // Read receipts (wrapper): a quick look in OpenBubbles, when one of the user's iMessages here is not read yet.
         val receiptChat = if (link.service == ChatService.IMESSAGE) id else snapshot.companion
         if (receiptChat != null && lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
-            val back = RelayIntents.thread(this, id, service = link.service)
-            runInBackground { com.lightdecoder.wrapper.Wrapper.checkReceipts(applicationContext, receiptChat, back) }
+            receiptLook = receiptChat to RelayIntents.thread(this, id, service = link.service)
+            scheduleReceiptLook()
         }
         markCompanionVisible()
         val localExhausted = snapshot.rows.size < wanted
@@ -2603,6 +2609,58 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             .show()
     }
 
+    // --- the wrapper: receipts, and jobs that did not go --------------------------------------
+
+    /** The iMessage chat to look at for receipts, and the way back here. */
+    private var receiptLook: Pair<String, Intent>? = null
+    private val receiptHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val receiptRunnable = Runnable {
+        val (chat, back) = receiptLook ?: return@Runnable
+        if (!lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) || recorder != null) return@Runnable
+        runInBackground { com.lightdecoder.wrapper.Wrapper.checkReceipts(applicationContext, chat, back) }
+    }
+
+    /**
+     * A look for receipts only once the conversation has been left untouched for [RECEIPT_IDLE_MS]: the
+     * still it works behind never takes a tap meant for this screen.
+     */
+    private fun scheduleReceiptLook() {
+        receiptHandler.removeCallbacks(receiptRunnable)
+        if (receiptLook != null && com.lightdecoder.wrapper.Wrapper.receipts(this)) receiptHandler.postDelayed(receiptRunnable, RECEIPT_IDLE_MS)
+    }
+
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        if (receiptLook != null) scheduleReceiptLook()
+    }
+
+    private val wrapperFailure: (com.lightdecoder.wrapper.Wrapper.Failure) -> Unit = { f -> runOnUiThread { showWrapperFailure(f) } }
+
+    private fun showWrapperFailure(f: com.lightdecoder.wrapper.Wrapper.Failure) {
+        if (isFinishing || isDestroyed) return
+        val job = f.job
+        val kind = job.kind
+        // Again from here works for these (a reply or pictures were already taken back; OpenBubbles has them).
+        val retry = kind == com.lightdecoder.wrapper.Wrapper.Kind.UNSEND || kind == com.lightdecoder.wrapper.Wrapper.Kind.EDIT ||
+            kind == com.lightdecoder.wrapper.Wrapper.Kind.REACT
+        val step = f.result.stoppedAt?.let { "\n\n" + getString(R.string.wrapper_failed_step, it) }.orEmpty()
+        val dialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.wrapper_failed_title)
+            .setMessage(f.words + step)
+            .setNegativeButton(R.string.wrapper_do_in_openbubbles) { _, _ ->
+                val opened = com.lightdecoder.wrapper.Wrapper.doInOpenBubbles(this, job) ||
+                    iMessageLink.handOff(this, job.chatGuid, "") || com.lightdecoder.imessage.OpenBubbles.launch(this)
+                if (!opened) toast(errorText(iMessageLink, com.lightdecoder.imessage.IMessageErrors.NOT_INSTALLED))
+            }
+            .setNeutralButton(android.R.string.cancel, null)
+        if (retry) dialog.setPositiveButton(R.string.wrapper_try_again) { _, _ ->
+            if (!com.lightdecoder.wrapper.Wrapper.start(this, job) && !wrapperIsOff { com.lightdecoder.wrapper.Wrapper.doInOpenBubbles(this, job) }) {
+                com.lightdecoder.wrapper.Wrapper.doInOpenBubbles(this, job)
+            }
+        }
+        dialog.show()
+    }
+
     // --- unsending an iMessage ------------------------------------------------------------
 
     /**
@@ -3048,6 +3106,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
         /** How long after sending Apple lets an iMessage be unsent. */
         private const val UNSEND_WINDOW_MS = 2 * 60 * 1000L
+        private const val RECEIPT_IDLE_MS = 2_500L
 
         /** Most pictures picked for one message. */
         private const val MAX_ATTACHMENTS = 10

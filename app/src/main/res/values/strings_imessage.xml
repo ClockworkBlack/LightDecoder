@@ -70,12 +70,12 @@
     <string name="wrapper_off_body">The OpenBubbles wrapper is switched on in LightDecoder, but its accessibility permission is off, so it cannot do this for you. Android can turn it off when LightDecoder updates.\n\nTurn on \u201cLightDecoder: OpenBubbles wrapper (beta)\u201d in Android\u2019s accessibility settings, then try again.</string>
     <string name="wrapper_off_use_openbubbles">Do it in OpenBubbles</string>
     <string name="wrapper_receipts_setting">Read receipts (wrapper)</string>
-    <string name="wrapper_failed_send">It could not be sent for you. OpenBubbles is open with it ready: tap send there.</string>
+    <string name="wrapper_failed_send">Those could not be sent for you.</string>
     <string name="wrapper_cover_react">Reacting in OpenBubbles\u2026</string>
-    <string name="wrapper_failed_edit">The edit could not be finished. OpenBubbles is open with the chat; the new text is copied.</string>
-    <string name="wrapper_failed_react">OpenBubbles did not offer %1$s. It is open with the chat: long-press the message to react there.</string>
-    <string name="wrapper_failed_reply">The inline reply could not be finished. OpenBubbles is open with the chat; your text is copied.</string>
-    <string name="wrapper_failed_unsend">Undo Send could not be finished. OpenBubbles is open with the chat: long-press the message and tap Undo Send.</string>
+    <string name="wrapper_failed_edit">The edit could not be finished; the new text is copied.</string>
+    <string name="wrapper_failed_react">OpenBubbles did not offer %1$s for that message.</string>
+    <string name="wrapper_failed_reply">The inline reply could not be finished; your text is copied.</string>
+    <string name="wrapper_failed_unsend">Undo Send could not be finished.</string>
     <string name="wrapper_replying_to">Replying to %1$s (inline, through OpenBubbles)</string>
     <string name="imessage_media_waiting">Picture from OpenBubbles · tap</string>
     <string name="imessage_media_title">Pictures from iMessage</string>
@@ -137,4 +137,9 @@
     <string name="imessage_error_hand_off">That is done in OpenBubbles.</string>
     <string name="imessage_error_unsupported">iMessages here cannot do that.</string>
     <string name="imessage_error_internal">Something went wrong with Blue Bubbles.</string>
+    <string name="wrapper_failed_title">Not finished in OpenBubbles</string>
+    <string name="wrapper_failed_step">Stopped at: %1$s</string>
+    <string name="wrapper_try_again">Try again</string>
+    <string name="wrapper_do_in_openbubbles">Do it in OpenBubbles</string>
+    <string name="wrapper_failed_toast">%1$s Open the conversation to try again.</string>
 </resources>

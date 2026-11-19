@@ -75,7 +75,10 @@ object Wrapper {
 
     /** Chats looked at for receipts, and when: at most every [RECEIPT_EVERY_MS] each. */
     private val lookedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
-    private const val RECEIPT_EVERY_MS = 90_000L
+    private const val RECEIPT_EVERY_MS = 5 * 60_000L
+
+    /** Forgets when chats were looked at (tests). */
+    internal fun forgetLooks() = lookedAt.clear()
 
     /**
      * Looks in OpenBubbles for whether the user's newest iMessage in [chatGuid] was delivered or read, when it
@@ -146,10 +149,12 @@ object Wrapper {
         }
     }
 
-    /** After a job: a reply shown as sent stays; one that did not go is taken back and left for the user in OpenBubbles. */
+    /** After a job: a reply shown as sent stays; one that did not go is taken back and offered again. */
     internal fun finish(context: Context, job: Job, result: Result) {
         val app = context.applicationContext
         val local = job.localId
+        // The chat was just on screen (its receipt read if shown): no separate look for a while.
+        lookedAt[job.chatGuid] = System.currentTimeMillis()
         // Shown here as done: OpenBubbles notifies none of these.
         if (result.ok && job.targetId != null) {
             runCatching {
@@ -167,18 +172,53 @@ object Wrapper {
                 app.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText("reply", job.text))
             }
         }
-        val words = when {
-            result.ok -> null
-            job.kind == Kind.REPLY -> app.getString(R.string.wrapper_failed_reply)
-            job.kind == Kind.EDIT -> app.getString(R.string.wrapper_failed_edit)
-            job.kind == Kind.REACT -> app.getString(R.string.wrapper_failed_react, job.text)
-            job.kind == Kind.SEND -> app.getString(R.string.wrapper_failed_send)
-            // A look for receipts that did not work says nothing.
-            job.kind == Kind.STATUS -> null
-            else -> app.getString(R.string.wrapper_failed_unsend)
+        val words = failureWords(app, job)
+        if (words != null) {
+            failed = Failure(job, result, words)
+            val main = Handler(Looper.getMainLooper())
+            main.post {
+                // The conversation the job came from shows it (Try again / Do it in OpenBubbles) once it is back.
+                if (onFailure?.let { show -> takeFailure()?.let(show); true } != true) {
+                    main.postDelayed({ takeFailure()?.let { Toast.makeText(app, app.getString(R.string.wrapper_failed_toast, it.words), Toast.LENGTH_LONG).show() } }, UNSHOWN_MS)
+                }
+            }
         }
-        if (words != null) Handler(Looper.getMainLooper()).post { Toast.makeText(app, words, Toast.LENGTH_LONG).show() }
         listener?.invoke(job, result)
+    }
+
+    /** What to tell the user when [job] did not go; null for a look for receipts. */
+    private fun failureWords(app: Context, job: Job): String? = when (job.kind) {
+        Kind.REPLY -> app.getString(R.string.wrapper_failed_reply)
+        Kind.EDIT -> app.getString(R.string.wrapper_failed_edit)
+        Kind.REACT -> app.getString(R.string.wrapper_failed_react, job.text)
+        Kind.SEND -> app.getString(R.string.wrapper_failed_send)
+        Kind.UNSEND -> app.getString(R.string.wrapper_failed_unsend)
+        // A look for receipts that did not work says nothing.
+        Kind.STATUS -> null
+    }
+
+    /** A job that did not go, waiting for its conversation to show it. */
+    data class Failure(val job: Job, val result: Result, val words: String)
+
+    @Volatile
+    private var failed: Failure? = null
+
+    /** The failure not shown yet, taken (shown once). */
+    @Synchronized
+    fun takeFailure(): Failure? = failed.also { failed = null }
+
+    /** Set by the conversation on screen: shows a failure to the user. */
+    @Volatile
+    var onFailure: ((Failure) -> Unit)? = null
+
+    private const val UNSHOWN_MS = 2_500L
+
+    /** Does [job] in OpenBubbles by hand: its composer (pictures) or the chat opened normally. */
+    fun doInOpenBubbles(context: Context, job: Job): Boolean {
+        job.open?.let { intent ->
+            if (runCatching { context.startActivity(Intent(intent).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }.isSuccess) return true
+        }
+        return IMessageReplies.open(context, job.chatGuid)
     }
 
     /** Told when a job ends (tests, and the screen that started it). */

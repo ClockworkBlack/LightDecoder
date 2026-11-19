@@ -34,6 +34,26 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - Pictures were already shown from the original file, decoded at the bubble's size, and full resolution and
   zoomable in the gallery (HEIC included).
 - versionCode 55–57 were wrapper-branch builds, so main jumps to 58 to install over them.
+## 0.5.50-wrapper (versionCode 60) - BRANCH ccr-4fee5e9f-jrrlhu-wrapper: wrapper faster and steadier
+- User report: laggy, Unsend took two presses then "could not be finished", sometimes left in OpenBubbles.
+  Causes found: the receipt look (`Kind.STATUS`) ran as soon as a conversation opened, behind a
+  touch-eating still, so the first tap was lost and a job started meanwhile failed as "busy"; a failed
+  job left OpenBubbles in front; Flutter icon buttons ("Undo Send", "Show menu") name themselves in
+  `tooltipText`, which was not read.
+- `WrapperService.run` queues jobs (main thread): the user's job stops a running receipt look (`stop`,
+  checked in `waitFor`) and others wait their turn; receipt looks are dropped while anything is under way.
+  Queued jobs run behind the same still with no trip back between.
+- LightDecoder is always brought back, done or not. A failure is kept in `Wrapper.takeFailure()` and the
+  conversation shows it (`ThreadActivity.showWrapperFailure`): Try again (Unsend, Edit, react) or Do it in
+  OpenBubbles (`Wrapper.doInOpenBubbles`: the composer for pictures, else the chat); a toast if no
+  conversation takes it within 2.5 s.
+- `UiNode.tooltip` (API 28+) is read by `WrapperNodes.said`. Unsend/Edit pick the user's own bubble (right
+  half) among alike ones. Undo Send now counts as done only when one more "You unsent a message" shows.
+- Receipt looks: only after the conversation is untouched for 2.5 s (`onUserInteraction` resets it), at
+  most every 5 min a chat, never right after a job in that chat; a tap on the still stops a look. No more
+  900 ms receipt wait after each job (one read of what is on screen).
+- Not diagnosed: "lost chat history on update" (asked the user for which conversation and the iMessage log).
+
 ## 0.5.48-wrapper (versionCode 57) - BRANCH ccr-4fee5e9f-jrrlhu-wrapper: receipts, tapbacks, unsent, wrapper-off prompt
 - On the user's phone, Unsend and Edit fell back to OpenBubbles. In 0.5.46 that happens when the wrapper is
   switched on but its accessibility service is not running: Android (Samsung especially) can turn it off on

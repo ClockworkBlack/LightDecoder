@@ -66,6 +66,7 @@ class BlueBubblesScreenTest {
         com.lightdecoder.imessage.IMessageChecks.resetForTesting()
         // Receipt looks off unless a test is about them (they would add jobs of their own).
         com.lightdecoder.wrapper.Wrapper.setReceipts(two.app, false)
+        com.lightdecoder.wrapper.Wrapper.forgetLooks()
     }
 
     @After
@@ -880,8 +881,13 @@ class BlueBubblesScreenTest {
         try {
             ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
                 scenario.waitFor("my iMessages") { shownTexts(it).containsAll(listOf("Sounds good", "Oops")) }
-                // Opening it looks in OpenBubbles for a receipt (an unread message of mine).
-                scenario.waitFor("a receipt look") { jobs.any { it.kind == com.lightdecoder.wrapper.Wrapper.Kind.STATUS } }
+                // Opening it looks in OpenBubbles for a receipt (an unread message of mine), once it is left untouched a moment.
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                assertFalse("not at once: a tap then would be lost", jobs.any { it.kind == com.lightdecoder.wrapper.Wrapper.Kind.STATUS })
+                scenario.waitFor("a receipt look") {
+                    org.robolectric.shadows.ShadowLooper.idleMainLooper(3, java.util.concurrent.TimeUnit.SECONDS)
+                    jobs.any { it.kind == com.lightdecoder.wrapper.Wrapper.Kind.STATUS }
+                }
                 com.lightdecoder.wrapper.Wrapper.receipt(two.app, ALICE, com.lightdecoder.wrapper.WrapperNodes.Receipt.READ)
                 scenario.waitFor("read ticks") { a ->
                     listOf("Sounds good", "Oops").all { t -> com.lightdecoder.ui.chat.MessageStatus.tickFor(rowOf(a, t)) == com.lightdecoder.ui.chat.Tick.READ }
