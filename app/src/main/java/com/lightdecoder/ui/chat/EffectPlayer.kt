@@ -217,6 +217,27 @@ internal class EffectPlayer(
         return play
     }
 
+    /**
+     * Plays the text effects (iOS 18's Big, Shake, ...) of message [messageId] in its bubble's text
+     * [view]: recorded as a play of [TEXT], nothing moving with animations off.
+     */
+    fun playText(messageId: String, view: TextEffectView, reason: Reason): Play {
+        val animated = !animationsOff()
+        val play = Play(messageId, TEXT, false, reason, animated)
+        played += play
+        onPlay?.invoke(play)
+        if (!animated) return play
+        view.play()?.let { animator ->
+            animator.addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    running.remove(animation)
+                }
+            })
+            running += animator
+        }
+        return play
+    }
+
     /** Stops whatever plays and puts everything back (leaving the thread). */
     fun cancel() {
         running.toList().forEach { it.cancel() }
@@ -351,6 +372,15 @@ internal class EffectPlayer(
     }
 
     companion object {
+        /** What a play of a message's text effects is recorded as ([Play.effect]). */
+        const val TEXT = "text"
+
+        /**
+         * The key a message's text effects are remembered by once played by themselves: the message's
+         * own, or its local copy's (the sent message and the copy shown while it went are one).
+         */
+        fun textKey(row: MessageRow): String = (if (row.tmpId.isNotEmpty()) MessageRow.tmpMessageId(row.tmpId) else row.id) + "#text"
+
         /** The animations running on bubbles, so that a row reused meanwhile is put back ([settle]). */
         private val bubbles = WeakHashMap<View, Animator>()
 

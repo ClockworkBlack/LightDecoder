@@ -253,16 +253,19 @@ class DirectLink private constructor(
 
     /**
      * Like every send in the app: a local copy now ("tmp:<tmpId>"), the sent message once Apple
-     * confirms it. [effect] is the Apple effect it is sent with ("Sent with Slam"), if any.
+     * confirms it. [effect] is the Apple effect it is sent with ("Sent with Slam"), if any; [runs]
+     * the text's formatting and text effects (iOS 18), over [text], kept with both copies.
      */
-    fun sendText(conversationId: String, text: String, replyToId: String?, effect: String? = null): String {
+    fun sendText(conversationId: String, text: String, replyToId: String?, effect: String? = null, runs: List<TextRun> = emptyList()): String {
         // The message ends the typing indicator on their side: no "stopped typing" after it.
         typingThrottle.sent(conversationId)
         val tmpId = UUID.randomUUID().toString()
+        val formatted = TextRuns.normalize(text, runs)
         repo.insertLocalOutgoing(
-            tmpId, conversationId, text, null, null, null, replyToId, System.currentTimeMillis(), IMessageExtra(effect = effect).toJson(),
+            tmpId, conversationId, text, null, null, null, replyToId, System.currentTimeMillis(),
+            IMessageExtra(effect = effect, runs = runsOf(formatted)).toJson(),
         )
-        inTurn(conversationId) { deliver(tmpId, conversationId, text, replyToId, effect = effect) }
+        inTurn(conversationId) { deliver(tmpId, conversationId, text, replyToId, effect = effect, runs = formatted) }
         return tmpId
     }
 
@@ -272,9 +275,18 @@ class DirectLink private constructor(
      * text: a local copy now ("tmp:<tmpId>"), the sent message once Apple confirms it. The file
      * is copied here first, so the send (and a retry, even after a restart) no longer needs [uri].
      * Throws [DirectEngine.ImessageError] when the file cannot be read or is over Apple's
-     * [DirectMedia.MAX_SEND_BYTES]. [effect] is the Apple effect it is sent with, if any.
+     * [DirectMedia.MAX_SEND_BYTES]. [effect] is the Apple effect it is sent with, if any; [runs]
+     * format the caption.
      */
-    fun sendMedia(conversationId: String, uri: Uri, caption: String?, replyToId: String?, voice: Boolean = false, effect: String? = null): String {
+    fun sendMedia(
+        conversationId: String,
+        uri: Uri,
+        caption: String?,
+        replyToId: String?,
+        voice: Boolean = false,
+        effect: String? = null,
+        runs: List<TextRun> = emptyList(),
+    ): String {
         val tmpId = UUID.randomUUID().toString()
         val file = repo.outboxFileFor(tmpId)
         copyCapped(uri, file)
@@ -282,11 +294,11 @@ class DirectLink private constructor(
         val mime = mimeOf(uri, given)
         // Named as an iPhone names its own voice messages.
         val name = if (voice) "$VOICE_NAME.${DirectMedia.extensionFor(mime, given)}" else given.ifBlank { DirectMedia.nameFor(mime) }
-        val text = caption?.trim().orEmpty()
+        val (text, formatted) = TextRuns.trimmed(caption.orEmpty(), runs)
         typingThrottle.sent(conversationId)
-        val extra = IMessageExtra(voice = voice, effect = effect).toJson()
+        val extra = IMessageExtra(voice = voice, effect = effect, runs = runsOf(formatted)).toJson()
         repo.insertLocalOutgoing(tmpId, conversationId, text, file.path, mime, name, replyToId, System.currentTimeMillis(), extra)
-        inTurn(conversationId) { deliver(tmpId, conversationId, text, replyToId, Outgoing(file, mime, name, voice), effect) }
+        inTurn(conversationId) { deliver(tmpId, conversationId, text, replyToId, Outgoing(file, mime, name, voice), effect, runs = formatted) }
         return tmpId
     }
 
@@ -523,7 +535,7 @@ class DirectLink private constructor(
         // From failed to waiting, once: of two retries at once only one goes.
         if (!repo.setLocalStateIf(tmpId, LocalState.FAILED, LocalState.PENDING)) return true
         inTurn(row.conversationId) {
-            deliver(tmpId, row.conversationId, row.text, row.replyToId.ifEmpty { null }, media, extra.effect, extra.app)
+            deliver(tmpId, row.conversationId, row.text, row.replyToId.ifEmpty { null }, media, extra.effect, extra.app, extra.textRuns(row.text))
         }
         return true
     }
@@ -569,6 +581,7 @@ class DirectLink private constructor(
         media: Outgoing? = null,
         effect: String? = null,
         appCard: IMessageExtra.App? = null,
+        runs: List<TextRun> = emptyList(),
     ) {
         try {
             repo.setLocalState(tmpId, LocalState.SENDING)
@@ -583,6 +596,7 @@ class DirectLink private constructor(
                 attachments = listOfNotNull(media?.let { DirectWire.Attachment(it.file.path, it.mime, it.name) }),
                 voice = media?.voice == true,
                 app = appCard,
+                runs = if (appCard != null) emptyList() else runs,
             )
             // A file is uploaded first: that takes longer than a text.
             val reply = requests.call(DirectWire.SEND, request, if (media == null) SEND_TIMEOUT_MS else MEDIA_SEND_TIMEOUT_MS)
@@ -614,7 +628,10 @@ class DirectLink private constructor(
                 replyToId = replyToId.orEmpty(),
                 isOld = true,
                 // An app's card is the first of its session.
-                extra = IMessageExtra(voice = media?.voice == true, effect = effect, app = appCard?.copy(root = messageId)).toJson(),
+                extra = IMessageExtra(
+                    voice = media?.voice == true, effect = effect, app = appCard?.copy(root = messageId),
+                    runs = if (appCard != null) emptyMap() else runsOf(runs),
+                ).toJson(),
             )
             // A receipt (or a reaction) can come from Apple before the send's answer did: what
             // [apply] held for it is applied now, under the same lock, so none slips between.
@@ -630,6 +647,7 @@ class DirectLink private constructor(
                 "${IMessageLog.chatRef(conversationId)}: sent through the iMessage library (Apple confirmed)" +
                     (if (media != null) " with ${if (media.voice) "a voice message" else media.mime.substringBefore('/')}" else "") +
                     (if (effect != null) ", with an effect" else "") +
+                    (if (runs.isNotEmpty()) ", formatted" else "") +
                     (if (appCard != null) ", an iMessage app's card" else ""),
             )
         } catch (e: Exception) {
@@ -849,17 +867,19 @@ class DirectLink private constructor(
      * Changes the text of one of the user's iMessages ([canEdit]): Apple's answer is waited for,
      * then the message reads [text] here too, marked edited. Throws a [RelayException] with
      * [RelayException.INVALID_ARGUMENT] when it is too late (15 minutes, or 5 edits), else
-     * [DirectEngine.ImessageError] saying why when it does not go through.
+     * [DirectEngine.ImessageError] saying why when it does not go through. [runs] format the new
+     * text (none: plain), as an iPhone sends an edit of formatted text.
      */
-    suspend fun edit(messageId: String, text: String) {
+    suspend fun edit(messageId: String, text: String, runs: List<TextRun> = emptyList()) {
         val row = repo.message(messageId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_not_stored))
         val guid = DirectArchive.guidOf(messageId)
         if (guid == null || !editable(row)) throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_edit_not_editable))
         if (!inEditWindow(row, System.currentTimeMillis())) throw RelayException(RelayException.INVALID_ARGUMENT, "too late to edit")
         val target = targetOf(row.conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
         // Once asked, Apple's answer is waited for and stored even if the screen that asked closes.
+        val formatted = TextRuns.normalize(text, runs)
         withContext(NonCancellable) {
-            val reply = requests.call(DirectWire.EDIT, DirectWire.edit(target, guid, 0, text), SEND_TIMEOUT_MS)
+            val reply = requests.call(DirectWire.EDIT, DirectWire.edit(target, guid, 0, text, formatted), SEND_TIMEOUT_MS)
             DirectWire.errorOf(reply)?.let { throw DirectEngine.ImessageError(it) }
             synchronized(this@DirectLink) {
                 // Read again: a tapback or a receipt may have come in while Apple was asked, or it
@@ -867,7 +887,7 @@ class DirectLink private constructor(
                 val current = repo.message(messageId) ?: return@withContext
                 val extra = IMessageExtra.parse(current.extra)
                 if (current.direction == "system" || 0 in extra.unsent) return@withContext
-                val next = extra.copy(parts = extra.parts + (0 to text), edits = extra.edits + 1)
+                val next = extra.copy(parts = extra.parts + (0 to text), edits = extra.edits + 1, runs = extra.withRuns(0, formatted))
                 repo.editText(messageId, next.text(), System.currentTimeMillis(), next.toJson(), snippetOf(next.text(), current.extra))
             }
         }
@@ -1267,7 +1287,8 @@ class DirectLink private constructor(
         if (update.part in extra.unsent) return
         val parts = partsOf(row, extra)
         if (parts[update.part] == update.text && update.atMs <= row.editedAtMs) return
-        val next = extra.copy(parts = parts + (update.part to update.text), edits = extra.edits + 1)
+        val runs = extra.withRuns(update.part, TextRuns.normalize(update.text, update.runs))
+        val next = extra.copy(parts = parts + (update.part to update.text), edits = extra.edits + 1, runs = runs)
         repo.editText(row.id, next.text(), update.atMs, next.toJson(), snippetOf(next.text(), row.extra))
     }
 
@@ -1295,7 +1316,7 @@ class DirectLink private constructor(
             return
         }
         if (partId in media) repo.removeMediaPart(row.id, partId)
-        val next = extra.copy(parts = textLeft, unsent = extra.unsent + update.part)
+        val next = extra.copy(parts = textLeft, unsent = extra.unsent + update.part, runs = extra.runs - update.part)
         repo.editText(row.id, next.text(), row.editedAtMs, next.toJson(), snippetOf(next.text(), row.extra))
     }
 
@@ -1307,6 +1328,9 @@ class DirectLink private constructor(
         repo.markConversationRead(row.conversationId)
         MessageNotifier.cancel(app, row.conversationId, ChatService.IMESSAGE)
     }
+
+    /** A message's formatting kept with it: [runs] (over its text, part 0) by part. */
+    private fun runsOf(runs: List<TextRun>): Map<Int, List<TextRun>> = if (runs.isEmpty()) emptyMap() else mapOf(0 to runs)
 
     /** A message's text by part: as stored with it, or, for one that has none stored, its text as part 0. */
     private fun partsOf(row: MessageRow, extra: IMessageExtra): Map<Int, String> =

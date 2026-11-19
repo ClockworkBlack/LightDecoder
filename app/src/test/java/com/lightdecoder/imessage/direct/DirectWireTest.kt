@@ -347,4 +347,18 @@ class DirectWireTest {
         assertEquals("/p.jpeg", card.attachments.single().path)
         assertNull(DirectWire.SendRequest.fromJson(JSONObject(DirectWire.send(target, "hi", null).toString())).app)
     }
+
+    @Test
+    fun formattingTravelsWithASendAnEditAndAnIncomingEdit() {
+        val t = DirectWire.Target(listOf("tel:+2"), null, null, "tel:+1")
+        val runs = listOf(TextRun(0, 3, bold = true, italic = true), TextRun(4, 9, effect = TextEffectKind.EXPLODE))
+        val send = DirectWire.SendRequest.fromJson(JSONObject(DirectWire.send(t, "Hey there", null, runs = runs).toString()))
+        assertEquals(runs, send.runs)
+        assertEquals(emptyList<TextRun>(), DirectWire.SendRequest.fromJson(JSONObject(DirectWire.send(t, "hi", null).toString())).runs)
+        val edit = DirectWire.EditRequest.fromJson(JSONObject(DirectWire.edit(t, "G1", 0, "Hey there", runs).toString()))
+        assertEquals(DirectWire.EditRequest(t, "G1", 0, "Hey there", runs), edit)
+        assertEquals(emptyList<TextRun>(), DirectWire.EditRequest.fromJson(JSONObject(DirectWire.edit(t, "G1", 0, "plain").toString())).runs)
+        val incoming = DirectArchive.Update.Edit("imsg:G1", "Hey there", 0, 5_000, runs)
+        assertEquals(incoming, trip(incoming))
+    }
 }

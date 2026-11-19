@@ -223,6 +223,27 @@
     <string name="imessage_effect_pick_hint">Pick an effect, then tap the arrow to send.</string>
     <!-- The send button held down in a chat that cannot send effects. -->
     <string name="imessage_effect_not_imessage">Effects are for iMessage chats.</string>
+    <!-- Text effects (iOS 18): one word or the whole message animates. As an iPhone names them. -->
+    <string name="imessage_text_effect_big">Big</string>
+    <string name="imessage_text_effect_small">Small</string>
+    <string name="imessage_text_effect_shake">Shake</string>
+    <string name="imessage_text_effect_nod">Nod</string>
+    <string name="imessage_text_effect_explode">Explode</string>
+    <string name="imessage_text_effect_ripple">Ripple</string>
+    <string name="imessage_text_effect_bloom">Bloom</string>
+    <string name="imessage_text_effect_jitter">Jitter</string>
+    <!-- The text selection menu's item, and "Send with effect"'s third tab. -->
+    <string name="imessage_text_effects">Text effects</string>
+    <string name="imessage_effect_tab_text">Text</string>
+    <!-- Text formatting in the text selection menu (iOS 18). -->
+    <string name="imessage_format_bold">Bold</string>
+    <string name="imessage_format_italic">Italic</string>
+    <string name="imessage_format_underline">Underline</string>
+    <string name="imessage_format_strikethrough">Strikethrough</string>
+    <!-- What TalkBack reads for a message with animated words. %1$s: the effects (imessage_text_effect_*), comma separated. -->
+    <string name="imessage_text_effect_described">With text effects: %1$s</string>
+    <!-- Tapped, a message's text effects play again: what TalkBack says a tap does. -->
+    <string name="imessage_text_effect_replay_action">Play text effects</string>
     <string name="imessage_invisible_ink_hidden">Invisible Ink: tap to reveal</string>
     <!-- %1$s: the iMessage app's name, or imessage_app_unnamed. -->
     <string name="imessage_app_only_on_apple">%1$s can only be opened on an iPhone, iPad or Mac.</string>

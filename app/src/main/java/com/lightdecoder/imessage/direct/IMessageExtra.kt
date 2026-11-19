@@ -20,6 +20,8 @@ import org.json.JSONObject
  * @param sticker it is a sticker
  * @param unsent  the part indexes the sender unsent (gone from [parts] and from the media), so
  *   that the same unsend handed over again, or Apple sending the message again, changes nothing
+ * @param runs    iOS 18's formatting (bold, italic, underline, strikethrough) and text effects
+ *   (Big, Shake, ...), by part index: the formatted stretches of each part's text ([TextRuns])
  *
  * Pure. Tested in IMessageExtraTest.
  */
@@ -32,6 +34,7 @@ data class IMessageExtra(
     val app: App? = null,
     val sticker: Boolean = false,
     val unsent: Set<Int> = emptySet(),
+    val runs: Map<Int, List<TextRun>> = emptyMap(),
 ) {
     /** A link preview: the address, the page's title and summary, and the site it is on. */
     data class Link(val url: String, val title: String = "", val summary: String = "", val site: String = "") {
@@ -116,6 +119,33 @@ data class IMessageExtra(
     /** The message's text from [parts]: each part's text in part order, one per line. */
     fun text(): String = parts.toSortedMap().values.filter { it.isNotEmpty() }.joinToString("\n")
 
+    /**
+     * The formatting of a message whose text (as shown) is [text], over that text: each part's
+     * [runs] moved to where its text is in [text()][text]. With no part texts kept, [text] is part 0.
+     * Empty when the stored parts no longer make up [text] (nothing is drawn in the wrong place).
+     */
+    fun textRuns(text: String): List<TextRun> {
+        if (runs.isEmpty() || text.isEmpty()) return emptyList()
+        if (parts.isEmpty()) return if (runs.keys == setOf(0)) TextRuns.normalize(text, runs.getValue(0)) else emptyList()
+        if (text() != text) return emptyList()
+        val out = ArrayList<TextRun>()
+        var at = 0
+        for ((idx, t) in parts.toSortedMap()) {
+            if (t.isEmpty()) continue
+            runs[idx]?.let { r -> TextRuns.normalize(t, r).forEach { out += it.copy(start = it.start + at, end = it.end + at) } }
+            at += t.length + 1
+        }
+        return out
+    }
+
+    /** Which text effects the message's text has, in the order they first come. */
+    fun textEffects(): List<TextEffectKind> =
+        runs.toSortedMap().values.flatten().mapNotNull { it.effect }.distinct()
+
+    /** [runs] with part [idx]'s set to [partRuns] (none: taken off). */
+    fun withRuns(idx: Int, partRuns: List<TextRun>): Map<Int, List<TextRun>> =
+        if (partRuns.isEmpty()) runs - idx else runs + (idx to partRuns)
+
     /** The JSON stored with the message; empty when there is nothing to store. */
     fun toJson(): String {
         val o = JSONObject()
@@ -129,6 +159,7 @@ data class IMessageExtra(
         app?.let { o.put("app", it.toJson()) }
         if (sticker) o.put("sticker", true)
         if (unsent.isNotEmpty()) o.put("unsent", JSONArray(unsent.sorted()))
+        if (runs.values.any { it.isNotEmpty() }) o.put("runs", TextRuns.toJson(runs))
         return if (o.length() == 0) "" else o.toString()
     }
 
@@ -208,6 +239,7 @@ data class IMessageExtra(
                     unsent = o.optJSONArray("unsent")?.let { a ->
                         (0 until a.length()).map { a.optInt(it, -1) }.filter { it >= 0 }.toSet()
                     }.orEmpty(),
+                    runs = TextRuns.fromJson(o.optJSONObject("runs")),
                 )
             } catch (e: JSONException) {
                 IMessageExtra()

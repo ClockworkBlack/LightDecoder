@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The composer's text selection menu in an iMessage chat (iOS 18's formatting). -->
+    <item name="text_format_effects" type="id" />
+    <item name="text_format_bold" type="id" />
+    <item name="text_format_italic" type="id" />
+    <item name="text_format_underline" type="id" />
+    <item name="text_format_strikethrough" type="id" />
+</resources>

@@ -37,7 +37,7 @@ class DirectService : Service() {
         when (what) {
             DirectWire.SEND -> {
                 val r = DirectWire.SendRequest.fromJson(request)
-                engine.send(r.target, r.text, r.replyGuid, r.replyPart, r.effect, r.attachments, r.voice, r.app).toJson()
+                engine.send(r.target, r.text, r.replyGuid, r.replyPart, r.effect, r.attachments, r.voice, r.app, r.runs).toJson()
             }
             DirectWire.EXTENSION -> {
                 val r = DirectWire.ExtensionRequest.fromJson(request)
@@ -52,7 +52,8 @@ class DirectService : Service() {
                 if (conversation != null) JSONObject().put("conversation", conversation.toJson()) else JSONObject()
             }
             DirectWire.EDIT -> {
-                engine.edit(target(request), request.getString("guid"), request.optInt("part", 0), request.getString("text"))
+                val r = DirectWire.EditRequest.fromJson(request)
+                engine.edit(r.target, r.guid, r.part, r.text, r.runs)
                 DirectWire.ok()
             }
             DirectWire.REACT -> DirectWire.guid(

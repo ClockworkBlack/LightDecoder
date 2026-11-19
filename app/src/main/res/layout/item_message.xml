@@ -145,7 +145,8 @@
                     android:textAppearance="?attr/textAppearanceLabelSmall" />
             </LinearLayout>
 
-            <TextView
+            <!-- The text, with iOS 18's formatting; its text effects play on it. -->
+            <com.lightdecoder.ui.chat.TextEffectView
                 android:id="@+id/body"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"

@@ -125,6 +125,8 @@ object DirectWire {
         val attachments: List<Attachment>,
         val voice: Boolean,
         val app: IMessageExtra.App? = null,
+        /** The text's formatting and text effects, over [text] ([TextRuns]). */
+        val runs: List<TextRun> = emptyList(),
     ) {
         companion object {
             fun fromJson(o: JSONObject) = SendRequest(
@@ -136,6 +138,20 @@ object DirectWire {
                 o.objects("attachments").map(Attachment::fromJson),
                 o.optBoolean("voice"),
                 o.optJSONObject("app")?.let(IMessageExtra.App::fromJson),
+                TextRuns.fromJsonArray(o.optJSONArray("runs")),
+            )
+        }
+    }
+
+    /** What an [EDIT] request asks for: part [part] of message [guid] now reads [text], formatted with [runs]. */
+    data class EditRequest(val target: Target, val guid: String, val part: Int, val text: String, val runs: List<TextRun>) {
+        companion object {
+            fun fromJson(o: JSONObject) = EditRequest(
+                Target.fromJson(o.getJSONObject("target")),
+                o.getString("guid"),
+                o.optInt("part"),
+                o.getString("text"),
+                TextRuns.fromJsonArray(o.optJSONArray("runs")),
             )
         }
     }
@@ -164,7 +180,8 @@ object DirectWire {
      * reply names the message it answers ([replyGuid]) and the part of it ([replyPart],
      * "<part>:<start>:<end>" of that message's text, as iMessage expects). [effect] is Apple's
      * effect id; [voice] marks a recorded audio message. [app] makes it an iMessage app's card
-     * (a new game): the app's balloon, with its picture as the attachment.
+     * (a new game): the app's balloon, with its picture as the attachment. [runs] are the text's
+     * formatting and text effects (iOS 18), over [text].
      */
     fun send(
         target: Target,
@@ -175,6 +192,7 @@ object DirectWire {
         attachments: List<Attachment> = emptyList(),
         voice: Boolean = false,
         app: IMessageExtra.App? = null,
+        runs: List<TextRun> = emptyList(),
     ): JSONObject =
         JSONObject().put("target", target.toJson()).put("text", text)
             .put("replyGuid", replyGuid ?: JSONObject.NULL).put("replyPart", replyPart ?: JSONObject.NULL)
@@ -182,6 +200,7 @@ object DirectWire {
             .put("attachments", JSONArray().apply { attachments.forEach { put(it.toJson()) } })
             .put("voice", voice)
             .apply { if (app != null) put("app", app.toJson()) }
+            .apply { if (runs.isNotEmpty()) put("runs", TextRuns.toJsonArray(runs)) }
 
     /**
      * An iMessage app's update to the session that message [rootGuid] started: [app]'s new state
@@ -200,9 +219,10 @@ object DirectWire {
 
     fun reach(recipient: String): JSONObject = JSONObject().put("recipient", recipient)
 
-    /** Part [part] of the user's message [guid] now reads [text]. */
-    fun edit(target: Target, guid: String, part: Int, text: String): JSONObject =
+    /** Part [part] of the user's message [guid] now reads [text], formatted with [runs] (none: plain). */
+    fun edit(target: Target, guid: String, part: Int, text: String, runs: List<TextRun> = emptyList()): JSONObject =
         JSONObject().put("target", target.toJson()).put("guid", guid).put("part", part).put("text", text)
+            .apply { if (runs.isNotEmpty()) put("runs", TextRuns.toJsonArray(runs)) }
 
     /**
      * The user's tapback [emoji] on part [part] of message [guid], put on ([enable]) or taken
@@ -279,6 +299,7 @@ object DirectWire {
             .put("messageIds", JSONArray(u.messageIds)).put("status", u.status)
         is DirectArchive.Update.Edit -> JSONObject().put("kind", "edit").put("messageId", u.messageId).put("text", u.text)
             .put("part", u.part).put("atMs", u.atMs)
+            .apply { if (u.runs.isNotEmpty()) put("runs", TextRuns.toJsonArray(u.runs)) }
         is DirectArchive.Update.Reaction -> JSONObject().put("kind", "reaction").put("messageId", u.messageId)
             .put("participantId", u.participantId).put("emoji", u.emoji).put("enable", u.enable).put("fromMe", u.fromMe)
             .put("atMs", u.atMs)
@@ -324,7 +345,8 @@ object DirectWire {
             return u.copy(message = m.copy(parts = m.parts.map { if (it === largest) it.copy(key = ByteArray(0)) else it }))
         }
         val extra = IMessageExtra.parse(m.extra)
-        if (extra.parts.isNotEmpty()) return u.copy(message = m.copy(extra = extra.copy(parts = emptyMap()).toJson()))
+        // The formatting goes with the parts it is laid over.
+        if (extra.parts.isNotEmpty()) return u.copy(message = m.copy(extra = extra.copy(parts = emptyMap(), runs = emptyMap()).toJson()))
         val longestPart = m.parts.filter { !it.isMedia }.maxByOrNull { it.text.length }
         val longest = listOf(m.text.length, m.extra.length, longestPart?.text?.length ?: 0).max()
         if (longest < MIN_CUT_CHARS) return null
@@ -362,7 +384,9 @@ object DirectWire {
             o.getJSONArray("messageIds").let { a -> (0 until a.length()).map { a.getString(it) } },
             o.getString("status"),
         )
-        "edit" -> DirectArchive.Update.Edit(o.getString("messageId"), o.getString("text"), o.optInt("part"), o.optLong("atMs"))
+        "edit" -> DirectArchive.Update.Edit(
+            o.getString("messageId"), o.getString("text"), o.optInt("part"), o.optLong("atMs"), TextRuns.fromJsonArray(o.optJSONArray("runs")),
+        )
         "reaction" -> DirectArchive.Update.Reaction(
             o.getString("messageId"), o.optString("participantId"), o.getString("emoji"), o.optBoolean("enable"),
             o.optBoolean("fromMe"), o.optLong("atMs"),

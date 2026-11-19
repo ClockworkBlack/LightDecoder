@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- "Send with effect" (the send button held down in an iMessage chat), as on an iPhone:
-     Bubble or Screen, the message in a blue bubble, the effects, and the round send arrow. -->
+     Bubble, Screen or Text, the message in a blue bubble, the effects, and the round send arrow. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
@@ -56,6 +56,16 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:text="@string/imessage_effect_tab_screen" />
+
+        <!-- iOS 18's text effects on the whole message (only when it has text). -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/effectTabText"
+            style="?attr/materialButtonOutlinedStyle"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/imessage_effect_tab_text"
+            android:visibility="gone" />
     </com.google.android.material.button.MaterialButtonToggleGroup>
 
     <LinearLayout
@@ -125,6 +135,13 @@
 
             <RadioGroup
                 android:id="@+id/effectScreenList"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone" />
+
+            <RadioGroup
+                android:id="@+id/effectTextList"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"

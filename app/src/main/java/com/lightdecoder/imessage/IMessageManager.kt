@@ -349,15 +349,22 @@ class IMessageManager private constructor(
     override fun sendText(conversationId: String, text: String, replyToId: String?): String = sendText(conversationId, text, replyToId, effect = null)
 
     /**
-     * [sendText], sent with Apple's [effect] ("Sent with Slam"; null: none). Effects go only through
-     * the iMessage library: without it [effect] is left out.
+     * [sendText], sent with Apple's [effect] ("Sent with Slam"; null: none) and with [runs] (iOS 18's
+     * bold, italic, ... and text effects, over [text]). Both go only through the iMessage library:
+     * without it they are left out.
      */
-    fun sendText(conversationId: String, text: String, replyToId: String?, effect: String?): String {
-        val body = text.trim()
+    fun sendText(
+        conversationId: String,
+        text: String,
+        replyToId: String?,
+        effect: String?,
+        runs: List<com.lightdecoder.imessage.direct.TextRun> = emptyList(),
+    ): String {
+        val (body, formatted) = com.lightdecoder.imessage.direct.TextRuns.trimmed(text, runs)
         if (body.isEmpty()) throw RelayException(RelayException.INVALID_ARGUMENT, "empty message")
         // Straight to Apple through the library: a real iMessage with its own GUID (Unsend works),
         // replies inline, and Apple's answer decides sent or failed.
-        if (direct.canSend(conversationId)) return direct.sendText(conversationId, body, replyToId, effect)
+        if (direct.canSend(conversationId)) return direct.sendText(conversationId, body, replyToId, effect, formatted)
         requireEnabled()
         val tmpId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
@@ -418,16 +425,31 @@ class IMessageManager private constructor(
     override fun sendMedia(conversationId: String, uri: Uri, caption: String?, replyToId: String?): String =
         sendThroughLibrary(conversationId, uri, caption, replyToId, voice = false, effect = null)
 
-    /** [sendMedia], sent with Apple's [effect] (null: none). */
-    fun sendMedia(conversationId: String, uri: Uri, caption: String?, replyToId: String?, effect: String?): String =
-        sendThroughLibrary(conversationId, uri, caption, replyToId, voice = false, effect = effect)
+    /** [sendMedia], sent with Apple's [effect] (null: none), the caption formatted with [runs]. */
+    fun sendMedia(
+        conversationId: String,
+        uri: Uri,
+        caption: String?,
+        replyToId: String?,
+        effect: String?,
+        runs: List<com.lightdecoder.imessage.direct.TextRun> = emptyList(),
+    ): String =
+        sendThroughLibrary(conversationId, uri, caption, replyToId, voice = false, effect = effect, runs = runs)
 
     /** A recorded voice message, which an iPhone shows as one: as [sendMedia]. */
     fun sendVoice(conversationId: String, uri: Uri, replyToId: String?): String =
         sendThroughLibrary(conversationId, uri, null, replyToId, voice = true, effect = null)
 
-    private fun sendThroughLibrary(conversationId: String, uri: Uri, caption: String?, replyToId: String?, voice: Boolean, effect: String?): String {
-        if (direct.canSend(conversationId)) return direct.sendMedia(conversationId, uri, caption, replyToId, voice, effect)
+    private fun sendThroughLibrary(
+        conversationId: String,
+        uri: Uri,
+        caption: String?,
+        replyToId: String?,
+        voice: Boolean,
+        effect: String?,
+        runs: List<com.lightdecoder.imessage.direct.TextRun> = emptyList(),
+    ): String {
+        if (direct.canSend(conversationId)) return direct.sendMedia(conversationId, uri, caption, replyToId, voice, effect, runs)
         if (direct.active) throw RelayException(IMessageErrors.NO_REPLY_BUTTON, "this chat cannot be reached through the iMessage library")
         throw RelayException(IMessageErrors.HAND_OFF, "attachments are sent in OpenBubbles")
     }
@@ -572,13 +594,18 @@ class IMessageManager private constructor(
     /**
      * Changes the text of one of the user's iMessages, through the iMessage library
      * ([com.lightdecoder.imessage.direct.DirectLink.edit]): Apple allows it for 15 minutes, 5 times.
-     * Too late is a [RelayException] with [RelayException.INVALID_ARGUMENT].
+     * Too late is a [RelayException] with [RelayException.INVALID_ARGUMENT]. [runs] format the new
+     * text (bold, a text effect, ...).
      */
-    suspend fun editMessage(messageId: String, text: String): Unit = withContext(Dispatchers.IO) {
+    suspend fun editMessage(
+        messageId: String,
+        text: String,
+        runs: List<com.lightdecoder.imessage.direct.TextRun> = emptyList(),
+    ): Unit = withContext(Dispatchers.IO) {
         if (!direct.active) throw RelayException(WA_UNSUPPORTED, "no editing through OpenBubbles' notifications")
-        val body = text.trim()
+        val (body, formatted) = com.lightdecoder.imessage.direct.TextRuns.trimmed(text, runs)
         if (body.isEmpty()) throw RelayException(RelayException.INVALID_ARGUMENT, "empty message")
-        direct.edit(messageId, body)
+        direct.edit(messageId, body, formatted)
     }
 
     /**

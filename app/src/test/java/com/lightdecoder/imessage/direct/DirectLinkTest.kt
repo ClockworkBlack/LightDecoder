@@ -334,6 +334,71 @@ class DirectLinkTest {
     }
 
     @Test
+    fun aFormattedSendCarriesItsRunsAndBothCopiesKeepThem() {
+        val asked = Collections.synchronizedList(ArrayList<Pair<Int, JSONObject>>())
+        var local: IMessageExtra? = null
+        lateinit var link: DirectLink
+        link = DirectLink.installForTesting(context) { what, request, _ ->
+            asked += what to request
+            // While Apple is asked, the local copy already shows it formatted.
+            local = repo.messages("imsg:$bob").firstOrNull { it.isLocal }?.let { IMessageExtra.parse(it.extra) }
+            DirectWire.sent("S7", 1_700_000_005_000L)
+        }
+        link.apply(incoming("B0", bob, "hi"))
+        val runs = listOf(TextRun(0, 3, effect = TextEffectKind.BIG), TextRun(4, 8, bold = true))
+        link.sendText("imsg:$bob", "Wow look", null, runs = runs)
+        waitFor("the sent message") { repo.message("imsg:S7") != null }
+        val sent = DirectWire.SendRequest.fromJson(asked.single { it.first == DirectWire.SEND }.second)
+        assertEquals("Wow look", sent.text)
+        assertEquals(runs, sent.runs)
+        assertEquals(mapOf(0 to runs), local?.runs)
+        val row = repo.message("imsg:S7")!!
+        assertEquals(runs, IMessageExtra.parse(row.extra).textRuns(row.text))
+        // The reply part names the whole of part 0, formatted or not.
+        assertEquals("0:0:8", DirectWire.replyPart(row.text))
+    }
+
+    @Test
+    fun anEditOfFormattedTextKeepsItsFormattingAndAnUnsentPartLosesIt() {
+        val asked = Collections.synchronizedList(ArrayList<Pair<Int, JSONObject>>())
+        val link = fakeLink(asked)
+        link.apply(incoming("B0", bob, "hi"))
+        repo.upsertMessage(
+            com.lightdecoder.relay.MessageDto(
+                id = "imsg:E8", conversationId = "imsg:$bob", fromMe = true, timestampMs = System.currentTimeMillis() - 60_000, direction = "out",
+                status = DirectArchive.STATUS_SENT, statusCode = 1, transport = IMessageManager.TRANSPORT, text = "on my wya",
+                parts = listOf(com.lightdecoder.relay.PartDto("0", "text", "on my wya")),
+                extra = IMessageExtra(runs = mapOf(0 to listOf(TextRun(0, 2, bold = true)))).toJson(),
+            ),
+        )
+        assertTrue("formatted text can be edited", DirectLink.editable(repo.message("imsg:E8")!!))
+        val runs = listOf(TextRun(0, 2, bold = true), TextRun(6, 9, effect = TextEffectKind.NOD))
+        runBlocking { link.edit("imsg:E8", "on my way", runs) }
+        val request = DirectWire.EditRequest.fromJson(asked.single { it.first == DirectWire.EDIT }.second)
+        assertEquals("on my way", request.text)
+        assertEquals(runs, request.runs)
+        var row = repo.message("imsg:E8")!!
+        assertEquals("on my way", row.text)
+        assertEquals(runs, IMessageExtra.parse(row.extra).textRuns(row.text))
+        // Edited on another device to plain text: the formatting goes with it.
+        link.apply(DirectArchive.Update.Edit("imsg:E8", "on my way!", 0, System.currentTimeMillis()))
+        row = repo.message("imsg:E8")!!
+        assertEquals("on my way!", row.text)
+        assertTrue(IMessageExtra.parse(row.extra).runs.isEmpty())
+        // Bob's message of two parts, the second formatted: unsent, its runs go too.
+        val parts = listOf(
+            IndexedMessagePart(MessagePart.Text("look", TextFormat.Flags(TextFlags(false, false, false, false))), 0UL, null),
+            IndexedMessagePart(MessagePart.Text("and this", TextFormat.Flags(TextFlags(true, false, false, false))), 1UL, null),
+        )
+        link.apply(event("U8", bob, PushChatMessage.Message(NormalMessage(parts, null, null, null, MessageType.IMessage, null, null, null, false, null, null))))
+        assertEquals(mapOf(1 to listOf(TextRun(0, 8, bold = true))), IMessageExtra.parse(repo.message("imsg:U8")!!.extra).runs)
+        assertEquals(listOf(TextRun(5, 13, bold = true)), IMessageExtra.parse(repo.message("imsg:U8")!!.extra).textRuns("look\nand this"))
+        link.apply(event("X8", bob, PushChatMessage.Unsend(UnsendMessage("U8", 1UL))))
+        assertTrue(IMessageExtra.parse(repo.message("imsg:U8")!!.extra).runs.isEmpty())
+        assertEquals("look", repo.message("imsg:U8")!!.text)
+    }
+
+    @Test
     fun onlyAMessageTheUserSentCanBeUnsent() {
         // Direct mode on: registered, with the library's files.
         DirectPrefs.setRegistered(context, true)

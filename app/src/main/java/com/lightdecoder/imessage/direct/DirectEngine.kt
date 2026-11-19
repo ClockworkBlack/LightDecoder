@@ -27,10 +27,8 @@ import uniffi.rust_bridge.AttachmentType
 import uniffi.rust_bridge.ConversationData
 import uniffi.rust_bridge.EditMessage
 import uniffi.rust_bridge.EventPipeline
-import uniffi.rust_bridge.IndexedMessagePart
 import uniffi.rust_bridge.MessageAttachment
 import uniffi.rust_bridge.MessageInst
-import uniffi.rust_bridge.MessagePart
 import uniffi.rust_bridge.MessageReceiver
 import uniffi.rust_bridge.MessageType
 import uniffi.rust_bridge.NormalMessage
@@ -41,8 +39,6 @@ import uniffi.rust_bridge.ReactMessageType
 import uniffi.rust_bridge.RegisterState
 import uniffi.rust_bridge.RustBridgeException
 import uniffi.rust_bridge.SharedPushStateHandle
-import uniffi.rust_bridge.TextFlags
-import uniffi.rust_bridge.TextFormat
 import uniffi.rust_bridge.UnsendMessage
 
 /**
@@ -413,7 +409,7 @@ class DirectEngine private constructor(private val app: Context) {
      * it: [text], then [attachments] (each uploaded first), an inline reply to [replyGuid] (part
      * [replyPart]), sent with [effect] (Apple's effect id), [voice] when it is a recorded audio
      * message. With [app] it is that iMessage app's new card (a new game): its balloon, with
-     * [attachments] as its picture.
+     * [attachments] as its picture. [runs] format the text (bold, a text effect, ...; [TextRuns]).
      */
     suspend fun send(
         target: DirectWire.Target,
@@ -424,11 +420,12 @@ class DirectEngine private constructor(private val app: Context) {
         attachments: List<DirectWire.Attachment>,
         voice: Boolean,
         app: IMessageExtra.App? = null,
+        runs: List<TextRun> = emptyList(),
     ): DirectWire.SendReply {
         val s = requireSession()
         val (conversation, from) = conversationOf(target)
         val uploaded = attachments.map { upload(s, it) }
-        val outgoing = if (app != null) DirectMessages.appParts(app, uploaded, move = false) else DirectMessages.outgoing(text, uploaded)
+        val outgoing = if (app != null) DirectMessages.appParts(app, uploaded, move = false) else DirectMessages.outgoing(text, uploaded, runs)
         val message = NormalMessage(
             outgoing.parts,
             effect, replyGuid, replyGuid?.let { replyPart ?: "0:0:0" }, MessageType.IMessage,
@@ -482,12 +479,12 @@ class DirectEngine private constructor(private val app: Context) {
         sendAndConfirm(s, inst, Sent.UNSEND)
     }
 
-    /** Part [part] of the user's message [guid] now reads [text]; the main process checked the limits. */
-    suspend fun edit(target: DirectWire.Target, guid: String, part: Int, text: String) {
+    /** Part [part] of the user's message [guid] now reads [text], formatted with [runs]; the main process checked the limits. */
+    suspend fun edit(target: DirectWire.Target, guid: String, part: Int, text: String, runs: List<TextRun> = emptyList()) {
         val s = requireSession()
         val (conversation, from) = conversationOf(target)
         val inst = uniffi.rust_bridge.newMsg(
-            conversation, from, PushChatMessage.Edit(EditMessage(guid, part.toULong(), listOf(textPart(text)))),
+            conversation, from, PushChatMessage.Edit(EditMessage(guid, part.toULong(), DirectMessages.editParts(text, runs))),
         ).copy(sentTimestamp = System.currentTimeMillis().toULong())
         sendAndConfirm(s, inst, Sent.EDIT)
     }
@@ -556,9 +553,6 @@ class DirectEngine private constructor(private val app: Context) {
             partial.delete()
         }
     }
-
-    private fun textPart(text: String) =
-        IndexedMessagePart(MessagePart.Text(text, TextFormat.Flags(TextFlags(false, false, false, false))), null, null)
 
     /**
      * The library's conversation for [target] and the address to send from. A one-to-one chat

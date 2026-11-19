@@ -33,6 +33,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -1023,6 +1024,51 @@ class BlueBubblesScreenTest {
                 two.app.getString(R.string.imessage_edited_at, com.lightdecoder.ui.chat.TimeFormat.clock(two.app, editedAt)),
                 org.robolectric.shadows.ShadowToast.getTextOfLatestToast(),
             )
+        }
+    }
+
+    @Test
+    fun editingMyFormattedIMessageKeepsItsFormatting() {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        directMode(asked)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        val now = System.currentTimeMillis()
+        directMessage("H9", "Hers", now - 120_000, mine = false)
+        val bold = com.lightdecoder.imessage.direct.TextRun(0, 3, bold = true)
+        imRepo.upsertMessage(
+            com.lightdecoder.relay.MessageDto(
+                id = "imsg:M9", conversationId = ALICE_DIRECT, fromMe = true, timestampMs = now - 60_000, direction = "out",
+                status = "OUTGOING_COMPLETE", transport = IMessageManager.TRANSPORT, text = "Fix this tpyo",
+                parts = listOf(com.lightdecoder.relay.PartDto("0", "text", "Fix this tpyo")), isOld = true,
+                extra = com.lightdecoder.imessage.direct.IMessageExtra(runs = mapOf(0 to listOf(bold))).toJson(),
+            ),
+        )
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("my iMessage") { shownTexts(it).contains("Fix this tpyo") }
+            scenario.onActivity { activity -> activity.onMessageLongPress(rowOf(activity, "Fix this tpyo")) }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            ShadowDialog.getLatestDialog().findViewById<View>(R.id.actionEdit).performClick()
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val dialog = latestDialog()
+            val field = firstEditText(dialog.window!!.decorView)!!
+            // Shown as sent, and the selection menu formats here too.
+            assertEquals(1, field.text.getSpans(0, 3, com.lightdecoder.ui.chat.BoldMark::class.java).size)
+            assertTrue(field.customSelectionActionModeCallback is com.lightdecoder.ui.chat.FormattingActionMode)
+            field.text.replace(9, 13, "typo")
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+            scenario.waitFor("the edit, shown") { activity ->
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                bubbleOf(activity, "Fix this typo")?.findViewById<View>(R.id.edited)?.visibility == View.VISIBLE
+            }
+            val edit = com.lightdecoder.imessage.direct.DirectWire.EditRequest.fromJson(asked.single { it.first == com.lightdecoder.imessage.direct.DirectWire.EDIT }.second)
+            assertEquals("Fix this typo", edit.text)
+            assertEquals(listOf(bold), edit.runs)
+            scenario.onActivity { activity ->
+                val body = bubbleOf(activity, "Fix this typo")!!.findViewById<android.widget.TextView>(R.id.body)
+                assertEquals(android.graphics.Typeface.BOLD, (body.text as android.text.Spanned).getSpans(0, 3, android.text.style.StyleSpan::class.java).single().style)
+            }
         }
     }
 
@@ -2414,8 +2460,11 @@ class BlueBubblesScreenTest {
         }
     }
 
-    /** The iMessage library set up as Apple would answer sends, Alice's Messages conversation with her iMessage chat. */
-    private fun effectsSetUp() {
+    /**
+     * The iMessage library set up as Apple would answer sends, Alice's Messages conversation with her
+     * iMessage chat. Returns the sends asked of it.
+     */
+    private fun effectsSetUp(): MutableList<Pair<Int, org.json.JSONObject>> {
         two.env.pairedManager()
         IMessagePrefs.setEnabled(two.app, true)
         val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
@@ -2426,6 +2475,7 @@ class BlueBubblesScreenTest {
             answer(what, request)
         }
         two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        return asked
     }
 
     private fun plays(activity: Activity) = (activity as ThreadActivity).effectPlayer.plays
@@ -2544,6 +2594,209 @@ class BlueBubblesScreenTest {
             }
         } finally {
             Settings.Global.putFloat(two.app.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f)
+        }
+    }
+
+    private fun formatted(vararg runs: com.lightdecoder.imessage.direct.TextRun) =
+        com.lightdecoder.imessage.direct.IMessageExtra(runs = mapOf(0 to runs.toList()))
+
+    private fun textPlays(activity: Activity) = plays(activity).filter { it.effect == com.lightdecoder.ui.chat.EffectPlayer.TEXT }
+
+    @Test
+    fun anIncomingFormattedTextShowsItsStylesAndItsTextEffectPlaysOnceAndOnTap() {
+        effectsSetUp()
+        val big = com.lightdecoder.imessage.direct.TextEffectKind.BIG
+        directMessageWith(
+            "T1", "Hello big world", System.currentTimeMillis() - 3 * 60 * 60_000L,
+            formatted(com.lightdecoder.imessage.direct.TextRun(0, 5, bold = true), com.lightdecoder.imessage.direct.TextRun(6, 9, effect = big)),
+        )
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("the text effect played") { textPlays(it).isNotEmpty() }
+            scenario.onActivity { activity ->
+                val play = textPlays(activity).single()
+                assertEquals("imsg:T1", play.messageId)
+                assertEquals(com.lightdecoder.ui.chat.EffectPlayer.Reason.RECEIVED, play.reason)
+                assertTrue(play.animated)
+                val bubble = bubbleOf(activity, "Hello big world")!!
+                val body = bubble.findViewById<com.lightdecoder.ui.chat.TextEffectView>(R.id.body)
+                val text = body.text as android.text.Spanned
+                assertEquals(android.graphics.Typeface.BOLD, text.getSpans(0, 5, android.text.style.StyleSpan::class.java).single().style)
+                assertEquals(big, text.getSpans(6, 9, com.lightdecoder.ui.chat.TextEffectSpan::class.java).single().effect)
+                assertTrue(text.getSpans(10, 15, android.text.style.StyleSpan::class.java).isEmpty())
+                assertTrue(bubble.findViewById<View>(R.id.bubble).contentDescription.toString().contains("With text effects: Big"))
+                // No "Sent with …" caption: text effects are the words' own.
+                assertEquals(View.GONE, bubble.findViewById<View>(R.id.effectRow).visibility)
+                // A tap on the text plays it again, as often as tapped.
+                body.performClick()
+                body.performClick()
+                assertEquals(listOf(com.lightdecoder.ui.chat.EffectPlayer.Reason.RECEIVED, com.lightdecoder.ui.chat.EffectPlayer.Reason.REPLAY, com.lightdecoder.ui.chat.EffectPlayer.Reason.REPLAY), textPlays(activity).map { it.reason })
+                // The list and its quote say the words alone.
+                assertEquals("Hello big world", imRepo.message("imsg:T1")!!.text)
+            }
+        }
+        // Opened again: played already, it stays still until tapped.
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("her iMessage") { shownTexts(it).contains("Hello big world") }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper(300, java.util.concurrent.TimeUnit.MILLISECONDS)
+            scenario.onActivity { activity -> assertTrue(textPlays(activity).isEmpty()) }
+        }
+    }
+
+    @Test
+    fun withAnimationsRemovedTextEffectsStayStillButFormattingShows() {
+        effectsSetUp()
+        Settings.Global.putFloat(two.app.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 0f)
+        try {
+            directMessageWith(
+                "T2", "shake it off", System.currentTimeMillis() - 60_000,
+                formatted(
+                    com.lightdecoder.imessage.direct.TextRun(0, 5, effect = com.lightdecoder.imessage.direct.TextEffectKind.SHAKE),
+                    com.lightdecoder.imessage.direct.TextRun(9, 12, italic = true),
+                ),
+            )
+            ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+                scenario.waitFor("its turn") { textPlays(it).isNotEmpty() }
+                scenario.onActivity { activity ->
+                    assertFalse(textPlays(activity).single().animated)
+                    val body = bubbleOf(activity, "shake it off")!!.findViewById<com.lightdecoder.ui.chat.TextEffectView>(R.id.body)
+                    assertFalse(body.playing)
+                    body.performClick()
+                    assertFalse("a tap moves nothing either", body.playing)
+                    val text = body.text as android.text.Spanned
+                    assertEquals(android.graphics.Typeface.ITALIC, text.getSpans(9, 12, android.text.style.StyleSpan::class.java).single().style)
+                    assertFalse(text.getSpans(0, 5, com.lightdecoder.ui.chat.TextEffectSpan::class.java).single().hidden)
+                }
+            }
+        } finally {
+            Settings.Global.putFloat(two.app.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f)
+        }
+    }
+
+    @Test
+    fun selectedWordsAreFormattedInTheComposerAndSentSo() {
+        val asked = effectsSetUp()
+        directMessageWith("E1", "Hello", System.currentTimeMillis() - 60_000, com.lightdecoder.imessage.direct.IMessageExtra())
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("her iMessage") { shownTexts(it).contains("Hello") }
+            scenario.onActivity { activity ->
+                val input = activity.findViewById<EditText>(R.id.input)
+                input.setText("  make it bold and big")
+                val mode = input.customSelectionActionModeCallback as com.lightdecoder.ui.chat.FormattingActionMode
+                val menu = androidx.appcompat.view.menu.MenuBuilder(activity)
+                mode.addItems(menu)
+                assertEquals(
+                    listOf("Text effects", "Bold", "Italic", "Underline", "Strikethrough"),
+                    (0 until menu.size()).map { menu.getItem(it).title.toString() },
+                )
+                input.setSelection(10, 14)
+                assertTrue(mode.handle(R.id.text_format_bold))
+                // Bold shows in the composer as it is typed.
+                assertEquals(android.graphics.Typeface.BOLD, input.text.getSpans(10, 14, android.text.style.StyleSpan::class.java).single().style)
+                // "Text effects": the eight, by name; Big on "big".
+                input.setSelection(19, 22)
+                assertTrue(mode.handle(R.id.text_format_effects))
+            }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val picker = latestDialog()
+            val names = (0 until picker.listView.adapter.count).map { picker.listView.adapter.getItem(it).toString() }
+            assertEquals(listOf("Big", "Small", "Shake", "Nod", "Explode", "Ripple", "Bloom", "Jitter"), names)
+            picker.listView.performItemClick(null, 0, 0)
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            scenario.onActivity { activity ->
+                val input = activity.findViewById<EditText>(R.id.input)
+                assertEquals(1, input.text.getSpans(19, 22, com.lightdecoder.ui.chat.EffectMark::class.java).size)
+                activity.findViewById<View>(R.id.send).performClick()
+            }
+            two.waitUntil("sent") { asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).isNotEmpty() }
+            val sent = com.lightdecoder.imessage.direct.DirectWire.SendRequest.fromJson(asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).single())
+            // Trimmed, the runs moved with it.
+            assertEquals("make it bold and big", sent.text)
+            assertEquals(
+                listOf(
+                    com.lightdecoder.imessage.direct.TextRun(8, 12, bold = true),
+                    com.lightdecoder.imessage.direct.TextRun(17, 20, effect = com.lightdecoder.imessage.direct.TextEffectKind.BIG),
+                ),
+                sent.runs,
+            )
+            // The sent copy shows formatted, and its effect plays once (the copy and the sent message are one).
+            two.waitUntil("stored") { imRepo.message("imsg:S1") != null }
+            scenario.waitFor("the sent message") { a -> bubbleOf(a, "make it bold and big") != null && shownTexts(a).count { it == "make it bold and big" } == 1 }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper(300, java.util.concurrent.TimeUnit.MILLISECONDS)
+            scenario.onActivity { activity ->
+                assertEquals(1, textPlays(activity).size)
+                assertEquals(com.lightdecoder.ui.chat.EffectPlayer.Reason.SENT, textPlays(activity).single().reason)
+                val body = bubbleOf(activity, "make it bold and big")!!.findViewById<android.widget.TextView>(R.id.body)
+                assertEquals(1, (body.text as android.text.Spanned).getSpans(8, 12, android.text.style.StyleSpan::class.java).size)
+            }
+        }
+    }
+
+    @Test
+    fun theComposersFormattingSurvivesARotation() {
+        effectsSetUp()
+        directMessageWith("E1", "Hello", System.currentTimeMillis() - 60_000, com.lightdecoder.imessage.direct.IMessageExtra())
+        val runs = listOf(
+            com.lightdecoder.imessage.direct.TextRun(0, 4, bold = true),
+            com.lightdecoder.imessage.direct.TextRun(5, 9, effect = com.lightdecoder.imessage.direct.TextEffectKind.NOD),
+        )
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("her iMessage") { shownTexts(it).contains("Hello") }
+            scenario.onActivity { activity ->
+                val input = activity.findViewById<EditText>(R.id.input)
+                input.setText("bold nods")
+                com.lightdecoder.ui.chat.ComposerFormatting.write(input.text, runs, 0)
+            }
+            scenario.recreate()
+            scenario.waitFor("the composer again") { it.findViewById<EditText>(R.id.input).text.toString() == "bold nods" }
+            scenario.onActivity { activity ->
+                assertEquals(runs, com.lightdecoder.ui.chat.ComposerFormatting.runs(activity.findViewById<EditText>(R.id.input).text))
+            }
+        }
+    }
+
+    @Test
+    fun theEffectSheetsTextTabPutsATextEffectOnTheWholeMessage() {
+        val asked = effectsSetUp()
+        directMessageWith("E1", "Hello", System.currentTimeMillis() - 60_000, com.lightdecoder.imessage.direct.IMessageExtra())
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("her iMessage") { shownTexts(it).contains("Hello") }
+            scenario.onActivity { activity ->
+                activity.findViewById<EditText>(R.id.input).setText("Party time")
+                assertTrue(activity.findViewById<View>(R.id.send).performLongClick())
+            }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val sheet = effectSheet()
+            assertEquals(View.VISIBLE, sheet.findViewById<View>(R.id.effectTabText)!!.visibility)
+            sheet.findViewById<View>(R.id.effectTabText)!!.performClick()
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val texts = sheet.findViewById<android.widget.RadioGroup>(R.id.effectTextList)!!
+            assertEquals(View.VISIBLE, texts.visibility)
+            assertEquals(View.GONE, sheet.findViewById<View>(R.id.effectBubbleList)!!.visibility)
+            assertEquals(View.GONE, sheet.findViewById<View>(R.id.effectScreenList)!!.visibility)
+            assertEquals(listOf("Big", "Small", "Shake", "Nod", "Explode", "Ripple", "Bloom", "Jitter"), effectNames(texts))
+            texts.getChildAt(effectNames(texts).indexOf("Shake")).performClick()
+            sheet.findViewById<View>(R.id.effectSend)!!.performClick()
+            two.waitUntil("sent") { asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).isNotEmpty() }
+            val sent = com.lightdecoder.imessage.direct.DirectWire.SendRequest.fromJson(asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).single())
+            assertEquals("Party time", sent.text)
+            assertNull("no bubble or screen effect with it", sent.effect)
+            assertEquals(listOf(com.lightdecoder.imessage.direct.TextRun(0, 10, effect = com.lightdecoder.imessage.direct.TextEffectKind.SHAKE)), sent.runs)
+        }
+    }
+
+    @Test
+    fun outsideAnIMessageChatTheSelectionMenuHasNoFormatting() {
+        two.env.pairedManager()
+        two.seedConversation(ChatService.MESSAGES, "c1", "Bob", lastTs = 1_000)
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("the composer") { it.findViewById<View>(R.id.input).isEnabled }
+            scenario.onActivity { activity ->
+                val input = activity.findViewById<EditText>(R.id.input)
+                input.setText("green text")
+                val menu = androidx.appcompat.view.menu.MenuBuilder(activity)
+                (input.customSelectionActionModeCallback as com.lightdecoder.ui.chat.FormattingActionMode).addItems(menu)
+                assertEquals(0, menu.size())
+            }
         }
     }
 

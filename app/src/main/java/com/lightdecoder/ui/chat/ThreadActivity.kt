@@ -48,6 +48,9 @@ import com.lightdecoder.chat.ChatBackend
 import com.lightdecoder.chat.ChatService
 import com.lightdecoder.databinding.ActivityThreadBinding
 import com.lightdecoder.databinding.SheetMessageActionsBinding
+import com.lightdecoder.imessage.direct.TextEffectKind
+import com.lightdecoder.imessage.direct.TextRun
+import com.lightdecoder.imessage.direct.TextRuns
 import com.lightdecoder.imessage.direct.UnsendWindow
 import com.lightdecoder.relay.Folder
 import com.lightdecoder.relay.MessageNotifier
@@ -563,6 +566,17 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         outState.putInt(STATE_WINDOW, windowSize)
         if (attachments.isNotEmpty()) outState.putStringArrayList(STATE_ATTACHMENTS, ArrayList(attachments.map(Uri::toString)))
         replyTarget?.takeIf { it.conversationId == conversationId }?.let { outState.putString(STATE_REPLY_TO, it.id) }
+        // The composer's formatting: its text comes back by itself, its text effects would not.
+        ComposerFormatting.runs(binding.input.text ?: "").takeIf { it.isNotEmpty() }?.let {
+            outState.putString(STATE_FORMATTING, TextRuns.toJsonArray(it).toString())
+        }
+    }
+
+    override fun onRestoreInstanceState(savedInstanceState: Bundle) {
+        super.onRestoreInstanceState(savedInstanceState)
+        val saved = savedInstanceState.getString(STATE_FORMATTING) ?: return
+        val runs = runCatching { TextRuns.fromJsonArray(org.json.JSONArray(saved)) }.getOrDefault(emptyList())
+        binding.input.text?.let { ComposerFormatting.write(it, runs, effectHighlight()) }
     }
 
     // --- list ----------------------------------------------------------------
@@ -1213,6 +1227,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         binding.recordingSend.setOnClickListener { finishRecording() }
         binding.attachmentRemove.setOnClickListener { clearAttachment() }
         binding.replyClose.setOnClickListener { clearReply() }
+        // Selected words: iOS 18's Bold, Italic, ... and Text effects, in an iMessage chat only.
+        binding.input.customSelectionActionModeCallback = composerFormatting
         binding.input.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
@@ -1223,6 +1239,45 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         })
         updateSendEnabled()
     }
+
+    /** The composer's text selection menu: formatting and text effects where they can be sent ([sendsWithEffects]). */
+    @VisibleForTesting
+    internal val composerFormatting by lazy {
+        FormattingActionMode(binding.input, ::sendsWithEffects, { effectHighlight() }) { start, end ->
+            pickTextEffect(binding.input, start, end)
+        }
+    }
+
+    /** How a stretch with a text effect shows in a text field: a soft highlight. */
+    private fun effectHighlight(): Int =
+        com.google.android.material.color.MaterialColors.getColor(binding.input, com.google.android.material.R.attr.colorTertiaryContainer)
+
+    /** "Text effects" on [start]..[end] of [field]'s text: which of the eight (one already there: taken off when picked again). */
+    private fun pickTextEffect(field: android.widget.EditText, start: Int, end: Int) {
+        val s = minOf(start, end)
+        val e = maxOf(start, end)
+        if (e <= s) return
+        val effects = TextEffectKind.values()
+        // Over the composer it is the one question open; over an edit's field, that question stays.
+        val composer = field === binding.input
+        if (composer) confirmDialog?.dismiss()
+        val picker = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.imessage_text_effects)
+            .setItems(effects.map { getString(it.nameRes) }.toTypedArray()) { _, which ->
+                val text = field.text ?: return@setItems
+                if (e > text.length) return@setItems
+                val runs = ComposerFormatting.runs(text)
+                val already = TextRuns.styles(text.toString(), runs).sliceArray(s until e).all { it.effect == effects[which] }
+                ComposerFormatting.apply(text, s, e, TextRuns.Change.Effect(if (already) null else effects[which]), effectHighlight())
+                field.setSelection(e)
+            }
+            .show()
+        if (composer) confirmDialog = picker
+    }
+
+    /** The composer's formatting as it is sent: none where it cannot be ([sendsWithEffects]). */
+    private fun composerRuns(): List<TextRun> =
+        if (sendsWithEffects()) ComposerFormatting.runs(binding.input.text ?: "") else emptyList()
 
     private fun renderComposerState() {
         // The phone deleted it: there is nothing on the phone to send into any more.
@@ -1568,6 +1623,20 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         playEffect(row, EffectPlayer.Reason.REPLAY)
     }
 
+    /** A message with text effects on screen: they play by themselves the first time it shows, once ([effectPlays]). */
+    override fun onTextEffectsShown(row: MessageRow, text: TextEffectView) {
+        if (isFinishing || isDestroyed) return
+        val key = EffectPlayer.textKey(row)
+        if (key in effectPlays) return
+        effectPlays.add(key)
+        effectPlayer.playText(row.id, text, if (EffectWatch.isOwn(row)) EffectPlayer.Reason.SENT else EffectPlayer.Reason.RECEIVED)
+    }
+
+    /** Its text tapped: the text effects again, as often as tapped. */
+    override fun onTextEffectsTap(row: MessageRow, text: TextEffectView) {
+        effectPlayer.playText(row.id, text, EffectPlayer.Reason.REPLAY)
+    }
+
     /** No text-to-speech: said once per app run, and the options go. */
     private fun noteReaderUnavailable() {
         if (!readerUnavailableShown) {
@@ -1650,7 +1719,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
         val preview = text.ifEmpty { resources.getQuantityString(R.plurals.chat_attachments, files.size, files.size) }
         confirmDialog?.dismiss()
-        confirmDialog = EffectSheet.show(this, preview) { effect -> send(effect = effect) }
+        // The Text tab: a text effect on the whole message, which needs words to move.
+        val onText: ((TextEffectKind) -> Unit)? = if (text.isEmpty()) null else { effect -> send(textEffect = effect) }
+        confirmDialog = EffectSheet.show(this, preview, onText) { effect -> send(effect = effect) }
         return true
     }
 
@@ -1689,9 +1760,13 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         return chat.takeIf { com.lightdecoder.imessage.madrid.MadridHost.get(this).gamesOffered(this) }
     }
 
-    /** Sends what the composer holds; [effect] is Apple's effect to send it with (iMessage through the library only). */
-    private fun send(effect: String? = null) {
-        val text = binding.input.text?.toString()?.trim().orEmpty()
+    /**
+     * Sends what the composer holds; [effect] is Apple's effect to send it with, [textEffect] a text
+     * effect on all of its text, and its words' formatting goes too (iMessage through the library only).
+     */
+    private fun send(effect: String? = null, textEffect: TextEffectKind? = null) {
+        val (text, formatted) = TextRuns.trimmed(binding.input.text?.toString().orEmpty(), composerRuns())
+        val runs = if (textEffect != null && text.isNotEmpty()) TextRuns.apply(text, formatted, 0, text.length, TextRuns.Change.Effect(textEffect)) else formatted
         val files = attachments
         if (text.isEmpty() && files.isEmpty()) return
         val id = conversationId
@@ -1730,7 +1805,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             lifecycleScope.launch {
                 withContext(Dispatchers.IO) {
                     relayAttempt {
-                        if (files.isEmpty()) im.sendText(companion, text, replyTo, effect) else sendFiles(im, companion, files, text, replyTo, effect)
+                        if (files.isEmpty()) im.sendText(companion, text, replyTo, effect, runs) else sendFiles(im, companion, files, text, replyTo, effect, runs)
                     }
                 }.onFailure { toast(errorText(im, it)) }
             }
@@ -1770,9 +1845,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             val result = withContext(Dispatchers.IO) {
                 relayAttempt {
                     when {
-                        files.isEmpty() && link is com.lightdecoder.imessage.IMessageManager -> link.sendText(id, text, replyTo, effect)
+                        files.isEmpty() && link is com.lightdecoder.imessage.IMessageManager -> link.sendText(id, text, replyTo, effect, runs)
                         files.isEmpty() -> link.sendText(id, text, replyTo)
-                        link is com.lightdecoder.imessage.IMessageManager -> sendFiles(link, id, files, text, replyTo, effect)
+                        link is com.lightdecoder.imessage.IMessageManager -> sendFiles(link, id, files, text, replyTo, effect, runs)
                         else -> {
                             // Each picture as a message of its own, in the order picked (queued in turn, they go
                             // out in it): the phone keeps only one part of a message with several. The text goes
@@ -1804,9 +1879,18 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      * own, in the order picked, the text with the first (above it, as Apple numbers the parts), the
      * reply and the [effect] too. Runs on IO; stops at the first that cannot go.
      */
-    private fun sendFiles(im: com.lightdecoder.imessage.IMessageManager, chat: String, files: List<Uri>, text: String, replyTo: String?, effect: String?) {
+    private fun sendFiles(
+        im: com.lightdecoder.imessage.IMessageManager,
+        chat: String,
+        files: List<Uri>,
+        text: String,
+        replyTo: String?,
+        effect: String?,
+        runs: List<TextRun> = emptyList(),
+    ) {
         files.forEachIndexed { i, file ->
-            im.sendMedia(chat, file, text.ifEmpty { null }.takeIf { i == 0 }, replyTo.takeIf { i == 0 }, effect.takeIf { i == 0 })
+            val first = i == 0
+            im.sendMedia(chat, file, text.ifEmpty { null }.takeIf { first }, replyTo.takeIf { first }, effect.takeIf { first }, if (first) runs else emptyList())
         }
     }
 
@@ -2826,12 +2910,20 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private fun askEdit(row: MessageRow) {
         if (!isShown(row)) return
         val link = backendFor(row)
+        // An iMessage through the library keeps its formatting, and can be given more (the selection menu).
+        val formats = link.service == ChatService.IMESSAGE && directMode()
+        val before = if (formats) com.lightdecoder.imessage.direct.IMessageExtra.parse(row.extra).textRuns(row.text) else emptyList()
         val field = com.google.android.material.textfield.TextInputEditText(this).apply {
-            setText(row.text)
+            setText(ComposerFormatting.spanned(row.text, before, effectHighlight()), TextView.BufferType.EDITABLE)
             setSelection(row.text.length)
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or
                 android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
             maxLines = 8
+        }
+        if (formats) {
+            field.customSelectionActionModeCallback = FormattingActionMode(field, { true }, { effectHighlight() }) { start, end ->
+                pickTextEffect(field, start, end)
+            }
         }
         val pad = (20 * resources.displayMetrics.density).toInt()
         val box = android.widget.FrameLayout(this).apply {
@@ -2843,11 +2935,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             .setMessage(if (link.service == ChatService.IMESSAGE) R.string.imessage_edit_note else R.string.chat_edit_note)
             .setView(box)
             .setPositiveButton(R.string.chat_edit_save) { _, _ ->
-                val text = field.text?.toString()?.trim().orEmpty()
+                val (text, runs) = TextRuns.trimmed(field.text?.toString().orEmpty(), if (formats) ComposerFormatting.runs(field.text ?: "") else emptyList())
                 // The thread switched under the question (onNewIntent closes it; this is the backstop).
-                if (text.isEmpty() || text == row.text || !isShown(row) || link !== backendFor(row)) return@setPositiveButton
+                if (text.isEmpty() || (text == row.text && runs == before) || !isShown(row) || link !== backendFor(row)) return@setPositiveButton
                 lifecycleScope.launch {
-                    relayAttempt { edit(link, row.id, text) }.onFailure {
+                    relayAttempt { edit(link, row.id, text, runs) }.onFailure {
                         val tooLate = it is RelayException && it.code == RelayException.INVALID_ARGUMENT
                         toast(if (tooLate) getString(R.string.chat_edit_too_late) else errorText(link, it))
                     }
@@ -2859,9 +2951,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     /** Like "delete for everyone", editing is the service's own manager's. */
-    private suspend fun edit(link: ChatBackend, messageId: String, text: String) = when (link) {
+    private suspend fun edit(link: ChatBackend, messageId: String, text: String, runs: List<TextRun> = emptyList()) = when (link) {
         is WaManager -> link.editMessage(messageId, text)
-        is com.lightdecoder.imessage.IMessageManager -> link.editMessage(messageId, text)
+        is com.lightdecoder.imessage.IMessageManager -> link.editMessage(messageId, text, runs)
         else -> throw RelayException(WaErrors.UNSUPPORTED, "no editing")
     }
 
@@ -3503,6 +3595,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         private const val STICKER_COLUMNS = 4
         private const val STICKER_TILE_DP = 96
         private const val STATE_REPLY_TO = "replyTo"
+        private const val STATE_FORMATTING = "composerFormatting"
 
         private const val PAGE = 50
         private const val RELOAD_SLACK = 50

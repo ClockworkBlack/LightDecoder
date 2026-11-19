@@ -32,7 +32,8 @@ import com.lightdecoder.relay.ReactionDto
  * groups, reply quote, media, text, "Edited", time and delivery status,
  * reactions, an iPhone's "Delivered" / "Read"), and system notices. An
  * iMessage also shows what it carries beyond its text ([IMessageBubbles]): the
- * effect it was sent with, invisible ink, a link preview, an iMessage app's card.
+ * effect it was sent with, invisible ink, a link preview, an iMessage app's card, and iOS 18's
+ * formatting and text effects ([BubbleText], [TextEffectView]).
  */
 class MessagesAdapter(
     private val media: MediaLoader,
@@ -82,6 +83,12 @@ class MessagesAdapter(
 
         /** "Replay" beside "Sent with Slam" tapped: play the message's effect again ([EffectPlayer]). */
         fun onReplayEffect(row: MessageRow) = Unit
+
+        /** A message whose words have text effects (Big, Shake, ...) is on screen in [text]: they may play once by themselves. */
+        fun onTextEffectsShown(row: MessageRow, text: TextEffectView) = Unit
+
+        /** Its text tapped: its text effects play again. */
+        fun onTextEffectsTap(row: MessageRow, text: TextEffectView) = Unit
     }
 
     /** Messages whose invisible ink was tapped away, by id: their text shows. */
@@ -228,7 +235,10 @@ class MessagesAdapter(
         // An app's card draws its own lines instead of the text that stands for them.
         val inked = IMessageBubbles.hidden(extra, row.text, row.id in revealed)
         b.body.visibility = if (row.text.isNotEmpty() && app == null) View.VISIBLE else View.GONE
-        b.body.text = if (inked) IMessageBubbles.inked(row.text) else row.text
+        // Bold, italic, ... and text effects; none under invisible ink (its shape alone shows).
+        val runs = if (inked || app != null) emptyList() else extra.textRuns(row.text)
+        b.body.text = if (inked) IMessageBubbles.inked(row.text) else BubbleText.styled(row.text, runs)
+        val textEffects = runs.mapNotNull { it.effect }.distinct()
         bindAppCard(holder, app, textColor, metaColor)
         bindLinkCard(holder, extra.link.takeIf { app == null }, textColor, metaColor)
         val effect = IMessageBubbles.effectCaption(context, extra)
@@ -309,10 +319,12 @@ class MessagesAdapter(
             val at = holder.bindingAdapterPosition
             if (at != RecyclerView.NO_POSITION) notifyItemChanged(at)
         }
+        val playText = View.OnClickListener { callbacks.onTextEffectsTap(row, b.body) }
         val tap = when {
             tick == Tick.FAILED -> View.OnClickListener { callbacks.onFailedTap(row) }
             inked -> reveal
             app != null -> View.OnClickListener { callbacks.onAppCardTap(row) }
+            textEffects.isNotEmpty() -> playText
             else -> null
         }
         b.bubble.setOnClickListener(tap)
@@ -321,6 +333,8 @@ class MessagesAdapter(
         // is clickable only for its links, so a tap beside them reaches the bubble.
         if (inked && tick != Tick.FAILED) {
             b.body.setOnClickListener(reveal)
+        } else if (textEffects.isNotEmpty() && tick != Tick.FAILED) {
+            b.body.setOnClickListener(playText)
         } else if (b.body.hasOnClickListeners()) {
             b.body.setOnClickListener(null)
             b.body.isClickable = b.body.movementMethod != null
@@ -328,11 +342,12 @@ class MessagesAdapter(
         val tapLabel = failedTapLabel ?: when {
             inked -> context.getString(R.string.imessage_invisible_ink_hidden)
             app != null -> app.shownName.ifBlank { context.getString(R.string.imessage_app_unnamed) }
+            textEffects.isNotEmpty() -> context.getString(R.string.imessage_text_effect_replay_action)
             else -> null
         }
         ViewCompat.replaceAccessibilityAction(b.bubble, AccessibilityActionCompat.ACTION_CLICK, tapLabel, null)
 
-        b.bubble.contentDescription = describe(holder, item, shownTick, receipt, inked, effect)
+        b.bubble.contentDescription = describe(holder, item, shownTick, receipt, inked, effect, textEffects)
         // TalkBack users cannot swipe a bubble: offer reply as an action.
         ViewCompat.replaceAccessibilityAction(
             b.bubble, AccessibilityActionCompat.ACTION_LONG_CLICK, context.getString(R.string.chat_message_actions), null,
@@ -348,6 +363,7 @@ class MessagesAdapter(
         }
         // The text view is hidden from TalkBack (the bubble reads it): its links are bubble actions.
         holder.linkActionIds = BubbleLinks.bind(b.bubble, b.body, holder.linkActionIds)
+        if (textEffects.isNotEmpty() && b.body.visibility == View.VISIBLE) callbacks.onTextEffectsShown(row, b.body)
     }
 
     /**
@@ -587,6 +603,7 @@ class MessagesAdapter(
             cancelMedia(holder.binding.mediaContainer)
             // An effect still playing on it is not carried over to the next message it shows.
             EffectPlayer.settle(holder.binding.bubble)
+            holder.binding.body.stop()
         }
     }
 
@@ -652,7 +669,15 @@ class MessagesAdapter(
      * What TalkBack reads for a bubble: who, what (not invisible ink's words while [inked]), the
      * [effect] it was sent with, when, and how far it got ([receipt] when it says).
      */
-    private fun describe(holder: MessageHolder, item: ThreadItem.Message, tick: Tick, receipt: String?, inked: Boolean, effect: String?): String {
+    private fun describe(
+        holder: MessageHolder,
+        item: ThreadItem.Message,
+        tick: Tick,
+        receipt: String?,
+        inked: Boolean,
+        effect: String?,
+        textEffects: List<com.lightdecoder.imessage.direct.TextEffectKind> = emptyList(),
+    ): String {
         val context = holder.binding.root.context
         val row = item.row
         val who = if (row.isOutgoing) context.getString(R.string.chat_you)
@@ -665,6 +690,9 @@ class MessagesAdapter(
         }
         if (inked) parts += context.getString(R.string.imessage_invisible_ink_hidden) else if (row.text.isNotEmpty()) parts += row.text
         effect?.takeIf { !inked }?.let { parts += it }
+        if (textEffects.isNotEmpty()) {
+            parts += context.getString(R.string.imessage_text_effect_described, textEffects.joinToString(", ") { context.getString(it.nameRes) })
+        }
         if (row.editedAtMs > 0) parts += context.getString(R.string.imessage_edited)
         parts += TimeFormat.clock(context, row.timestampMs)
         holder.binding.statusIcon.contentDescription?.takeIf { tick != Tick.NONE }?.let { parts += it.toString() }

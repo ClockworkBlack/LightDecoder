@@ -21,8 +21,6 @@ import uniffi.rust_bridge.NsDictionaryClass
 import uniffi.rust_bridge.PushChatMessage
 import uniffi.rust_bridge.ReactMessage
 import uniffi.rust_bridge.ReactMessageType
-import uniffi.rust_bridge.TextFlags
-import uniffi.rust_bridge.TextFormat
 
 /**
  * The ":imessage" process's rules for what goes to Apple, as OpenBubbles 2.0.0 follows them.
@@ -87,14 +85,13 @@ object DirectMessages {
     /**
      * The parts of a message with [text] and the uploaded [attachments], as OpenBubbles builds one:
      * the text first (none when it is empty), then the attachments. Numbered as rustpush numbers
-     * them ([DirectArchive.partIndexes]): with text, it is part 0 and the attachments 1 to n.
+     * them ([DirectArchive.partIndexes]): with text, it is part 0 and the attachments 1 to n. With
+     * [runs] (bold, a text effect, ...), the text is one `Text` part per stretch of one style
+     * ([TextRuns.toParts]), all of them part 0, as an iPhone sends formatted text.
      */
-    fun outgoing(text: String, attachments: List<MessageAttachment>): Outgoing {
-        val parts = listOfNotNull(
-            text.takeIf { it.isNotEmpty() }?.let {
-                IndexedMessagePart(MessagePart.Text(it, TextFormat.Flags(TextFlags(false, false, false, false))), null, null)
-            },
-        ) + attachments.map { IndexedMessagePart(MessagePart.Attachment(it), null, null) }
+    fun outgoing(text: String, attachments: List<MessageAttachment>, runs: List<TextRun> = emptyList()): Outgoing {
+        val parts = TextRuns.toParts(text, runs).map { IndexedMessagePart(it, null, null) } +
+            attachments.map { IndexedMessagePart(MessagePart.Attachment(it), null, null) }
         val indexes = DirectArchive.partIndexes(parts)
         val sent = parts.indices.mapNotNull { i ->
             val att = (parts[i].part as? MessagePart.Attachment)?.v1 ?: return@mapNotNull null
@@ -104,6 +101,11 @@ object DirectMessages {
         }
         return Outgoing(parts, sent)
     }
+
+    /** The new parts of an edited part reading [text] with [runs] (plain: one `Text` part). */
+    fun editParts(text: String, runs: List<TextRun> = emptyList()): List<IndexedMessagePart> =
+        TextRuns.toParts(text, runs).ifEmpty { listOf(MessagePart.Text(text, TextRuns.format(TextStyle.PLAIN))) }
+            .map { IndexedMessagePart(it, null, null) }
 
     /**
      * The parts of an iMessage app's card or move, as OpenBubbles builds them: the app's summary

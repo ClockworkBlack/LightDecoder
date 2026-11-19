@@ -31,6 +31,7 @@ import uniffi.rust_bridge.PushChatMessage
 import uniffi.rust_bridge.ReactMessage
 import uniffi.rust_bridge.ReactMessageType
 import uniffi.rust_bridge.Reaction
+import uniffi.rust_bridge.TextEffect
 import uniffi.rust_bridge.TextFlags
 import uniffi.rust_bridge.TextFormat
 import uniffi.rust_bridge.UnsendMessage
@@ -610,5 +611,38 @@ class DirectArchiveTest {
         override fun changedPhoto(who: String) = "$who changed the group photo."
         override fun removedPhoto(who: String) = "$who removed the group photo."
         override fun updated(who: String, app: String) = if (app.isEmpty()) "$who updated an iMessage app." else "$who updated $app."
+    }
+
+    @Test
+    fun aFormattedMessageKeepsItsRunsOverItsTextAndAnEditItsNewOnes() {
+        fun run(t: String, f: TextFormat, idx: Int) = IndexedMessagePart(MessagePart.Text(t, f), idx.toULong(), null)
+        val boldItalic = TextFormat.Flags(TextFlags(true, true, false, false))
+        val parts = listOf(
+            run("So ", TextFormat.Flags(TextFlags(false, false, false, false)), 0),
+            IndexedMessagePart(MessagePart.Mention(carol, "Carol"), 0UL, null),
+            run(" this is ", TextFormat.Flags(TextFlags(false, false, false, false)), 0),
+            run("big", TextFormat.Effect(TextEffect.BIG), 0),
+            run(" and ", TextFormat.Flags(TextFlags(false, false, false, false)), 0),
+            run("bold", boldItalic, 0),
+            attachment("a.jpg", 1),
+        )
+        val u = map(inst("F1", bob, PushChatMessage.Message(normal(parts)))) as DirectArchive.Update.Upsert
+        assertEquals("So Carol this is big and bold", u.message.text)
+        // One text part (and the picture): runs of formatting are not parts of their own.
+        assertEquals(listOf("0", "p1"), u.message.parts.map { it.partId })
+        val extra = IMessageExtra.parse(u.message.extra)
+        assertEquals(
+            listOf(TextRun(17, 20, effect = TextEffectKind.BIG), TextRun(25, 29, bold = true, italic = true)),
+            extra.textRuns(u.message.text),
+        )
+        assertEquals(listOf(TextEffectKind.BIG), extra.textEffects())
+        // A plain message keeps none.
+        val plainRow = map(message("F2", bob, listOf(me, bob), "plain")) as DirectArchive.Update.Upsert
+        assertTrue(IMessageExtra.parse(plainRow.message.extra).runs.isEmpty())
+        // An edit to formatted text carries its formatting.
+        val edit = map(
+            inst("X", bob, PushChatMessage.Edit(EditMessage("F1", 0UL, listOf(text("now "), IndexedMessagePart(MessagePart.Text("shaking", TextFormat.Effect(TextEffect.SHAKE)), null, null))))),
+        )
+        assertEquals(DirectArchive.Update.Edit("imsg:F1", "now shaking", 0, 1_700_000_005_000L, listOf(TextRun(4, 11, effect = TextEffectKind.SHAKE))), edit)
     }
 }

@@ -135,8 +135,17 @@ object DirectArchive {
         /** A delivery or read receipt for messages the user sent. */
         data class Receipt(val messageIds: List<String>, val status: String) : Update()
 
-        /** The sender edited part [part] of a message, at [atMs]: that part's new text. */
-        data class Edit(val messageId: String, val text: String, val part: Int = 0, val atMs: Long = 0) : Update()
+        /**
+         * The sender edited part [part] of a message, at [atMs]: that part's new text, and its
+         * formatting ([runs], over [text]; none: plain).
+         */
+        data class Edit(
+            val messageId: String,
+            val text: String,
+            val part: Int = 0,
+            val atMs: Long = 0,
+            val runs: List<TextRun> = emptyList(),
+        ) : Update()
 
         /**
          * Someone put a tapback on a message ([enable]) or took it back. [participantId] is their
@@ -226,7 +235,9 @@ object DirectArchive {
             is PushChatMessage.Unsend ->
                 Update.Unsent(messageId(m.v1.tuuid), m.v1.editPart.toInt(), fromMe, if (fromMe || sender == null) "" else nameOf(sender))
             is PushChatMessage.Edit ->
-                Update.Edit(messageId(m.v1.tuuid), textOf(m.v1.newParts.map { it.part }), m.v1.editPart.toInt(), timestampOf(inst))
+                m.v1.newParts.map { it.part }.let { parts ->
+                    Update.Edit(messageId(m.v1.tuuid), textOf(parts), m.v1.editPart.toInt(), timestampOf(inst), TextRuns.fromEdit(parts))
+                }
             // From one of the user's own devices: a Delivered says nothing; a Read means they read it there.
             is PushChatMessage.Delivered ->
                 if (fromMe) Update.Ignore else Update.Receipt(listOf(messageId(inst.id)), STATUS_DELIVERED)
@@ -305,6 +316,8 @@ object DirectArchive {
             link = n.link,
             app = n.app,
             sticker = attachments.any { it.sticker },
+            // An app's card shows its own lines, not the text that stands for them.
+            runs = if (n.app == null) TextRuns.fromParts(n.parts).filterKeys { it in texts } else emptyMap(),
         )
         val msg = MessageDto(
             id = messageId(inst.id),
