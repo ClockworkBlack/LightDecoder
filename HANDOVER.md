@@ -23,6 +23,32 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.46-wrapper (versionCode 55) - BRANCH ccr-4fee5e9f-jrrlhu-wrapper: Edit and reactions through the wrapper
+- Main's 0.5.46 (every emoji as a reaction) merged in.
+- **Edit:** the new text is asked in LightDecoder (the usual edit dialog). The wrapper then:
+  1. long-presses the message and taps "Edit";
+  2. fills the field OpenBubbles opens over it (hint "Edited Message", `message_holder.dart`);
+  3. taps the send arrow to its right (`WrapperNodes.editField` + `send`);
+  4. waits for the field to close.
+
+  The text is updated here (`IMessageManager.recordEdited`).
+- **Reactions** (quick row or full picker): the wrapper long-presses the message and taps that emoji in
+  OpenBubbles' reaction row. The row holds ❤️ 👍 👎 😂 ❗ ❓, then recent and filler emoji, up to 16, and
+  is scrolled along up to 3 times; matching ignores U+FE0F. The tapback is shown here
+  (`recordOwnReaction`). An emoji OpenBubbles' row does not offer ends as "reaction not offered":
+  OpenBubbles is left open, and a notice says to react there. "Remove reaction" is hidden for iMessages.
+- Both are only for messages with text (they are found by it), and are logged with timings like replies.
+
+## 0.5.46 (versionCode 54) - every emoji as a reaction
+- Long-press sheet: five quick reactions (👍 ❤️ 😂 😮 😢; the user's own reaction takes the last place
+  when it is another emoji), then a white round "+" (`item_quick_reaction_more`). It opens
+  `sheet_emoji_picker`: AndroidX `EmojiPickerView` (androidx.emoji2:emoji2-emojipicker 1.5.0), with every
+  emoji, categories, recently used and skin tones (long press). Any emoji goes as a reaction to Google
+  Messages and WhatsApp (`ThreadActivity.reactionPicked`), and to iMessage through OpenBubbles (the
+  wrapper branch does the tapback itself).
+- The picker brings Guava (Apache-2.0, added to `bundleLicenses`' Apache list and NOTICE). Its
+  annotation-only dependencies (jsr305, checker-qual, j2objc-annotations) are excluded, not shipped.
+- versionCode 53 was the wrapper branch's 0.5.45-wrapper. Main continues at 54, so it installs over it.
 ## 0.5.45-wrapper (versionCode 53) - BRANCH ccr-4fee5e9f-jrrlhu-wrapper: the OpenBubbles wrapper (beta)
 - An experimental option, on its own branch at the user's request; main stays at 0.5.44. Off by default.
   Switch: Messages tab menu → "Inline replies & Undo Send (wrapper, beta)", which leads to Android's

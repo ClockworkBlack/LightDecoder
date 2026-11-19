@@ -110,6 +110,26 @@ object WrapperNodes {
         }.maxByOrNull { it.bounds.right }
     }
 
+    /** The field OpenBubbles opens over a message being edited (hint "Edited Message"). */
+    fun editField(root: UiNode): UiNode? =
+        all(root).firstOrNull { it.editable && norm(it.hint).startsWith("edited message") }
+
+    /**
+     * A reaction in OpenBubbles' reaction row: drawn as the emoji itself (❤️ 👍 👎 😂 ❗ ❓, then recent
+     * ones). Compared without the emoji presentation marks, so ❤ and ❤️ are the same.
+     */
+    fun reaction(root: UiNode, emoji: String): UiNode? {
+        val want = bareEmoji(emoji)
+        if (want.isEmpty()) return null
+        return all(root).firstOrNull { !it.editable && bareEmoji(said(it)) == want }
+    }
+
+    /** Short scrolling rows (the reaction row), widest first, to look further along for an emoji. */
+    fun rows(root: UiNode): List<UiNode> =
+        all(root).filter { it.scrollable && it.bounds.height() in 1 until it.bounds.width() / 3 }.sortedByDescending { it.bounds.width() }.toList()
+
+    private fun bareEmoji(s: String) = s.trim().replace("\uFE0F", "").replace("\uFE0E", "")
+
     /** A list that can scroll back to older messages. */
     fun scrollable(root: UiNode): UiNode? = all(root).filter { it.scrollable }.maxByOrNull { it.bounds.height() }
 

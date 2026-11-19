@@ -21,7 +21,7 @@ import com.lightdecoder.imessage.OpenBubbles
  */
 object Wrapper {
 
-    enum class Kind { REPLY, UNSEND }
+    enum class Kind { REPLY, UNSEND, EDIT, REACT }
 
     /**
      * One thing to do in OpenBubbles: an inline reply with [text] to the message reading [targetText],
@@ -87,6 +87,16 @@ object Wrapper {
     internal fun finish(context: Context, job: Job, result: Result) {
         val app = context.applicationContext
         val local = job.localId
+        // Shown here as done: OpenBubbles notifies none of these.
+        if (result.ok && job.targetId != null) {
+            runCatching {
+                when (job.kind) {
+                    Kind.EDIT -> IMessageManager.get(app).recordEdited(job.targetId, job.text)
+                    Kind.REACT -> IMessageManager.get(app).recordOwnReaction(job.targetId, job.text)
+                    else -> Unit
+                }
+            }
+        }
         if (result.ok && job.kind == Kind.UNSEND && job.targetId != null) {
             runCatching {
                 com.lightdecoder.imessage.IMessagePrefs.addDeletedMessage(app, job.targetId)
@@ -95,13 +105,15 @@ object Wrapper {
         }
         if (!result.ok) {
             if (local != null) runCatching { IMessageManager.get(app).forgetSentElsewhere(local) }
-            if (job.kind == Kind.REPLY) {
+            if (job.kind == Kind.REPLY || job.kind == Kind.EDIT) {
                 app.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText("reply", job.text))
             }
         }
         val words = when {
             result.ok -> null
             job.kind == Kind.REPLY -> app.getString(R.string.wrapper_failed_reply)
+            job.kind == Kind.EDIT -> app.getString(R.string.wrapper_failed_edit)
+            job.kind == Kind.REACT -> app.getString(R.string.wrapper_failed_react, job.text)
             else -> app.getString(R.string.wrapper_failed_unsend)
         }
         if (words != null) Handler(Looper.getMainLooper()).post { Toast.makeText(app, words, Toast.LENGTH_LONG).show() }

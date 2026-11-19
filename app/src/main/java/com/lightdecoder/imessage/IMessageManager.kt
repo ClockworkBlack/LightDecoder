@@ -369,6 +369,32 @@ class IMessageManager private constructor(
         return id
     }
 
+    /** A message of the user's, edited through the wrapper: its new text here too. */
+    fun recordEdited(id: String, text: String) {
+        val row = repo.message(id)?.takeIf { it.media.isEmpty() } ?: return
+        repo.upsertMessage(
+            MessageDto(
+                id = row.id, conversationId = row.conversationId, fromMe = row.isOutgoing, direction = row.direction,
+                senderId = row.senderId, senderName = row.senderName, status = row.status, transport = TRANSPORT,
+                text = text, replyToId = row.replyToId, timestampMs = row.timestampMs, reactions = row.reactions, isOld = true,
+            ),
+        )
+    }
+
+    /** The user's tapback on [id], done through the wrapper: shown on it here (one reaction of one's own). */
+    fun recordOwnReaction(id: String, emoji: String) {
+        val row = repo.message(id)?.takeIf { it.media.isEmpty() } ?: return
+        val others = row.reactions.filter { !it.fromMe }
+        repo.upsertMessage(
+            MessageDto(
+                id = row.id, conversationId = row.conversationId, fromMe = row.isOutgoing, direction = row.direction,
+                senderId = row.senderId, senderName = row.senderName, status = row.status, transport = TRANSPORT,
+                text = row.text, replyToId = row.replyToId, timestampMs = row.timestampMs, isOld = true,
+                reactions = others + com.lightdecoder.relay.ReactionDto(emoji, participantIds = listOf(ME), fromMe = true),
+            ),
+        )
+    }
+
     /** Takes back a [recordSentElsewhere] row whose send did not go through. */
     fun forgetSentElsewhere(id: String) = repo.applyDeletion(id)
 

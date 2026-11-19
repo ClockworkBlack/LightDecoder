@@ -83,7 +83,14 @@ class WrapperService : AccessibilityService() {
                 steps += "$name ${now - stepAt}ms"
                 stepAt = now
             }
-            showCover(if (job.kind == Wrapper.Kind.UNSEND) R.string.wrapper_cover_unsend else R.string.wrapper_cover_reply)
+            showCover(
+                when (job.kind) {
+                    Wrapper.Kind.UNSEND -> R.string.wrapper_cover_unsend
+                    Wrapper.Kind.EDIT -> R.string.wrapper_cover_edit
+                    Wrapper.Kind.REACT -> R.string.wrapper_cover_react
+                    Wrapper.Kind.REPLY -> R.string.wrapper_cover_reply
+                },
+            )
             val failedAt: String? = try {
                 perform(job, ::mark)
             } catch (e: Exception) {
@@ -127,7 +134,28 @@ class WrapperService : AccessibilityService() {
         if (press == null || !act(press, AccessibilityNodeInfo.ACTION_LONG_CLICK)) {
             if (!gesture(bubble.bounds, long = true)) return "long-press"
         }
-        val title = if (job.kind == Wrapper.Kind.UNSEND) "Undo Send" else "Reply"
+        // A reaction: tap its emoji in the reaction row at the top of the menu (scrolling along it if need be).
+        if (job.kind == Wrapper.Kind.REACT) {
+            var emoji = waitFor(MENU_MS) { root -> WrapperNodes.reaction(root, job.text) }
+            var along = 0
+            while (emoji == null && along < 3) {
+                val row = root()?.let(WrapperNodes::rows)?.firstOrNull() ?: break
+                act(row, AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+                along++
+                emoji = waitFor(SCROLL_MS) { root -> WrapperNodes.reaction(root, job.text) }
+            }
+            emoji ?: return "reaction not offered"
+            mark("menu")
+            if (!click(emoji)) return "reaction"
+            delay(SETTLE_MS)
+            mark("reacted")
+            return null
+        }
+        val title = when (job.kind) {
+            Wrapper.Kind.UNSEND -> "Undo Send"
+            Wrapper.Kind.EDIT -> "Edit"
+            else -> "Reply"
+        }
         var item = waitFor(MENU_MS) { root -> WrapperNodes.action(root, title) }
         if (item == null) {
             // Behind the menu's "more" button.
@@ -140,6 +168,18 @@ class WrapperService : AccessibilityService() {
         if (job.kind == Wrapper.Kind.UNSEND) {
             delay(SETTLE_MS)
             mark("undo send")
+            return null
+        }
+        if (job.kind == Wrapper.Kind.EDIT) {
+            // The message becomes a field ("Edited Message") with a send arrow to its right.
+            val editing = waitFor(SHORT_MS) { root -> WrapperNodes.editField(root) } ?: return "edit field"
+            val args = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, job.text) }
+            if (!act(editing, AccessibilityNodeInfo.ACTION_SET_TEXT, args)) return "type"
+            mark("typed")
+            val confirm = waitFor(SHORT_MS) { root -> WrapperNodes.editField(root)?.let { f -> WrapperNodes.send(root, f) } } ?: return "edit send"
+            if (!click(confirm)) return "edit send"
+            waitFor(SHORT_MS) { root -> if (WrapperNodes.editField(root) == null) root else null } ?: return "edited?"
+            mark("edited")
             return null
         }
         // 4. Reply mode: type into the field.

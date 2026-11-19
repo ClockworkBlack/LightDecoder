@@ -63,6 +63,10 @@
     <string name="wrapper_open_settings">Open accessibility settings</string>
     <string name="wrapper_cover_reply">Sending inline reply through OpenBubbles\u2026</string>
     <string name="wrapper_cover_unsend">Undoing send in OpenBubbles\u2026</string>
+    <string name="wrapper_cover_edit">Editing in OpenBubbles\u2026</string>
+    <string name="wrapper_cover_react">Reacting in OpenBubbles\u2026</string>
+    <string name="wrapper_failed_edit">The edit could not be finished. OpenBubbles is open with the chat; the new text is copied.</string>
+    <string name="wrapper_failed_react">OpenBubbles did not offer %1$s. It is open with the chat: long-press the message to react there.</string>
     <string name="wrapper_failed_reply">The inline reply could not be finished. OpenBubbles is open with the chat; your text is copied.</string>
     <string name="wrapper_failed_unsend">Undo Send could not be finished. OpenBubbles is open with the chat: long-press the message and tap Undo Send.</string>
     <string name="wrapper_replying_to">Replying to %1$s (inline, through OpenBubbles)</string>

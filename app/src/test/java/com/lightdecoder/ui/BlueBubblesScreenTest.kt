@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.pm.PackageInfo
 import android.provider.Settings
 import android.view.View
+import android.view.ViewGroup
 import android.widget.EditText
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.widget.Toolbar
@@ -703,6 +704,55 @@ class BlueBubblesScreenTest {
                 scenario.onActivity { assertEquals("OpenBubbles not opened for the user", null, shadowOf(it).peekNextStartedActivity()) }
                 com.lightdecoder.wrapper.Wrapper.finish(two.app, jobs.single(), com.lightdecoder.wrapper.Wrapper.Result(true, null, 1200))
                 scenario.waitFor("gone here too") { !shownTexts(it).contains("Oops") }
+            }
+        } finally {
+            com.lightdecoder.wrapper.Wrapper.runner = null
+            com.lightdecoder.wrapper.Wrapper.setEnabled(two.app, false)
+        }
+    }
+
+    @Test
+    fun withTheWrapperAnIMessageIsEditedAndReactedTo() {
+        two.env.pairedManager()
+        installOpenBubbles()
+        IMessagePrefs.setEnabled(two.app, true)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        seedIMessage("We won!", ts = 5_000)
+        iMessage.record(
+            CapturedIMessageChat(ALICE, "m2", "Alice", false, "+15551234567", listOf(CapturedIMessage("", "", true, "Mine, with a tpyo", System.currentTimeMillis() - 60_000))),
+            live = false,
+        )
+        val jobs = ArrayList<com.lightdecoder.wrapper.Wrapper.Job>()
+        com.lightdecoder.wrapper.Wrapper.setEnabled(two.app, true)
+        com.lightdecoder.wrapper.Wrapper.runner = { _, job -> jobs += job }
+        try {
+            ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+                scenario.waitFor("the iMessages") { shownTexts(it).containsAll(listOf("We won!", "Mine, with a tpyo")) }
+                // A reaction, from the full picker's path: done in OpenBubbles, then shown here.
+                scenario.onActivity { a -> a.reactionPicked(rowOf(a, "We won!"), "\uD83D\uDD25", null, isIMessage = true) }
+                scenario.waitFor("the react job") { jobs.size == 1 }
+                assertEquals(com.lightdecoder.wrapper.Wrapper.Kind.REACT, jobs[0].kind)
+                assertEquals("We won!", jobs[0].targetText)
+                com.lightdecoder.wrapper.Wrapper.finish(two.app, jobs[0], com.lightdecoder.wrapper.Wrapper.Result(true, null, 900))
+                scenario.waitFor("my reaction on it") { a -> rowOf(a, "We won!").reactions.any { it.fromMe && it.emoji == "\uD83D\uDD25" } }
+                // An edit: the new text is asked here.
+                scenario.onActivity { a -> a.onMessageLongPress(rowOf(a, "Mine, with a tpyo")) }
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                ShadowDialog.getLatestDialog().findViewById<View>(R.id.actionEdit).performClick()
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                val ask = latestDialog()
+                ask.findViewById<android.widget.FrameLayout>(android.R.id.custom)
+                val input = (ShadowDialog.getLatestDialog().window!!.decorView as ViewGroup).let { root ->
+                    fun find(v: View): EditText? = if (v is EditText) v else (v as? ViewGroup)?.let { g -> (0 until g.childCount).firstNotNullOfOrNull { find(g.getChildAt(it)) } }
+                    find(root)!!
+                }
+                input.setText("Mine, with a typo")
+                ask.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+                scenario.waitFor("the edit job") { jobs.size == 2 }
+                assertEquals(com.lightdecoder.wrapper.Wrapper.Kind.EDIT, jobs[1].kind)
+                assertEquals("Mine, with a typo", jobs[1].text)
+                com.lightdecoder.wrapper.Wrapper.finish(two.app, jobs[1], com.lightdecoder.wrapper.Wrapper.Result(true, null, 1500))
+                scenario.waitFor("edited here too") { shownTexts(it).contains("Mine, with a typo") }
             }
         } finally {
             com.lightdecoder.wrapper.Wrapper.runner = null

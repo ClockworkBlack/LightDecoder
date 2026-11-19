@@ -38,8 +38,8 @@ android {
         applicationId = "com.lightdecoder"
         minSdk = 26
         targetSdk = 36
-        versionCode = 53
-        versionName = "0.5.45-wrapper"
+        versionCode = 55
+        versionName = "0.5.46-wrapper"
         // On-device tests (app/src/androidTest): the Blue Bubbles round trip against the
         // stand-in OpenBubbles app (:fakebubbles), run on an emulator by .github/workflows/device-test.yml.
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -331,7 +331,7 @@ val bundleLicenses by tasks.registering {
     val apacheLibrary = Regex(
         "(androidx\\.[^:]+|com\\.google\\.android\\.material|org\\.jetbrains\\.kotlinx?):[^:]+" +
             "|org\\.jetbrains:annotations|org\\.jspecify:jspecify" +
-            "|com\\.google\\.guava:listenablefuture|com\\.google\\.errorprone:error_prone_annotations" +
+            "|com\\.google\\.guava:(listenablefuture|guava|failureaccess)|com\\.google\\.errorprone:error_prone_annotations" +
             "|com\\.google\\.zxing:core",
     )
     val androidLibraries = provider { configurations.getByName("releaseRuntimeClasspath") }.map { classpath ->
@@ -593,6 +593,13 @@ dependencies {
     implementation("androidx.recyclerview:recyclerview:1.3.2")
     implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
     implementation("androidx.viewpager2:viewpager2:1.1.0")
+    // The full emoji picker for reactions (every Unicode emoji, categories, recents, skin tones).
+    implementation("androidx.emoji2:emoji2-emojipicker:1.5.0") {
+        // Annotations only (nothing reads them at run time): not shipped.
+        exclude(group = "com.google.code.findbugs", module = "jsr305")
+        exclude(group = "org.checkerframework", module = "checker-qual")
+        exclude(group = "com.google.j2objc", module = "j2objc-annotations")
+    }
     // The Messenger tab's web page: tells Facebook "computer layout" in the client hints too (Apache-2.0).
     implementation("androidx.webkit:webkit:1.12.1")
     // Reads a photo's EXIF orientation, so camera pictures are not shown sideways (Apache-2.0).

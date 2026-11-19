@@ -69,4 +69,21 @@ class WrapperNodesTest {
         assertNull("the attach button is left of the field", WrapperNodes.send(noSend, field))
         assertSame(list, WrapperNodes.scrollable(screen))
     }
+
+    @Test
+    fun theEditFieldAndAReactionAreFound() {
+        val heart = N(text = "\u2764", clickable = true)
+        val thumbs = N(text = "\uD83D\uDC4D", clickable = true)
+        val reactions = N(scrollable = true, bounds = Rect(100, 300, 900, 380), kids = listOf(heart, thumbs))
+        val editing = N(hint = "Edited Message", editable = true, bounds = Rect(100, 500, 800, 600))
+        val arrow = N(clickable = true, bounds = Rect(810, 500, 900, 600))
+        val cancel = N(clickable = true, bounds = Rect(0, 500, 90, 600))
+        val screen2 = N(bounds = Rect(0, 0, 1080, 2000), kids = listOf(reactions, cancel, editing, arrow, field, sendIcon))
+        assertSame("❤️ and ❤ are the same", heart, WrapperNodes.reaction(screen2, "\u2764\uFE0F"))
+        assertSame(thumbs, WrapperNodes.reaction(screen2, "\uD83D\uDC4D"))
+        assertNull(WrapperNodes.reaction(screen2, "\uD83D\uDD25"))
+        assertSame(reactions, WrapperNodes.rows(screen2).first())
+        assertSame(editing, WrapperNodes.editField(screen2))
+        assertSame("the edit's arrow, right of its field", arrow, WrapperNodes.send(screen2, editing))
+    }
 }
