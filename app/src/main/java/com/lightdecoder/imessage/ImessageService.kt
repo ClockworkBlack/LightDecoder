@@ -18,30 +18,66 @@ import com.lightdecoder.ui.imessage.ImessageActivity
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 
 /**
- * Keeps the iMessage session connected while LightDecoder is in the background, as the Google
- * Messages link's service does, so iMessages reach the Messages tab (and its notifications)
- * whether a screen is open or not. Runs only while iMessage is set up ([ImessageEngine.isSetUp]);
- * started after registration, with the app, and after a reboot or update.
+ * The ":imessage" process's service: keeps the iMessage session connected (in the foreground,
+ * like the Google Messages link's service) so iMessages reach the Messages tab whether a screen is
+ * open or not, answers the main process's requests ([ImessageWire.SEND], [ImessageWire.UNSEND],
+ * [ImessageWire.REACH]), and hands what Apple sends to the main process's [ImessageSinkService].
  */
 class ImessageService : Service() {
 
     private val scope = MainScope()
+    private lateinit var engine: ImessageEngine
+    private lateinit var sinkClient: ImessageIpc.Client
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    private val server = ImessageIpc.Server { what, request ->
+        when (what) {
+            ImessageWire.SEND -> {
+                val (guid, ts) = engine.send(
+                    ImessageWire.Target.fromJson(request.getJSONObject("target")),
+                    request.getString("text"),
+                    request.optString("replyGuid").takeIf { !request.isNull("replyGuid") && it.isNotEmpty() },
+                )
+                ImessageWire.sent(guid, ts)
+            }
+            ImessageWire.UNSEND -> {
+                engine.unsend(
+                    ImessageWire.Target.fromJson(request.getJSONObject("target")),
+                    request.getString("guid"),
+                    request.optInt("part", 0),
+                )
+                ImessageWire.ok()
+            }
+            ImessageWire.REACH -> {
+                val conversation = engine.reach(request.getString("recipient"))
+                if (conversation != null) JSONObject().put("conversation", conversation.toJson()) else JSONObject()
+            }
+            else -> ImessageWire.error("Unknown request $what")
+        }
+    }
+
+    override fun onBind(intent: Intent?): IBinder = server.messenger.binder
 
     override fun onCreate() {
         super.onCreate()
         ensureChannel(this)
-        val engine = ImessageEngine.get(this)
+        engine = ImessageEngine.get(this)
+        sinkClient = ImessageIpc.Client(this, ImessageSinkService::class.java)
+        engine.sink = ImessageEngine.Sink { update ->
+            val reply = sinkClient.call(ImessageWire.UPDATE, ImessageWire.encode(update), SINK_TIMEOUT_MS)
+            ImessageWire.errorOf(reply) == null
+        }
         scope.launch { engine.status.collect { update(it) } }
+        // Bound by the main process for a send or unsend, even before a start command.
+        engine.start()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         try {
             ServiceCompat.startForeground(
-                this, NOTIFICATION_ID, notification(ImessageEngine.get(this).status.value),
+                this, NOTIFICATION_ID, notification(engine.status.value),
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING else 0,
             )
         } catch (e: RuntimeException) {
@@ -53,11 +89,14 @@ class ImessageService : Service() {
             stopSelf(startId)
             return START_NOT_STICKY
         }
-        ImessageEngine.get(this).start()
+        engine.start()
         return START_STICKY
     }
 
     override fun onDestroy() {
+        engine.sink = null
+        sinkClient.close()
+        server.close()
         scope.cancel()
         super.onDestroy()
     }
@@ -66,7 +105,7 @@ class ImessageService : Service() {
         try {
             getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(status))
         } catch (e: SecurityException) {
-            // Notifications not allowed: the service runs without the update.
+            // Notifications not allowed.
         }
     }
 
@@ -96,6 +135,7 @@ class ImessageService : Service() {
         private const val TAG = "ImessageService"
         const val CHANNEL = "imessage_status"
         private const val NOTIFICATION_ID = 7301
+        private const val SINK_TIMEOUT_MS = 30_000L
 
         fun ensureChannel(context: Context) {
             val nm = context.getSystemService(NotificationManager::class.java)
@@ -106,7 +146,7 @@ class ImessageService : Service() {
             }
         }
 
-        /** Starts the service if iMessage is set up. False if Android refused (a start from the background). */
+        /** Starts the service if iMessage is set up (from either process). False if Android refused. */
         fun start(context: Context): Boolean {
             if (!ImessageEngine.isSetUp(context)) return false
             return try {

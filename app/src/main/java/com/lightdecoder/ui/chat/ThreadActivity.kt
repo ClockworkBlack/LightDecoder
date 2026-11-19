@@ -1715,7 +1715,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      * connected, refused, no answer). It disappears for people on iOS 16 or later.
      */
     private fun unsend(row: MessageRow) {
-        val engine = com.lightdecoder.imessage.ImessageEngine.get(this)
+        val engine = com.lightdecoder.imessage.ImessageLink.get(this)
         toast(getString(R.string.imessage_unsending))
         lifecycleScope.launch {
             try {

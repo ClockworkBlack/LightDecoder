@@ -16,7 +16,10 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - No separate tab (owner's call). iMessage conversations live in the Messages archive; a
   foreground service (`imessage/ImessageService`) keeps iMessage connected in the background.
 - Library (`librust_bridge.so` + `libheifdec.so`, OpenBubbles 2.0.0 arm64, pinned by SHA-256) is
-  imported by the user and never committed. Loads in the main process once set up.
+  imported by the user and never committed. **On this branch (`-isolated`) it loads only in
+  the ":imessage" process** (service + setup screen); the main process keeps the archive and
+  talks to it over bound services (`imessage/ImessageIpc`, `ImessageWire`, `ImessageLink`,
+  `ImessageSinkService`). Branch `ccr-ffe9dbd4-xu00fq` has the single-process version.
 - Unsend works after a restart (recipients come from the archive). Not built yet: iMessage
   pictures/attachments, reactions, history from before registration (needs Apple Account/iCloud).
 - **Not tried on a phone.** The owner's pass: registration completes and the status turns green.

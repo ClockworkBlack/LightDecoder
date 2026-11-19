@@ -2,22 +2,16 @@ package com.lightdecoder.imessage
 
 import android.content.Context
 import android.util.Log
-import com.lightdecoder.archive.ArchiveRepository
-import com.lightdecoder.archive.LocalState
-import com.lightdecoder.archive.MessageRow
 import com.lightdecoder.relay.ConversationDto
-import com.lightdecoder.relay.MessageDto
-import com.lightdecoder.relay.MessageNotifier
 import com.lightdecoder.relay.ParticipantDto
-import com.lightdecoder.relay.PartDto
-import com.lightdecoder.relay.RelayManager
 import java.io.File
-import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -42,22 +36,18 @@ import uniffi.rust_bridge.TextFormat
 import uniffi.rust_bridge.UnsendMessage
 
 /**
- * iMessage through OpenBubbles' library, part of the Messages tab: its conversations and messages
- * are stored in the Messages archive ([ImessageArchive] ids), shown in the same list and threads,
- * and [RelayManager] hands every action on an iMessage conversation to this class.
+ * OpenBubbles' library, in the ":imessage" process only ([ImessageProcess]): the rest of
+ * LightDecoder never has it in memory, and a crash in it cannot take the Messages tab or the
+ * Google Messages link down. The main process reaches it through [ImessageService] (see
+ * [ImessageWire]); what Apple sends goes to the main process's archive through [sink].
  *
  * - [register]: relay code -> device identity -> Apple push connection -> this phone's number,
- *   verified by SMS -> iMessage registration -> live session. The status is green
- *   ([Status.Registered]) only once Apple reports the registration as done.
- * - While registered, [ImessageService] keeps the session up, so messages arrive (from other
- *   people, and copies of what the user sent from their other devices, OpenBubbles included)
- *   whether a LightDecoder screen is open or not.
- * - [sendText] works like the Messages tab's own sends: a local copy at once, replaced by the sent
- *   message (id `imsg:<GUID>`) once Apple confirms it, or marked failed with the reason.
- * - [unsend] retracts a message within Apple's 2-minute window. Who it went to is read from the
- *   archive, so it works after LightDecoder restarted too.
- *
- * Only loaded once the user imported OpenBubbles' files ([ImessageLibrary]).
+ *   verified by SMS -> iMessage registration -> live session. Green ([Status.Registered]) only
+ *   once Apple reports the registration as done.
+ * - [send] / [unsend] for a [ImessageWire.Target] the main process built from its archive, so
+ *   unsend works after a restart of either process.
+ * - Incoming events are mapped to archive changes ([ImessageArchive]) and handed to [sink] in
+ *   order; each is acknowledged to the library only once the main process stored it.
  */
 class ImessageEngine private constructor(private val app: Context) {
 
@@ -73,6 +63,11 @@ class ImessageEngine private constructor(private val app: Context) {
     /** A failure the screens show as it is. */
     class ImessageError(message: String) : Exception(message)
 
+    /** Stores an archive change in the main process; true once it is stored. */
+    fun interface Sink {
+        suspend fun deliver(update: ImessageArchive.Update): Boolean
+    }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lock = Mutex()
     private val _status = MutableStateFlow<Status>(Status.NotRegistered)
@@ -80,20 +75,45 @@ class ImessageEngine private constructor(private val app: Context) {
 
     val statePath: String = File(app.filesDir, "imessage/state").apply { mkdirs() }.path
 
-    private val repo: ArchiveRepository get() = RelayManager.get(app).repo
-
     private var started = false
     private var pipeline: EventPipeline? = null
     private var session: SharedPushStateHandle? = null
 
-    /** The user's own iMessage addresses (filled once registered). */
     @Volatile
     private var myHandles: List<String> = emptyList()
 
     /** Waiting for Apple's answer to a send, by message id. */
     private val confirms = ConcurrentHashMap<String, CompletableDeferred<String?>>()
 
+    /** Archive changes waiting for the main process, in the order Apple sent them. */
+    private val outgoingEvents = Channel<Pair<String, ImessageArchive.Update>>(Channel.UNLIMITED)
+
+    @Volatile
+    var sink: Sink? = null
+
     val isRegistered: Boolean get() = _status.value is Status.Registered
+
+    init {
+        scope.launch {
+            for ((id, update) in outgoingEvents) {
+                if (update != ImessageArchive.Update.Ignore) {
+                    var stored = false
+                    var attempt = 0
+                    while (!stored) {
+                        stored = try {
+                            sink?.deliver(update) == true
+                        } catch (e: Exception) {
+                            Log.w(TAG, "main process did not take an update", e)
+                            false
+                        }
+                        if (!stored) delay((1000L shl attempt.coerceAtMost(6)))
+                        attempt++
+                    }
+                }
+                pipeline?.ack(id)
+            }
+        }
+    }
 
     /** Loads the library and restores a previous registration, if any. Safe to call again. */
     fun start() {
@@ -125,21 +145,6 @@ class ImessageEngine private constructor(private val app: Context) {
         uniffi.rust_bridge.setupKeystore(statePath, ImessageKeystore(app))
         pipeline = EventPipeline(File(statePath, "journal").path).also { it.setReceiver(receiver) }
         started = true
-        failInterruptedSends()
-    }
-
-    /**
-     * Local copies of iMessages a previous run was still sending: their answer from Apple was lost
-     * with that run, so they wait as failed for the user (Retry may send them twice).
-     */
-    private fun failInterruptedSends() {
-        try {
-            repo.recentOutgoing(limit = 500)
-                .filter { it.isLocal && ImessageArchive.isImessage(it.conversationId) && it.localState != LocalState.FAILED }
-                .forEach { repo.setLocalState(it.tmpId, LocalState.FAILED, app.getString(com.lightdecoder.R.string.imessage_interrupted)) }
-        } catch (e: RuntimeException) {
-            Log.w(TAG, "could not check interrupted sends", e)
-        }
     }
 
     private suspend fun refreshStatus() {
@@ -162,8 +167,8 @@ class ImessageEngine private constructor(private val app: Context) {
 
     /**
      * Registers this phone's number with iMessage, using the iPhone relay that [relayCode] names.
-     * [phone] does the SMS part. Progress shows in [status]; the result is [Status.Registered] or
-     * [Status.Failed]. Once registered, the background service is started.
+     * [phone] does the SMS part. Progress shows in [status]; once registered the background
+     * service is started.
      */
     fun register(relayCode: String, relayHost: String, phone: PhoneVerifier) {
         scope.launch {
@@ -211,16 +216,33 @@ class ImessageEngine private constructor(private val app: Context) {
         refreshStatus()
     }
 
-    // --- conversations ----------------------------------------------------------------------
+    /** Waits (a little) for [start] to restore the session, for requests that arrive right after the process starts. */
+    private suspend fun requireSession(): SharedPushStateHandle {
+        session?.let { return it }
+        start()
+        return withTimeoutOrNull(SESSION_WAIT_MS) {
+            while (session == null || !isRegistered) {
+                if (_status.value is Status.Failed || _status.value is Status.LibraryMissing || _status.value is Status.NotRegistered) {
+                    if (started) break
+                }
+                delay(200)
+            }
+            session
+        }?.takeIf { isRegistered } ?: throw ImessageError("iMessage is not connected.")
+    }
+
+    // --- requests from the main process ---------------------------------------------------------
 
     /**
-     * The iMessage conversation with [recipient] (a phone number or email), if that address is on
-     * iMessage: made in the archive if it is new. Null when iMessage is not registered or the
-     * address cannot get iMessages (the caller then uses SMS).
+     * The conversation with [recipient] if that address is on iMessage: as the archive should
+     * store it (names are the addresses; the main process puts contact names in). Null otherwise.
      */
-    suspend fun conversationFor(recipient: String): String? {
-        val s = session ?: return null
-        if (!isRegistered) return null
+    suspend fun reach(recipient: String): ConversationDto? {
+        val s = try {
+            requireSession()
+        } catch (e: ImessageError) {
+            return null
+        }
         val to = Handles.normalize(recipient) ?: return null
         val from = Handles.preferredSender(myHandles) ?: return null
         val reachable = try {
@@ -229,112 +251,46 @@ class ImessageEngine private constructor(private val app: Context) {
             return null
         }
         if (to !in reachable) return null
-        val id = ImessageArchive.conversationId(listOf(to, from), myHandles.toSet(), null)
-        if (repo.conversation(id) == null) {
-            repo.upsertConversation(
-                ConversationDto(
-                    id = id,
-                    name = nameOf(to),
-                    type = ImessageArchive.TRANSPORT,
-                    defaultOutgoingId = from,
-                    lastMessageTs = System.currentTimeMillis(),
-                    participants = listOf(
-                        ParticipantDto(id = to, name = nameOf(to), number = Handles.display(to), formattedNumber = Handles.display(to)),
-                        ParticipantDto(id = from, number = Handles.display(from), formattedNumber = Handles.display(from), isMe = true),
-                    ),
-                    otherParticipantIds = listOf(to),
-                ),
-            )
-        }
-        return id
+        return ConversationDto(
+            id = ImessageArchive.conversationId(listOf(to, from), myHandles.toSet(), null),
+            name = Handles.display(to),
+            type = ImessageArchive.TRANSPORT,
+            defaultOutgoingId = from,
+            lastMessageTs = System.currentTimeMillis(),
+            participants = listOf(
+                ParticipantDto(id = to, name = Handles.display(to), number = Handles.display(to), formattedNumber = Handles.display(to)),
+                ParticipantDto(id = from, number = Handles.display(from), formattedNumber = Handles.display(from), isMe = true),
+            ),
+            otherParticipantIds = listOf(to),
+        )
     }
 
-    /** The library's description of a stored iMessage conversation, and the address to send from. */
-    private fun conversationOf(conversationId: String): Pair<ConversationData, String> {
-        val row = repo.conversation(conversationId) ?: throw ImessageError("This conversation is not in the archive any more.")
-        val participants = repo.participants(conversationId)
-        val from = participants.firstOrNull { it.isMe }?.id?.takeIf { it in myHandles }
-            ?: row.defaultOutgoingId.takeIf { it in myHandles }
-            ?: Handles.preferredSender(myHandles)
-            ?: throw ImessageError("This device has no registered iMessage address.")
-        val data = ImessageArchive.conversationData(conversationId, participants, row.name)
-        val handles = (data.participants + from).distinct()
-        return data.copy(participants = handles) to from
+    /** Sends a text and returns its GUID and timestamp once Apple confirmed it. */
+    suspend fun send(target: ImessageWire.Target, text: String, replyGuid: String?): Pair<String, Long> {
+        val s = requireSession()
+        val (conversation, from) = conversationOf(target)
+        val message = NormalMessage(
+            listOf(IndexedMessagePart(MessagePart.Text(text, TextFormat.Flags(TextFlags(false, false, false, false))), null, null)),
+            null, replyGuid, replyGuid?.let { "0:0:${text.length}" }, MessageType.IMessage, null, null, null, false, null, null,
+        )
+        val inst = uniffi.rust_bridge.newMsg(conversation, from, PushChatMessage.Message(message))
+        sendAndConfirm(s, inst, unsend = false)
+        return inst.id to (inst.sentTimestamp.toLong().takeIf { it > 0 } ?: System.currentTimeMillis())
     }
 
-    // --- sending ----------------------------------------------------------------------------
-
-    /** Like the Messages tab's sends: a local copy now ("tmp:<tmpId>"), the sent message once Apple confirms it. */
-    fun sendText(conversationId: String, text: String, replyToId: String?): String {
-        val tmpId = UUID.randomUUID().toString()
-        repo.insertLocalOutgoing(tmpId, conversationId, text, null, null, null, replyToId, System.currentTimeMillis())
-        scope.launch { deliver(tmpId, conversationId, text, replyToId) }
-        return tmpId
-    }
-
-    /** Sends a failed message again, from its local copy (which survives restarts). */
-    fun retry(tmpId: String) {
-        val row = repo.message(MessageRow.tmpMessageId(tmpId)) ?: return
-        repo.setLocalState(tmpId, LocalState.PENDING)
-        scope.launch { deliver(tmpId, row.conversationId, row.text, row.replyToId.ifEmpty { null }) }
-    }
-
-    fun discard(tmpId: String) {
-        repo.applyDeletion(MessageRow.tmpMessageId(tmpId))
-    }
-
-    private suspend fun deliver(tmpId: String, conversationId: String, text: String, replyToId: String?) {
-        try {
-            repo.setLocalState(tmpId, LocalState.SENDING)
-            val s = session ?: throw ImessageError("iMessage is not connected.")
-            val (conversation, from) = conversationOf(conversationId)
-            val replyGuid = replyToId?.let(ImessageArchive::guidOf)
-            val message = NormalMessage(
-                listOf(IndexedMessagePart(MessagePart.Text(text, TextFormat.Flags(TextFlags(false, false, false, false))), null, null)),
-                null, replyGuid, replyGuid?.let { "0:0:${text.length}" }, MessageType.IMessage, null, null, null, false, null, null,
-            )
-            val inst = uniffi.rust_bridge.newMsg(conversation, from, PushChatMessage.Message(message))
-            sendAndConfirm(s, inst, unsend = false)
-            repo.upsertMessage(
-                MessageDto(
-                    id = ImessageArchive.messageId(inst.id),
-                    conversationId = conversationId,
-                    tmpId = tmpId,
-                    senderId = from,
-                    fromMe = true,
-                    timestampMs = inst.sentTimestamp.toLong().takeIf { it > 0 } ?: System.currentTimeMillis(),
-                    direction = "out",
-                    status = ImessageArchive.STATUS_SENT,
-                    statusCode = 1,
-                    transport = ImessageArchive.TRANSPORT,
-                    text = text,
-                    parts = listOf(PartDto(partId = "0", kind = "text", text = text)),
-                    replyToId = replyToId.orEmpty(),
-                ),
-            )
-        } catch (e: Throwable) {
-            Log.w(TAG, "iMessage send failed", e)
-            repo.setLocalState(tmpId, LocalState.FAILED, readable(e))
-        }
-    }
-
-    /**
-     * Retracts one of the user's iMessages (by its archive id, `imsg:<GUID>`) within Apple's 2-minute
-     * window; the recipient needs iOS 16 or later for it to disappear on their side. On success the
-     * message is removed here too. Throws [ImessageError] saying why when it does not go through.
-     */
-    suspend fun unsend(messageId: String, part: Int = 0) {
-        val guid = ImessageArchive.guidOf(messageId) ?: throw ImessageError("Only iMessages can be unsent.")
-        val row = repo.message(messageId) ?: throw ImessageError("This message is not in the archive any more.")
-        if (!row.isOutgoing) throw ImessageError("Only your own messages can be unsent.")
-        if (!UnsendWindow.canUnsend(row.timestampMs, System.currentTimeMillis())) {
-            throw ImessageError("Too late to unsend: Apple only allows it within 2 minutes of sending.")
-        }
-        val s = session ?: throw ImessageError("iMessage is not connected.")
-        val (conversation, from) = conversationOf(row.conversationId)
+    /** Retracts [guid]; the main process has checked the 2-minute window. */
+    suspend fun unsend(target: ImessageWire.Target, guid: String, part: Int) {
+        val s = requireSession()
+        val (conversation, from) = conversationOf(target)
         val inst = uniffi.rust_bridge.newMsg(conversation, from, PushChatMessage.Unsend(UnsendMessage(guid, part.toULong())))
         sendAndConfirm(s, inst, unsend = true)
-        repo.applyDeletion(messageId)
+    }
+
+    private fun conversationOf(target: ImessageWire.Target): Pair<ConversationData, String> {
+        val from = target.from.takeIf { it in myHandles } ?: Handles.preferredSender(myHandles)
+            ?: throw ImessageError("This device has no registered iMessage address.")
+        val handles = (target.participants + from).distinct()
+        return ConversationData(handles, target.groupName, target.groupGuid, null) to from
     }
 
     private suspend fun sendAndConfirm(s: SharedPushStateHandle, inst: MessageInst, unsend: Boolean) {
@@ -358,10 +314,11 @@ class ImessageEngine private constructor(private val app: Context) {
         }
     }
 
-    // --- incoming ---------------------------------------------------------------------------
+    // --- events from Apple -----------------------------------------------------------------------
 
     private val receiver = object : MessageReceiver {
         override fun onMessage(id: String, event: PushEvent) {
+            var update: ImessageArchive.Update = ImessageArchive.Update.Ignore
             try {
                 when (event) {
                     is PushEvent.SendConfirm -> confirms[event.uuid]?.complete(event.error ?: "")
@@ -370,63 +327,15 @@ class ImessageEngine private constructor(private val app: Context) {
                         is RegisterState.Registering -> Status.Working("Registering with Apple")
                         is RegisterState.Failed -> Status.Failed(r.error)
                     }
-                    is PushEvent.Message -> incoming(event.v1)
+                    is PushEvent.Message -> update = ImessageArchive.map(event.v1, myHandles.toSet(), Handles::display)
                     else -> Unit
                 }
             } catch (e: Throwable) {
                 Log.w(TAG, "event ${event::class.simpleName} not handled", e)
-            } finally {
-                // Acknowledged only after the archive has it: until then the library keeps the
-                // event in its journal and hands it over again after a restart.
-                pipeline?.ack(id)
             }
-        }
-    }
-
-    private fun incoming(inst: MessageInst) {
-        when (val u = ImessageArchive.map(inst, myHandles.toSet(), ::nameOf)) {
-            is ImessageArchive.Update.Upsert -> {
-                val existing = repo.conversation(u.conversation.id)
-                val conversation = if (existing != null && !u.conversation.isGroup) {
-                    u.conversation.copy(name = existing.name.ifBlank { u.conversation.name })
-                } else {
-                    u.conversation
-                }
-                repo.upsertConversation(conversation.copy(lastMessageTs = maxOf(existing?.lastMessageTs ?: 0, u.message.timestampMs)))
-                val result = repo.upsertMessage(u.message)
-                if (result.inserted && !u.message.fromMe) MessageNotifier.onIncoming(app, repo, u.message)
-            }
-            is ImessageArchive.Update.Remove -> repo.applyDeletion(u.messageId)
-            is ImessageArchive.Update.Receipt -> repo.advanceMessageStatus(
-                u.messageIds, u.status, ImessageArchive.statusCode(u.status), ImessageArchive::statusRank,
-            )
-            is ImessageArchive.Update.Edit -> {
-                val row = repo.message(u.messageId) ?: return
-                repo.upsertMessage(
-                    MessageDto(
-                        id = row.id, conversationId = row.conversationId, senderId = row.senderId, senderName = row.senderName,
-                        fromMe = row.isOutgoing, timestampMs = row.timestampMs, direction = row.direction, status = row.status,
-                        statusCode = row.statusCode, transport = ImessageArchive.TRANSPORT, text = u.text,
-                        parts = listOf(PartDto(partId = "0", kind = "text", text = u.text)), replyToId = row.replyToId,
-                    ),
-                )
-            }
-            ImessageArchive.Update.Ignore -> Unit
-        }
-    }
-
-    /** A display name for an address: the Messages archive's contact with that number, else the address. */
-    private fun nameOf(handle: String): String {
-        val address = Handles.display(handle)
-        if (!handle.startsWith("tel:")) return address
-        val digits = address.filter { it.isDigit() }.takeLast(10)
-        if (digits.length < 7) return address
-        return try {
-            repo.contacts(digits).firstOrNull { c ->
-                c.phoneNumber.filter { it.isDigit() }.endsWith(digits) && (c.customAlias.isNotBlank() || c.displayName.isNotBlank())
-            }?.let { it.customAlias.ifBlank { it.displayName } } ?: address
-        } catch (e: RuntimeException) {
-            address
+            // Acknowledged (in order) once the main process stored it; until then the library
+            // keeps the event in its journal and hands it over again after a restart.
+            outgoingEvents.trySend(id to update)
         }
     }
 
@@ -435,7 +344,6 @@ class ImessageEngine private constructor(private val app: Context) {
         _status.value = Status.Failed(readable(e))
     }
 
-    /** Runs a library call, turning its errors into readable ones. */
     private suspend fun <T> call(block: suspend () -> T): T = try {
         block()
     } catch (e: ImessageError) {
@@ -447,6 +355,7 @@ class ImessageEngine private constructor(private val app: Context) {
     companion object {
         private const val TAG = "Imessage"
         const val CONFIRM_TIMEOUT_MS = 45_000L
+        private const val SESSION_WAIT_MS = 20_000L
 
         /** The public registration relay the iPhone relay apps use by default, and its public token. */
         const val DEFAULT_RELAY_HOST = "https://registration-relay.beeper.com"
@@ -461,12 +370,13 @@ class ImessageEngine private constructor(private val app: Context) {
         @Volatile
         private var instance: ImessageEngine? = null
 
+        /** Only in the ":imessage" process. */
         fun get(context: Context): ImessageEngine =
             instance ?: synchronized(this) {
                 instance ?: ImessageEngine(context.applicationContext).also { instance = it }
             }
 
-        /** Whether iMessage is set up here: its files imported and a registration made. Cheap. */
+        /** Whether iMessage is set up: its files imported and a registration made. Cheap; any process. */
         fun isSetUp(context: Context): Boolean = ImessagePrefs.registered(context) && ImessageLibrary.isInstalled(context)
     }
 }

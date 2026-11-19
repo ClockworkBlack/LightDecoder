@@ -802,7 +802,7 @@ class RelayManager private constructor(
      */
     override fun sendText(conversationId: String, text: String, replyToId: String?): String {
         // An iMessage conversation of this tab: sent over iMessage, not through the phone.
-        if (com.lightdecoder.imessage.ImessageArchive.isImessage(conversationId)) return com.lightdecoder.imessage.ImessageEngine.get(app).sendText(conversationId, text, replyToId)
+        if (com.lightdecoder.imessage.ImessageArchive.isImessage(conversationId)) return com.lightdecoder.imessage.ImessageLink.get(app).sendText(conversationId, text, replyToId)
         val tmpId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
         onIntake("queue a message") { outbox.enqueueText(tmpId, conversationId, text, replyToId, now) }
@@ -839,13 +839,13 @@ class RelayManager private constructor(
 
     /** Sends a failed message again. */
     override fun retry(tmpId: String) {
-        if (isImessageTmp(tmpId)) return com.lightdecoder.imessage.ImessageEngine.get(app).retry(tmpId)
+        if (isImessageTmp(tmpId)) return com.lightdecoder.imessage.ImessageLink.get(app).retry(tmpId)
         onIntake("retry a message") { outbox.retry(tmpId) }
     }
 
     /** Drops a failed (or still queued) message and its local copy. */
     override fun discardFailed(tmpId: String) {
-        if (isImessageTmp(tmpId)) return com.lightdecoder.imessage.ImessageEngine.get(app).discard(tmpId)
+        if (isImessageTmp(tmpId)) return com.lightdecoder.imessage.ImessageLink.get(app).discard(tmpId)
         onIntake("discard a message") { outbox.discard(tmpId) }
     }
 
@@ -918,7 +918,7 @@ class RelayManager private constructor(
         if (messageId.startsWith(MessageRow.TMP_PREFIX)) {
             val tmpId = messageId.removePrefix(MessageRow.TMP_PREFIX)
             if (isImessageTmp(tmpId)) {
-                withContext(Dispatchers.IO) { com.lightdecoder.imessage.ImessageEngine.get(app).discard(tmpId) }
+                withContext(Dispatchers.IO) { com.lightdecoder.imessage.ImessageLink.get(app).discard(tmpId) }
                 return
             }
             onIntakeAndWait { outbox.discard(tmpId) }
@@ -1053,7 +1053,7 @@ class RelayManager private constructor(
         // One person who can get iMessages, with iMessage set up here: an iMessage conversation,
         // as an iPhone would choose. Anyone else (or iMessage off, or not reachable): SMS/RCS.
         if (numbers.size == 1 && com.lightdecoder.imessage.ImessageEngine.isSetUp(app)) {
-            com.lightdecoder.imessage.ImessageEngine.get(app).conversationFor(numbers.first())?.let { return@withContext it }
+            com.lightdecoder.imessage.ImessageLink.get(app).conversationFor(numbers.first())?.let { return@withContext it }
         }
         val since = gate.epoch()
         val conversation = requireBridge().getOrCreateConversation(numbers, groupName?.trim()?.ifEmpty { null })

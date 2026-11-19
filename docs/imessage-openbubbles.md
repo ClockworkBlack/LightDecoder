@@ -34,8 +34,27 @@ restart.
   and says it disappears for iOS 16+ only.
 - **Setup** (`ui/imessage/ImessageActivity`, Messages tab menu > "iMessage..."): import
   OpenBubbles' files, enter the relay code, register; status green only when Apple says
-  Registered. The library now loads in the app's main process (needed to write the archive and
-  keep the connection), still only after the user imported the files and registered.
+  Registered.
+- **Two processes** (branch `ccr-ffe9dbd4-xu00fq-isolated`; the main branch loads the library in
+  the main process instead): OpenBubbles' library runs only in **":imessage"**
+  (`imessage/ImessageProcess`; `LightDecoderApp.onCreate` returns early there): its
+  `ImessageService` (foreground, keeps iMessage connected), `ImessageEngine`, the setup screen
+  and the SMS verification. The Messages archive, the screens and the Google Messages link stay
+  in the main process, which never loads the library, so a crash in it cannot take them down.
+  They talk over two non-exported bound services with `Messenger` (`imessage/ImessageIpc`,
+  format `imessage/ImessageWire`):
+  - main -> ":imessage" (`ImessageLink` -> `ImessageService`): SEND (target built from the
+    archive, text, reply GUID) -> GUID + time; UNSEND (target, GUID, part); REACH (address) ->
+    the conversation if it is on iMessage. Each waits for Apple's answer; a dead or silent other
+    process gives a clear error, never a hang.
+  - ":imessage" -> main (`ImessageEngine.sink` -> `ImessageSinkService` -> `ImessageLink.apply`):
+    each archive change, in Apple's order. The library's event is acknowledged only after the
+    main process answered that it stored it; until then it stays in the library's journal and is
+    retried (with backoff), also after a restart. Binding with BIND_AUTO_CREATE starts the main
+    process if it is not running, so messages are stored and notified whether LightDecoder is
+    open or not.
+  - The "registered" flag is a file (`files/imessage/registered`), not SharedPreferences, which
+    are cached per process.
 - **Import** (`imessage/ImessageLibrary`, `ElfInfo`): files identified by SHA-256 against `PINS`
   (arm64: `librust_bridge.so` b6dfe8ce..., `libheifdec.so` bdabf750...), refused if unknown or for
   another CPU type. `libuniffi_runtime.so` is not needed.
@@ -53,7 +72,9 @@ restart.
   wipe, also deletes the iMessage conversations (one archive). The Messages tab must be paired
   for its composer to be enabled.
 - Tests: `imessage/ImessageArchiveTest` (ids, mapping of every event kind, groups, sending
-  data), `imessage/ImessageLogicTest` (unsend window, SMS format, addresses, import rules),
+  data), `imessage/ImessageWireTest` (everything that crosses processes survives the trip),
+  `imessage/ImessageIpcTest` (request/reply over a bound Messenger, errors, timeouts),
+  `imessage/ImessageLogicTest` (unsend window, SMS format, addresses, import rules),
   `imessage/ElfInfoTest`.
 
 ### Keystore contract (read from OpenBubbles 2.0.0's own implementation)
