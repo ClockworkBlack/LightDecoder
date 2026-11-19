@@ -142,6 +142,7 @@ class MadridHostTest {
 
     @After
     fun tearDown() {
+        DirectPrefs.setGamesOn(context, true)
         MadridHost.resetForTesting()
         MadridApps.resetForTesting()
         IMessageApps.host = null
@@ -287,6 +288,46 @@ class MadridHostTest {
         assertEquals(context.getString(R.string.imessage_app_still_sending), ShadowToast.getTextOfLatestToast())
         Thread.sleep(200)
         assertNull("nothing opened", fake.tapped)
+    }
+
+    @Test
+    fun withGamesOffATapIsNotTakenNothingIsBoundAndNoMoveIsHandedOver() {
+        assertTrue("on by default", DirectPrefs.gamesOn(context))
+        val host = MadridHost.get(context)
+        assertTrue(host.gamesOffered(context))
+        assertEquals(listOf(ext), host.available(context))
+
+        // Off: a tap is not taken (the card's other ways apply), and nothing is bound.
+        DirectPrefs.setGamesOn(context, false)
+        assertTrue(!DirectPrefs.gamesOn(context))
+        assertTrue(!host.gamesOffered(context))
+        assertTrue(host.available(context).isEmpty())
+        assertTrue(!tap("imsg:C1"))
+        Thread.sleep(300)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertNull(fake.tapped)
+        assertTrue("nothing bound", shadowOf(context).boundServiceConnections.isEmpty())
+
+        // On again: a game opens in OpenPigeon and quiets the chat.
+        DirectPrefs.setGamesOn(context, true)
+        assertTrue(tap("imsg:C1"))
+        waitFor("the tap") { fake.tapped != null }
+        fake.handle!!.setSuppressNotifications(true)
+        assertTrue(host.silences(chat))
+
+        // Turned off with the game open: the chat is not quiet, and Apple's moves are not handed over.
+        DirectPrefs.setGamesOn(context, false)
+        assertTrue("not quiet any more", !host.silences(chat))
+        link.apply(fromBob("M2", move("C1", session, "Bob again"), 3))
+        Thread.sleep(300)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertTrue("no move handed over", fake.updated.isEmpty())
+
+        // On: the next move is.
+        DirectPrefs.setGamesOn(context, true)
+        link.apply(fromBob("M3", move("C1", session, "third"), 4))
+        waitFor("the move") { fake.updated.isNotEmpty() }
+        assertEquals(listOf("M3"), fake.updated.map { it.messageGuid })
     }
 
     private companion object {

@@ -75,6 +75,8 @@ class BlueBubblesScreenTest {
         }
         com.lightdecoder.imessage.IMessageChecks.resetForTesting()
         IMessagePrefs.setEnabled(two.app, false)
+        com.lightdecoder.imessage.direct.DirectPrefs.setGamesOn(two.app, true)
+        com.lightdecoder.imessage.madrid.MadridApps.resetForTesting()
         com.lightdecoder.imessage.direct.DirectPrefs.setRegistered(two.app, false)
         com.lightdecoder.imessage.direct.DirectLink.resetForTesting()
         IMessageManager.resetForTesting()
@@ -1501,6 +1503,171 @@ class BlueBubblesScreenTest {
                 assertTrue(com.lightdecoder.imessage.direct.DirectPrefs.sendReadReceipts(activity))
                 switch.performClick()
                 assertFalse(com.lightdecoder.imessage.direct.DirectPrefs.sendReadReceipts(activity))
+            }
+        }
+    }
+
+    private val openPigeon = com.lightdecoder.imessage.madrid.MadridApps.OPENPIGEON
+
+    private fun installOpenPigeon(verified: Boolean) {
+        shadowOf(two.app.packageManager).installPackage(
+            PackageInfo().apply {
+                packageName = openPigeon.pkg
+                lastUpdateTime = if (verified) 1 else 2
+                applicationInfo = android.content.pm.ApplicationInfo().apply { packageName = openPigeon.pkg }
+            },
+        )
+        com.lightdecoder.imessage.madrid.MadridApps.verifier = { _, _ -> verified }
+    }
+
+    private fun gamesStatus(activity: Activity) = activity.findViewById<android.widget.TextView>(R.id.gamesStatus)
+
+    @Test
+    fun theIMessageScreenHasIMessageGamesOnAtFirstAndOffersOpenPigeon() {
+        assertTrue(com.lightdecoder.imessage.direct.DirectPrefs.gamesOn(two.app))
+        ActivityScenario.launch(com.lightdecoder.ui.imessage.DirectSetupActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                val switch = activity.findViewById<android.widget.CompoundButton>(R.id.switchGames)
+                assertTrue(switch.isChecked)
+                assertEquals("iMessage games", switch.text.toString())
+                // Not installed: said, with "Get games", which opens its store page.
+                assertEquals(View.VISIBLE, gamesStatus(activity).visibility)
+                assertEquals("OpenPigeon is not installed.", gamesStatus(activity).text.toString())
+                val get = activity.findViewById<android.widget.Button>(R.id.getGames)
+                assertEquals(View.VISIBLE, get.visibility)
+                assertEquals("Get games", get.text.toString())
+                get.performClick()
+                val opened = shadowOf(activity).nextStartedActivity
+                assertEquals(Intent.ACTION_VIEW, opened.action)
+                assertEquals("market://details?id=com.openbubbles.openpigeon", opened.dataString)
+                // Off: kept, and neither is shown.
+                switch.performClick()
+                assertFalse(com.lightdecoder.imessage.direct.DirectPrefs.gamesOn(activity))
+                assertEquals(View.GONE, gamesStatus(activity).visibility)
+                assertEquals(View.GONE, get.visibility)
+            }
+        }
+        // Still off when the screen opens again; on again from there.
+        ActivityScenario.launch(com.lightdecoder.ui.imessage.DirectSetupActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                val switch = activity.findViewById<android.widget.CompoundButton>(R.id.switchGames)
+                assertFalse(switch.isChecked)
+                assertEquals(View.GONE, gamesStatus(activity).visibility)
+                switch.performClick()
+                assertTrue(com.lightdecoder.imessage.direct.DirectPrefs.gamesOn(activity))
+                assertEquals(View.VISIBLE, gamesStatus(activity).visibility)
+            }
+        }
+    }
+
+    @Test
+    fun withNoStoreAppGetGamesOpensThePlayStoreOnTheWeb() {
+        shadowOf(two.app).checkActivities(true)
+        val browser = ComponentName("com.example.browser", "com.example.browser.Main")
+        shadowOf(two.app.packageManager).addActivityIfNotPresent(browser)
+        shadowOf(two.app.packageManager).addIntentFilterForActivity(
+            browser,
+            android.content.IntentFilter(Intent.ACTION_VIEW).apply {
+                addCategory(Intent.CATEGORY_DEFAULT)
+                addDataScheme("https")
+            },
+        )
+        ActivityScenario.launch(com.lightdecoder.ui.imessage.DirectSetupActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                activity.findViewById<View>(R.id.getGames).performClick()
+                assertEquals("https://play.google.com/store/apps/details?id=com.openbubbles.openpigeon", shadowOf(activity).nextStartedActivity.dataString)
+            }
+        }
+    }
+
+    @Test
+    fun theIMessageScreenSaysWhenGamesAreReadyOnceOpenPigeonIsInstalled() {
+        ActivityScenario.launch(com.lightdecoder.ui.imessage.DirectSetupActivity::class.java).use { scenario ->
+            scenario.onActivity { activity -> assertEquals("OpenPigeon is not installed.", gamesStatus(activity).text.toString()) }
+            // Installed from the store, and back to the screen.
+            installOpenPigeon(verified = true)
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.STARTED)
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
+            scenario.onActivity { activity ->
+                assertEquals("Ready. Tap a game in a chat, or choose Games when adding a picture.", gamesStatus(activity).text.toString())
+                assertEquals(View.GONE, activity.findViewById<View>(R.id.getGames).visibility)
+            }
+            // A copy signed by someone else.
+            installOpenPigeon(verified = false)
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.STARTED)
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
+            scenario.onActivity { activity ->
+                assertEquals(two.app.getString(R.string.imessage_app_unverified, "OpenPigeon"), gamesStatus(activity).text.toString())
+                assertEquals(View.GONE, activity.findViewById<View>(R.id.getGames).visibility)
+            }
+        }
+    }
+
+    /** Alice's Messages conversation with her iMessage chat through the library, and her game's card in it. */
+    private fun gameChat() {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        directMode(java.util.Collections.synchronizedList(ArrayList()))
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        val game = com.lightdecoder.imessage.direct.IMessageExtra.App(
+            name = "GamePigeon", appId = 1124197642L, url = "data:state", ldText = "8 Ball", imageTitle = "8 Ball", caption = "Your move", root = "imsg:G1",
+            session = "0f8fad5b-d9cb-469f-a165-70867728950e",
+        )
+        directMessageWith("G1", "Your move", System.currentTimeMillis() - 60_000, com.lightdecoder.imessage.direct.IMessageExtra(app = game))
+    }
+
+    @Test
+    fun withIMessageGamesOffAddingAPictureOpensThePickerAndAGameOpensOnlyOnAnIphone() {
+        gameChat()
+        com.lightdecoder.imessage.direct.DirectPrefs.setGamesOn(two.app, false)
+        // OpenPigeon is here, and is not used.
+        installOpenPigeon(verified = true)
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("her game") { shownTexts(it).contains("Your move") }
+            scenario.onActivity { activity ->
+                val before = ShadowDialog.getLatestDialog()
+                activity.findViewById<View>(R.id.attach).performClick()
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                assertTrue("no Photos-or-Games choice", ShadowDialog.getLatestDialog() === before)
+                assertNotNull("the photo picker", shadowOf(activity).nextStartedActivity)
+                // Her game's card: not opened in OpenPigeon, nothing bound; it opens on an Apple device.
+                appCardOf(activity, "Your move")!!.findViewById<View>(R.id.bubble).performClick()
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                assertEquals("GamePigeon can only be opened on an iPhone, iPad or Mac.", org.robolectric.shadows.ShadowToast.getTextOfLatestToast())
+                assertTrue("no install offer", ShadowDialog.getLatestDialog() === before)
+                assertEquals(null, shadowOf(activity).nextStartedActivity)
+                assertTrue("nothing bound", shadowOf(two.app).boundServiceConnections.isEmpty())
+            }
+        }
+    }
+
+    @Test
+    fun withIMessageGamesOnAndNoOpenPigeonGamesOffersToInstallIt() {
+        gameChat()
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("her game") { shownTexts(it).contains("Your move") }
+            scenario.onActivity { activity ->
+                activity.findViewById<View>(R.id.attach).performClick()
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                val choice = latestDialog()
+                val list = choice.listView
+                assertEquals(
+                    listOf("Photos and videos", "Games"),
+                    (0 until list.adapter.count).map { list.adapter.getItem(it).toString() },
+                )
+                assertEquals(null, shadowOf(activity).nextStartedActivityForResult)
+                list.performItemClick(null, 1, 1)
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                val install = latestDialog()
+                assertTrue(install !== choice)
+                assertEquals(
+                    "Install OpenPigeon to play GamePigeon games with iPhone users.",
+                    install.findViewById<android.widget.TextView>(android.R.id.message)!!.text.toString(),
+                )
+                install.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                assertEquals("market://details?id=com.openbubbles.openpigeon", shadowOf(activity).nextStartedActivity.dataString)
+                assertTrue("nothing bound", shadowOf(two.app).boundServiceConnections.isEmpty())
             }
         }
     }
