@@ -25,6 +25,13 @@
         android:title="@string/blue_bubbles"
         android:visible="false"
         app:showAsAction="never" />
+    <!-- Messages tab with Blue Bubbles on: the OpenBubbles wrapper (beta), inline replies and Undo Send. -->
+    <item
+        android:id="@+id/action_wrapper"
+        android:checkable="true"
+        android:title="@string/wrapper_setting"
+        android:visible="false"
+        app:showAsAction="never" />
     <item
         android:id="@+id/action_link_status"
         android:title="@string/chat_link_status"

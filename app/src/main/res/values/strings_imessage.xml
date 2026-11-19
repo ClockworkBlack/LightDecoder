@@ -55,6 +55,17 @@
     <string name="imessage_light_no_access">LightDecoder is not allowed to read notifications, so it cannot see or answer iMessages. Allow it in Android settings (Notification access).</string>
     <string name="imessage_light_reader_stopped">Android has stopped LightDecoder\u2019s notification reader, so new iMessages are missed until it starts again. Turning notification access off and on for LightDecoder restarts it.</string>
     <string name="imessage_unsend">Unsend (in OpenBubbles)</string>
+    <string name="wrapper_service_label">LightDecoder: OpenBubbles wrapper (beta)</string>
+    <string name="wrapper_service_description">Lets LightDecoder do inline iMessage replies and Undo Send for you in OpenBubbles: when you ask for one, it opens the chat in OpenBubbles, presses the buttons there and comes back. It only acts in OpenBubbles, only when you ask, and reads nothing else.</string>
+    <string name="wrapper_setting">Inline replies &amp; Undo Send (wrapper, beta)</string>
+    <string name="wrapper_setup_title">OpenBubbles wrapper (beta)</string>
+    <string name="wrapper_setup_body">With this on, a reply to an iMessage goes as a real inline reply, and Unsend is done for you, both through OpenBubbles\u2019 own screen: LightDecoder opens the chat behind a cover, presses Reply or Undo Send there, and comes back, in a second or two.\n\nIt needs Android\u2019s accessibility permission for \u201cLightDecoder: OpenBubbles wrapper\u201d. It only acts in OpenBubbles, only when you ask.\n\nExperimental: if OpenBubbles changes its screens it may stop, and OpenBubbles is left open with your text copied.</string>
+    <string name="wrapper_open_settings">Open accessibility settings</string>
+    <string name="wrapper_cover_reply">Sending inline reply through OpenBubbles\u2026</string>
+    <string name="wrapper_cover_unsend">Undoing send in OpenBubbles\u2026</string>
+    <string name="wrapper_failed_reply">The inline reply could not be finished. OpenBubbles is open with the chat; your text is copied.</string>
+    <string name="wrapper_failed_unsend">Undo Send could not be finished. OpenBubbles is open with the chat: long-press the message and tap Undo Send.</string>
+    <string name="wrapper_replying_to">Replying to %1$s (inline, through OpenBubbles)</string>
     <string name="imessage_media_waiting">Picture from OpenBubbles · tap</string>
     <string name="imessage_media_title">Pictures from iMessage</string>
     <string name="imessage_media_how">OpenBubbles\u2019 notifications only say \u201cImage\u201d, so LightDecoder shows the picture from the copy OpenBubbles saves in your gallery, at full quality.\n\nIn OpenBubbles: Settings → Attachments, turn ON \u201cAuto-save Attachments\u201d (and keep Auto-download on).\n\nPictures that came before that show once you open them in OpenBubbles, if Auto-save is on then.</string>

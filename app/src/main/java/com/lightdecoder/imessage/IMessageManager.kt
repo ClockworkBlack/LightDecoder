@@ -353,6 +353,25 @@ class IMessageManager private constructor(
             }
         }
 
+    /**
+     * A message the wrapper sent from OpenBubbles' own screen (an inline reply to [replyToId]): OpenBubbles
+     * never notifies its own messages, so it is shown from here. Returns its id.
+     */
+    fun recordSentElsewhere(conversationId: String, text: String, replyToId: String?): String {
+        val id = SENT_PREFIX + "wrap-" + UUID.randomUUID()
+        repo.upsertMessage(
+            MessageDto(
+                id = id, conversationId = conversationId, fromMe = true, direction = "out", status = STATUS_SENT,
+                transport = TRANSPORT, text = text, replyToId = replyToId.orEmpty(),
+                timestampMs = System.currentTimeMillis(), isOld = true,
+            ),
+        )
+        return id
+    }
+
+    /** Takes back a [recordSentElsewhere] row whose send did not go through. */
+    fun forgetSentElsewhere(id: String) = repo.applyDeletion(id)
+
     /** Pictures and files go through OpenBubbles' own screen ([handOff]). */
     override fun sendMedia(conversationId: String, uri: Uri, caption: String?, replyToId: String?): String =
         throw RelayException(IMessageErrors.HAND_OFF, "attachments are sent in OpenBubbles")

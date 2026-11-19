@@ -1337,6 +1337,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val files = attachments
         if (text.isEmpty() && files.isEmpty()) return
         val id = conversationId
+        // The wrapper (beta): a reply to an iMessage goes as a real inline reply, through OpenBubbles' screen.
+        val target = replyTarget?.takeIf { isShown(it) && backendFor(it).service == ChatService.IMESSAGE && it.text.isNotBlank() }
+        if (target != null && files.isEmpty() && com.lightdecoder.wrapper.Wrapper.available(this)) {
+            wrapperReply(target, text)
+            return
+        }
         // Blue Bubbles: to someone with an iMessage chat, everything goes as an iMessage (blue on their
         // iPhone), never as a green text: silently through OpenBubbles' Reply button when it has one,
         // else OpenBubbles opens with the message filled in, for one tap on send.
@@ -1406,6 +1412,25 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             val title = supportActionBar?.title?.toString().orEmpty()
             if (row != null && title != getString(R.string.chat_untitled)) withContext(Dispatchers.IO) {
                 com.lightdecoder.chat.ShareShortcuts.push(applicationContext, link.service, id, title, row.avatarColor)
+            }
+        }
+    }
+
+    /** An inline reply to [target] through the wrapper; shown here at once, taken back if it does not go. */
+    private fun wrapperReply(target: MessageRow, text: String) {
+        val chat = target.conversationId
+        val im = iMessageLink
+        val back = RelayIntents.thread(this, conversationId, service = manager.service)
+        binding.input.setText("")
+        clearReply()
+        scrollToBottomNext = true
+        lifecycleScope.launch {
+            val local = withContext(Dispatchers.IO) { runCatching { im.recordSentElsewhere(chat, text, target.id) }.getOrNull() }
+            val job = com.lightdecoder.wrapper.Wrapper.Job(com.lightdecoder.wrapper.Wrapper.Kind.REPLY, chat, target.text, text, back, local)
+            if (!com.lightdecoder.wrapper.Wrapper.start(this@ThreadActivity, job)) {
+                // The service went away meanwhile: as an iMessage of its own instead.
+                local?.let { withContext(Dispatchers.IO) { im.forgetSentElsewhere(it) } }
+                withContext(Dispatchers.IO) { relayAttempt { im.sendText(chat, text) } }.onFailure { toast(errorText(im, it)) }
             }
         }
     }
@@ -1847,7 +1872,15 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         // Through OpenBubbles' notification an iMessage goes as a message of its own: say so, rather than promise a thread.
         val asIMessage = backendFor(row).service == ChatService.IMESSAGE || manager.service == ChatService.IMESSAGE ||
             (manager.service == ChatService.MESSAGES && companionId != null)
-        binding.replySender.text = getString(if (asIMessage) R.string.imessage_replying_to else R.string.chat_replying_to, who)
+        val inline = backendFor(row).service == ChatService.IMESSAGE && row.text.isNotBlank() && com.lightdecoder.wrapper.Wrapper.available(this)
+        binding.replySender.text = getString(
+            when {
+                inline -> R.string.wrapper_replying_to
+                asIMessage -> R.string.imessage_replying_to
+                else -> R.string.chat_replying_to
+            },
+            who,
+        )
         binding.replyText.text = ThreadItems.preview(row, getString(R.string.chat_media_picture))
         binding.input.requestFocus()
         // Ready to type the reply, with the message replied to still in its place above.
@@ -2466,6 +2499,14 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 .setNegativeButton(android.R.string.cancel, null)
                 .show()
             return
+        }
+        // The wrapper (beta) does the Undo Send itself.
+        if (row.text.isNotBlank() && com.lightdecoder.wrapper.Wrapper.available(this)) {
+            val job = com.lightdecoder.wrapper.Wrapper.Job(
+                com.lightdecoder.wrapper.Wrapper.Kind.UNSEND, chat, row.text, "",
+                RelayIntents.thread(this, conversationId, service = manager.service), targetId = row.id,
+            )
+            if (com.lightdecoder.wrapper.Wrapper.start(this, job)) return
         }
         val opened = com.lightdecoder.imessage.IMessageReplies.open(this, chat) ||
             iMessageLink.handOff(this, chat, "") ||

@@ -23,6 +23,38 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.45-wrapper (versionCode 53) - BRANCH ccr-4fee5e9f-jrrlhu-wrapper: the OpenBubbles wrapper (beta)
+- An experimental option, on its own branch at the user's request; main stays at 0.5.44. Off by default.
+  Switch: Messages tab menu → "Inline replies & Undo Send (wrapper, beta)", which leads to Android's
+  accessibility settings for "LightDecoder: OpenBubbles wrapper (beta)".
+- `wrapper/WrapperService`: an AccessibilityService limited to OpenBubbles' packages (`res/xml/wrapper_service.xml`,
+  `packageNames`). For an inline reply:
+  1. it opens the chat (OpenBubbles' own notification intent, else its share screen for the chat);
+  2. it waits for the message field;
+  3. it finds the bubble by the message's first 40 characters, the lowest on screen, scrolling back up to 8
+     times;
+  4. it long-presses it (ACTION_LONG_CLICK, else a gesture);
+  5. it clicks "Reply" or "Undo Send" (tooltip and title from OpenBubbles 1.15 `details_menu_action.dart`),
+     else "Show menu" / "More" first;
+  6. it sets the text (ACTION_SET_TEXT) and clicks send. Send has no label, so it is found by place: the
+     clickable node right of the field on its row.
+  7. it waits for the field to empty, then brings LightDecoder's conversation back (REORDER_TO_FRONT).
+
+  Polling every 40 ms, with timeouts per step (chat 5 s, other steps 0.6–2 s). The pure finding is in
+  `WrapperNodes` (tested on made-up trees).
+- A LightDecoder-coloured cover (TYPE_ACCESSIBILITY_OVERLAY, not touchable) hides OpenBubbles while it works.
+- Each run is logged with the time per step and in total ("Wrapper reply chat#xxxx: done in 1840ms (chat …, message …,
+  menu …, typed …, sent …)"), or where it stopped. On a failure, OpenBubbles is left open on the chat, a
+  reply's text is copied and LightDecoder's own row is taken back.
+- LightDecoder side:
+  - `ThreadActivity.send` routes a reply to an iMessage with text through the wrapper when it is available,
+    and shows the reply at once with its quote (`IMessageManager.recordSentElsewhere`, an `ld:` row).
+    OpenBubbles never notifies its own sends.
+  - Unsend uses the wrapper inside the 2 minutes, and removes the message here once it is done.
+  - The reply bar says "(inline, through OpenBubbles)".
+- Not verified against a real OpenBubbles yet (no device here): labels and layout come from its source.
+  Edit and tapbacks are not automated (Edit's confirm button and the reaction icons have no labels to find).
+
 ## 0.5.44 (versionCode 52) - received iMessage pictures in their bubbles
 - OpenBubbles' notification carries only a description ("Image", "Attachments: 2 images, 1 movie"), never
   the picture (its payload is title, text, time, guid). `IMessageCapture.attachmentKinds` turns such a line

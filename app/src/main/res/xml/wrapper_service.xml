@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The OpenBubbles wrapper (experimental): acts only on OpenBubbles' own screens (the
+    package list), to do an inline reply or Undo Send the user asked for in LightDecoder.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagRetrieveInteractiveWindows|flagReportViewIds"
+    android:canPerformGestures="true"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/wrapper_service_description"
+    android:notificationTimeout="0"
+    android:packageNames="com.openbubbles.messaging,com.bluebubbles.messaging.alpha,com.bluebubbles.messaging.beta" />

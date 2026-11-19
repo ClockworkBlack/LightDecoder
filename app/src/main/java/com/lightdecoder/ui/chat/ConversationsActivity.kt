@@ -625,10 +625,35 @@ class ConversationsActivity : AppCompatActivity() {
             folder == Folder.DELETED && hasDeleted && searchQuery == null
     }
 
+    /** The OpenBubbles wrapper (beta): on needs Android's accessibility permission for it, asked here. */
+    private fun toggleWrapper() {
+        val w = com.lightdecoder.wrapper.Wrapper
+        if (w.enabled(this) && w.serviceOn()) {
+            w.setEnabled(this, false)
+            invalidateOptionsMenu()
+            return
+        }
+        w.setEnabled(this, true)
+        if (w.serviceOn()) {
+            invalidateOptionsMenu()
+            return
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.wrapper_setup_title)
+            .setMessage(R.string.wrapper_setup_body)
+            .setPositiveButton(R.string.wrapper_open_settings) { _, _ -> runCatching { startActivity(w.settingsIntent()) } }
+            .setNegativeButton(android.R.string.cancel) { _, _ -> w.setEnabled(this, false) }
+            .show()
+    }
+
     override fun onPrepareOptionsMenu(menu: Menu): Boolean {
         menu.findItem(R.id.action_blue_bubbles)?.let { item ->
             item.isVisible = backend.service == ChatService.MESSAGES
             item.isChecked = blueBubbles.isOn()
+        }
+        menu.findItem(R.id.action_wrapper)?.let { item ->
+            item.isVisible = backend.service == ChatService.MESSAGES && blueBubbles.isOn()
+            item.isChecked = com.lightdecoder.wrapper.Wrapper.enabled(this) && com.lightdecoder.wrapper.Wrapper.serviceOn()
         }
         // The iMessage light: Messages tab, while Blue Bubbles is on.
         menu.findItem(R.id.action_imessage_light)?.let { item ->
@@ -646,6 +671,7 @@ class ConversationsActivity : AppCompatActivity() {
         when (item.itemId) {
             android.R.id.home -> finish()
             R.id.action_refresh -> refreshFromPhone()
+            R.id.action_wrapper -> toggleWrapper()
             R.id.action_blue_bubbles -> blueBubbles.toggle()
             R.id.action_link_status -> startActivity(ServiceUi.status(this, backend.service))
             R.id.action_delete_archive -> LocalArchive.confirmDelete(this, backend) { reload() }
