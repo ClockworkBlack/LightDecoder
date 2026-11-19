@@ -2269,23 +2269,62 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             val existing = withContext(Dispatchers.IO) { iMessage.conversationWith(address) }
             if (existing != null) {
                 startActivity(RelayIntents.thread(this@ThreadActivity, existing, service = ChatService.IMESSAGE).setFlags(0))
-            } else if (!iMessage.startInOpenBubbles(this@ThreadActivity, address)) {
-                toast(errorText(iMessage, com.lightdecoder.imessage.IMessageErrors.NOT_INSTALLED))
+            } else {
+                openNewIMessageChat(address, "")
             }
         }
+    }
+
+    /**
+     * Opens OpenBubbles on a new chat with [address] and [text], saying what to do when it could
+     * only open its share screen or its main screen. False if it could not be opened at all.
+     */
+    private fun openNewIMessageChat(address: String, text: String): Boolean {
+        val iMessage = com.lightdecoder.imessage.IMessageManager.get(this)
+        return when (iMessage.startInOpenBubbles(this, address, text)) {
+            com.lightdecoder.imessage.OpenBubbles.NewChat.CHAT_OPENED -> true
+            com.lightdecoder.imessage.OpenBubbles.NewChat.SHARE_OPENED -> {
+                copyAddress(address)
+                toast(getString(R.string.imessage_pick_chat_in_share))
+                true
+            }
+            com.lightdecoder.imessage.OpenBubbles.NewChat.APP_OPENED -> {
+                copyAddress(address)
+                toast(getString(R.string.imessage_start_chat_in_app))
+                true
+            }
+            com.lightdecoder.imessage.OpenBubbles.NewChat.NOT_INSTALLED -> {
+                toast(errorText(iMessage, com.lightdecoder.imessage.IMessageErrors.NOT_INSTALLED))
+                false
+            }
+            com.lightdecoder.imessage.OpenBubbles.NewChat.FAILED -> {
+                toast(getString(R.string.imessage_would_not_open))
+                false
+            }
+        }
+    }
+
+    /** Puts the person's number (or email address) on the clipboard, to start the chat with by hand. */
+    private fun copyAddress(address: String) {
+        val clipboard = getSystemService(android.content.ClipboardManager::class.java) ?: return
+        clipboard.setPrimaryClip(android.content.ClipData.newPlainText(getString(R.string.imessage_address_label), address))
     }
 
     // --- Check iMessage -------------------------------------------------------------------
 
     /** Shows what the check sends, and to whom, before anything is sent. */
     private fun confirmIMessageCheck() {
-        val companion = companionId ?: return
+        val companion = companionId
+        val address = if (companion == null) otherAddress() ?: return toast(getString(R.string.imessage_no_address)) else null
         val name = supportActionBar?.title?.toString().orEmpty()
         val text = com.lightdecoder.imessage.IMessageCheck.text(com.lightdecoder.imessage.IMessageCheck.newCode())
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.imessage_check)
-            .setMessage(getString(R.string.imessage_check_explain, name, text))
-            .setPositiveButton(R.string.imessage_check_send) { _, _ -> runIMessageCheck(companion, text) }
+            .setMessage(
+                getString(R.string.imessage_check_explain, name, text) +
+                    if (companion == null) "\n\n" + getString(R.string.imessage_check_new_chat) else ""
+            )
+            .setPositiveButton(R.string.imessage_check_send) { _, _ -> runIMessageCheck(companion, address, text) }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
     }
@@ -2293,7 +2332,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     /** Starts a check of [text] at once, without asking first (for the on-device test). */
     @androidx.annotation.VisibleForTesting
     internal fun startIMessageCheck(text: String) {
-        companionId?.let { runIMessageCheck(it, text) }
+        val companion = companionId
+        runIMessageCheck(companion, if (companion == null) otherAddress() else null, text)
     }
 
     /** The dialog of the check under way, while it is open. */
@@ -2305,7 +2345,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      * OpenBubbles' Reply button, else OpenBubbles opens with it filled in)
      * and shows, live, how far it got and how the person replied.
      */
-    private fun runIMessageCheck(companion: String, text: String) {
+    private fun runIMessageCheck(companion: String?, address: String?, text: String) {
+        if (companion == null && address == null) return
         val id = conversationId
         val name = supportActionBar?.title?.toString().orEmpty()
         val im = iMessageLink
@@ -2320,22 +2361,32 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             .setPositiveButton(R.string.imessage_check_close, null)
             .create()
         checkDialog = dialog
-        val ref = com.lightdecoder.imessage.IMessageLog.chatRef(companion)
+        val ref = companion?.let(com.lightdecoder.imessage.IMessageLog::chatRef) ?: "(new chat)"
         fun log(line: String) = com.lightdecoder.imessage.IMessageLog.add(this, "Check iMessage $ref: $line")
         var last = com.lightdecoder.imessage.IMessageCheck.Progress(false, false, false, com.lightdecoder.imessage.IMessageCheck.Reply.NONE)
         var slowNoted = false
         val job = lifecycleScope.launch {
             log("started; ${im.setupSummary()}")
-            val silent = withContext(Dispatchers.IO) { relayAttempt { im.sendText(companion, text) } }.isSuccess
-            if (!silent) {
+            val silent = companion != null &&
+                withContext(Dispatchers.IO) { relayAttempt { im.sendText(companion, text) } }.isSuccess
+            if (companion == null) {
+                // No iMessage chat with them yet: OpenBubbles starts one, with the check filled in.
+                log("no iMessage chat with this person yet: opening a new one in OpenBubbles")
+                if (!openNewIMessageChat(address!!, text)) {
+                    dialog.dismiss()
+                    return@launch
+                }
+            } else if (!silent) {
                 log("no usable Reply button: OpenBubbles opened for the user to tap send")
                 handOffToOpenBubbles(im, companion, text, emptyList(), clearComposer = false)
             }
             while (true) {
                 if (conversationId != id) return@launch
                 val progress = withContext(Dispatchers.IO) {
+                    // A chat OpenBubbles has just started is found by the person's number once it shows up.
+                    val chat = companion ?: address?.let(im::conversationWith)
                     com.lightdecoder.imessage.IMessageCheck.progress(
-                        text, sentAt, im.repo.messages(companion, limit = 50), textLink.repo.messages(id, limit = 50),
+                        text, sentAt, chat?.let { im.repo.messages(it, limit = 50) }.orEmpty(), textLink.repo.messages(id, limit = 50),
                     )
                 }
                 val waited = System.currentTimeMillis() - sentAt
@@ -2401,7 +2452,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         // Not when the person's iMessages are already here.
         menu.findItem(R.id.action_send_imessage)?.isVisible = manager.service == ChatService.MESSAGES && companionId == null &&
             com.lightdecoder.imessage.IMessagePrefs.enabled(this) && conv != null && !conv.isGroup && otherAddress() != null
-        menu.findItem(R.id.action_check_imessage)?.isVisible = manager.service == ChatService.MESSAGES && companionId != null
+        // Also before they have an iMessage chat: the check then starts one in OpenBubbles.
+        menu.findItem(R.id.action_check_imessage)?.isVisible = manager.service == ChatService.MESSAGES &&
+            (companionId != null || (com.lightdecoder.imessage.IMessagePrefs.enabled(this) && conv != null && !conv.isGroup && otherAddress() != null))
         val archived = conv?.folderEnum == Folder.ARCHIVE
         menu.findItem(R.id.action_archive)?.apply {
             isVisible = conv != null && (conv.folderEnum == Folder.INBOX || archived)

@@ -23,6 +23,24 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.35 (versionCode 43) - OpenBubbles fixes from the first real-phone try
+- **"OpenBubbles is not installed" when it is** (Send iMessage): the new-chat screen was opened only with an
+  `imessage://` link, and a failed start was reported as not installed. `OpenBubbles.openNewChat` now tries
+  imessage:, smsto:, sms: links, then its share screen (text), then its main screen (number copied to the
+  clipboard, with a notice); NOT_INSTALLED only when no package is found. Each try is logged. The user's
+  OpenBubbles is `com.openbubbles.messaging` with activities under `com.localob.messaging.app` (logcat).
+- **Blue Bubbles checkbox looked unticked when on**: white tick on the white box; `buttonIconTint` is now the
+  surface colour (`MenuCheckBoxTest`).
+- **An iMessage in OpenBubbles not in LightDecoder**: capture is more tolerant (any tag; chat id from the
+  conversation shortcut when there is no `chatGuid` extra), and every OpenBubbles notification not used is
+  logged once per 10 min with the reason and its shape (tag kind, channel, or "(per-chat)", category, style,
+  message count, buttons, extras key names; no content). Listener connect/disconnect is logged with how many
+  OpenBubbles notifications are up. LightDecoder only sees iMessages OpenBubbles notifies about (none while
+  OpenBubbles is open on screen, none from before Blue Bubbles was on).
+- **Check iMessage without an iMessage chat yet**: offered in a one-to-one Messages conversation with a number
+  when Blue Bubbles is on; it opens a new OpenBubbles chat with the check filled in and finds the chat by
+  number once OpenBubbles notifies about it.
+
 ## 0.5.34 (versionCode 42) - iMessage log
 - `imessage/IMessageLog`: Blue Bubbles step by step, in app storage (200 lines, problem report section
   "== iMessage (Blue Bubbles) ==" with setup summary, chats stored, Reply buttons held) and in logcat,

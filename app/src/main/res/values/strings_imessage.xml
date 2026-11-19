@@ -39,6 +39,11 @@
     <string name="imessage_check">Check iMessage (blue on their iPhone?)</string>
     <string name="imessage_check_explain">LightDecoder will send this to %1$s as an iMessage:\n\n\u201c%2$s\u201d\n\nAsk them to reply. An iPhone replies the way the conversation shows on it: by iMessage when it is blue, by text when it is green. So their reply tells you which colour they see.</string>
     <string name="imessage_check_send">Send check</string>
+    <string name="imessage_check_new_chat">There is no iMessage chat with them in LightDecoder yet: OpenBubbles opens a new one with the check filled in. Tap send there.</string>
+    <string name="imessage_pick_chat_in_share">OpenBubbles opened its share screen with the message. Pick or start the chat with them there (their number is copied).</string>
+    <string name="imessage_start_chat_in_app">OpenBubbles opened. Start a chat with them there: their number is copied, paste it as the recipient.</string>
+    <string name="imessage_would_not_open">OpenBubbles is installed but would not open. Open it once by itself, then try again.</string>
+    <string name="imessage_address_label">Number for iMessage</string>
     <string name="imessage_check_close">Close</string>
     <string name="imessage_check_step_handed">Handed to OpenBubbles</string>
     <string name="imessage_check_step_tap_send">Tap send in OpenBubbles</string>

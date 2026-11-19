@@ -43,6 +43,10 @@ class MessengerNotificationListener : NotificationListenerService() {
         // Pick up what is showing: messages that arrived while the service
         // was not running, and the reply buttons a restart lost.
         val active = try { activeNotifications } catch (e: Exception) { null }
+        if (IMessagePrefs.enabled(this)) {
+            val showing = active?.count { OpenBubbles.isOpenBubbles(it.packageName) } ?: -1
+            com.lightdecoder.imessage.IMessageLog.add(this, "Notification reader connected; OpenBubbles notifications showing now: $showing")
+        }
         active?.forEach { inspect(it, live = false) }
         MessengerEvents.notifyChanged()
         refreshIMessage()
@@ -50,6 +54,7 @@ class MessengerNotificationListener : NotificationListenerService() {
 
     override fun onListenerDisconnected() {
         if (running === this) running = null
+        if (IMessagePrefs.enabled(this)) com.lightdecoder.imessage.IMessageLog.add(this, "Notification reader disconnected (Android stopped it; iMessages are missed until it is back)")
         MessengerEvents.notifyChanged()
         refreshIMessage()
     }

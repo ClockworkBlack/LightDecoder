@@ -82,13 +82,50 @@ class IMessageCaptureTest {
     fun otherNotificationsAreNotChats() {
         val ok = chat(context, listOf(Line("Hi", 1_000_000_000_000L, alice)))
         assertNull("another app", parse(ok, packageName = "com.whatsapp"))
-        assertNull("another tag", parse(ok, tag = "something-else"))
+        // Not every OpenBubbles build tags its message notifications the same: the chat id is what counts.
+        assertNotNull("another tag", parse(ok, tag = "something-else"))
         assertNull("the summary's id", parse(chat(context, listOf(Line("Hi", 1_000_000_000_000L, alice)), chatGuid = "-1")))
         val summary = NotificationCompat.Builder(context, "c").setSmallIcon(android.R.drawable.sym_action_chat)
             .setGroup("g").setGroupSummary(true).build()
         assertNull("the group summary", parse(summary))
         val plain = NotificationCompat.Builder(context, "c").setSmallIcon(android.R.drawable.sym_action_chat).setContentTitle("Syncing").build()
         assertNull("no chat id", parse(plain))
+    }
+
+    @Test
+    fun withoutAChatGuidTheConversationShortcutNamesTheChat() {
+        val n = chat(context, listOf(Line("Hi", 1_000_000_000_000L, alice)))
+        n.extras.remove("chatGuid")
+        val captured = parse(n, tag = null)!!
+        assertEquals("the shortcut id is the chat's", ALICE_GUID, captured.chatGuid)
+        n.extras.remove("android.shortcutId")
+    }
+
+    @Test
+    fun whyANotificationIsNotUsedIsSaidWithoutAnythingInIt() {
+        val plain = NotificationCompat.Builder(context, "com.bluebubbles.new_messages.$ALICE_GUID")
+            .setSmallIcon(android.R.drawable.sym_action_chat).setContentTitle("Alice Secret").setContentText("meet at noon").build()
+        val (chat, why) = IMessageCapture.parseOrWhyNot(PACKAGE, OpenBubbles.MESSAGE_TAG, plain, 5_000L)
+        assertNull(chat)
+        assertEquals("no chat id (no chatGuid extra, no conversation shortcut)", why)
+        val withId = NotificationCompat.Builder(context, "x").setSmallIcon(android.R.drawable.sym_action_chat)
+            .setContentTitle("Alice Secret").setContentText("meet at noon").setShortcutId(ALICE_GUID).build()
+        assertEquals("not a chat-style (MessagingStyle) notification", IMessageCapture.parseOrWhyNot(PACKAGE, null, withId, 5_000L).second)
+        val ok = chat(context, listOf(Line("meet at noon", 1_000_000_000_000L, alice)))
+        assertEquals("", IMessageCapture.parseOrWhyNot(PACKAGE, OpenBubbles.MESSAGE_TAG, ok, 5_000L).second)
+
+        val shape = IMessageCapture.shape(OpenBubbles.MESSAGE_TAG, 7, ok)
+        assertTrue(shape, shape.contains("tag=message id=7"))
+        assertTrue(shape, shape.contains("channel=(per-chat)"))
+        assertTrue(shape, shape.contains("style=MessagingStyle"))
+        assertTrue(shape, shape.contains("messages=1"))
+        assertTrue(shape, shape.contains("shortcut=true"))
+        assertTrue("its Reply takes text", shape.contains("+text]"))
+        assertTrue("extras by name", shape.contains("chatGuid"))
+        for (secret in listOf("Alice", "meet at noon", "5551234567", ALICE_GUID, ALICE_GUID.take(8))) {
+            assertFalse("must not be in the shape: $secret", shape.contains(secret))
+        }
+        assertFalse(IMessageCapture.shape(null, 1, plain).contains("Secret"))
     }
 
     @Test

@@ -123,10 +123,13 @@ class IMessageManager private constructor(
     fun onNotification(sbn: StatusBarNotification, live: Boolean) {
         if (!IMessagePrefs.enabled(appContext)) return
         val notification = sbn.notification ?: return
-        val chat = try { IMessageCapture.parse(sbn) } catch (e: RuntimeException) { null }
+        val (chat, whyNot) = try {
+            IMessageCapture.parseOrWhyNot(sbn.packageName, sbn.tag, notification, sbn.postTime)
+        } catch (e: RuntimeException) {
+            null to "could not be read (${e.javaClass.simpleName})"
+        }
         if (chat == null) {
-            // Only a message notification that could not be read is worth a line (OpenBubbles posts others too).
-            if (sbn.tag == OpenBubbles.MESSAGE_TAG) IMessageLog.add(appContext, "A message notification from ${sbn.packageName} could not be read")
+            noteUnused(whyNot, IMessageCapture.shape(sbn.tag, sbn.id, notification), live)
             return
         }
         val reply = try { IMessageCapture.replyAction(notification) } catch (e: RuntimeException) { null }
@@ -142,6 +145,20 @@ class IMessageManager private constructor(
             // A full disk or a damaged file: these messages are not kept.
             IMessageLog.add(appContext, "$ref: could not store a notification's messages (${e.javaClass.simpleName})")
         }
+    }
+
+    /** Unused notifications already logged (reason + shape), so a repeated one is one line, not hundreds. */
+    private val unusedLogged = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    private fun noteUnused(why: String, shape: String, live: Boolean) {
+        // Its group summary is posted with every message: expected, not worth a line.
+        if (why == "group summary") return
+        val key = "$why|$shape"
+        val now = System.currentTimeMillis()
+        val last = unusedLogged[key]
+        if (last != null && now - last < UNUSED_LOG_EVERY_MS) return
+        unusedLogged[key] = now
+        IMessageLog.add(appContext, "OpenBubbles notification not used${if (live) "" else " (already up)"}: $why; $shape")
     }
 
     /**
@@ -361,14 +378,15 @@ class IMessageManager private constructor(
         val pkg = OpenBubbles.installedPackage(appContext) ?: return false
         if (OpenBubbles.start(context, OpenBubbles.shareToChatIntent(pkg, conversationId, text, attachments))) return true
         val address = addressOf(conversationId) ?: return false
-        return OpenBubbles.start(context, OpenBubbles.newChatIntent(pkg, address, text))
+        return when (OpenBubbles.openNewChat(context, address, text)) {
+            OpenBubbles.NewChat.CHAT_OPENED, OpenBubbles.NewChat.SHARE_OPENED -> true
+            else -> false
+        }
     }
 
     /** Opens OpenBubbles on a new chat with [address] (a number or an email address) and [text] filled in. */
-    fun startInOpenBubbles(context: Context, address: String, text: String = ""): Boolean {
-        val pkg = OpenBubbles.installedPackage(appContext) ?: return false
-        return OpenBubbles.start(context, OpenBubbles.newChatIntent(pkg, address, text))
-    }
+    fun startInOpenBubbles(context: Context, address: String, text: String = ""): OpenBubbles.NewChat =
+        OpenBubbles.openNewChat(context, address, text)
 
     /** The other person's number or email address in a stored one-to-one chat. */
     fun addressOf(conversationId: String): String? {
@@ -494,6 +512,8 @@ class IMessageManager private constructor(
         internal const val STATUS_SENT = "OUTGOING_COMPLETE"
 
         /** Id prefix of a message sent from here (the rest is its tmpId). */
+        /** The same unused notification is logged again at most this often. */
+        private const val UNUSED_LOG_EVERY_MS = 10 * 60 * 1000L
         private const val SENT_PREFIX = "ld:"
         private const val ME = "me"
         private const val ECHO_LOOKBACK = 40

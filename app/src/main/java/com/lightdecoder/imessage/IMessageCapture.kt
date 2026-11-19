@@ -83,15 +83,27 @@ object IMessageCapture {
      * of OpenBubbles' iMessage notifications (another app's, the group
      * summary, a call, a text-message chat, one with nothing in it).
      */
-    fun parse(packageName: String?, tag: String?, notification: Notification, postTimeMs: Long): CapturedIMessageChat? {
-        if (!OpenBubbles.isOpenBubbles(packageName)) return null
-        if (tag != null && tag != OpenBubbles.MESSAGE_TAG) return null
-        if (notification.flags and Notification.FLAG_GROUP_SUMMARY != 0) return null
-        val extras = notification.extras ?: return null
-        val chatGuid = extras.getString(OpenBubbles.EXTRA_CHAT_GUID)?.trim().orEmpty()
-        // "-1" is the summary's "open the app" id.
-        if (chatGuid.isEmpty() || chatGuid == "-1") return null
-        val style = NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(notification) ?: return null
+    fun parse(packageName: String?, tag: String?, notification: Notification, postTimeMs: Long): CapturedIMessageChat? =
+        parseOrWhyNot(packageName, tag, notification, postTimeMs).first
+
+    /**
+     * [parse], with why a notification of OpenBubbles' was not used (for the
+     * iMessage log) when it was not. Not every OpenBubbles build is the same:
+     * the tag is not required, and a chat id missing from the extras is taken
+     * from the notification's conversation shortcut.
+     */
+    fun parseOrWhyNot(packageName: String?, tag: String?, notification: Notification, postTimeMs: Long): Pair<CapturedIMessageChat?, String> {
+        fun no(why: String) = null to why
+        if (!OpenBubbles.isOpenBubbles(packageName)) return no("not OpenBubbles")
+        if (notification.flags and Notification.FLAG_GROUP_SUMMARY != 0) return no("group summary")
+        val extras = notification.extras ?: return no("no extras")
+        val shortcut = if (android.os.Build.VERSION.SDK_INT >= 26) notification.shortcutId?.trim().orEmpty() else ""
+        val chatGuid = extras.getString(OpenBubbles.EXTRA_CHAT_GUID)?.trim()?.takeIf { it.isNotEmpty() && it != "-1" }
+            ?: shortcut.takeIf { it.isNotEmpty() && it != "-1" }
+            // "-1" is the summary's "open the app" id.
+            ?: return no("no chat id (no chatGuid extra, no conversation shortcut)")
+        val style = NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(notification)
+            ?: return no("not a chat-style (MessagingStyle) notification")
         val user = style.user
         val fallbackTime = notification.`when`.takeIf { it > 0 } ?: postTimeMs
         val messages = style.messages.mapNotNull { message ->
@@ -113,7 +125,7 @@ object IMessageCapture {
                 },
             )
         }
-        if (messages.isEmpty()) return null
+        if (messages.isEmpty()) return no("no message with text in it (${style.messages.size} without text: a picture, a reaction?)")
         val isGroup = style.isGroupConversation
         val shownTitle = extras.getCharSequence(NotificationCompat.EXTRA_TITLE)?.toString()?.trim().orEmpty().removePrefix(NOTIFY_ANYWAYS)
         val groupTitle = style.conversationTitle?.toString()?.trim().orEmpty().removePrefix(NOTIFY_ANYWAYS)
@@ -124,9 +136,35 @@ object IMessageCapture {
             .ifEmpty { shownTitle.takeUnless { it == user.name?.toString()?.trim() }.orEmpty() }
             .ifEmpty { groupTitle }
             .ifEmpty { address }
-        if (title.isEmpty()) return null
+        if (title.isEmpty()) return no("no name for the chat")
         val messageGuid = extras.getString(OpenBubbles.EXTRA_MESSAGE_GUID)?.trim().orEmpty()
-        return CapturedIMessageChat(chatGuid, messageGuid, title, isGroup, address, messages)
+        return CapturedIMessageChat(chatGuid, messageGuid, title, isGroup, address, messages) to ""
+    }
+
+    /**
+     * What a notification is made of, without anything it says: tag, channel,
+     * category, style, how many messages, which extras it has (names only)
+     * and its buttons (whether each takes typed text, and its kind). For the
+     * iMessage log when a notification of OpenBubbles' is not used.
+     */
+    fun shape(tag: String?, id: Int, notification: Notification): String {
+        val extras = notification.extras
+        val keys = extras?.keySet()?.sorted()?.joinToString(",").orEmpty()
+        val template = extras?.getString(Notification.EXTRA_TEMPLATE)?.substringAfterLast('$')?.substringAfterLast('.').orEmpty()
+        val messages = runCatching { NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(notification)?.messages?.size }.getOrNull()
+        val actions = notification.actions.orEmpty().joinToString(",") { a ->
+            val input = if (a.remoteInputs.isNullOrEmpty()) "" else "+text"
+            val kind = if (android.os.Build.VERSION.SDK_INT >= 28) "s${a.semanticAction}" else ""
+            "[$kind$input]"
+        }
+        val shortcut = if (android.os.Build.VERSION.SDK_INT >= 26) !notification.shortcutId.isNullOrEmpty() else false
+        // A channel of its own per chat may carry the chat's id: then only that it is one.
+        val channel = (if (android.os.Build.VERSION.SDK_INT >= 26) notification.channelId.orEmpty() else "")
+            .let { if (it.length > 48 || Regex("[0-9A-Fa-f]{8}|\\d{6}|@").containsMatchIn(it)) "(per-chat)" else it }
+        return "tag=${if (tag == OpenBubbles.MESSAGE_TAG) "message" else if (tag == null) "none" else "other"} id=$id " +
+            "channel=$channel category=${notification.category.orEmpty()} style=${template.ifEmpty { "none" }} " +
+            "messages=${messages ?: "-"} shortcut=$shortcut summary=${notification.flags and Notification.FLAG_GROUP_SUMMARY != 0} " +
+            "actions=$actions extras=[$keys]"
     }
 
     /** The other person's address, from a message's handle ("tel:…" or "mailto:…"). */

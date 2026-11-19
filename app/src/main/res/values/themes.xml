@@ -19,5 +19,7 @@
     <style name="Widget.LightDecoder.MenuCheckBox" parent="Widget.Material3.CompoundButton.CheckBox">
         <item name="buttonTint">@color/menu_checkbox_tint</item>
         <item name="android:buttonTint">@color/menu_checkbox_tint</item>
+        <!-- The tick itself: the menu's own dark colour, or it is white on the white box and the box looks empty. -->
+        <item name="buttonIconTint">@color/menu_checkbox_icon_tint</item>
     </style>
 </resources>

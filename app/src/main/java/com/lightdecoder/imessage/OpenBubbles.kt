@@ -81,6 +81,58 @@ object OpenBubbles {
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
 
+    /** How [openNewChat] got OpenBubbles to a new chat. */
+    enum class NewChat {
+        /** A new chat with the person, the text filled in. */
+        CHAT_OPENED,
+
+        /** Its share screen with the text: the user picks or starts the chat there. */
+        SHARE_OPENED,
+
+        /** Only its main screen (the number is on the clipboard for the user). */
+        APP_OPENED,
+        NOT_INSTALLED,
+        FAILED,
+    }
+
+    /**
+     * Opens OpenBubbles on a new chat with [address] and [body], trying each
+     * way it may accept one: imessage:, smsto: and sms: links (which ones its
+     * version takes is not documented), then its share screen, then its main
+     * screen. Each attempt is in the iMessage log.
+     */
+    fun openNewChat(context: Context, address: String, body: String): NewChat {
+        val pkg = installedPackage(context) ?: return NewChat.NOT_INSTALLED.also {
+            IMessageLog.add(context, "New chat: OpenBubbles is not installed (looked for ${PACKAGES.joinToString()})")
+        }
+        val to = address.trim()
+        val query = if (body.isEmpty()) "" else "?body=" + Uri.encode(body)
+        val links = listOf(
+            "imessage" to Intent(Intent.ACTION_VIEW, Uri.parse("imessage://$to$query")),
+            "smsto" to Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:" + Uri.encode(to))),
+            "sms" to Intent(Intent.ACTION_VIEW, Uri.parse("sms:" + Uri.encode(to) + query)),
+        )
+        for ((name, intent) in links) {
+            if (body.isNotEmpty()) intent.putExtra("sms_body", body).putExtra(Intent.EXTRA_TEXT, body)
+            intent.setPackage(pkg).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (tryStart(context, intent, "New chat by $name: link")) return NewChat.CHAT_OPENED
+        }
+        if (body.isNotEmpty()) {
+            val share = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, body)
+                .setPackage(pkg).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (tryStart(context, share, "New chat by share screen")) return NewChat.SHARE_OPENED
+        }
+        val main = context.packageManager.getLaunchIntentForPackage(pkg)?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (main != null && tryStart(context, main, "New chat: main screen")) return NewChat.APP_OPENED
+        return NewChat.FAILED
+    }
+
+    private fun tryStart(context: Context, intent: Intent, what: String): Boolean {
+        val ok = start(context, intent)
+        IMessageLog.add(context, "$what ${if (ok) "opened" else "not taken"} (${intent.`package`})")
+        return ok
+    }
+
     /** False if OpenBubbles is not installed or would not take [intent]. */
     fun start(context: Context, intent: Intent): Boolean = try {
         context.startActivity(intent)
