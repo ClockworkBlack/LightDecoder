@@ -266,8 +266,8 @@ internal object ChatErrors {
         com.lightdecoder.imessage.IMessageErrors.NOT_INSTALLED -> R.string.imessage_error_not_installed
         com.lightdecoder.imessage.IMessageErrors.NO_ACCESS -> R.string.imessage_error_no_access
         com.lightdecoder.imessage.IMessageErrors.NO_REPLY_BUTTON -> if (direct) R.string.imessage_error_no_reply_direct else R.string.imessage_error_no_reply
-        // Through the library only attachments are not there yet.
-        com.lightdecoder.imessage.IMessageErrors.HAND_OFF -> if (direct) R.string.imessage_no_attachments else R.string.imessage_error_hand_off
+        // Through the library nothing is handed to another app.
+        com.lightdecoder.imessage.IMessageErrors.HAND_OFF -> if (direct) R.string.imessage_error_unsupported else R.string.imessage_error_hand_off
         WaErrors.UNSUPPORTED -> R.string.imessage_error_unsupported
         RelayState.NOTIFICATIONS_OFF -> R.string.link_error_notifications_off
         else -> if (direct) R.string.imessage_error_internal_direct else R.string.imessage_error_internal

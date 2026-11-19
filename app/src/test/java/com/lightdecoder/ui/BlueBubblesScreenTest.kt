@@ -238,6 +238,37 @@ class BlueBubblesScreenTest {
     }
 
     @Test
+    fun aFileThatFailedThroughTheLibraryGoesToOpenBubblesWithItOnceTheLibraryIsOff() {
+        two.env.pairedManager()
+        installOpenBubbles()
+        IMessagePrefs.setEnabled(two.app, true)
+        seedIMessage()
+        // Sent through the library before it was turned off, and failed: its copy is still here.
+        val picture = byteArrayOf(-119, 80, 78, 71, 5)
+        val copy = imRepo.outboxFileFor("t-m").apply { parentFile?.mkdirs(); writeBytes(picture) }
+        imRepo.insertLocalOutgoing("t-m", ALICE, "Look", copy.path, "image/png", "IMG_3.png", null, System.currentTimeMillis())
+        imRepo.setLocalState("t-m", com.lightdecoder.archive.LocalState.FAILED, "Apple refused the message")
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, ALICE, service = ChatService.IMESSAGE).setFlags(0)).use { scenario ->
+            scenario.waitFor("the failed one") { shownTexts(it).contains("Look") }
+            scenario.onActivity { activity -> activity.onFailedTap(rowOf(activity, "Look")) }
+            scenario.waitFor("OpenBubbles opened") { shadowOf(it).peekNextStartedActivity() != null }
+            scenario.onActivity { activity ->
+                // With the picture, not its caption alone.
+                val handOff = shadowOf(activity).nextStartedActivity
+                assertEquals(OpenBubbles.PACKAGES.first(), handOff.`package`)
+                assertEquals(Intent.ACTION_SEND, handOff.action)
+                assertEquals("image/png", handOff.type)
+                assertEquals("Look", handOff.getStringExtra(Intent.EXTRA_TEXT))
+                @Suppress("DEPRECATION")
+                val stream = handOff.getParcelableExtra<android.net.Uri>(Intent.EXTRA_STREAM)!!
+                assertTrue(two.app.contentResolver.openInputStream(stream)!!.use { it.readBytes() }.contentEquals(picture))
+            }
+            two.waitUntil("the failed one gone, its copy too") { imRepo.message(com.lightdecoder.archive.MessageRow.tmpMessageId("t-m")) == null && !copy.exists() }
+            assertTrue("nothing marked sent", imRepo.messages(ALICE).none { it.isOutgoing && !it.isLocal })
+        }
+    }
+
+    @Test
     fun aPersonsIMessagesAreInTheirMessagesConversationNotARowOfTheirOwn() {
         two.env.pairedManager()
         IMessagePrefs.setEnabled(two.app, true)
@@ -1153,42 +1184,81 @@ class BlueBubblesScreenTest {
 
     private fun asked(asked: List<Pair<Int, org.json.JSONObject>>, what: Int) = synchronized(asked) { asked.filter { it.first == what }.map { it.second } }
 
+    /**
+     * Apple's answers to sends as the library gives them: a new GUID each ("S1", "S2"…), its
+     * attachments numbered as rustpush numbers them.
+     */
+    private fun appleSends(): (Int, org.json.JSONObject) -> org.json.JSONObject {
+        val count = java.util.concurrent.atomic.AtomicInteger()
+        return { what, request ->
+            if (what != com.lightdecoder.imessage.direct.DirectWire.SEND) {
+                com.lightdecoder.imessage.direct.DirectWire.ok()
+            } else {
+                val r = com.lightdecoder.imessage.direct.DirectWire.SendRequest.fromJson(request)
+                val first = if (r.text.isEmpty()) 0 else 1
+                val parts = r.attachments.mapIndexed { i, a ->
+                    com.lightdecoder.imessage.direct.DirectWire.SentPart(first + i, "p${first + i}", a.mime, a.name, java.io.File(a.path).length())
+                }
+                com.lightdecoder.imessage.direct.DirectWire.sent("S${count.incrementAndGet()}", System.currentTimeMillis(), parts)
+            }
+        }
+    }
+
     @Test
     fun withTheLibraryNothingIsHandedToOpenBubbles() {
         two.env.pairedManager()
         installOpenBubbles()
         IMessagePrefs.setEnabled(two.app, true)
         val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
-        directMode(asked, answer = appleAnswers())
+        val answer = appleSends()
+        directMode(asked)
+        // Apple's answers to the sends only, as the library gives them.
+        com.lightdecoder.imessage.direct.DirectLink.installForTesting(two.app) { what, request, _ ->
+            if (what == com.lightdecoder.imessage.direct.DirectWire.SEND) asked += what to request
+            answer(what, request)
+        }
         two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
         directMessage("H1", "Hers", System.currentTimeMillis() - 60_000, mine = false)
         ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
             scenario.waitFor("her iMessage") { shownTexts(it).contains("Hers") }
-            // A picture cannot go through the library yet: it says so, and the composer keeps it all.
+            // A picture goes straight to Apple, with the text, as an iMessage.
             scenario.onActivity { activity ->
-                activity.setAttachment(android.net.Uri.parse("content://media/external/images/media/1"))
+                val picture = java.io.File(activity.cacheDir, "IMG_1.jpg").apply { writeBytes(byteArrayOf(-1, -40, -1, -32, 1, 2, 3)) }
+                activity.setAttachment(android.net.Uri.fromFile(picture))
                 activity.findViewById<EditText>(R.id.input).setText("Look")
                 activity.findViewById<View>(R.id.send).performClick()
             }
-            assertEquals(two.app.getString(R.string.imessage_no_attachments), org.robolectric.shadows.ShadowToast.getTextOfLatestToast())
+            two.waitUntil("the picture sent through the library") { asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).isNotEmpty() }
+            val picture = com.lightdecoder.imessage.direct.DirectWire.SendRequest.fromJson(asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).single())
+            assertEquals("Look", picture.text)
+            assertEquals("image/jpeg", picture.attachments.single().mime)
+            assertEquals("IMG_1.jpg", picture.attachments.single().name)
+            assertFalse(picture.voice)
+            two.waitUntil("stored as Apple numbered it") { imRepo.message("imsg:S1")?.media?.singleOrNull()?.partId == "p1" }
+            assertEquals("Look", imRepo.message("imsg:S1")!!.text)
             scenario.onActivity { activity ->
-                assertEquals("Look", activity.findViewById<EditText>(R.id.input).text.toString())
-                assertEquals(View.VISIBLE, activity.findViewById<View>(R.id.attachmentBar).visibility)
-                // A sticker: the same.
-                val sticker = java.io.File(activity.cacheDir, "sticker.png").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+                assertEquals("", activity.findViewById<EditText>(R.id.input).text.toString())
+                assertEquals(View.GONE, activity.findViewById<View>(R.id.attachmentBar).visibility)
+                // A sticker: a picture of its own.
+                val sticker = java.io.File(activity.cacheDir, "sticker.png").apply { writeBytes(byteArrayOf(-119, 80, 78, 71, 1, 2, 3)) }
                 activity.sendStickers(listOf(sticker))
             }
-            assertEquals(two.app.getString(R.string.imessage_no_attachments), org.robolectric.shadows.ShadowToast.getTextOfLatestToast())
-            // The text alone goes straight to Apple.
+            two.waitUntil("the sticker sent through the library") { asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).size == 2 }
+            val sticker = com.lightdecoder.imessage.direct.DirectWire.SendRequest.fromJson(asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND)[1])
+            assertEquals("", sticker.text)
+            assertEquals("image/png", sticker.attachments.single().mime)
+            // A text alone too.
             scenario.onActivity { activity ->
-                activity.findViewById<View>(R.id.attachmentRemove).performClick()
+                activity.findViewById<EditText>(R.id.input).setText("Nice")
                 activity.findViewById<View>(R.id.send).performClick()
             }
-            two.waitUntil("sent through the library") { asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).isNotEmpty() }
-            assertEquals("Look", asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).single().getString("text"))
+            two.waitUntil("the text sent through the library") { asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).size == 3 }
+            val text = com.lightdecoder.imessage.direct.DirectWire.SendRequest.fromJson(asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND)[2])
+            assertEquals("Nice", text.text)
+            assertTrue(text.attachments.isEmpty())
             scenario.onActivity { activity -> assertEquals(null, shadowOf(activity).nextStartedActivity) }
             val log = com.lightdecoder.imessage.IMessageLog.read(two.app)
-            assertTrue(log.joinToString("\n"), log.any { it.contains("sent as iMessage, through the iMessage library") })
+            assertTrue(log.joinToString("\n"), log.any { it.contains("sent as iMessage, 1 file(s), through the iMessage library") })
             assertFalse(log.joinToString("\n"), log.any { it.contains("OpenBubbles") })
         }
     }
@@ -1460,52 +1530,261 @@ class BlueBubblesScreenTest {
         }
     }
 
-    @Test
-    fun withTheLibraryAVoiceMessageToAnIMessageChatStaysHere() {
-        val default = com.lightdecoder.ui.chat.VoiceRecorder.factory
-        val recorder = object : com.lightdecoder.ui.chat.VoiceRecorder {
-            var file: java.io.File? = null
-            override var onMaxDuration: (() -> Unit)? = null
-            override fun start(file: java.io.File, maxDurationMs: Int): Boolean {
-                file.parentFile?.mkdirs()
-                file.writeBytes(byteArrayOf(0, 0, 0, 0x18) + "ftypM4A voice".toByteArray())
-                this.file = file
-                return true
-            }
-            override fun stop(): Boolean = file?.isFile == true
-            override fun cancel() {
-                file?.delete()
-            }
+    /** A recorder that has a short m4a at once, and remembers the longest recording it was allowed. */
+    private class FakeVoiceRecorder : com.lightdecoder.ui.chat.VoiceRecorder {
+        var file: java.io.File? = null
+        var maxDurationMs = 0
+        override var onMaxDuration: (() -> Unit)? = null
+        override fun start(file: java.io.File, maxDurationMs: Int): Boolean {
+            file.parentFile?.mkdirs()
+            file.writeBytes(byteArrayOf(0, 0, 0, 0x18) + "ftypM4A voice".toByteArray())
+            this.file = file
+            this.maxDurationMs = maxDurationMs
+            return true
         }
+        override fun stop(): Boolean = file?.isFile == true
+        override fun cancel() {
+            file?.delete()
+        }
+    }
+
+    /** [block] with [FakeVoiceRecorder] as the app's recorder, on a phone with a microphone the app may use. */
+    private fun withRecorder(block: (FakeVoiceRecorder) -> Unit) {
+        val default = com.lightdecoder.ui.chat.VoiceRecorder.factory
+        val recorder = FakeVoiceRecorder()
         com.lightdecoder.ui.chat.VoiceRecorder.factory = { recorder }
         shadowOf(two.app.packageManager).setSystemFeature(android.content.pm.PackageManager.FEATURE_MICROPHONE, true)
         shadowOf(two.app).grantPermissions(android.Manifest.permission.RECORD_AUDIO)
         try {
-            val (_, fake) = two.env.pairedManager()
-            installOpenBubbles()
-            IMessagePrefs.setEnabled(two.app, true)
-            val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
-            directMode(asked, answer = appleAnswers())
-            two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
-            directMessage("H1", "Hers", System.currentTimeMillis() - 60_000, mine = false)
-            ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
-                scenario.waitFor("her iMessage and the record button") {
-                    shownTexts(it).contains("Hers") && it.findViewById<View>(R.id.voiceMessage).isShown && it.findViewById<View>(R.id.voiceMessage).isEnabled
-                }
-                scenario.onActivity { it.findViewById<View>(R.id.voiceMessage).performClick() }
-                shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(3))
-                scenario.onActivity { it.findViewById<View>(R.id.recordingSend).performClick() }
-                org.robolectric.shadows.ShadowLooper.idleMainLooper()
-                // Not through the library yet, not as a text, not through OpenBubbles: it says so.
-                assertEquals(two.app.getString(R.string.imessage_no_attachments), org.robolectric.shadows.ShadowToast.getTextOfLatestToast())
-                scenario.onActivity { activity -> assertEquals(null, shadowOf(activity).nextStartedActivity) }
-                assertTrue("the recording is kept", recorder.file!!.isFile)
-                assertTrue(asked.isEmpty())
-                assertTrue("no text sent instead", fake.sent.isEmpty())
-                assertFalse(com.lightdecoder.imessage.IMessageLog.read(two.app).any { it.contains("OpenBubbles") })
-            }
+            block(recorder)
         } finally {
             com.lightdecoder.ui.chat.VoiceRecorder.factory = default
+        }
+    }
+
+    @Test
+    fun withTheLibraryAVoiceMessageToAnIMessageChatGoesAsAnIphonesVoiceMessage() = withRecorder { recorder ->
+        val (_, fake) = two.env.pairedManager()
+        installOpenBubbles()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        directMode(asked, answer = appleAnswers())
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        directMessage("H1", "Hers", System.currentTimeMillis() - 60_000, mine = false)
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("her iMessage and the record button") {
+                shownTexts(it).contains("Hers") && it.findViewById<View>(R.id.voiceMessage).isShown && it.findViewById<View>(R.id.voiceMessage).isEnabled
+            }
+            scenario.onActivity { it.findViewById<View>(R.id.voiceMessage).performClick() }
+            shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(3))
+            scenario.onActivity { it.findViewById<View>(R.id.recordingSend).performClick() }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            // As an iPhone's voice message, straight to Apple: not as a text, not through OpenBubbles.
+            two.waitUntil("the voice message sent through the library") { asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).isNotEmpty() }
+            val voice = com.lightdecoder.imessage.direct.DirectWire.SendRequest.fromJson(asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).single())
+            assertTrue(voice.voice)
+            assertEquals("", voice.text)
+            assertEquals("audio/mp4", voice.attachments.single().mime)
+            assertEquals("Audio Message.m4a", voice.attachments.single().name)
+            scenario.onActivity { activity -> assertEquals(null, shadowOf(activity).nextStartedActivity) }
+            assertTrue("no text sent instead", fake.sent.isEmpty())
+            assertFalse(com.lightdecoder.imessage.IMessageLog.read(two.app).any { it.contains("OpenBubbles") })
+            // As long as an iPhone's may be.
+            assertEquals(10 * 60 * 1000, recorder.maxDurationMs)
+        }
+    }
+
+    @Test
+    fun withoutTheLibraryAVoiceMessageToAnIMessageChatKeepsTheConversationsLimit() = withRecorder { recorder ->
+        two.env.pairedManager()
+        installOpenBubbles()
+        IMessagePrefs.setEnabled(two.app, true)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        seedIMessage("An iMessage", ts = 5_000)
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("her iMessage and the record button") {
+                shownTexts(it).contains("An iMessage") && it.findViewById<View>(R.id.voiceMessage).isShown && it.findViewById<View>(R.id.voiceMessage).isEnabled
+            }
+            scenario.onActivity { it.findViewById<View>(R.id.voiceMessage).performClick() }
+            // OpenBubbles sends it: the Messages conversation's limit (an MMS), as before the library.
+            assertEquals(3 * 60 * 1000, recorder.maxDurationMs)
+        }
+    }
+
+    @Test
+    fun withTheLibraryAnIMessageChatsOwnScreenSendsVoiceMessagesPicturesAndStickers() = withRecorder { recorder ->
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        directMode(asked)
+        val answer = appleSends()
+        com.lightdecoder.imessage.direct.DirectLink.installForTesting(two.app) { what, request, _ ->
+            if (what == com.lightdecoder.imessage.direct.DirectWire.SEND) asked += what to request
+            answer(what, request)
+        }
+        directMessage("H1", "Hers", System.currentTimeMillis() - 60_000, mine = false)
+        fun sends() = asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).map(com.lightdecoder.imessage.direct.DirectWire.SendRequest::fromJson)
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, ALICE_DIRECT, service = ChatService.IMESSAGE).setFlags(0)).use { scenario ->
+            scenario.waitFor("her iMessage and the record button") {
+                shownTexts(it).contains("Hers") && it.findViewById<View>(R.id.voiceMessage).isShown && it.findViewById<View>(R.id.voiceMessage).isEnabled
+            }
+            // A voice message, as long as an iPhone's may be, sent as one.
+            scenario.onActivity { it.findViewById<View>(R.id.voiceMessage).performClick() }
+            assertEquals(10 * 60 * 1000, recorder.maxDurationMs)
+            shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(3))
+            scenario.onActivity { it.findViewById<View>(R.id.recordingSend).performClick() }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            two.waitUntil("the voice message sent") { sends().size == 1 }
+            val voice = sends()[0]
+            assertTrue(voice.voice)
+            assertEquals("audio/mp4", voice.attachments.single().mime)
+            assertEquals("Audio Message.m4a", voice.attachments.single().name)
+            // A picture with a caption.
+            scenario.onActivity { activity ->
+                val picture = java.io.File(activity.cacheDir, "IMG_2.jpg").apply { writeBytes(byteArrayOf(-1, -40, -1, -32, 4, 5, 6)) }
+                activity.setAttachment(android.net.Uri.fromFile(picture))
+                activity.findViewById<EditText>(R.id.input).setText("Look")
+                activity.findViewById<View>(R.id.send).performClick()
+            }
+            two.waitUntil("the picture sent") { sends().size == 2 }
+            val picture = sends()[1]
+            assertEquals("Look", picture.text)
+            assertFalse(picture.voice)
+            assertEquals("image/jpeg", picture.attachments.single().mime)
+            assertEquals("IMG_2.jpg", picture.attachments.single().name)
+            scenario.onActivity { activity ->
+                assertEquals("", activity.findViewById<EditText>(R.id.input).text.toString())
+                assertEquals(View.GONE, activity.findViewById<View>(R.id.attachmentBar).visibility)
+                // A sticker: a picture of its own.
+                val sticker = java.io.File(activity.cacheDir, "sticker.png").apply { writeBytes(byteArrayOf(-119, 80, 78, 71, 1, 2, 3)) }
+                activity.sendStickers(listOf(sticker))
+            }
+            two.waitUntil("the sticker sent") { sends().size == 3 }
+            val sticker = sends()[2]
+            assertEquals("", sticker.text)
+            assertEquals("image/png", sticker.attachments.single().mime)
+            // All stored as Apple numbered them, nothing handed to another app.
+            two.waitUntil("all three stored") { imRepo.message("imsg:S3") != null }
+            assertEquals("p0", imRepo.message("imsg:S1")!!.media.single().partId)
+            assertEquals("p1", imRepo.message("imsg:S2")!!.media.single().partId)
+            assertEquals("p0", imRepo.message("imsg:S3")!!.media.single().partId)
+            scenario.onActivity { activity -> assertEquals(null, shadowOf(activity).nextStartedActivity) }
+        }
+    }
+
+    @Test
+    fun withTheLibraryAVoiceMessageThisPhoneCannotPlayAndADocumentOpenInAnotherApp() {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        directMode(asked)
+        // An iPhone's voice message in a codec Android cannot play (Apple Lossless), and a PDF.
+        fun chunk(type: String, body: ByteArray) = java.nio.ByteBuffer.allocate(12 + body.size).put(type.toByteArray()).putLong(body.size.toLong()).put(body).array()
+        val desc = java.nio.ByteBuffer.allocate(32).putDouble(44100.0).put("alac".toByteArray()).putInt(0).putInt(0).putInt(4096).putInt(1).putInt(16).array()
+        val alac = "caff".toByteArray() + byteArrayOf(0, 1, 0, 0) + chunk("desc", desc) + chunk("data", ByteArray(4) + ByteArray(16) { 3 })
+        val pdf = "%PDF-1.4 plan".toByteArray()
+        com.lightdecoder.imessage.direct.DirectLink.installForTesting(two.app) { what, request, _ ->
+            asked += what to request
+            if (what == com.lightdecoder.imessage.direct.DirectWire.DOWNLOAD) {
+                val bytes = if (request.getString("descriptor") == "DESC-V1") alac else pdf
+                java.io.File(request.getString("path")).apply { parentFile?.mkdirs(); writeBytes(bytes) }
+                com.lightdecoder.imessage.direct.DirectWire.downloaded(bytes.size.toLong())
+            } else {
+                com.lightdecoder.imessage.direct.DirectWire.ok()
+            }
+        }
+        val now = System.currentTimeMillis()
+        fun incoming(guid: String, ts: Long, mime: String, name: String, extra: String = "") = imRepo.upsertMessage(
+            com.lightdecoder.relay.MessageDto(
+                id = "imsg:$guid", conversationId = ALICE_DIRECT, senderId = "+15551234567", senderName = "Alice", timestampMs = ts,
+                direction = "in", status = "INCOMING_COMPLETE", transport = IMessageManager.TRANSPORT, isOld = true, extra = extra,
+                parts = listOf(com.lightdecoder.relay.PartDto("p0", "media", mediaId = "$guid/p0", key = "DESC-$guid".toByteArray(), mime = mime, fileName = name, size = 30)),
+            ),
+        )
+        directMessage("H1", "Hers", now - 90_000, mine = false)
+        incoming("V1", now - 60_000, "audio/x-caf", "Audio Message.caf", com.lightdecoder.imessage.direct.IMessageExtra(voice = true).toJson())
+        incoming("D1", now - 30_000, "application/pdf", "Plan.pdf")
+        // The other app offered to open it: what it is handed, and that it can read it.
+        fun offered(activity: ThreadActivity, mime: String, bytes: ByteArray) {
+            val chooser = shadowOf(activity).nextStartedActivity
+            assertEquals(Intent.ACTION_CHOOSER, chooser?.action)
+            @Suppress("DEPRECATION")
+            val view = chooser.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)!!
+            assertEquals(Intent.ACTION_VIEW, view.action)
+            assertEquals(mime, view.type)
+            assertEquals("${two.app.packageName}.fileprovider", view.data!!.authority)
+            assertTrue(view.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION != 0)
+            assertTrue(two.app.contentResolver.openInputStream(view.data!!)!!.use { it.readBytes() }.contentEquals(bytes))
+        }
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, ALICE_DIRECT, service = ChatService.IMESSAGE).setFlags(0)).use { scenario ->
+            scenario.waitFor("her messages") { shownTexts(it).contains("Hers") }
+            org.robolectric.shadows.ShadowToast.reset()
+            scenario.onActivity { a -> a.onAudioTap(imRepo.message("imsg:V1")!!, imRepo.mediaPart("imsg:V1", "p0")!!) }
+            scenario.waitFor("the voice message downloaded") { imRepo.mediaPart("imsg:V1", "p0")!!.localPath.isNotEmpty() }
+            scenario.waitFor("another app offered for it") { shadowOf(it).peekNextStartedActivity() != null }
+            scenario.onActivity { a -> offered(a, "audio/x-caf", alac) }
+            assertFalse(
+                "not said to be missing",
+                org.robolectric.shadows.ShadowToast.shownToastCount() > 0 &&
+                    org.robolectric.shadows.ShadowToast.getTextOfLatestToast() == two.app.getString(R.string.chat_media_unavailable),
+            )
+            scenario.onActivity { a -> a.onMediaTap(imRepo.message("imsg:D1")!!, imRepo.mediaPart("imsg:D1", "p0")!!) }
+            scenario.waitFor("another app offered for the document") { shadowOf(it).peekNextStartedActivity() != null }
+            scenario.onActivity { a -> offered(a, "application/pdf", pdf) }
+        }
+    }
+
+    @Test
+    fun withTheLibraryFilesToAChatOnlyOpenBubblesCouldReplyToStayInTheComposer() {
+        two.env.pairedManager()
+        installOpenBubbles()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        directMode(asked, answer = appleAnswers())
+        // A group the library has no group id for, whose OpenBubbles notification left a Reply button (text only).
+        val group = "iMessage;+;chat123"
+        imRepo.upsertConversation(
+            com.lightdecoder.relay.ConversationDto(
+                id = group, isGroup = true, name = "Trip", type = IMessageManager.TRANSPORT,
+                participants = listOf(
+                    com.lightdecoder.relay.ParticipantDto(id = "me", isMe = true),
+                    com.lightdecoder.relay.ParticipantDto(id = "+15551234567", name = "Alice", number = "+15551234567"),
+                    com.lightdecoder.relay.ParticipantDto(id = "+15559876543", name = "Bob", number = "+15559876543"),
+                ),
+            ),
+        )
+        imRepo.upsertMessage(
+            com.lightdecoder.relay.MessageDto(
+                id = "ld:g1", conversationId = group, senderId = "+15551234567", senderName = "Alice", timestampMs = System.currentTimeMillis() - 60_000,
+                direction = "in", status = "INCOMING_COMPLETE", transport = IMessageManager.TRANSPORT, text = "Who's driving?", isOld = true,
+            ),
+        )
+        val reply = com.lightdecoder.imessage.OpenBubblesTestNotifications.replyAction(two.app)
+        com.lightdecoder.imessage.IMessageReplies.update(
+            group, com.lightdecoder.imessage.IMessageAction(reply.actionIntent!!, arrayOf(android.app.RemoteInput.Builder("text_reply").build())),
+            null, null, "m1",
+        )
+        try {
+            ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, group, service = ChatService.IMESSAGE).setFlags(0)).use { scenario ->
+                scenario.waitFor("the group") { shownTexts(it).contains("Who's driving?") }
+                scenario.onActivity { activity ->
+                    activity.setAttachment(android.net.Uri.parse("content://media/external/images/media/1"))
+                    activity.findViewById<EditText>(R.id.input).setText("Look")
+                    activity.findViewById<View>(R.id.send).performClick()
+                }
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                // It says why, and the picture and the text are still there to send another way.
+                assertEquals(two.app.getString(R.string.imessage_error_no_reply_direct), org.robolectric.shadows.ShadowToast.getTextOfLatestToast())
+                scenario.onActivity { activity ->
+                    assertEquals("Look", activity.findViewById<EditText>(R.id.input).text.toString())
+                    assertEquals(View.VISIBLE, activity.findViewById<View>(R.id.attachmentBar).visibility)
+                    assertEquals(null, shadowOf(activity).nextStartedActivity)
+                }
+                assertTrue("nothing asked of the library", asked.isEmpty())
+                assertTrue("nothing stored", imRepo.messages(group).none { it.isLocal })
+            }
+        } finally {
+            com.lightdecoder.imessage.IMessageReplies.clear()
         }
     }
 
@@ -1535,6 +1814,69 @@ class BlueBubblesScreenTest {
             scenario.onActivity { activity ->
                 assertEquals(null, shadowOf(activity).nextStartedActivity)
                 assertEquals("no photo access asked for", null, shadowOf(activity).lastRequestedPermission)
+            }
+        }
+    }
+
+    @Test
+    fun withTheLibraryAnIMessagesPictureShownInMessagesComesThroughIMessage() {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        directMode(asked)
+        val picture = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10, 7, 7, 7)
+        // The ":imessage" process downloads it to the file asked for.
+        com.lightdecoder.imessage.direct.DirectLink.installForTesting(two.app) { what, request, _ ->
+            asked += what to request
+            if (what == com.lightdecoder.imessage.direct.DirectWire.DOWNLOAD) {
+                java.io.File(request.getString("path")).apply { parentFile?.mkdirs(); writeBytes(picture) }
+                com.lightdecoder.imessage.direct.DirectWire.downloaded(picture.size.toLong())
+            } else {
+                com.lightdecoder.imessage.direct.DirectWire.ok()
+            }
+        }
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        val now = System.currentTimeMillis()
+        directMessage("H1", "Hers", now - 120_000, mine = false)
+        // Her picture as the library stored it: nothing here yet, Apple's description to download it by.
+        imRepo.upsertMessage(
+            com.lightdecoder.relay.MessageDto(
+                id = "imsg:P1", conversationId = ALICE_DIRECT, senderId = "+15551234567", senderName = "Alice", timestampMs = now - 60_000,
+                direction = "in", status = "INCOMING_COMPLETE", transport = IMessageManager.TRANSPORT, isOld = true,
+                parts = listOf(
+                    com.lightdecoder.relay.PartDto(
+                        "p0", "media", mediaId = "P1/p0", key = "DESC-P1".toByteArray(), mime = "image/png", fileName = "IMG_1.png", size = picture.size.toLong(),
+                    ),
+                ),
+            ),
+        )
+        // And her inline reply to her own message.
+        imRepo.upsertMessage(
+            com.lightdecoder.relay.MessageDto(
+                id = "imsg:R1", conversationId = ALICE_DIRECT, senderId = "+15551234567", senderName = "Alice", timestampMs = now - 30_000,
+                direction = "in", status = "INCOMING_COMPLETE", transport = IMessageManager.TRANSPORT, text = "About that",
+                parts = listOf(com.lightdecoder.relay.PartDto("0", "text", "About that")), replyToId = "imsg:H1", isOld = true,
+            ),
+        )
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("her messages") { shownTexts(it).containsAll(listOf("Hers", "About that")) }
+            // Shown at once, downloaded through iMessage (not Google Messages).
+            two.waitUntil("her picture downloaded") { imRepo.mediaPart("imsg:P1", "p0")?.localPath?.isNotEmpty() == true }
+            val download = asked(asked, com.lightdecoder.imessage.direct.DirectWire.DOWNLOAD).single()
+            assertEquals("DESC-P1", download.getString("descriptor"))
+            assertTrue(java.io.File(imRepo.mediaPart("imsg:P1", "p0")!!.localPath).readBytes().contentEquals(picture))
+            // Her reply quotes her message, from the iMessage archive.
+            scenario.waitFor("the quote") { a ->
+                bubbleOf(a, "About that")?.findViewById<android.widget.TextView>(R.id.quoteText)?.text?.toString() == "Hers"
+            }
+            // Tapped: the gallery of her iMessage chat.
+            scenario.onActivity { a -> a.findViewById<RecyclerView>(R.id.messages).findViewById<View>(R.id.mediaFrame).performClick() }
+            scenario.onActivity { activity ->
+                val started = shadowOf(activity).nextStartedActivity
+                assertEquals(com.lightdecoder.ui.chat.PictureGalleryActivity::class.java.name, started.component?.className)
+                assertEquals(ChatService.IMESSAGE, RelayIntents.serviceOf(started))
+                assertEquals(ALICE_DIRECT, started.getStringExtra(RelayIntents.EXTRA_CONVERSATION_ID))
+                assertEquals("imsg:P1", started.getStringExtra(RelayIntents.EXTRA_MESSAGE_ID))
             }
         }
     }
@@ -1578,13 +1920,15 @@ class BlueBubblesScreenTest {
                 activity.findViewById<View>(R.id.send).performClick()
             }
             assertEquals(unreachable, org.robolectric.shadows.ShadowToast.getTextOfLatestToast())
-            // A picture: not through the library yet.
+            // A picture: the same.
+            org.robolectric.shadows.ShadowToast.reset()
             scenario.onActivity { activity ->
                 assertEquals("I can", activity.findViewById<EditText>(R.id.input).text.toString())
                 activity.setAttachment(android.net.Uri.parse("content://media/external/images/media/1"))
                 activity.findViewById<View>(R.id.send).performClick()
             }
-            assertEquals(two.app.getString(R.string.imessage_no_attachments), org.robolectric.shadows.ShadowToast.getTextOfLatestToast())
+            assertEquals(unreachable, org.robolectric.shadows.ShadowToast.getTextOfLatestToast())
+            scenario.onActivity { activity -> assertEquals(View.VISIBLE, activity.findViewById<View>(R.id.attachmentBar).visibility) }
             // The failed one, tapped: why, not OpenBubbles.
             org.robolectric.shadows.ShadowToast.reset()
             scenario.onActivity { activity -> activity.onFailedTap(rowOf(activity, "Not me")) }

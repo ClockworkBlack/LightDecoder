@@ -153,7 +153,9 @@
     <string name="imessage_effect_celebration">Celebration</string>
 
     <!-- Direct mode: what the iMessage library's process answers when something does not go through. -->
-    <string name="imessage_direct_no_attachments_yet">Pictures and files can\'t be sent over iMessage from LightDecoder yet.</string>
+    <!-- %1$d: the largest size Apple takes, in MB. -->
+    <string name="imessage_direct_attachment_too_big">This file is too big for iMessage: at most %1$d MB can be sent.</string>
+    <string name="imessage_direct_attachment_unreadable">This file could not be read.</string>
     <string name="imessage_direct_attachment_no_file">Apple sent this attachment without a file.</string>
     <string name="imessage_direct_attachment_not_saved">The attachment could not be saved.</string>
     <string name="imessage_direct_message_not_confirmed">Apple did not confirm the message within %1$d seconds. It may not have been delivered.</string>

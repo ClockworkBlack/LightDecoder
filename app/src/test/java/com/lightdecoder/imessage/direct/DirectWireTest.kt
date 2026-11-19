@@ -61,6 +61,33 @@ class DirectWireTest {
     }
 
     @Test
+    fun aMessageTooLargeForOneTransactionDropsItsLargestDescriptionsUntilItFits() {
+        val conv = ConversationDto(id = "imsg:tel:+15550000002", type = DirectArchive.TRANSPORT)
+        fun media(idx: Int, keyBytes: Int) = PartDto(
+            partId = "p$idx", kind = "media", mediaId = "G9/p$idx", key = ByteArray(keyBytes) { 'k'.code.toByte() },
+            mime = "image/png", fileName = "$idx.png", size = 10,
+        )
+        val msg = MessageDto(
+            id = "imsg:G9", conversationId = conv.id, timestampMs = 1, direction = "in", transport = DirectArchive.TRANSPORT,
+            // Two descriptions that together are more than one transaction takes, and a small one.
+            parts = listOf(media(0, 2_000), media(1, 60_000), media(2, 50_000)),
+        )
+        val big = DirectArchive.Update.Upsert(conv, msg)
+        assertTrue(DirectWire.encode(big).toString().length > DirectWire.MAX_UPDATE_CHARS)
+        val json = DirectWire.encodeUpdate(big)
+        assertTrue(json.toString().length <= DirectWire.MAX_UPDATE_CHARS)
+        val fitted = DirectWire.decode(JSONObject(json.toString())) as DirectArchive.Update.Upsert
+        // The largest went; the others, and everything else of the message, came across.
+        assertEquals(listOf(2_000, 0, 50_000), fitted.message.parts.map { it.key.size })
+        assertEquals(msg.parts.map { it.mediaId }, fitted.message.parts.map { it.mediaId })
+        // One that fits, and any other change, as encode gives it.
+        val small = DirectArchive.Update.Upsert(conv, msg.copy(parts = listOf(media(0, 2_000))))
+        assertEquals(DirectWire.encode(small).toString(), DirectWire.encodeUpdate(small).toString())
+        val receipt = DirectArchive.Update.Receipt(listOf("imsg:G9"), DirectArchive.STATUS_RECEIVED)
+        assertEquals(DirectWire.encode(receipt).toString(), DirectWire.encodeUpdate(receipt).toString())
+    }
+
+    @Test
     fun anOlderEditWithoutPartOrTimeIsPartZero() {
         val old = JSONObject().put("kind", "edit").put("messageId", "imsg:G1").put("text", "fixed")
         assertEquals(DirectArchive.Update.Edit("imsg:G1", "fixed", 0, 0), DirectWire.decode(old))

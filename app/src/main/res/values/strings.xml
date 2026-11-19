@@ -138,7 +138,6 @@
     <string name="imessage_service_on">Connected. iMessages arrive in Messages.</string>
     <string name="imessage_service_starting">Connecting…</string>
     <string name="imessage_service_failed">Not working: %1$s</string>
-    <string name="imessage_no_attachments">Pictures and files can\'t be sent over iMessage from LightDecoder yet.</string>
     <string name="imessage_no_reactions">Reactions can\'t be sent over iMessage from LightDecoder yet.</string>
     <string name="imessage_action_unsend">Unsend</string>
     <string name="imessage_action_unsend_left">Unsend (%1$d:%2$02d left)</string>

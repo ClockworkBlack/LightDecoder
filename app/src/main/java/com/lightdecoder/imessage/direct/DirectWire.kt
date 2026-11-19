@@ -240,6 +240,31 @@ object DirectWire {
         DirectArchive.Update.Ignore -> JSONObject().put("kind", "ignore")
     }
 
+    /**
+     * The most an [UPDATE]'s JSON may take, in characters. A Bundle carries a string as UTF-16 (two
+     * bytes a character), and a Messenger's one-way Binder transaction gets at most about half of
+     * the 1 MB buffer: this keeps one well under that.
+     */
+    const val MAX_UPDATE_CHARS = 100_000
+
+    /**
+     * [u] as it crosses to the main process ([UPDATE]): [encode]d, small enough for one Binder
+     * transaction. A message that is not ([MAX_UPDATE_CHARS]) drops its attachments' largest
+     * descriptions, one at a time, until it is: those attachments then cannot be downloaded, but
+     * the message is stored, instead of being handed over again and again, ahead of every later one.
+     */
+    fun encodeUpdate(u: DirectArchive.Update): JSONObject {
+        var update = u
+        while (true) {
+            val json = encode(update)
+            val upsert = update as? DirectArchive.Update.Upsert ?: return json
+            if (json.toString().length <= MAX_UPDATE_CHARS) return json
+            val largest = upsert.message.parts.filter { it.key.isNotEmpty() }.maxByOrNull { it.key.size } ?: return json
+            val parts = upsert.message.parts.map { if (it === largest) it.copy(key = ByteArray(0)) else it }
+            update = upsert.copy(message = upsert.message.copy(parts = parts))
+        }
+    }
+
     fun decode(o: JSONObject): DirectArchive.Update = when (o.optString("kind")) {
         "upsert" -> DirectArchive.Update.Upsert(
             ConversationDto.fromJson(o.getJSONObject("conversation")),

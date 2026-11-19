@@ -6,11 +6,17 @@ import java.io.IOException
 import java.util.UUID
 import org.json.JSONException
 import org.json.JSONObject
+import uniffi.rust_bridge.AttachmentType
 import uniffi.rust_bridge.CertifiedContext
 import uniffi.rust_bridge.ConversationData
+import uniffi.rust_bridge.IndexedMessagePart
+import uniffi.rust_bridge.MessageAttachment
 import uniffi.rust_bridge.MessageInst
+import uniffi.rust_bridge.MessagePart
 import uniffi.rust_bridge.MessageType
 import uniffi.rust_bridge.PushChatMessage
+import uniffi.rust_bridge.TextFlags
+import uniffi.rust_bridge.TextFormat
 
 /**
  * The ":imessage" process's rules for what goes to Apple, as OpenBubbles 2.0.0 follows them.
@@ -68,6 +74,30 @@ object DirectMessages {
      */
     fun readReceiptParticipants(target: DirectWire.Target, sendReadReceipts: Boolean): List<String> =
         if (sendReadReceipts) listOfNotNull(target.peer) else emptyList()
+
+    /** A message's parts as they go to Apple, and its attachments as the archive numbers them. */
+    class Outgoing(val parts: List<IndexedMessagePart>, val attachments: List<DirectWire.SentPart>)
+
+    /**
+     * The parts of a message with [text] and the uploaded [attachments], as OpenBubbles builds one:
+     * the text first (none when it is empty), then the attachments. Numbered as rustpush numbers
+     * them ([DirectArchive.partIndexes]): with text, it is part 0 and the attachments 1 to n.
+     */
+    fun outgoing(text: String, attachments: List<MessageAttachment>): Outgoing {
+        val parts = listOfNotNull(
+            text.takeIf { it.isNotEmpty() }?.let {
+                IndexedMessagePart(MessagePart.Text(it, TextFormat.Flags(TextFlags(false, false, false, false))), null, null)
+            },
+        ) + attachments.map { IndexedMessagePart(MessagePart.Attachment(it), null, null) }
+        val indexes = DirectArchive.partIndexes(parts)
+        val sent = parts.indices.mapNotNull { i ->
+            val att = (parts[i].part as? MessagePart.Attachment)?.v1 ?: return@mapNotNull null
+            val size = (att.aType as? AttachmentType.Mmcs)?.v1?.maxOfOrNull { it.size }?.toLong()
+                ?: (att.aType as? AttachmentType.Inline)?.v1?.size?.toLong() ?: 0L
+            DirectWire.SentPart(indexes[i], DirectArchive.partId(indexes[i]), att.mime, att.name, size)
+        }
+        return Outgoing(parts, sent)
+    }
 
     /**
      * The library's conversation for [target], sent from [from]: its members with the user, the

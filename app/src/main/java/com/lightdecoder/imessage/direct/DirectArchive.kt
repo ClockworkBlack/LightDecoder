@@ -5,11 +5,13 @@ import com.lightdecoder.relay.ConversationDto
 import com.lightdecoder.relay.MessageDto
 import com.lightdecoder.relay.ParticipantDto
 import com.lightdecoder.relay.PartDto
+import uniffi.rust_bridge.AttachmentType
 import uniffi.rust_bridge.BalloonLayout
 import uniffi.rust_bridge.ConversationData
 import uniffi.rust_bridge.ExtensionApp
 import uniffi.rust_bridge.IndexedMessagePart
 import uniffi.rust_bridge.LinkMeta
+import uniffi.rust_bridge.MessageAttachment
 import uniffi.rust_bridge.MessageInst
 import uniffi.rust_bridge.MessagePart
 import uniffi.rust_bridge.NormalMessage
@@ -27,7 +29,9 @@ import uniffi.rust_bridge.Reaction
  * Conversation ids: `imsg:tel:+15551234567` (one other person, by their address) or
  * `imsg:group:<group guid>`. Message ids: `imsg:<message GUID>`, so the GUID Apple knows a
  * message by is always in its id (what unsend needs, also after a restart). A message's text
- * part is part "0"; its attachments will be parts `p<idx>`, idx being Apple's part index.
+ * part is part "0"; its attachments are media parts `p<idx>` (idx being Apple's part index) with
+ * media id `<GUID>/p<idx>`, and the library's description of the file as their key, from which
+ * the file is downloaded when it is first shown.
  *
  * Pure: no library, no database. Tested in DirectArchiveTest.
  */
@@ -161,16 +165,24 @@ object DirectArchive {
     /**
      * Turns one incoming event into its archive change. [me] are the user's own addresses (a message
      * from one of them is one the user sent from another device); [nameOf] gives a display name
-     * for an address; [texts] words the rows of a group's events.
+     * for an address; [texts] words the rows of a group's events; [describe] is the library's
+     * description of an attachment (`saveAttachment`), kept so that it can be downloaded later
+     * (empty: none kept).
      */
-    fun map(inst: MessageInst, me: Set<String>, nameOf: (String) -> String, texts: Texts): Update {
+    fun map(
+        inst: MessageInst,
+        me: Set<String>,
+        nameOf: (String) -> String,
+        texts: Texts,
+        describe: (MessageAttachment) -> String = { "" },
+    ): Update {
         val sender = inst.sender
         val fromMe = sender != null && sender in me
         val m = inst.message
         // OpenBubbles drops these when Apple could not verify who sent them.
         if (inst.verificationFailed && droppedUnverified(m)) return Update.Ignore
         return when (m) {
-            is PushChatMessage.Message -> message(inst, m.v1, me, nameOf)
+            is PushChatMessage.Message -> message(inst, m.v1, me, nameOf, describe)
             is PushChatMessage.React -> {
                 val r = m.v1.reaction as? ReactMessageType.React ?: return Update.Ignore
                 if (sender == null) return Update.Ignore
@@ -221,7 +233,13 @@ object DirectArchive {
     /** Apple's time of the event, else now. */
     private fun timestampOf(inst: MessageInst): Long = inst.sentTimestamp.toLong().takeIf { it > 0 } ?: System.currentTimeMillis()
 
-    private fun message(inst: MessageInst, n: NormalMessage, me: Set<String>, nameOf: (String) -> String): Update {
+    private fun message(
+        inst: MessageInst,
+        n: NormalMessage,
+        me: Set<String>,
+        nameOf: (String) -> String,
+        describe: (MessageAttachment) -> String,
+    ): Update {
         val conversation = inst.conversation ?: return Update.Ignore
         val sender = inst.sender
         val fromMe = sender != null && sender in me
@@ -230,13 +248,14 @@ object DirectArchive {
         val conv = conversationDto(id, participants, conversation.cvName, me, nameOf)
         val texts = partTexts(n.parts)
         val text = IMessageExtra(parts = texts).text()
+        val attachments = attachments(n.parts)
         val extra = IMessageExtra(
             parts = texts,
             effect = n.effect?.takeIf { it.isNotBlank() },
             voice = n.voice,
             link = linkOf(n.linkMeta),
             app = appOf(n.app, messageId(inst.id)),
-            sticker = n.parts.any { it.ext is PartExtension.Sticker },
+            sticker = attachments.any { it.sticker },
         )
         val msg = MessageDto(
             id = messageId(inst.id),
@@ -250,12 +269,98 @@ object DirectArchive {
             transport = TRANSPORT,
             subject = n.subject.orEmpty(),
             text = text,
-            parts = if (text.isEmpty()) emptyList() else listOf(PartDto(partId = "0", kind = "text", text = text)),
+            parts = listOfNotNull(text.takeIf { it.isNotEmpty() }?.let { PartDto(partId = "0", kind = "text", text = it) }) +
+                mediaParts(inst.id, attachments, describe),
             replyToId = n.replyGuid?.let(::messageId).orEmpty(),
             extra = extra.toJson(),
         )
         return Update.Upsert(conv, msg)
     }
+
+    /**
+     * One attachment of a message as the archive keeps it: Apple's part index [idx] (archive part
+     * `p<idx>`, media id `<GUID>/p<idx>`), its real type, file name and size, and the library's
+     * attachment ([source]) it came as.
+     */
+    class Attachment(val idx: Int, val mime: String, val name: String, val size: Long, val sticker: Boolean, val source: MessageAttachment) {
+        val partId: String get() = DirectArchive.partId(idx)
+
+        /** The file's bytes when they came inside the message (a small file), else null: it is downloaded. */
+        val inlineBytes: ByteArray? get() = (source.aType as? AttachmentType.Inline)?.v1
+    }
+
+    /**
+     * A message's attachments, in order. The moving part of a Live Photo (an `iris` attachment
+     * right after a picture, whether or not the still is marked `iris` too) is left out: the still
+     * shows, as on an Android phone. A sticker is a picture.
+     */
+    fun attachments(parts: List<IndexedMessagePart>): List<Attachment> {
+        val out = ArrayList<Attachment>()
+        val indexes = partIndexes(parts)
+        // The picture just kept, whose moving part may come next (once: a moving part has no other).
+        var still = false
+        for ((i, p) in parts.withIndex()) {
+            val att = (p.part as? MessagePart.Attachment)?.v1
+            if (att == null) {
+                still = false
+                continue
+            }
+            if (att.iris && still) {
+                still = false
+                continue
+            }
+            val sticker = p.ext is PartExtension.Sticker
+            val mime = DirectMedia.mimeFor(att.mime, att.utiType, att.name)
+                .let { if (sticker && !it.startsWith("image/")) STICKER_MIME else it }
+            val size = when (val t = att.aType) {
+                is AttachmentType.Inline -> t.v1.size.toLong()
+                is AttachmentType.Mmcs -> t.v1.maxOfOrNull { it.size }?.toLong() ?: 0L
+            }
+            out += Attachment(indexes[i], mime, att.name, size, sticker, att)
+            still = mime.startsWith("image/")
+        }
+        return out
+    }
+
+    /**
+     * The media parts of message [guid]'s [attachments], each with the library's description of it
+     * ([describe]) as its key. A small file that came inside the message is also written to its
+     * file by the ":imessage" process; its description holds the whole file, so it is only kept
+     * while the message's are small together ([MAX_INLINE_KEYS_BYTES]), the rest of the way being
+     * through the file. A download's description is always kept: it is all there is to fetch it by.
+     */
+    private fun mediaParts(guid: String, attachments: List<Attachment>, describe: (MessageAttachment) -> String): List<PartDto> {
+        var inline = 0
+        return attachments.map { a ->
+            val key = when {
+                a.inlineBytes == null -> describe(a.source).toByteArray(Charsets.UTF_8)
+                // Its description could only be larger than the file itself.
+                inline + a.size > MAX_INLINE_KEYS_BYTES -> ByteArray(0)
+                else -> describe(a.source).toByteArray(Charsets.UTF_8)
+                    .let { if (inline + it.size > MAX_INLINE_KEYS_BYTES) ByteArray(0) else it }
+            }
+            if (a.inlineBytes != null) inline += key.size
+            PartDto(
+                partId = a.partId,
+                kind = "media",
+                mediaId = mediaId(guid, a.idx),
+                key = key,
+                mime = a.mime,
+                fileName = a.name,
+                size = a.size,
+            )
+        }
+    }
+
+    /** A sticker whose type Apple did not say: Apple's stickers are HEIC pictures. */
+    private const val STICKER_MIME = "image/heic"
+
+    /**
+     * How much of a message's inline attachments' descriptions is kept, all of them together. The
+     * message crosses between the processes in one Binder transaction, where these become base64
+     * in JSON, carried as UTF-16: this keeps it well under what one can take ([DirectWire.MAX_UPDATE_CHARS]).
+     */
+    const val MAX_INLINE_KEYS_BYTES = 32 * 1024
 
     /**
      * A conversation as the library describes it: its id, members and name. A group's name is the
@@ -394,9 +499,8 @@ object DirectArchive {
     }
 
     /**
-     * The text of each part, by part index: its runs of text and mentions together, and a line
-     * for each attachment (attachments are not downloaded yet: the line says so, rather than the
-     * message looking empty). Parts with no text are left out.
+     * The text of each part, by part index: its runs of text and mentions together. Parts with no
+     * text (attachments, which are media parts of their own, and an app's placeholder) are left out.
      */
     fun partTexts(parts: List<IndexedMessagePart>): Map<Int, String> {
         val out = LinkedHashMap<Int, StringBuilder>()
@@ -404,8 +508,7 @@ object DirectArchive {
             val text = when (val part = p.part) {
                 is MessagePart.Text -> part.v1
                 is MessagePart.Mention -> part.v2
-                is MessagePart.Attachment -> ATTACHMENT_LINE + part.v1.name.ifBlank { part.v1.mime }
-                is MessagePart.Object -> ""
+                is MessagePart.Attachment, is MessagePart.Object -> ""
             }
             out.getOrPut(idx) { StringBuilder() }.append(text)
         }
@@ -415,8 +518,6 @@ object DirectArchive {
     /** The text of a message: each part's text ([partTexts]), one per line. */
     fun textOf(parts: List<MessagePart>): String =
         IMessageExtra(parts = partTexts(parts.map { IndexedMessagePart(it, null, null) })).text()
-
-    const val ATTACHMENT_LINE = "📎 Attachment (open it on another device for now): "
 
     private fun linkOf(meta: LinkMeta?): IMessageExtra.Link? {
         val d = meta?.data ?: return null

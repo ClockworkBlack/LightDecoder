@@ -52,8 +52,8 @@ import java.util.UUID
  *  - there are no reactions, typing or delivery reports.
  *
  * With OpenBubbles' library registered ([com.lightdecoder.imessage.direct.DirectLink.active],
- * "direct mode") none of that applies: messages, tapbacks, edits, typing and read receipts go
- * straight to Apple through it, and the OpenBubbles app is never opened.
+ * "direct mode") none of that applies: messages, pictures and files, tapbacks, edits, typing and
+ * read receipts go straight to Apple through it, and the OpenBubbles app is never opened.
  *
  * [isPaired] is whether "Blue Bubbles" is on. Nothing runs while it is off:
  * the listener drops OpenBubbles' notifications unread.
@@ -400,11 +400,24 @@ class IMessageManager private constructor(
         }
 
     /**
-     * Pictures and files go through OpenBubbles' own screen ([handOff]). Through the iMessage
-     * library they cannot be sent yet ([IMessageErrors.HAND_OFF] says so in its words).
+     * A picture, video or other file: through the iMessage library straight to Apple, as an
+     * iMessage of its own with [caption] ([com.lightdecoder.imessage.direct.DirectLink.sendMedia]).
+     * Without it they go through OpenBubbles' own screen ([handOff]), so this throws
+     * [IMessageErrors.HAND_OFF]; a chat the library cannot reach throws
+     * [IMessageErrors.NO_REPLY_BUTTON].
      */
     override fun sendMedia(conversationId: String, uri: Uri, caption: String?, replyToId: String?): String =
-        throw RelayException(IMessageErrors.HAND_OFF, if (direct.active) "no attachments through the iMessage library yet" else "attachments are sent in OpenBubbles")
+        sendThroughLibrary(conversationId, uri, caption, replyToId, voice = false)
+
+    /** A recorded voice message, which an iPhone shows as one: as [sendMedia]. */
+    fun sendVoice(conversationId: String, uri: Uri, replyToId: String?): String =
+        sendThroughLibrary(conversationId, uri, null, replyToId, voice = true)
+
+    private fun sendThroughLibrary(conversationId: String, uri: Uri, caption: String?, replyToId: String?, voice: Boolean): String {
+        if (direct.canSend(conversationId)) return direct.sendMedia(conversationId, uri, caption, replyToId, voice)
+        if (direct.active) throw RelayException(IMessageErrors.NO_REPLY_BUTTON, "this chat cannot be reached through the iMessage library")
+        throw RelayException(IMessageErrors.HAND_OFF, "attachments are sent in OpenBubbles")
+    }
 
     override fun retry(tmpId: String) {
         if (direct.retry(tmpId)) return
@@ -412,12 +425,17 @@ class IMessageManager private constructor(
         if (direct.active) return
         val row = repo.message(MessageRow.tmpMessageId(tmpId)) ?: return
         if (row.localState != LocalState.FAILED || row.text.isEmpty()) return
+        // A file (sent through the library before it was turned off) has no Reply button to go
+        // through: not its caption alone, as if it had gone. It stays failed, for OpenBubbles' screen.
+        if (row.media.isNotEmpty()) return
         repo.setLocalState(tmpId, LocalState.SENDING)
         deliver(tmpId, row.conversationId, row.text)
     }
 
+    /** Drops a message that did not go, with the copy of its file kept for sending it. */
     override fun discardFailed(tmpId: String) {
         repo.applyDeletion(MessageRow.tmpMessageId(tmpId))
+        repo.outboxFileFor(tmpId).delete()
     }
 
     /**
@@ -597,7 +615,16 @@ class IMessageManager private constructor(
 
     override suspend fun refreshConversations(folder: Folder): Int = 0
 
-    override suspend fun mediaFile(messageId: String, partId: String, thumbnail: Boolean): File? = null
+    /**
+     * An attachment's file: through the iMessage library downloaded from Apple when it is not here
+     * yet ([com.lightdecoder.imessage.direct.DirectLink.mediaFile]); a thumbnail is the file
+     * itself. Pictures OpenBubbles' notifications named come from its saved copies ([IMessageMedia]),
+     * never from here.
+     */
+    override suspend fun mediaFile(messageId: String, partId: String, thumbnail: Boolean): File? = withContext(Dispatchers.IO) {
+        if (!direct.active || !com.lightdecoder.imessage.direct.DirectArchive.isImessage(messageId)) return@withContext null
+        direct.mediaFile(messageId, partId)
+    }
 
     override suspend fun requestFullSize(messageId: String, partId: String): Unit =
         throw RelayException(WA_UNSUPPORTED, "not for iMessage")
@@ -693,7 +720,7 @@ object IMessageErrors {
     /** This chat has no Reply button to send through: it has to be sent in OpenBubbles. */
     const val NO_REPLY_BUTTON = "no_reply_button"
 
-    /** This is done in OpenBubbles' own screen (attachments, new chats); through the iMessage library, attachments cannot be sent yet. */
+    /** This is done in OpenBubbles' own screen (attachments, new chats); never through the iMessage library. */
     const val HAND_OFF = "hand_off"
 }
 

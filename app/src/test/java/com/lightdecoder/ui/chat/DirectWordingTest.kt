@@ -48,6 +48,8 @@ class DirectWordingTest {
             R.string.imessage_read_receipts, R.string.imessage_read_receipts_help, R.string.imessage_status_retrying,
             R.string.imessage_service_retrying, R.string.imessage_receipt_delivered, R.string.imessage_receipt_read,
             R.string.imessage_media_waiting_direct, R.string.imessage_media_not_here_direct, R.string.imessage_direct_no_own_address,
+            R.string.imessage_direct_attachment_too_big, R.string.imessage_direct_attachment_unreadable,
+            R.string.imessage_direct_attachment_no_file, R.string.imessage_direct_attachment_not_saved,
         )
         for (res in direct) {
             val text = context.getString(res)
@@ -68,8 +70,8 @@ class DirectWordingTest {
         assertEquals(R.string.imessage_resend_body, ServiceUi.resendBody(im, false))
         assertEquals(R.string.imessage_error_hand_off, ChatErrors.messageRes(im, IMessageErrors.HAND_OFF, direct = false))
         assertEquals(R.string.imessage_error_no_reply, ChatErrors.messageRes(im, IMessageErrors.NO_REPLY_BUTTON, direct = false))
-        // Through the library only attachments are not there yet.
-        assertEquals(R.string.imessage_no_attachments, ChatErrors.messageRes(im, IMessageErrors.HAND_OFF, direct = true))
+        // Through the library nothing is handed to another app.
+        assertEquals(R.string.imessage_error_unsupported, ChatErrors.messageRes(im, IMessageErrors.HAND_OFF, direct = true))
         // The other services are not iMessage's to change.
         assertEquals(R.string.chat_failed_phone_detail, ServiceUi.failedOnPhone(ChatService.MESSAGES, true))
         assertEquals(R.string.chat_resend_body, ServiceUi.resendBody(ChatService.MESSAGES, true))
@@ -88,7 +90,7 @@ class DirectWordingTest {
             ServiceUi.status(context, ChatService.IMESSAGE).component?.className,
         )
         assertEquals(context.getString(R.string.imessage_error_internal_direct), ChatErrors.message(context, ChatService.IMESSAGE, "internal"))
-        assertEquals(context.getString(R.string.imessage_no_attachments), ChatErrors.message(context, ChatService.IMESSAGE, IMessageErrors.HAND_OFF))
+        assertEquals(context.getString(R.string.imessage_error_unsupported), ChatErrors.message(context, ChatService.IMESSAGE, IMessageErrors.HAND_OFF))
     }
 
     @Test

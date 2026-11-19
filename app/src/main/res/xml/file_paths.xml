@@ -17,4 +17,7 @@
     <!-- And Gmail attachments. -->
     <files-path name="gmail-media" path="gmail-media/" />
     <files-path name="gmail-outbox" path="gmail-outbox/" />
+    <!-- And iMessage attachments sent and received through the iMessage library. -->
+    <files-path name="imessage-media" path="imessage-media/" />
+    <files-path name="imessage-outbox" path="imessage-outbox/" />
 </paths>

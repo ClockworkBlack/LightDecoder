@@ -156,8 +156,10 @@ class DirectArchiveTest {
         )
         val u = map(MessageInst("M5", bob, ConversationData(listOf(me, bob), null, null, null), PushChatMessage.Message(normal(parts)), 1UL, null, false, false, null))
         u as DirectArchive.Update.Upsert
-        assertEquals("Hello world\n" + DirectArchive.ATTACHMENT_LINE + "IMG_1.jpg\nsee?", u.message.text)
-        assertEquals(mapOf(0 to "Hello world", 1 to DirectArchive.ATTACHMENT_LINE + "IMG_1.jpg", 2 to "see?"), IMessageExtra.parse(u.message.extra).parts)
+        assertEquals("Hello world\nsee?", u.message.text)
+        assertEquals(mapOf(0 to "Hello world", 2 to "see?"), IMessageExtra.parse(u.message.extra).parts)
+        // The picture is a media part of its own, by Apple's part index.
+        assertEquals(listOf("0", "p1"), u.message.parts.map { it.partId })
     }
 
     @Test
@@ -168,12 +170,165 @@ class DirectArchiveTest {
     }
 
     @Test
-    fun attachmentsAreNamedInTheText() {
+    fun attachmentsAreNotInTheText() {
         val parts = listOf(
             MessagePart.Text("look", TextFormat.Flags(TextFlags(false, false, false, false))),
             MessagePart.Attachment(uniffi.rust_bridge.MessageAttachment(uniffi.rust_bridge.AttachmentType.Inline(byteArrayOf()), 1UL, "public.jpeg", "image/jpeg", "IMG_1.jpg", false)),
         )
-        assertEquals("look\n" + DirectArchive.ATTACHMENT_LINE + "IMG_1.jpg", DirectArchive.textOf(parts))
+        assertEquals("look", DirectArchive.textOf(parts))
+    }
+
+    // --- attachments ----------------------------------------------------------------------------
+
+    private fun mmcs(size: Long, vararg more: Long) = uniffi.rust_bridge.AttachmentType.Mmcs(
+        (listOf(size) + more.toList()).map { MmcsFile(byteArrayOf(1), "obj", "https://example.com/$it", byteArrayOf(2), it.toULong()) },
+    )
+
+    private fun file(
+        idx: Int?,
+        name: String,
+        mime: String,
+        uti: String,
+        type: uniffi.rust_bridge.AttachmentType = mmcs(1000),
+        iris: Boolean = false,
+        ext: uniffi.rust_bridge.PartExtension? = null,
+    ) = IndexedMessagePart(MessagePart.Attachment(uniffi.rust_bridge.MessageAttachment(type, (idx ?: 0).toULong(), uti, mime, name, iris)), idx?.toULong(), ext)
+
+    private fun withParts(id: String, parts: List<IndexedMessagePart>, voice: Boolean = false, describe: (uniffi.rust_bridge.MessageAttachment) -> String = { "desc:" + it.name }) =
+        DirectArchive.map(
+            MessageInst(id, bob, ConversationData(listOf(me, bob), null, null, null), PushChatMessage.Message(normal(parts, voice = voice)), 1UL, null, false, false, null),
+            setOf(me), ::nameOf, TestTexts, describe,
+        ) as DirectArchive.Update.Upsert
+
+    @Test
+    fun anAttachmentIsAMediaPartWithItsRealTypeNameSizeAndDescription() {
+        val u = withParts("G1", listOf(text("look", 0), file(1, "IMG_7.HEIC", "", "public.heic", mmcs(900, 120_000, 4_000))))
+        assertEquals("look", u.message.text)
+        val text = u.message.parts.first()
+        assertEquals(listOf("0", "text", "look"), listOf(text.partId, text.kind, text.text))
+        val media = u.message.parts.single { it.isMedia }
+        assertEquals("p1", media.partId)
+        assertEquals("G1/p1", media.mediaId)
+        assertEquals("image/heic", media.mime)
+        assertEquals("IMG_7.HEIC", media.fileName)
+        // The largest of the qualities Apple stored: the one that is downloaded.
+        assertEquals(120_000L, media.size)
+        assertEquals("desc:IMG_7.HEIC", String(media.key, Charsets.UTF_8))
+        // Across the processes and back.
+        val wired = DirectWire.decode(org.json.JSONObject(DirectWire.encode(u).toString())) as DirectArchive.Update.Upsert
+        assertEquals("desc:IMG_7.HEIC", String(wired.message.parts.single { it.isMedia }.key, Charsets.UTF_8))
+        // No line saying an attachment came.
+        assertFalse(u.message.text.contains("📎"))
+    }
+
+    @Test
+    fun theTypeComesFromApplesTypeThenItsUtiThenItsNameElseAnyData() {
+        fun mimeOf(mime: String, uti: String, name: String) =
+            withParts("T", listOf(file(0, name, mime, uti))).message.parts.single().mime
+        assertEquals("image/png", mimeOf("image/png", "public.jpeg", "a.jpg"))
+        // A wildcard or "any data" says nothing.
+        assertEquals("image/jpeg", mimeOf("image/*", "public.jpeg", "a"))
+        assertEquals("audio/x-caf", mimeOf("application/octet-stream", "com.apple.coreaudio-format", "Audio Message.caf"))
+        assertEquals("video/quicktime", mimeOf("", "com.apple.quicktime-movie", "IMG_2.MOV"))
+        assertEquals("video/mp4", mimeOf("", "dyn.unknown", "clip.mp4"))
+        assertEquals("application/octet-stream", mimeOf("", "dyn.unknown", "thing"))
+    }
+
+    @Test
+    fun aMessageOfOnlyAPictureHasNoTextPartAndItsPictureIsPartZero() {
+        val u = withParts("P0", listOf(file(0, "IMG_1.jpg", "image/jpeg", "public.jpeg")))
+        assertEquals("", u.message.text)
+        assertEquals(listOf("p0"), u.message.parts.map { it.partId })
+        assertEquals("P0/p0", u.message.parts.single().mediaId)
+    }
+
+    @Test
+    fun aLivePhotosMovingPartIsLeftOutTheStillShows() {
+        val u = withParts(
+            "L1",
+            listOf(
+                file(0, "IMG_5.HEIC", "image/heic", "public.heic"),
+                file(1, "IMG_5.MOV", "video/quicktime", "com.apple.quicktime-movie", iris = true),
+                file(2, "IMG_6.MOV", "video/quicktime", "com.apple.quicktime-movie"),
+            ),
+        )
+        assertEquals(listOf("p0", "p2"), u.message.parts.map { it.partId })
+        // A video marked so that does not follow a picture is a video.
+        val alone = withParts("L2", listOf(file(0, "IMG_8.MOV", "video/quicktime", "com.apple.quicktime-movie", iris = true)))
+        assertEquals(listOf("p0"), alone.message.parts.map { it.partId })
+        // The still marked too: its moving part is still left out, and only that one.
+        val both = withParts(
+            "L3",
+            listOf(
+                file(0, "IMG_9.HEIC", "image/heic", "public.heic", iris = true),
+                file(1, "IMG_9.MOV", "video/quicktime", "com.apple.quicktime-movie", iris = true),
+                file(2, "IMG_10.MOV", "video/quicktime", "com.apple.quicktime-movie", iris = true),
+            ),
+        )
+        assertEquals(listOf("p0", "p2"), both.message.parts.map { it.partId })
+        // Text between them: the video does not follow the picture.
+        val apart = withParts(
+            "L4",
+            listOf(
+                file(0, "IMG_11.HEIC", "image/heic", "public.heic"),
+                text("and", 1),
+                file(2, "IMG_11.MOV", "video/quicktime", "com.apple.quicktime-movie", iris = true),
+            ),
+        )
+        assertEquals(listOf("p0", "p2"), apart.message.parts.filter { it.isMedia }.map { it.partId })
+    }
+
+    @Test
+    fun aStickerIsAPictureMarkedAsASticker() {
+        val sticker = uniffi.rust_bridge.PartExtension.Sticker(0.5, 0.0, 0UL, 1.0, null, 0UL, 0.5, 0.5, 1UL, "h", 0UL, 0L, "s1")
+        val u = withParts("S1", listOf(file(0, "sticker", "", "", ext = sticker)))
+        assertTrue(IMessageExtra.parse(u.message.extra).sticker)
+        assertTrue(u.message.parts.single().mime.startsWith("image/"))
+        // A picture is no sticker.
+        assertFalse(IMessageExtra.parse(withParts("S2", listOf(file(0, "a.png", "image/png", "public.png"))).message.extra).sticker)
+    }
+
+    @Test
+    fun aVoiceMessageIsMarkedAndKeepsItsCaf() {
+        val u = withParts("V1", listOf(file(0, "Audio Message.caf", "", "com.apple.coreaudio-format")), voice = true)
+        assertTrue(IMessageExtra.parse(u.message.extra).voice)
+        assertEquals("audio/x-caf", u.message.parts.single().mime)
+    }
+
+    @Test
+    fun aSmallFileThatCameInsideTheMessageKeepsItsDescriptionOnlyWhileSmall() {
+        val small = withParts("I1", listOf(file(0, "a.png", "image/png", "public.png", uniffi.rust_bridge.AttachmentType.Inline(ByteArray(10)))))
+        assertEquals(10L, small.message.parts.single().size)
+        assertEquals("desc:a.png", String(small.message.parts.single().key, Charsets.UTF_8))
+        // Described at more than a message keeps: the file the ":imessage" process writes is the only way to it.
+        val big = withParts(
+            "I2", listOf(file(0, "b.png", "image/png", "public.png", uniffi.rust_bridge.AttachmentType.Inline(ByteArray(10)))),
+            describe = { "x".repeat(DirectArchive.MAX_INLINE_KEYS_BYTES + 1) },
+        )
+        assertEquals(0, big.message.parts.single().key.size)
+        // A file larger than that is not even described.
+        var described = 0
+        val large = withParts(
+            "I4", listOf(file(0, "d.png", "image/png", "public.png", uniffi.rust_bridge.AttachmentType.Inline(ByteArray(DirectArchive.MAX_INLINE_KEYS_BYTES + 1)))),
+            describe = { described++; "small" },
+        )
+        assertEquals(0, large.message.parts.single().key.size)
+        assertEquals(0, described)
+        // Several together: each kept while all of them stay within it.
+        val three = withParts(
+            "I5",
+            (0 until 3).map { file(it, "f$it.png", "image/png", "public.png", uniffi.rust_bridge.AttachmentType.Inline(ByteArray(10))) },
+            describe = { "x".repeat(DirectArchive.MAX_INLINE_KEYS_BYTES / 2 - 1) },
+        )
+        assertEquals(listOf(true, true, false), three.message.parts.map { it.key.isNotEmpty() })
+        // A download's description is always kept: it is all there is to fetch it by.
+        val download = withParts("I3", listOf(file(0, "c.mov", "video/quicktime", "")), describe = { "x".repeat(DirectArchive.MAX_INLINE_KEYS_BYTES + 1) })
+        assertEquals(DirectArchive.MAX_INLINE_KEYS_BYTES + 1, download.message.parts.single().key.size)
+        // Which the ":imessage" process writes.
+        val inline = DirectArchive.attachments(listOf(file(3, "d.gif", "image/gif", "", uniffi.rust_bridge.AttachmentType.Inline(byteArrayOf(7)))))
+        assertEquals(listOf(3), inline.map { it.idx })
+        assertTrue(inline.single().inlineBytes!!.contentEquals(byteArrayOf(7)))
+        assertNull(DirectArchive.attachments(listOf(file(0, "e.gif", "image/gif", ""))).single().inlineBytes)
     }
 
     @Test

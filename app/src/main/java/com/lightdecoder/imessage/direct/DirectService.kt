@@ -80,7 +80,7 @@ class DirectService : Service() {
         engine = DirectEngine.get(this)
         sinkClient = DirectIpc.Client(this, DirectSinkService::class.java)
         engine.sink = DirectEngine.Sink { update ->
-            val reply = sinkClient.call(DirectWire.UPDATE, DirectWire.encode(update), SINK_TIMEOUT_MS)
+            val reply = sinkClient.call(DirectWire.UPDATE, DirectWire.encodeUpdate(update), SINK_TIMEOUT_MS)
             DirectWire.errorOf(reply) == null
         }
         scope.launch { engine.status.collect { update(it) } }

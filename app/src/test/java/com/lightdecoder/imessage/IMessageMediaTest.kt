@@ -134,6 +134,23 @@ class IMessageMediaTest {
         assertTrue(IMessageLog.read(app).any { it.contains("Auto-save Attachments on?") })
     }
 
+    @Test
+    fun theIMessageLibrarysPicturesAreNeverTakenForOpenBubblesCopies() {
+        allow()
+        val t = 1_700_000_000_000L
+        // A picture slot of the library's with nothing to fetch it by yet (its file comes from Apple).
+        repo.upsertMessage(
+            com.lightdecoder.relay.MessageDto(
+                id = "imsg:G1", conversationId = "imsg:tel:+15551234567", senderId = "+15551234567", timestampMs = t, direction = "in",
+                transport = IMessageManager.TRANSPORT,
+                parts = listOf(com.lightdecoder.relay.PartDto("p0", "media", mime = "image/jpeg", fileName = "IMG_1.jpg")),
+            ),
+        )
+        saved = listOf(file(4, "image/jpeg", t / 1000 + 4))
+        assertEquals(0, IMessageMedia.fill(app, nowMs = t + 30_000))
+        assertEquals("", repo.message("imsg:G1")!!.media.single().localPath)
+    }
+
     private companion object {
         const val DB = "imessage-media-test.db"
     }

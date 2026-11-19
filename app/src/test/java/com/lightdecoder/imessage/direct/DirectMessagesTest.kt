@@ -124,4 +124,30 @@ class DirectMessagesTest {
         assertTrue(file.isFile)
         assertFalse(File(file.path + ".tmp").exists())
     }
+
+    private fun uploaded(name: String, mime: String, sizes: List<Long>) = uniffi.rust_bridge.MessageAttachment(
+        uniffi.rust_bridge.AttachmentType.Mmcs(sizes.map { uniffi.rust_bridge.MmcsFile(byteArrayOf(1), "o", "https://x/$it", byteArrayOf(2), it.toULong()) }),
+        0UL, "public.jpeg", mime, name, false,
+    )
+
+    @Test
+    fun aSentMessageHasItsTextFirstThenItsAttachmentsNumberedAsRustpushNumbersThem() {
+        // With a caption: the text is part 0, the attachments 1 and 2.
+        val withText = DirectMessages.outgoing("Look", listOf(uploaded("a.jpg", "image/jpeg", listOf(10, 500)), uploaded("b.mov", "video/quicktime", listOf(7))))
+        assertEquals(3, withText.parts.size)
+        assertEquals("Look", (withText.parts[0].part as MessagePart.Text).v1)
+        assertTrue(withText.parts.drop(1).all { it.part is MessagePart.Attachment && it.idx == null })
+        assertEquals(
+            listOf(DirectWire.SentPart(1, "p1", "image/jpeg", "a.jpg", 500), DirectWire.SentPart(2, "p2", "video/quicktime", "b.mov", 7)),
+            withText.attachments,
+        )
+        // Without one: no empty text, the attachments from 0.
+        val alone = DirectMessages.outgoing("", listOf(uploaded("Audio Message.m4a", "audio/mp4", listOf(3))))
+        assertEquals(1, alone.parts.size)
+        assertEquals(listOf(DirectWire.SentPart(0, "p0", "audio/mp4", "Audio Message.m4a", 3)), alone.attachments)
+        // A text alone.
+        val text = DirectMessages.outgoing("hi", emptyList())
+        assertEquals(1, text.parts.size)
+        assertTrue(text.attachments.isEmpty())
+    }
 }

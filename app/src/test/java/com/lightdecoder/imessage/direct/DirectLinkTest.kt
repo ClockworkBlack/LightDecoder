@@ -827,20 +827,23 @@ class DirectLinkTest {
         // only that part goes, as Apple does. Unsend is not offered on such a message.
         directModeOn()
         val now = System.currentTimeMillis()
-        val attachment = DirectArchive.ATTACHMENT_LINE + "a.jpg"
         repo.upsertMessage(
             com.lightdecoder.relay.MessageDto(
                 id = "imsg:V3", conversationId = "imsg:$bob", fromMe = true, timestampMs = now - 10_000, direction = "out",
-                status = DirectArchive.STATUS_SENT, statusCode = 1, transport = IMessageManager.TRANSPORT, text = "look\n$attachment",
-                parts = listOf(com.lightdecoder.relay.PartDto("0", "text", "look\n$attachment")),
-                extra = IMessageExtra(parts = mapOf(0 to "look", 1 to attachment)).toJson(),
+                status = DirectArchive.STATUS_SENT, statusCode = 1, transport = IMessageManager.TRANSPORT, text = "look",
+                parts = listOf(
+                    com.lightdecoder.relay.PartDto("0", "text", "look"),
+                    com.lightdecoder.relay.PartDto("p1", "media", mediaId = "V3/p1", mime = "image/jpeg", fileName = "a.jpg"),
+                ),
+                extra = IMessageExtra(parts = mapOf(0 to "look")).toJson(),
             ),
         )
         assertFalse(link.canUnsend(repo.message("imsg:V3")!!, now))
         runBlocking { link.unsend("imsg:V3", part = 0) }
         val partly = repo.message("imsg:V3")!!
         assertEquals("out", partly.direction)
-        assertEquals(attachment, partly.text)
+        assertEquals("", partly.text)
+        assertEquals(listOf("p1"), partly.media.map { it.partId })
         assertEquals(setOf(0), IMessageExtra.parse(partly.extra).unsent)
         // A chat the library cannot reach: it says so, in words.
         repo.upsertMessage(
@@ -1085,14 +1088,14 @@ class DirectLinkTest {
         // Nothing opens the OpenBubbles app.
         assertFalse(manager.handOff(context, chat, "hi"))
         assertEquals(com.lightdecoder.imessage.OpenBubbles.NewChat.FAILED, manager.startInOpenBubbles(context, "+15559876543"))
-        // Attachments: not yet, said in iMessage's words.
+        // Attachments go to Apple too: one that cannot be read says so, in words, and nothing is stored.
         try {
             manager.sendMedia(chat, android.net.Uri.parse("content://x/1"), null, null)
-            fail("sent a file")
-        } catch (e: com.lightdecoder.relay.RelayException) {
-            assertEquals(com.lightdecoder.imessage.IMessageErrors.HAND_OFF, e.code)
-            assertEquals(context.getString(com.lightdecoder.R.string.imessage_no_attachments), com.lightdecoder.ui.chat.ChatErrors.message(context, ChatService.IMESSAGE, e))
+            fail("sent a file it could not read")
+        } catch (e: DirectEngine.ImessageError) {
+            assertEquals(context.getString(com.lightdecoder.R.string.imessage_direct_attachment_unreadable), com.lightdecoder.ui.chat.ChatErrors.message(context, ChatService.IMESSAGE, e))
         }
+        assertTrue(repo.messages(chat).none { it.isLocal })
         // A chat the library cannot reach: kept here as failed, not sent through a Reply button.
         repo.upsertConversation(
             ConversationDto(

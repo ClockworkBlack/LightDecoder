@@ -455,8 +455,9 @@ class ArchiveRepository private constructor(
     /**
      * Shows a message being sent right away, as "tmp:<tmpId>" in state
      * pending, until the phone echoes the real one. A media attachment is
-     * stored as part "0" pointing at [mediaPath]. Does nothing if that tmpId
-     * is already there.
+     * stored as part "0" pointing at [mediaPath]. [extra] is the service's
+     * own display data for it (iMessage: a voice message). Does nothing if
+     * that tmpId is already there.
      */
     fun insertLocalOutgoing(
         tmpId: String,
@@ -467,6 +468,7 @@ class ArchiveRepository private constructor(
         fileName: String?,
         replyToId: String?,
         nowMs: Long,
+        extra: String = "",
     ) = write { b ->
         requireOwnDirectory(mediaPath.orEmpty())
         val id = MessageRow.tmpMessageId(tmpId)
@@ -482,6 +484,7 @@ class ArchiveRepository private constructor(
             put("text_body", text)
             put("reply_to_msg_id", replyToId.orEmpty())
             put("local_state", LocalState.PENDING)
+            put("extra_json", extra)
             put("updated_at", b.now)
         }
         val rowId = b.db.insertOrThrow("messages", null, values)

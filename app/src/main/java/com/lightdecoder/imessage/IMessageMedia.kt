@@ -113,12 +113,14 @@ object IMessageMedia {
 
     /**
      * Gives each iMessage picture or video still waiting its file: OpenBubbles' saved file from around
-     * its time, of the same kind, in order, each file used once. Returns how many it gave.
+     * its time, of the same kind, in order, each file used once. Returns how many it gave. Never one
+     * of the iMessage library's messages: those download their own files from Apple.
      */
     fun fill(context: Context, nowMs: Long = System.currentTimeMillis()): Int = synchronized(lock) {
         if (!IMessagePrefs.enabled(context)) return 0
         val repo = runCatching { IMessageManager.get(context).repo }.getOrNull() ?: return 0
         val waiting = runCatching { repo.mediaAwaitingFiles(nowMs - LOOK_BACK_MS) }.getOrDefault(emptyList())
+            .filter { !com.lightdecoder.imessage.direct.DirectArchive.isImessage(it.messageId) }
         if (waiting.isEmpty()) return 0
         if (!supported()) return 0.also { note(context, "unsupported", "Pictures: this Android cannot tell which app saved a file (Android 10+ needed)") }
         if (!hasPermission(context)) {

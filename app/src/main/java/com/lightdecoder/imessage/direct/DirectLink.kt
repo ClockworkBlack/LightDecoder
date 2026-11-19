@@ -1,10 +1,15 @@
 package com.lightdecoder.imessage.direct
 
 import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
 import android.util.Log
+import android.webkit.MimeTypeMap
 import com.lightdecoder.R
 import com.lightdecoder.archive.ArchiveRepository
 import com.lightdecoder.archive.LocalState
+import com.lightdecoder.archive.MediaCache
+import com.lightdecoder.archive.MediaRow
 import com.lightdecoder.archive.MessageRow
 import com.lightdecoder.chat.ChatService
 import com.lightdecoder.imessage.IMessageAddress
@@ -19,14 +24,18 @@ import com.lightdecoder.relay.ParticipantDto
 import com.lightdecoder.relay.PartDto
 import com.lightdecoder.relay.RelayException
 import com.lightdecoder.relay.RelayManager
+import com.lightdecoder.media.CafAudio
 import com.lightdecoder.reactions.ReadTimes
 import com.lightdecoder.ui.chat.EditRule
+import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -45,10 +54,10 @@ import uniffi.rust_bridge.Reaction
  * reused, so its history and the new messages stay together. New chats get `imsg:` ids
  * ([DirectArchive]); messages sent or received here are `imsg:<GUID>`, the GUID Apple knows them by.
  *
- * [IMessageManager] hands sends, retries, unsends, edits, tapbacks, typing and read receipts here
- * while [active]; [DirectSinkService] hands over what Apple sent ([apply]). What arrives for a
- * message that is not stored yet (a receipt for a message whose send has not returned yet) is held
- * for a while ([HeldUpdates]) and applied once it is.
+ * [IMessageManager] hands sends (attachments too), retries, unsends, edits, tapbacks, typing, read
+ * receipts and downloads of attachments here while [active]; [DirectSinkService] hands over what
+ * Apple sent ([apply]). What arrives for a message that is not stored yet (a receipt for a message
+ * whose send has not returned yet) is held for a while ([HeldUpdates]) and applied once it is.
  */
 class DirectLink private constructor(
     private val app: Context,
@@ -166,20 +175,150 @@ class DirectLink private constructor(
         typingThrottle.sent(conversationId)
         val tmpId = UUID.randomUUID().toString()
         repo.insertLocalOutgoing(tmpId, conversationId, text, null, null, null, replyToId, System.currentTimeMillis())
-        scope.launch { deliver(tmpId, conversationId, text, replyToId) }
+        inTurn(conversationId) { deliver(tmpId, conversationId, text, replyToId) }
         return tmpId
     }
 
-    /** Sends a failed message again, from its local copy (which survives restarts). */
+    /**
+     * Sends the picture, video, voice message or other file at [uri], with [caption], as an
+     * iMessage; [voice] when it is a recorded audio message (an iPhone shows it as one). As a
+     * text: a local copy now ("tmp:<tmpId>"), the sent message once Apple confirms it. The file
+     * is copied here first, so the send (and a retry, even after a restart) no longer needs [uri].
+     * Throws [DirectEngine.ImessageError] when the file cannot be read or is over Apple's
+     * [DirectMedia.MAX_SEND_BYTES].
+     */
+    fun sendMedia(conversationId: String, uri: Uri, caption: String?, replyToId: String?, voice: Boolean = false): String {
+        val tmpId = UUID.randomUUID().toString()
+        val file = repo.outboxFileFor(tmpId)
+        copyCapped(uri, file)
+        val given = displayName(uri)
+        val mime = mimeOf(uri, given)
+        // Named as an iPhone names its own voice messages.
+        val name = if (voice) "$VOICE_NAME.${DirectMedia.extensionFor(mime, given)}" else given.ifBlank { DirectMedia.nameFor(mime) }
+        val text = caption?.trim().orEmpty()
+        typingThrottle.sent(conversationId)
+        val extra = if (voice) IMessageExtra(voice = true).toJson() else ""
+        repo.insertLocalOutgoing(tmpId, conversationId, text, file.path, mime, name, replyToId, System.currentTimeMillis(), extra)
+        inTurn(conversationId) { deliver(tmpId, conversationId, text, replyToId, Outgoing(file, mime, name, voice)) }
+        return tmpId
+    }
+
+    /** Copies [uri] into [target], at most [DirectMedia.MAX_SEND_BYTES]; throws why it could not. */
+    private fun copyCapped(uri: Uri, target: File) {
+        val tooBig = DirectEngine.ImessageError(app.getString(R.string.imessage_direct_attachment_too_big, (DirectMedia.MAX_SEND_BYTES shr 20).toInt()))
+        val unreadable = DirectEngine.ImessageError(app.getString(R.string.imessage_direct_attachment_unreadable))
+        // Too big as it is said to be: refused before anything is copied.
+        if ((sizeOf(uri) ?: 0L) > DirectMedia.MAX_SEND_BYTES) throw tooBig
+        var done = false
+        try {
+            val input = app.contentResolver.openInputStream(uri) ?: throw unreadable
+            input.use { stream ->
+                target.parentFile?.mkdirs()
+                target.outputStream().use { out ->
+                    val buffer = ByteArray(64 * 1024)
+                    var total = 0L
+                    while (true) {
+                        val n = stream.read(buffer)
+                        if (n < 0) break
+                        total += n
+                        if (total > DirectMedia.MAX_SEND_BYTES) throw tooBig
+                        out.write(buffer, 0, n)
+                    }
+                    if (total == 0L) throw unreadable
+                }
+            }
+            done = true
+        } catch (e: java.io.IOException) {
+            throw unreadable
+        } catch (e: RuntimeException) {
+            // No longer allowed to read it, or no app answers for it any more.
+            throw unreadable
+        } finally {
+            if (!done) target.delete()
+        }
+    }
+
+    /** The file's size as the app it came from says it, if it does. */
+    private fun sizeOf(uri: Uri): Long? = try {
+        if (uri.scheme == "file") {
+            uri.path?.let { File(it).length() }
+        } else {
+            app.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { c ->
+                if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else null
+            }
+        }
+    } catch (e: Exception) {
+        null
+    }
+
+    /** The file's own name, as the app it came from gives it, else its path's last part. */
+    private fun displayName(uri: Uri): String {
+        val fromProvider = try {
+            app.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) c.getString(0) else null
+            }
+        } catch (e: Exception) {
+            null
+        }
+        return (fromProvider ?: uri.lastPathSegment).orEmpty().substringAfterLast('/').filterNot { it.isISOControl() }.take(120)
+    }
+
+    private fun mimeOf(uri: Uri, name: String): String {
+        val fromProvider = try {
+            app.contentResolver.getType(uri)
+        } catch (e: Exception) {
+            null
+        }
+        if (!fromProvider.isNullOrBlank() && DirectMedia.isSpecific(fromProvider)) return fromProvider
+        return DirectMedia.mimeOfName(name)
+            ?: MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase())
+            ?: DirectMedia.OCTET_STREAM
+    }
+
+    /** Sends a failed message again, from its local copy (which survives restarts), its file included. */
     fun retry(tmpId: String): Boolean {
         val row = repo.message(MessageRow.tmpMessageId(tmpId)) ?: return false
         if (!canSend(row.conversationId)) return false
+        val media = row.media.firstOrNull()?.let { Outgoing(File(it.localPath), it.mime, it.fileName, IMessageExtra.parse(row.extra).voice) }
         repo.setLocalState(tmpId, LocalState.PENDING)
-        scope.launch { deliver(tmpId, row.conversationId, row.text, row.replyToId.ifEmpty { null }) }
+        inTurn(row.conversationId) { deliver(tmpId, row.conversationId, row.text, row.replyToId.ifEmpty { null }, media) }
         return true
     }
 
-    private suspend fun deliver(tmpId: String, conversationId: String, text: String, replyToId: String?) {
+    /** Sends waiting their turn, by conversation ([inTurn]). */
+    private val sendQueues = HashMap<String, Channel<suspend () -> Unit>>()
+
+    /**
+     * Runs [send] once the sends asked of [conversationId] before it are done: one at a time, in the
+     * order asked, so that they reach Apple (and the other person) in that order, a small picture
+     * never ahead of the large video picked before it, and each names the one before it
+     * ([DirectWire.Target.afterGuid]). Other conversations' sends do not wait for these.
+     */
+    private fun inTurn(conversationId: String, send: suspend () -> Unit) {
+        synchronized(sendQueues) {
+            sendQueues.getOrPut(conversationId) {
+                Channel<suspend () -> Unit>(Channel.UNLIMITED).also { queue ->
+                    scope.launch {
+                        for (next in queue) {
+                            try {
+                                next()
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                // The next one still goes.
+                                Log.w(TAG, "send not finished", e)
+                            }
+                        }
+                    }
+                }
+            }.trySend(send)
+        }
+    }
+
+    /** A file going with a message: the copy here, its type and name, and whether it is a voice message. */
+    private class Outgoing(val file: File, val mime: String, val name: String, val voice: Boolean)
+
+    private suspend fun deliver(tmpId: String, conversationId: String, text: String, replyToId: String?, media: Outgoing? = null) {
         try {
             repo.setLocalState(tmpId, LocalState.SENDING)
             val target = targetOf(conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
@@ -188,12 +327,26 @@ class DirectLink private constructor(
             // a reply to one goes as a message of its own.
             val replyGuid = replyToId?.let(DirectArchive::guidOf)
             val replyPart = replyGuid?.let { DirectWire.replyPart(repo.message(replyToId)?.text.orEmpty()) }
-            val reply = requests.call(DirectWire.SEND, DirectWire.send(target, text, replyGuid, replyPart), SEND_TIMEOUT_MS)
+            val request = DirectWire.send(
+                target, text, replyGuid, replyPart,
+                attachments = listOfNotNull(media?.let { DirectWire.Attachment(it.file.path, it.mime, it.name) }),
+                voice = media?.voice == true,
+            )
+            // A file is uploaded first: that takes longer than a text.
+            val reply = requests.call(DirectWire.SEND, request, if (media == null) SEND_TIMEOUT_MS else MEDIA_SEND_TIMEOUT_MS)
             DirectWire.errorOf(reply)?.let {
                 throw if (DirectWire.unconfirmed(reply)) DirectEngine.Unconfirmed(it) else DirectEngine.ImessageError(it)
             }
             val sent = DirectWire.SendReply.fromJson(reply)
             val messageId = DirectArchive.messageId(sent.guid)
+            val mediaParts = sent.parts.map { p ->
+                PartDto(
+                    partId = p.partId, kind = "media", mediaId = DirectArchive.mediaId(sent.guid, p.idx),
+                    mime = p.mime, fileName = p.name, size = p.size,
+                )
+            }
+            // The file sent is the message's from now on: where a download of it would be kept.
+            val kept = media?.let { m -> mediaParts.firstOrNull()?.let { part -> part to keepSent(m.file, part) } }
             val stored = MessageDto(
                 id = messageId,
                 conversationId = conversationId,
@@ -205,17 +358,25 @@ class DirectLink private constructor(
                 statusCode = 1,
                 transport = IMessageManager.TRANSPORT,
                 text = text,
-                parts = listOf(PartDto(partId = "0", kind = "text", text = text)),
+                parts = listOfNotNull(text.takeIf { it.isNotEmpty() }?.let { PartDto(partId = "0", kind = "text", text = it) }) + mediaParts,
                 replyToId = replyToId.orEmpty(),
                 isOld = true,
+                extra = if (media?.voice == true) IMessageExtra(voice = true).toJson() else "",
             )
             // A receipt (or a reaction) can come from Apple before the send's answer did: what
             // [apply] held for it is applied now, under the same lock, so none slips between.
             synchronized(this) {
                 repo.upsertMessage(stored)
+                kept?.let { (part, file) -> if (file != null) record(messageId, part.partId, part.mediaId, file, part.mime) }
                 replayHeld(messageId)
             }
-            IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: sent through the iMessage library (Apple confirmed)")
+            // Apple numbered no attachment: the copy has nothing to belong to.
+            if (media != null && kept == null) media.file.delete()
+            IMessageLog.add(
+                app,
+                "${IMessageLog.chatRef(conversationId)}: sent through the iMessage library (Apple confirmed)" +
+                    if (media != null) " with ${if (media.voice) "a voice message" else media.mime.substringBefore('/')}" else "",
+            )
         } catch (e: Exception) {
             Log.w(TAG, "direct send failed", e)
             IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: library send FAILED: ${DirectEngine.readable(e)}")
@@ -224,6 +385,119 @@ class DirectLink private constructor(
             repo.setLocalState(tmpId, LocalState.FAILED, if (e is DirectEngine.Unconfirmed) Outbox.UNCONFIRMED else DirectEngine.readable(e))
         }
     }
+
+    // --- attachments -------------------------------------------------------------------------------
+
+    /**
+     * The file just sent ([file], the outbox copy) becomes the sent message's part [part]: moved to
+     * where a download of it would be kept, so that it is found there however the message is
+     * shown. Null when it could not be moved (the message then shows without it).
+     */
+    private fun keepSent(file: File, part: PartDto): File? {
+        val target = repo.mediaFileFor(part.mediaId, DirectMedia.extensionFor(part.mime, part.fileName))
+        return try {
+            if (!file.renameTo(target)) {
+                file.copyTo(target, overwrite = true)
+                file.delete()
+            }
+            target
+        } catch (e: java.io.IOException) {
+            Log.w(TAG, "sent file not kept", e)
+            file.delete()
+            null
+        }
+    }
+
+    /** Downloads under way, by media id: a second ask for the same file waits for the first. */
+    private val downloads = HashMap<String, Deferred<File?>>()
+
+    /**
+     * The file of an iMessage attachment: the one already here (one sent from here, or downloaded
+     * before, or a small one that came inside the message), else downloaded from Apple now (once,
+     * however many ask). An iPhone's voice message (CAF) is made playable here ([CafAudio]); the
+     * original is kept with it. Null when the message or part is gone, or there is nothing to
+     * download it from; throws [DirectEngine.ImessageError] when the download fails.
+     */
+    suspend fun mediaFile(messageId: String, partId: String): File? {
+        val part = repo.mediaPart(messageId, partId) ?: return null
+        existing(part.localPath)?.let { return it }
+        if (part.mediaId.isEmpty()) return null
+        val job = synchronized(downloads) {
+            downloads[part.mediaId]?.takeIf { it.isActive } ?: scope.async { fetch(messageId, part) }.also { downloads[part.mediaId] = it }
+        }
+        try {
+            return job.await()
+        } finally {
+            synchronized(downloads) { if (downloads[part.mediaId] === job && job.isCompleted) downloads.remove(part.mediaId) }
+        }
+    }
+
+    private suspend fun fetch(messageId: String, part: MediaRow): File? {
+        val file = repo.mediaFileFor(part.mediaId, DirectMedia.extensionFor(part.mime, part.fileName))
+        if (file.length() <= 0) {
+            // Nothing to download it by: a file that came inside the message, whose copy is gone.
+            val descriptor = String(part.key, Charsets.UTF_8).ifEmpty { return null }
+            val reply = requests.call(DirectWire.DOWNLOAD, DirectWire.download(descriptor, file.path), DOWNLOAD_TIMEOUT_MS)
+            DirectWire.errorOf(reply)?.let { throw DirectEngine.ImessageError(it) }
+            if (file.length() <= 0) return null
+        }
+        val playable = if (part.mime == CafAudio.MIME || part.fileName.endsWith(".caf", ignoreCase = true)) playable(part, file) else null
+        // Not while Apple's copy of the message is stored again ([apply]): that keeps what is recorded here.
+        return synchronized(this) {
+            if (playable == null) return@synchronized record(messageId, part.partId, part.mediaId, file, part.mime)
+            // Both files at once, so no cleanup comes between them.
+            repo.withMediaFileLock {
+                val shown = record(messageId, part.partId, part.mediaId, playable.first, playable.second)
+                if (shown != null) {
+                    // The original, as it came, stays with it (and goes with it).
+                    repo.setMediaLocalPath(messageId, part.partId, file.path, thumbnail = true)
+                } else {
+                    // The message or part is gone (record dropped the playable file): nothing shows the original either.
+                    file.delete()
+                }
+                shown
+            }
+        }
+    }
+
+    /** An iPhone's voice message in a file Android plays, with its type; null when its sound is in a codec that cannot be. */
+    private fun playable(part: MediaRow, caf: File): Pair<File, String>? {
+        if (caf.length() > MAX_REMUX_BYTES) return null
+        val sound = CafAudio.remux(caf.readBytes()) ?: return null.also { Log.i(TAG, "voice message kept as it came: its codec cannot be played here") }
+        val file = repo.mediaFileFor(part.mediaId + PLAYABLE, sound.extension)
+        return try {
+            MediaCache.writeAtomically(file, sound.bytes)
+            file to sound.mime
+        } catch (e: java.io.IOException) {
+            Log.w(TAG, "playable voice message not written", e)
+            null
+        }
+    }
+
+    /**
+     * [file] is part [partId]'s file from now on (if the part still has media [mediaId]), of type
+     * [mime], with its size, and a picture's or video's width and height. The file, or null when
+     * the part is gone.
+     */
+    private fun record(messageId: String, partId: String, mediaId: String, file: File, mime: String): File? = repo.withMediaFileLock {
+        if (!repo.setMediaLocalPath(messageId, partId, mediaId, file.path, thumbnail = false)) return@withMediaFileLock null
+        val (width, height) = sizeOf(file, mime)
+        repo.setMediaDetails(messageId, partId, mime, file.length(), width, height)
+        file
+    }
+
+    /** A picture's or video's width and height as it is shown; 0 and 0 for anything else or when it cannot be read. */
+    private fun sizeOf(file: File, mime: String): Pair<Int, Int> = try {
+        when {
+            mime.startsWith("image/") -> DirectFilePackager.pictureSize(file.path)
+            mime.startsWith("video/") -> DirectFilePackager.videoSize(file.path)
+            else -> null
+        } ?: (0 to 0)
+    } catch (e: RuntimeException) {
+        0 to 0
+    }
+
+    private fun existing(path: String): File? = if (path.isEmpty()) null else File(path).takeIf { it.isFile }
 
     /**
      * Whether [row] is one of the user's iMessages the library can unsend now: [unsendable], within
@@ -719,13 +993,24 @@ class DirectLink private constructor(
 
         /**
          * A message Apple sent again, over the stored copy: what happened to it since (reactions,
-         * edits, parts unsent, later receipts) is kept.
+         * edits, parts unsent, later receipts, what a download learned of its files) is kept.
          */
         internal fun merged(fresh: MessageDto, stored: MessageRow): MessageDto {
             val further = DirectArchive.statusRank(stored.status) > DirectArchive.statusRank(fresh.status)
             val unsent = IMessageExtra.parse(stored.extra).unsent
             val changed = stored.editedAtMs > 0 || unsent.isNotEmpty()
             val gone = unsent.map(DirectArchive::partId).toSet()
+            // A downloaded file's real type (a voice message made playable), size and dimensions.
+            val known = stored.media.associateBy { it.partId }
+            val parts = fresh.parts.map { p ->
+                val m = known[p.partId]?.takeIf { p.isMedia && it.mediaId == p.mediaId } ?: return@map p
+                p.copy(
+                    mime = m.mime.ifEmpty { p.mime },
+                    size = m.size.takeIf { it > 0 } ?: p.size,
+                    width = m.width.takeIf { it > 0 } ?: p.width,
+                    height = m.height.takeIf { it > 0 } ?: p.height,
+                )
+            }
             return fresh.copy(
                 reactions = stored.reactions,
                 status = if (further) stored.status else fresh.status,
@@ -733,9 +1018,9 @@ class DirectLink private constructor(
                 text = if (changed) stored.text else fresh.text,
                 parts = if (changed) {
                     listOfNotNull(stored.text.takeIf { it.isNotEmpty() }?.let { PartDto(partId = "0", kind = "text", text = it) }) +
-                        fresh.parts.filter { it.isMedia && it.partId !in gone }
+                        parts.filter { it.isMedia && it.partId !in gone }
                 } else {
-                    fresh.parts
+                    parts
                 },
                 editedAtMs = if (changed) stored.editedAtMs else fresh.editedAtMs,
                 extra = if (changed) stored.extra else fresh.extra,
@@ -810,6 +1095,22 @@ class DirectLink private constructor(
 
         /** A send waits for Apple's confirmation (up to 45 s) plus the session coming up. */
         private const val SEND_TIMEOUT_MS = 90_000L
+
+        /** A send with a file also waits for the file to go up to Apple (up to 100 MB). */
+        private const val MEDIA_SEND_TIMEOUT_MS = 10 * 60_000L
+
+        /** A download from Apple may take this long. */
+        private const val DOWNLOAD_TIMEOUT_MS = 5 * 60_000L
+
+        /** A voice message larger than this is not made playable here (it is opened in another app). */
+        private const val MAX_REMUX_BYTES = 32L * 1024 * 1024
+
+        /** Added to a voice message's media id for the file it is played from. */
+        private const val PLAYABLE = "#playable"
+
+        /** The name an iPhone gives a voice message's file (before its extension). */
+        private const val VOICE_NAME = "Audio Message"
+
         private const val REACH_TIMEOUT_MS = 25_000L
 
         /** Apple is asked again about a conversation's person ([reachOnce]) after this long: they may have got iMessage since. */

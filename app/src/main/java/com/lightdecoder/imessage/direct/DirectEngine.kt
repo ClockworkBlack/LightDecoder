@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Log
 import androidx.annotation.StringRes
 import com.lightdecoder.R
+import com.lightdecoder.archive.MediaCache
+import com.lightdecoder.chat.ChatService
 import com.lightdecoder.relay.ConversationDto
 import com.lightdecoder.relay.ParticipantDto
 import java.io.File
@@ -26,6 +28,7 @@ import uniffi.rust_bridge.ConversationData
 import uniffi.rust_bridge.EditMessage
 import uniffi.rust_bridge.EventPipeline
 import uniffi.rust_bridge.IndexedMessagePart
+import uniffi.rust_bridge.MessageAttachment
 import uniffi.rust_bridge.MessageInst
 import uniffi.rust_bridge.MessagePart
 import uniffi.rust_bridge.MessageReceiver
@@ -136,13 +139,41 @@ class DirectEngine private constructor(private val app: Context) {
         val me = handles.first { it.isNotEmpty() }.toSet()
         DirectMessages.oneToOneChat(inst, me)?.let { (peer, guid) -> chatGuids.remember(peer, guid) }
         val update = try {
-            DirectArchive.map(inst, me, Handles::display, texts)
+            DirectArchive.map(inst, me, Handles::display, texts, ::describe)
         } catch (e: Exception) {
             Log.w(TAG, "message ${inst.message::class.simpleName} not mapped", e)
             DirectArchive.Update.Ignore
         }
+        if (update is DirectArchive.Update.Upsert) keepInlineFiles(inst)
         if (update != DirectArchive.Update.Ignore) store(update)
         sendDeliveryAck(inst, me)
+    }
+
+    /** The library's description of an attachment, from which it is downloaded later; empty if it has none. */
+    private fun describe(attachment: MessageAttachment): String = try {
+        uniffi.rust_bridge.saveAttachment(attachment)
+    } catch (e: RustBridgeException) {
+        Log.w(TAG, "attachment not described", e)
+        ""
+    }
+
+    /**
+     * Small attachments come inside the message: they are written straight to the files the main
+     * process looks for them in ([DirectMedia.extensionFor]), so no media bytes cross between the
+     * processes.
+     */
+    private fun keepInlineFiles(inst: MessageInst) {
+        val n = (inst.message as? PushChatMessage.Message)?.v1 ?: return
+        for (a in DirectArchive.attachments(n.parts)) {
+            val bytes = a.inlineBytes?.takeIf { it.isNotEmpty() } ?: continue
+            val file = MediaCache.fileFor(app, DirectArchive.mediaId(inst.id, a.idx), DirectMedia.extensionFor(a.mime, a.name), ChatService.IMESSAGE)
+            if (file.length() == bytes.size.toLong()) continue
+            try {
+                MediaCache.writeAtomically(file, bytes)
+            } catch (e: java.io.IOException) {
+                Log.w(TAG, "attachment not written", e)
+            }
+        }
     }
 
     /** Hands [update] to the main process until it is stored. */
@@ -380,8 +411,9 @@ class DirectEngine private constructor(private val app: Context) {
 
     /**
      * Sends a message and returns its GUID, timestamp and attachment parts once Apple confirmed
-     * it: [text], an inline reply to [replyGuid] (part [replyPart]), sent with [effect] (Apple's
-     * effect id), [voice] when it is a recorded audio message.
+     * it: [text], then [attachments] (each uploaded first), an inline reply to [replyGuid] (part
+     * [replyPart]), sent with [effect] (Apple's effect id), [voice] when it is a recorded audio
+     * message.
      */
     suspend fun send(
         target: DirectWire.Target,
@@ -392,17 +424,31 @@ class DirectEngine private constructor(private val app: Context) {
         attachments: List<DirectWire.Attachment>,
         voice: Boolean,
     ): DirectWire.SendReply {
-        if (attachments.isNotEmpty()) throw ImessageError(app.getString(R.string.imessage_direct_no_attachments_yet))
         val s = requireSession()
         val (conversation, from) = conversationOf(target)
+        val outgoing = DirectMessages.outgoing(text, attachments.map { upload(s, it) })
         val message = NormalMessage(
-            listOf(textPart(text)),
+            outgoing.parts,
             effect, replyGuid, replyGuid?.let { replyPart ?: "0:0:0" }, MessageType.IMessage,
             null, null, null, voice, null, null,
         )
         val inst = uniffi.rust_bridge.newMsg(conversation, from, PushChatMessage.Message(message))
         sendAndConfirm(s, inst, Sent.MESSAGE)
-        return DirectWire.SendReply(inst.id, inst.sentTimestamp.toLong().takeIf { it > 0 } ?: System.currentTimeMillis(), emptyList())
+        return DirectWire.SendReply(inst.id, inst.sentTimestamp.toLong().takeIf { it > 0 } ?: System.currentTimeMillis(), outgoing.attachments)
+    }
+
+    /** Puts the file to send on Apple's servers ([DirectMedia.MAX_SEND_BYTES] at most): the attachment the message carries. */
+    private suspend fun upload(s: SharedPushStateHandle, a: DirectWire.Attachment): MessageAttachment {
+        val file = File(a.path)
+        if (!file.isFile || file.length() == 0L) throw ImessageError(app.getString(R.string.imessage_direct_attachment_unreadable))
+        if (file.length() > DirectMedia.MAX_SEND_BYTES) {
+            throw ImessageError(app.getString(R.string.imessage_direct_attachment_too_big, (DirectMedia.MAX_SEND_BYTES shr 20).toInt()))
+        }
+        val mime = a.mime.ifBlank { DirectMedia.mimeOfName(a.name) ?: DirectMedia.OCTET_STREAM }
+        val name = a.name.ifBlank { DirectMedia.nameFor(mime) }
+        val uploaded = call { uniffi.rust_bridge.uploadMmcsAttachment(s, file.path, mime, DirectMedia.utiFor(mime), name, null) }
+        // With the type and name the main process stored it under.
+        return uploaded.copy(mime = mime, name = name)
     }
 
     /** Retracts [guid]; the main process has checked the 2-minute window. */
@@ -458,20 +504,24 @@ class DirectEngine private constructor(private val app: Context) {
 
     /**
      * Fetches the attachment [descriptor] (as the library saved it, `saveAttachment`) into the
-     * file [path], through `<path>.partial` so a half-written file is never taken for the whole.
-     * Returns its size.
+     * file [path], through a partial file of its own so a half-written file is never taken for
+     * the whole. Two downloads of the same file (one asked again after the first took too long
+     * to answer) each write their own and rename it into place whole. Returns its size.
      */
     suspend fun download(descriptor: String, path: String): Long {
         val attachment = call { uniffi.rust_bridge.restoreAttachment(descriptor) }
         val file = File(path)
-        val partial = File("$path.partial")
         file.parentFile?.mkdirs()
+        // Named as the media cache names its partial files, so one left by a crash is cleaned up.
+        val partial = File.createTempFile(file.name + ".", MediaCache.PART_SUFFIX, file.parentFile)
         try {
             when (val type = attachment.aType) {
                 is AttachmentType.Inline -> partial.writeBytes(type.v1)
                 is AttachmentType.Mmcs -> {
                     val s = requireSession()
                     val largest = type.v1.maxByOrNull { it.size } ?: throw ImessageError(app.getString(R.string.imessage_direct_attachment_no_file))
+                    // The library makes the file itself, as it does for OpenBubbles: only its name is taken here.
+                    partial.delete()
                     call { uniffi.rust_bridge.downloadMmcsFile(s, largest, partial.path, null) }
                 }
             }

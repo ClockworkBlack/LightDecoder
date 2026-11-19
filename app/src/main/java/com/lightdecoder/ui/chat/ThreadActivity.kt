@@ -153,6 +153,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private fun backendFor(row: MessageRow): ChatBackend =
         if (manager.service == ChatService.MESSAGES && row.conversationId in iMessageChats) iMessageLink else manager
 
+    /** [backendFor] by a shown message's id (the pictures' loader knows only that). */
+    private fun backendForMessage(messageId: String): ChatBackend =
+        if (manager.service == ChatService.MESSAGES && messageId in iMessageIds) iMessageLink else manager
+
     /** Whether [row] is one of the user's iMessages whose receipts come from Apple (sent through the iMessage library). */
     private fun appleReceipts(row: MessageRow, service: ChatService, iMessageRows: Set<String>): Boolean =
         com.lightdecoder.imessage.direct.DirectArchive.isImessage(row.id) && (service == ChatService.IMESSAGE || row.id in iMessageRows)
@@ -285,7 +289,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         manager = ScreenBackends.get(this, RelayIntents.serviceOf(intent))
         repo = manager.repo
         banner = ConnectionBanner(this, binding.banner, manager, notifications)
-        media = MediaLoader(manager, lifecycleScope)
+        media = MediaLoader(manager, lifecycleScope, ::backendForMessage)
 
         conversationId = intent.getStringExtra(RelayIntents.EXTRA_CONVERSATION_ID).orEmpty()
         if (conversationId.isEmpty()) {
@@ -350,7 +354,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         if (started) ChatVisibility.enter(manager)
         banner.bind(manager)
         // Pictures are fetched through the link, and the list draws them through the loader.
-        media = MediaLoader(manager, lifecycleScope)
+        media = MediaLoader(manager, lifecycleScope, ::backendForMessage)
         adapter = MessagesAdapter(media, this).also {
             it.blueOutgoing = service == ChatService.IMESSAGE
             it.blueFor = { row -> row.id in iMessageIds }
@@ -721,7 +725,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 conversation = conversation,
                 participants = people,
                 rows = rows,
-                quotes = quotesFor(repo, rows),
+                // Replies among the person's iMessages shown here quote from the iMessage archive.
+                quotes = quotesFor(listOfNotNull(repo, imRepo), shown),
                 historyComplete = repo.syncState(id)?.historyComplete == true,
                 companion = companion,
                 companionRows = companionRows,
@@ -830,13 +835,13 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
     }
 
-    /** Quoted messages: from the window, else from the archive. Runs on IO. */
-    private fun quotesFor(repo: ArchiveRepository, rows: List<MessageRow>): Map<String, Quote> {
+    /** Quoted messages: from the window, else from the archives its messages come from ([repos]). Runs on IO. */
+    private fun quotesFor(repos: List<ArchiveRepository>, rows: List<MessageRow>): Map<String, Quote> {
         val byId = rows.associateBy { it.id }
         val mediaLabel = getString(R.string.chat_media_picture)
         val quotes = HashMap<String, Quote>()
         for (replyId in rows.mapNotNull { it.replyToId.takeIf(String::isNotEmpty) }.distinct().take(MAX_QUOTE_LOOKUPS)) {
-            val quoted = byId[replyId] ?: repo.message(replyId) ?: continue
+            val quoted = byId[replyId] ?: repos.firstNotNullOfOrNull { runCatching { it.message(replyId) }.getOrNull() } ?: continue
             val sender = if (quoted.isOutgoing) getString(R.string.chat_you)
             else quoted.senderName.ifBlank { getString(R.string.chat_unknown_sender) }
             quotes[replyId] = Quote(replyId, sender, ThreadItems.preview(quoted, mediaLabel))
@@ -1221,9 +1226,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     // --- voice messages -------------------------------------------------------
 
-    /** Voice messages: in Google Messages conversations (and so to iMessage chats shown in them), on a phone with a mic. */
+    /**
+     * Voice messages: in Google Messages conversations (and so to iMessage chats shown in them) and,
+     * through the iMessage library, in iMessage chats; on a phone with a mic.
+     */
     private fun updateVoiceMessageButton() {
-        val can = manager.service == ChatService.MESSAGES &&
+        val can = (manager.service == ChatService.MESSAGES || (manager.service == ChatService.IMESSAGE && directMode())) &&
             packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_MICROPHONE)
         binding.voiceMessage.visibility = if (can) View.VISIBLE else View.GONE
     }
@@ -1245,8 +1253,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         voiceDir().listFiles()?.forEach { if (now - it.lastModified() > HAND_OFF_KEEP_MS) it.delete() }
         val file = File(voiceDir(), "voice-${java.util.UUID.randomUUID()}.${VoiceRecorder.EXTENSION}")
         val r = VoiceRecorder.factory(this)
-        // An MMS is small; an RCS chat takes much longer messages.
-        val maxMs = if (conversation?.isRcs == true) MAX_VOICE_RCS_MS else MAX_VOICE_MMS_MS
+        // An MMS is small; an RCS chat, and an iMessage through the iMessage library, take much longer
+        // messages (without the library it is OpenBubbles' to send, as it always was).
+        val asIMessage = directMode() && (manager.service == ChatService.IMESSAGE || companionId != null)
+        val maxMs = if (conversation?.isRcs == true || asIMessage) MAX_VOICE_RCS_MS else MAX_VOICE_MMS_MS
         r.onMaxDuration = {
             runOnUiThread {
                 if (recorder === r) {
@@ -1310,20 +1320,34 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     /**
-     * Sends a finished recording as a voice message: through OpenBubbles to an iMessage chat, else
-     * through Google Messages. Through the iMessage library it cannot go yet, and never as a text:
-     * the recording is kept.
+     * Sends a finished recording as a voice message: to someone with an iMessage chat as an
+     * iPhone's voice message, through the iMessage library (or, without it, through OpenBubbles),
+     * else through Google Messages. Never as a text: a chat the library cannot reach says why.
      */
     private fun sendVoice(file: File) {
         val id = conversationId
         val uri = Uri.fromFile(file)
         val companion = companionId
-        if (manager.service == ChatService.MESSAGES && companion != null) {
-            if (directMode()) {
-                toast(getString(R.string.imessage_no_attachments))
+        val toIMessage = manager is com.lightdecoder.imessage.IMessageManager || (manager.service == ChatService.MESSAGES && companion != null)
+        val chat = if (manager.service == ChatService.MESSAGES && companion != null) companion else id
+        if (toIMessage && directMode()) {
+            val im = iMessageLink
+            if (chat !in directReachable) {
+                toast(errorText(im, com.lightdecoder.imessage.IMessageErrors.NO_REPLY_BUTTON))
                 return
             }
-            handOffToOpenBubbles(iMessageLink, companion, "", listOf(uri), clearComposer = false)
+            if (chat != id) logRoute(chat, "voice message, through the iMessage library")
+            val replyTo = replyTarget?.takeIf { it.conversationId == chat }?.id
+            clearReply()
+            scrollToBottomNext = true
+            lifecycleScope.launch {
+                withContext(Dispatchers.IO) { relayAttempt { im.sendVoice(chat, uri, replyTo) } }
+                    .onFailure { toast(errorText(im, it)) }
+            }
+            return
+        }
+        if (toIMessage) {
+            handOffToOpenBubbles(iMessageLink, chat, "", listOf(uri), clearComposer = false)
             return
         }
         val replyTo = replyTarget?.takeIf { it.conversationId == id }?.id
@@ -1336,9 +1360,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
     }
 
-    /** A voice message's file: the one already here, or downloaded now. Null (with a notice) if there is none. */
+    /** A voice message's file: the one already here, or downloaded now (through its own link). Null (with a notice) if there is none. */
     private suspend fun audioFileFor(row: MessageRow, part: MediaRow): File? {
-        val link = manager
+        val link = backendFor(row)
         listOf(part.localPath).firstOrNull { it.isNotEmpty() && File(it).isFile }?.let { return File(it) }
         toast(getString(R.string.chat_media_downloading))
         return relayAttempt { link.mediaFile(row.id, part.partId, thumbnail = false) }
@@ -1346,7 +1370,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 val code = ChatErrors.codeOf(it)
                 toast(
                     if (code == RelayException.NOT_CONNECTED) getString(ServiceUi.mediaNeedsConnection(link.service, ServiceUi.direct(this@ThreadActivity, link.service)))
-                    else errorText(link, code)
+                    else errorText(link, it)
                 )
                 return null
             } ?: run {
@@ -1366,7 +1390,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         lifecycleScope.launch {
             val file = audioFileFor(row, part) ?: return@launch
             if (conversationId != forConversation) return@launch
-            if (!voicePlayer.toggle(key, file)) toast(getString(R.string.chat_voice_cannot_play))
+            if (voicePlayer.toggle(key, file)) return@launch
+            // An iPhone's voice message in a codec this phone cannot play: another app may.
+            if (file.extension.equals("caf", ignoreCase = true)) openWithOtherApp(file, com.lightdecoder.media.CafAudio.MIME)
+            else toast(getString(R.string.chat_voice_cannot_play))
         }
     }
 
@@ -1501,45 +1528,53 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val id = conversationId
         val direct = directMode()
         // Blue Bubbles: to someone with an iMessage chat, everything goes as an iMessage (blue on their
-        // iPhone), never as a green text. Through the iMessage library it goes straight to Apple, and
-        // what cannot go that way (pictures and files, for now) stays in the composer. Without the
+        // iPhone), never as a green text. Through the iMessage library it goes straight to Apple,
+        // pictures and files too; a chat it cannot reach keeps it in the composer. Without the
         // library: silently through OpenBubbles' Reply button when it has one, else OpenBubbles opens
         // with the message filled in, for one tap on send.
         val companion = companionId
         if (manager.service == ChatService.MESSAGES && companion != null) {
-            val reachable = sendsAsIMessage(text)
-            if (direct && (files.isNotEmpty() || !reachable)) {
-                logRoute(companion, if (files.isNotEmpty()) "${files.size} file(s): NOT sent (no attachments through the iMessage library yet)" else "NOT sent: the iMessage library cannot reach this chat")
-                toast(if (files.isNotEmpty()) getString(R.string.imessage_no_attachments) else errorText(iMessageLink, com.lightdecoder.imessage.IMessageErrors.NO_REPLY_BUTTON))
+            // Files go only through the library itself (OpenBubbles' Reply button takes text alone).
+            val reachable = if (direct && files.isNotEmpty()) companion in directReachable else sendsAsIMessage(text)
+            if (direct && !reachable) {
+                logRoute(companion, "NOT sent: the iMessage library cannot reach this chat")
+                toast(errorText(iMessageLink, com.lightdecoder.imessage.IMessageErrors.NO_REPLY_BUTTON))
                 return
             }
-            if (files.isNotEmpty() || !reachable) {
+            if (!direct && (files.isNotEmpty() || !reachable)) {
                 logRoute(companion, if (files.isNotEmpty()) "${files.size} file(s): through OpenBubbles' screen" else "no usable Reply button: through OpenBubbles' screen")
                 handOffToOpenBubbles(iMessageLink, companion, text, files, clearComposer = true)
                 return
             }
-            logRoute(companion, if (direct) "through the iMessage library" else "silently through OpenBubbles' Reply button")
+            logRoute(
+                companion,
+                (if (files.isNotEmpty()) "${files.size} file(s), " else "") + if (direct) "through the iMessage library" else "silently through OpenBubbles' Reply button",
+            )
             val im = iMessageLink
             // An inline reply to one of the iMessages shown here (threads under it through the iMessage library).
             val replyTo = replyTarget?.takeIf { it.conversationId == companion }?.id
             scrollToBottomNext = true
             clearComposerForSend()
             clearReply()
+            clearAttachment()
             lifecycleScope.launch {
-                withContext(Dispatchers.IO) { relayAttempt { im.sendText(companion, text, replyTo) } }
-                    .onFailure { toast(errorText(im, it)) }
+                withContext(Dispatchers.IO) {
+                    relayAttempt { if (files.isEmpty()) im.sendText(companion, text, replyTo) else sendFiles(im, companion, files, text, replyTo) }
+                }.onFailure { toast(errorText(im, it)) }
             }
             return
         }
         val iMessage = manager as? com.lightdecoder.imessage.IMessageManager
-        // An iMessage with a picture, or to a chat with no Reply button to send through: OpenBubbles sends it.
-        // Through the iMessage library nothing is handed over: it says why, and the composer keeps it.
-        if (iMessage != null && (files.isNotEmpty() || !iMessage.canReply(id, text))) {
-            if (direct) {
-                toast(if (files.isNotEmpty()) getString(R.string.imessage_no_attachments) else errorText(iMessage, com.lightdecoder.imessage.IMessageErrors.NO_REPLY_BUTTON))
-            } else {
-                handOffToOpenBubbles(iMessage, id, text, files, clearComposer = true)
-            }
+        // An iMessage to a chat with no Reply button to send through, or (without the iMessage
+        // library) with a picture: OpenBubbles sends it. Through the library nothing is handed over:
+        // a chat it cannot reach (files: the library itself, not a Reply button) says why, and the
+        // composer keeps it.
+        if (iMessage != null && direct && (if (files.isNotEmpty()) id !in directReachable else !iMessage.canReply(id, text))) {
+            toast(errorText(iMessage, com.lightdecoder.imessage.IMessageErrors.NO_REPLY_BUTTON))
+            return
+        }
+        if (iMessage != null && !direct && (files.isNotEmpty() || !iMessage.canReply(id, text))) {
+            handOffToOpenBubbles(iMessage, id, text, files, clearComposer = true)
             return
         }
         if (manager.service == ChatService.MESSAGES && com.lightdecoder.imessage.IMessagePrefs.enabled(this) && conversation?.isGroup == false) {
@@ -1561,18 +1596,20 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             // The outbox writes to the archive (and copies an attachment), so not on the main thread.
             val result = withContext(Dispatchers.IO) {
                 relayAttempt {
-                    if (files.isEmpty()) {
-                        link.sendText(id, text, replyTo)
-                    } else {
-                        // Each picture as a message of its own, in the order picked (queued in turn, they go
-                        // out in it): the phone keeps only one part of a message with several. The text goes
-                        // with the last, the reply with the first.
-                        files.forEachIndexed { i, file ->
-                            link.sendMedia(
-                                id, file,
-                                text.ifEmpty { null }.takeIf { i == files.lastIndex },
-                                replyTo.takeIf { i == 0 },
-                            )
+                    when {
+                        files.isEmpty() -> link.sendText(id, text, replyTo)
+                        link is com.lightdecoder.imessage.IMessageManager -> sendFiles(link, id, files, text, replyTo)
+                        else -> {
+                            // Each picture as a message of its own, in the order picked (queued in turn, they go
+                            // out in it): the phone keeps only one part of a message with several. The text goes
+                            // with the last, the reply with the first.
+                            files.forEachIndexed { i, file ->
+                                link.sendMedia(
+                                    id, file,
+                                    text.ifEmpty { null }.takeIf { i == files.lastIndex },
+                                    replyTo.takeIf { i == 0 },
+                                )
+                            }
                         }
                     }
                 }
@@ -1585,6 +1622,17 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             if (row != null && title != getString(R.string.chat_untitled)) withContext(Dispatchers.IO) {
                 com.lightdecoder.chat.ShareShortcuts.push(applicationContext, link.service, id, title, row.avatarColor)
             }
+        }
+    }
+
+    /**
+     * Pictures and files to an iMessage chat through the iMessage library: each an iMessage of its
+     * own, in the order picked, the text with the first (above it, as Apple numbers the parts) and
+     * the reply too. Runs on IO; stops at the first that cannot go.
+     */
+    private fun sendFiles(im: com.lightdecoder.imessage.IMessageManager, chat: String, files: List<Uri>, text: String, replyTo: String?) {
+        files.forEachIndexed { i, file ->
+            im.sendMedia(chat, file, text.ifEmpty { null }.takeIf { i == 0 }, replyTo.takeIf { i == 0 })
         }
     }
 
@@ -1656,15 +1704,42 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     /**
-     * A copy of [source] in [handOffDir], as a uri of this app's own provider
-     * (another app may read it while it is granted), with its type. Null if
-     * it cannot be read. Not on the main thread.
+     * A failed iMessage with a file, sent through the iMessage library before it was turned off:
+     * OpenBubbles opens with it (its copy kept here, and the caption) for the user to tap send, and
+     * the failed one goes. Never the caption alone, as if the file had gone too.
      */
-    private fun shareableCopy(source: Uri): Pair<Uri, String>? {
+    private fun handOffFailedFile(link: com.lightdecoder.imessage.IMessageManager, row: MessageRow, part: MediaRow) {
+        val tmpId = row.tmpId
+        lifecycleScope.launch {
+            val copy = withContext(Dispatchers.IO) {
+                purgeHandOffCopies()
+                File(part.localPath).takeIf { part.localPath.isNotEmpty() && it.isFile }?.let { shareableCopy(Uri.fromFile(it), part.mime) }
+            }
+            if (copy == null) {
+                toast(getString(R.string.chat_media_unavailable))
+                return@launch
+            }
+            if (!link.handOff(this@ThreadActivity, row.conversationId, row.text, listOf(copy))) {
+                runInBackground { handOffFileOf(copy.first)?.delete() }
+                toast(errorText(link, com.lightdecoder.imessage.IMessageErrors.NOT_INSTALLED))
+                return@launch
+            }
+            runInBackground { link.discardFailed(tmpId) }
+            toast(getString(R.string.imessage_finish_in_openbubbles))
+        }
+    }
+
+    /**
+     * A copy of [source] in [handOffDir], as a uri of this app's own provider
+     * (another app may read it while it is granted), with its type ([type]
+     * when it is known). Null if it cannot be read. Not on the main thread.
+     */
+    private fun shareableCopy(source: Uri, type: String? = null): Pair<Uri, String>? {
         val dir = handOffDir().apply { mkdirs() }
         var target: File? = null
         return try {
-            val mime = contentResolver.getType(source)
+            val mime = type?.takeIf { it.isNotBlank() }
+                ?: contentResolver.getType(source)
                 ?: android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(source.lastPathSegment.orEmpty().substringAfterLast('.', "").lowercase())
                 ?: "application/octet-stream"
             val extension = android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)?.let { ".$it" }.orEmpty()
@@ -1818,9 +1893,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         refresh()
     }
 
-    /** Downloads the picture if need be and adds it to the user's stickers. */
+    /** Downloads the picture if need be (through its own link) and adds it to the user's stickers. */
     private fun addToStickers(row: MessageRow, part: MediaRow) {
-        val link = manager
+        val link = backendFor(row)
         lifecycleScope.launch {
             val local = listOf(part.localPath, if (part.needsFullSize) part.thumbPath else "")
                 .firstOrNull { it.isNotEmpty() && File(it).isFile }?.let(::File)
@@ -1861,27 +1936,28 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     private fun sendSticker(file: File) = sendStickers(listOf(file))
 
-    /** Sends [files] to this conversation one after the other, in order; stops at the first that fails. */
+    /**
+     * Sends [files] to this conversation one after the other, in order; stops at the first that
+     * fails. To someone with an iMessage chat they go as iMessages (pictures), never as texts.
+     */
     @androidx.annotation.VisibleForTesting
     internal fun sendStickers(files: List<File>) {
         if (files.isEmpty()) return
-        val id = conversationId
-        val link = manager
         val companion = companionId
-        // To an iMessage chat through the iMessage library: not yet (pictures cannot go that way), and never as a text.
-        if (directMode() && (link is com.lightdecoder.imessage.IMessageManager || (link.service == ChatService.MESSAGES && companion != null))) {
-            toast(getString(R.string.imessage_no_attachments))
-            return
-        }
-        // OpenBubbles sends them, from its own screen.
-        if (link is com.lightdecoder.imessage.IMessageManager) {
-            handOffToOpenBubbles(link, id, "", files.map { Uri.fromFile(it) }, clearComposer = false)
-            return
-        }
-        // Someone with an iMessage chat: as iMessage too, never as a green text.
-        if (link.service == ChatService.MESSAGES && companion != null) {
-            com.lightdecoder.imessage.IMessageLog.add(this, "Messages conversation with ${com.lightdecoder.imessage.IMessageLog.chatRef(companion)}: sticker sent as iMessage, through OpenBubbles' screen")
-            handOffToOpenBubbles(iMessageLink, companion, "", files.map { Uri.fromFile(it) }, clearComposer = false)
+        val toIMessage = manager is com.lightdecoder.imessage.IMessageManager || (manager.service == ChatService.MESSAGES && companion != null)
+        val link = if (toIMessage) iMessageLink else manager
+        val id = if (manager.service == ChatService.MESSAGES && companion != null) companion else conversationId
+        if (toIMessage && directMode()) {
+            // Straight to Apple; a chat the iMessage library cannot reach says why.
+            if (id !in directReachable) {
+                toast(errorText(link, com.lightdecoder.imessage.IMessageErrors.NO_REPLY_BUTTON))
+                return
+            }
+            if (id != conversationId) com.lightdecoder.imessage.IMessageLog.add(this, "Messages conversation with ${com.lightdecoder.imessage.IMessageLog.chatRef(id)}: sticker sent as iMessage, through the iMessage library")
+        } else if (toIMessage) {
+            // OpenBubbles sends them, from its own screen.
+            if (id != conversationId) com.lightdecoder.imessage.IMessageLog.add(this, "Messages conversation with ${com.lightdecoder.imessage.IMessageLog.chatRef(id)}: sticker sent as iMessage, through OpenBubbles' screen")
+            handOffToOpenBubbles(iMessageLink, id, "", files.map { Uri.fromFile(it) }, clearComposer = false)
             return
         }
         scrollToBottomNext = true
@@ -2218,6 +2294,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 else toast(errorText(link, com.lightdecoder.imessage.IMessageErrors.NO_REPLY_BUTTON))
                 return
             }
+            // A file (from while the library was on) goes through OpenBubbles' screen, never as its caption alone.
+            row.media.firstOrNull()?.let { part ->
+                handOffFailedFile(link, row, part)
+                return
+            }
             if (link.canReply(row.conversationId, row.text)) {
                 retry(row)
             } else if (link.handOff(this, row.conversationId, row.text)) {
@@ -2275,8 +2356,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      * arrives as an update of the message, which then shows it full size.
      */
     override fun onLoadFullSize(row: MessageRow, part: MediaRow) {
-        // Only a service whose phone keeps originals back can be asked for them.
-        if (Capability.FULL_SIZE_REQUEST !in manager.capabilities) return
+        // Only a service whose phone keeps originals back can be asked for them (never iMessage's rows shown here).
+        if (backendFor(row) !== manager || Capability.FULL_SIZE_REQUEST !in manager.capabilities) return
         val key = row.id + "|" + part.partId
         if (key in fullSizeAsked) return
         if (!online) {
@@ -2360,10 +2441,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             explainIMessagePictures(row)
             return
         }
-        val link = manager
+        // An iMessage shown in this Messages conversation comes through iMessage, from its own chat.
+        val link = backendFor(row)
         if (PictureGalleryActivity.isPicture(part)) {
             // Pictures open full screen, zoomable, with the conversation's other pictures a swipe away.
-            startActivity(PictureGalleryActivity.intent(this, link.service, conversationId, row.id, part.partId, title))
+            val chat = if (link === manager) conversationId else row.conversationId
+            startActivity(PictureGalleryActivity.intent(this, link.service, chat, row.id, part.partId, title))
             return
         }
         lifecycleScope.launch {
@@ -2377,7 +2460,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                         val code = ChatErrors.codeOf(it)
                         toast(
                             if (code == RelayException.NOT_CONNECTED) getString(ServiceUi.mediaNeedsConnection(link.service, ServiceUi.direct(this@ThreadActivity, link.service)))
-                            else errorText(link, code)
+                            else errorText(link, it)
                         )
                         return@launch
                     }

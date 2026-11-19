@@ -34,8 +34,9 @@ import java.util.WeakHashMap
 
 /**
  * The pictures in a conversation of one service (its [ChatBackend] does the
- * downloading), shown the way messaging apps show them: the picture itself,
- * at full size, without being asked.
+ * downloading; an iMessage shown in a Messages conversation downloads through
+ * iMessage), shown the way messaging apps show them: the picture itself, at
+ * full size, without being asked.
  *
  * - **The picture itself** comes from its downloaded file, a download through
  *   the link (up to [AUTO_DOWNLOAD_MAX]), or inline bytes when those are the
@@ -66,6 +67,11 @@ import java.util.WeakHashMap
 class MediaLoader(
     private val manager: ChatBackend,
     private val scope: CoroutineScope,
+    /**
+     * The link a message's pictures come through, by message id: [manager]'s, except for the
+     * iMessages shown in a Messages conversation, which come through iMessage.
+     */
+    private val backendFor: (String) -> ChatBackend = { manager },
 ) {
     /** What was shown: the picture under [keyFor], a stand-in under [standInKey]. */
     private val cache = object : LruCache<String, Bitmap>(cacheKb()) {
@@ -120,7 +126,7 @@ class MediaLoader(
             settle(view)
             return
         }
-        if (key in needsConnection && !manager.state.value.isOnline) {
+        if (key in needsConnection && !backendFor(messageId).state.value.isOnline) {
             // Still offline: say so again without another try that cannot work.
             hadFailures = true
             settle(view)
@@ -349,7 +355,7 @@ class MediaLoader(
             val picture = part.mime.isEmpty() || part.mime.startsWith("image/")
             if (part.mediaId.isEmpty() || !picture || part.size > AUTO_DOWNLOAD_MAX) return Fetched.None
         }
-        return relayAttempt { manager.mediaFile(messageId, part.partId, thumbnail) }.fold(
+        return relayAttempt { backendFor(messageId).mediaFile(messageId, part.partId, thumbnail) }.fold(
             onSuccess = { file -> if (file != null) Fetched.Got(file) else Fetched.None },
             onFailure = { e ->
                 if (RelayErrors.codeOf(e) == RelayException.NOT_CONNECTED) Fetched.NeedsConnection else Fetched.None
