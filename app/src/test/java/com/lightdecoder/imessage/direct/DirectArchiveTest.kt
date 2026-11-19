@@ -390,6 +390,15 @@ class DirectArchiveTest {
         val bare = textOf(game(caption = "", ldText = null, name = IMessageExtra.UNNAMED_APP))
         assertEquals("", bare.text)
         assertEquals(listOf("p1"), bare.parts.map { it.partId })
+        // Then its own words, if it came with any.
+        val worded = (map(
+            MessageInst(
+                "A2", bob, ConversationData(listOf(me, bob), null, null, null),
+                PushChatMessage.Message(normal(listOf(text("look", 0), attachment("card.jpeg", 1)), app = game(caption = "", ldText = null, name = IMessageExtra.UNNAMED_APP))),
+                1UL, null, false, false, null,
+            ),
+        ) as DirectArchive.Update.Upsert).message
+        assertEquals("look", worded.text)
     }
 
     @Test

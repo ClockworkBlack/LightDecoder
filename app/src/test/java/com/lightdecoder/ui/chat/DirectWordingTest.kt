@@ -53,7 +53,7 @@ class DirectWordingTest {
             R.string.imessage_event_app_updated, R.string.imessage_event_app_updated_unnamed, R.string.imessage_sent_with,
             R.string.imessage_effect_pick_title, R.string.imessage_invisible_ink_hidden, R.string.imessage_app_only_on_apple,
             R.string.imessage_app_unnamed, R.string.imessage_link_preview, R.string.imessage_new_group, R.string.imessage_to_hint,
-            R.string.imessage_group_body, R.string.imessage_not_on_imessage,
+            R.string.imessage_group_body, R.string.imessage_group_nobody, R.string.imessage_not_on_imessage,
         )
         for (res in direct) {
             val text = context.getString(res)

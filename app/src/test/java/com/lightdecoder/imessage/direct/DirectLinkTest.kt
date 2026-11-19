@@ -1242,7 +1242,7 @@ class DirectLinkTest {
         link.apply(
             event(
                 "GN3", carol, PushChatMessage.ChangeParticipants(uniffi.rust_bridge.ChangeParticipantMessage(listOf(me, bob, alice), 2UL)), members, "G-N",
-                ts = 1_700_000_011_000L, groupName = "Ski trip",
+                ts = 1_700_000_011_000L,
             ),
         )
         assertEquals(setOf("me", "+15559876543", "+15551234567"), repo.participants(id).map { it.id }.toSet())
@@ -1251,13 +1251,97 @@ class DirectLinkTest {
         link.apply(
             event(
                 "GN4", bob, PushChatMessage.ChangeParticipants(uniffi.rust_bridge.ChangeParticipantMessage(listOf(bob, alice), 3UL)), listOf(me, bob, alice), "G-N",
-                ts = 1_700_000_012_000L, groupName = "Ski trip",
+                ts = 1_700_000_012_000L,
             ),
         )
         assertEquals("me", repo.participants(id).single { it.isMe }.id)
         assertEquals(setOf("me", "+15559876543", "+15551234567"), repo.participants(id).map { it.id }.toSet())
         assertEquals("+15559876543 removed you.", repo.message("imsg:GN4")!!.text)
         assertEquals(id, repo.message("imsg:GN4")!!.conversationId)
+        // Events without a name (members changed) leave it as it was.
+        assertEquals("Ski trip", repo.conversation(id)!!.name)
+        assertEquals("Ski trip", link.targetOf(id)!!.groupName)
+    }
+
+    private fun says(text: String) = PushChatMessage.Message(
+        NormalMessage(
+            listOf(IndexedMessagePart(MessagePart.Text(text, TextFormat.Flags(TextFlags(false, false, false, false))), null, null)),
+            null, null, null, MessageType.IMessage, null, null, null, false, null, null,
+        ),
+    )
+
+    @Test
+    fun aGroupsNameIsTakenOffOnlyByARenameAndNeverPutBackByAnOlderMessage() {
+        val link = DirectLink.get(context)
+        val members = listOf(me, bob, alice)
+        val id = "imsg:group:G-K"
+        link.apply(event("GK1", bob, says("hi"), members, "G-K", ts = 1_700_000_001_000L, groupName = "Old"))
+        link.apply(event("GK2", bob, PushChatMessage.RenameMessage(ChatRenameMessage("New")), members, "G-K", ts = 1_700_000_002_000L))
+        // A message with no name says nothing about it.
+        link.apply(event("GK3", alice, says("yo"), members, "G-K", ts = 1_700_000_003_000L))
+        assertEquals("New", repo.conversation(id)!!.name)
+        assertEquals("New", link.targetOf(id)!!.groupName)
+        // One from before the rename, come late: the name stays.
+        link.apply(event("GK0", alice, says("late"), members, "G-K", ts = 1_700_000_000_500L, groupName = "Old"))
+        assertEquals("New", repo.conversation(id)!!.name)
+        assertEquals("New", link.targetOf(id)!!.groupName)
+        assertEquals(id, repo.message("imsg:GK0")!!.conversationId)
+        // A rename to nothing takes it off: shown by its members, sent with none.
+        link.apply(event("GK4", bob, PushChatMessage.RenameMessage(ChatRenameMessage("")), members, "G-K", ts = 1_700_000_004_000L))
+        assertEquals(setOf("+15559876543", "+15551234567"), repo.conversation(id)!!.name.split(", ").toSet())
+        assertNull(link.targetOf(id)!!.groupName)
+        link.apply(event("GK5", bob, says("again"), members, "G-K", ts = 1_700_000_005_000L))
+        assertNull(link.targetOf(id)!!.groupName)
+    }
+
+    @Test
+    fun aGroupStoredBeforeItsOwnNameWasKeptIsNotSentItsMembersNames() {
+        val link = DirectLink.get(context)
+        fun stored(id: String, name: String) = repo.upsertConversation(
+            ConversationDto(
+                id = id, name = name, isGroup = true, type = IMessageManager.TRANSPORT,
+                participants = listOf(
+                    ParticipantDto(id = "me", isMe = true),
+                    ParticipantDto(id = "+15551234567", name = "Alice", number = "+15551234567"),
+                    ParticipantDto(id = "+15559876543", name = "Bob", number = "+15559876543"),
+                ),
+            ),
+        )
+        stored("imsg:group:OLD-1", "Alice, Bob")
+        stored("imsg:group:OLD-2", "Book club")
+        assertNull(link.targetOf("imsg:group:OLD-1")!!.groupName)
+        assertEquals("Book club", link.targetOf("imsg:group:OLD-2")!!.groupName)
+    }
+
+    @Test
+    fun aGroupDownToOneOtherPersonStaysTheGroup() {
+        val link = DirectLink.get(context)
+        val id = "imsg:group:G-S"
+        link.apply(event("GS1", bob, says("hi"), listOf(me, bob, alice), "G-S", groupName = "Pair"))
+        link.apply(
+            event("GS2", alice, PushChatMessage.ChangeParticipants(uniffi.rust_bridge.ChangeParticipantMessage(listOf(me, bob), 2UL)), listOf(me, bob, alice), "G-S"),
+        )
+        assertEquals(setOf("me", "+15559876543"), repo.participants(id).map { it.id }.toSet())
+        // What follows in it is the group's, not a chat with Bob.
+        link.apply(event("GS3", bob, says("just us"), listOf(me, bob), "G-S", ts = 1_700_000_010_000L))
+        assertEquals(id, repo.message("imsg:GS3")!!.conversationId)
+        assertNull(repo.conversation("imsg:$bob"))
+        assertTrue(repo.conversation(id)!!.isGroup)
+        assertEquals("Pair", repo.conversation(id)!!.name)
+        // Someone added back to it: the group's event.
+        link.apply(
+            event("GS4", bob, PushChatMessage.ChangeParticipants(uniffi.rust_bridge.ChangeParticipantMessage(listOf(me, bob, alice), 3UL)), listOf(me, bob), "G-S", ts = 1_700_000_011_000L),
+        )
+        assertEquals(id, repo.message("imsg:GS4")!!.conversationId)
+        assertEquals(setOf("me", "+15559876543", "+15551234567"), repo.participants(id).map { it.id }.toSet())
+        val target = link.targetOf(id)!!
+        assertEquals("G-S", target.groupGuid)
+        assertEquals("Pair", target.groupName)
+        // A chat with one person that has a guid of its own is a chat with them, and their events are nothing.
+        link.apply(event("GS5", alice, says("solo"), listOf(me, alice), "ALICE-CHAT"))
+        assertEquals("imsg:$alice", repo.message("imsg:GS5")!!.conversationId)
+        link.apply(event("GS6", alice, PushChatMessage.RenameMessage(ChatRenameMessage("x")), listOf(me, alice), "ALICE-CHAT"))
+        assertNull(repo.message("imsg:GS6"))
     }
 
     @Test

@@ -940,7 +940,8 @@ class DirectLink private constructor(
      * name says nothing about it: only a rename takes a name off.
      */
     private fun groupNameAfter(id: String, update: DirectArchive.Update.Upsert): String {
-        val name = update.conversation.name
+        // Filed as a chat with one person, the group's name comes apart from it.
+        val name = if (update.groupGuid != null) update.groupName else update.conversation.name
         if ((name.isNotBlank() || update.renamed) && groupNames.note(id, name, update.message.timestampMs)) return name
         return ownName(id)
     }

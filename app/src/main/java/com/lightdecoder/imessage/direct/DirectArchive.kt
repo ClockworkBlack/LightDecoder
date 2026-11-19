@@ -115,6 +115,8 @@ object DirectArchive {
              * when it is stored as one.
              */
             val groupGuid: String? = null,
+            /** Apple's name for the group of [groupGuid] ("" for none): [conversation] is named as a one-to-one chat. */
+            val groupName: String = "",
             /** A group's event filed by [groupGuid] alone: only stored in that group, if there is one. */
             val groupOnly: Boolean = false,
             /** The group was renamed: [conversation]'s name is its new one, even blank (the name taken off). */
@@ -310,7 +312,13 @@ object DirectArchive {
             replyToId = n.replyGuid?.let(::messageId).orEmpty(),
             extra = extra.toJson(),
         )
-        return Update.Upsert(conv, msg, groupGuid = conversation.senderGuid?.takeIf { it.isNotBlank() && !isGroup(id) })
+        return byGuid(Update.Upsert(conv, msg), id, conversation, conversation.cvName)
+    }
+
+    /** [u], with the group's guid and name when it is filed as a one-to-one chat ([Update.Upsert.groupGuid]). */
+    private fun byGuid(u: Update.Upsert, id: String, conversation: ConversationData, groupName: String?): Update.Upsert {
+        val guid = conversation.senderGuid?.takeIf { it.isNotBlank() && !isGroup(id) } ?: return u
+        return u.copy(groupGuid = guid, groupName = groupName.orEmpty())
     }
 
     /**
@@ -513,7 +521,7 @@ object DirectArchive {
             text = text,
             parts = listOf(PartDto(partId = "0", kind = "text", text = text)),
         )
-        return Update.Upsert(conv, msg, groupGuid = conversation.senderGuid?.takeIf { it.isNotBlank() && !isGroup(id) })
+        return byGuid(Update.Upsert(conv, msg), id, conversation, groupName ?: conversation.cvName)
     }
 
     private fun actor(sender: String?, fromMe: Boolean, nameOf: (String) -> String, texts: Texts): String? = when {
