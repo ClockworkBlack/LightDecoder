@@ -23,6 +23,38 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.47-wrapper (versionCode 56) - BRANCH ccr-4fee5e9f-jrrlhu-wrapper: silent wrapper, replies direct, quotes fixed
+- User: a regular reply went through the wrapper (inline, via OpenBubbles' screen). Replies now go straight
+  through OpenBubbles' Reply button again. Inline replies through the wrapper are a separate option, off by
+  default: Messages menu → "Replies as inline replies (wrapper)", shown once the wrapper is on (`Wrapper.inlineReplies`,
+  `repliesInline`). The main switch is now "Unsend, Edit & reactions (wrapper, beta)".
+- Silent:
+  - Before switching apps, the service takes a screenshot (`takeScreenshot`, Android 11+,
+    `canTakeScreenshot` in its config) and shows it full screen as a TYPE_ACCESSIBILITY_OVERLAY that takes
+    touches (so nothing lands in OpenBubbles). Older Android shows a plain cover.
+  - OpenBubbles opens with no animation (`IMessageReplies.open(quiet = true)`, a zero custom animation),
+    and LightDecoder comes back with FLAG_ACTIVITY_NO_ANIMATION.
+  - The still goes 250 ms after the return, once LightDecoder is drawn.
+  - For a gesture fallback, touches go through the still for that moment only.
+- Quotes: a reply to an iMessage showed "Reply to an earlier message". Quotes were looked up only among the
+  conversation's own texts. Now `quotesFor` covers the shown iMessages too, and falls back to the iMessage archive.
+  Tapping a quote of an older iMessage reloads back to its time (the texts' window grows until it reaches it, and
+  that chat's iMessages are read back to it), then highlights it.
+- **What the wrapper does, at the user's request, is only what cannot be done directly:**
+  - Unsend, Edit, reactions;
+  - `Kind.SEND`: everything that used to open OpenBubbles for the user to tap send. That is pictures,
+    several pictures, voice messages, stickers, and texts to a chat with no Reply button yet.
+
+  For SEND, `handOffToOpenBubbles` starts OpenBubbles' composer for the chat with the files (the same
+  share intent as before) behind the still. The wrapper waits for the field and 600 ms for the files to
+  load, then clicks the send button right of the field. The message shows here at once with its pictures
+  (`recordSentElsewhere(files)`, copied into the iMessage media folder). On a failure it is taken back,
+  and OpenBubbles is left open with it ready.
+
+  Plain replies go through the Reply button, and inline replies only with their option on. "Send iMessage"
+  to a new person still opens OpenBubbles (it needs the address typed).
+- The quote fix and the reply routing are only on this branch so far. Merge into main when the wrapper is kept.
+
 ## 0.5.46-wrapper (versionCode 55) - BRANCH ccr-4fee5e9f-jrrlhu-wrapper: Edit and reactions through the wrapper
 - Main's 0.5.46 (every emoji as a reaction) merged in.
 - **Edit:** the new text is asked in LightDecoder (the usual edit dialog). The wrapper then:

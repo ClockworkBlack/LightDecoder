@@ -635,9 +635,17 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             } else {
                 rows = repo.messages(id, limit = wanted + RELOAD_SLACK).filter { it.timestampMs >= oldestShown }
             }
+            // A jump to one of the person's iMessages (a quote tapped): the texts shown reach back to its time.
+            val targetIMessage = if (target != null && link.service == ChatService.MESSAGES && rows.none { it.id == target }) {
+                runCatching { iMessageLink.repo.message(target) }.getOrNull()
+            } else {
+                null
+            }
             if (target != null) {
                 var size = maxOf(wanted, rows.size)
-                while (rows.none { it.id == target } && rows.size >= size && size < MAX_WINDOW) {
+                fun reached() = if (targetIMessage != null) rows.isNotEmpty() && rows.first().timestampMs <= targetIMessage.timestampMs
+                else rows.any { it.id == target }
+                while (!reached() && rows.size >= size && size < MAX_WINDOW) {
                     size *= 2
                     rows = repo.messages(id, limit = size)
                 }
@@ -650,16 +658,26 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             val ownFull = rows.size >= wanted
             // With the person's other iMessage chats (from before OpenBubbles was set up again), so their history stays.
             val chats = if (companion == null) emptyList() else listOf(companion) + BlueBubblesLinks.alsoShown(applicationContext, id)
+            // As many iMessages as texts, and back to the one jumped to.
+            val imLimit = if (targetIMessage != null) maxOf(wanted, rows.size, MAX_WINDOW) else maxOf(wanted, rows.size)
             val companionRows = if (imRepo == null) emptyList() else chats.flatMap { chat ->
-                runCatching { imRepo.messages(chat, limit = wanted) }.getOrDefault(emptyList())
+                runCatching {
+                    if (targetIMessage != null && chat == targetIMessage.conversationId) imRepo.messages(chat, limit = imLimit)
+                        .filter { it.timestampMs >= targetIMessage.timestampMs || rows.isEmpty() || it.timestampMs >= rows.first().timestampMs }
+                    else imRepo.messages(chat, limit = wanted)
+                }.getOrDefault(emptyList())
             }.distinctBy { it.id }
-                .let { im -> if (ownFull && rows.isNotEmpty()) im.filter { it.timestampMs >= rows.first().timestampMs } else im }
+                .let { im ->
+                    val from = if (targetIMessage != null) minOf(targetIMessage.timestampMs, rows.firstOrNull()?.timestampMs ?: Long.MAX_VALUE)
+                    else rows.firstOrNull()?.timestampMs ?: Long.MIN_VALUE
+                    if ((ownFull || targetIMessage != null) && rows.isNotEmpty()) im.filter { it.timestampMs >= from } else im
+                }
             val moveTo = if (link.service == ChatService.IMESSAGE) BlueBubblesLinks.messagesFor(applicationContext, id) else null
             Snapshot(
                 conversation = conversation,
                 participants = people,
                 rows = rows,
-                quotes = quotesFor(repo, rows),
+                quotes = quotesFor(repo, rows + companionRows, imRepo),
                 historyComplete = repo.syncState(id)?.historyComplete == true,
                 companion = companion,
                 companionRows = companionRows,
@@ -718,12 +736,13 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private fun isCurrent(link: ChatBackend, id: String) = link === manager && id == conversationId
 
     /** Quoted messages: from the window, else from the archive. Runs on IO. */
-    private fun quotesFor(repo: ArchiveRepository, rows: List<MessageRow>): Map<String, Quote> {
+    /** What each reply quotes: from the rows shown, else this archive, else (Blue Bubbles) the iMessage one. */
+    private fun quotesFor(repo: ArchiveRepository, rows: List<MessageRow>, other: ArchiveRepository? = null): Map<String, Quote> {
         val byId = rows.associateBy { it.id }
         val mediaLabel = getString(R.string.chat_media_picture)
         val quotes = HashMap<String, Quote>()
         for (replyId in rows.mapNotNull { it.replyToId.takeIf(String::isNotEmpty) }.distinct().take(MAX_QUOTE_LOOKUPS)) {
-            val quoted = byId[replyId] ?: repo.message(replyId) ?: continue
+            val quoted = byId[replyId] ?: repo.message(replyId) ?: other?.message(replyId) ?: continue
             val sender = if (quoted.isOutgoing) getString(R.string.chat_you)
             else quoted.senderName.ifBlank { getString(R.string.chat_unknown_sender) }
             quotes[replyId] = Quote(replyId, sender, ThreadItems.preview(quoted, mediaLabel))
@@ -1339,7 +1358,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val id = conversationId
         // The wrapper (beta): a reply to an iMessage goes as a real inline reply, through OpenBubbles' screen.
         val target = replyTarget?.takeIf { isShown(it) && backendFor(it).service == ChatService.IMESSAGE && it.text.isNotBlank() }
-        if (target != null && files.isEmpty() && com.lightdecoder.wrapper.Wrapper.available(this)) {
+        if (target != null && files.isEmpty() && com.lightdecoder.wrapper.Wrapper.repliesInline(this)) {
             wrapperReply(target, text)
             return
         }
@@ -1470,6 +1489,30 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 dropCopies()
                 toast(getString(R.string.share_could_not_read))
                 return@launch
+            }
+            // The wrapper (beta) sends it from OpenBubbles' composer itself, out of sight.
+            val pkg = com.lightdecoder.imessage.OpenBubbles.installedPackage(this@ThreadActivity)
+            if (pkg != null && com.lightdecoder.wrapper.Wrapper.available(this@ThreadActivity)) {
+                val open = com.lightdecoder.imessage.OpenBubbles.shareToChatIntent(pkg, id, text, shared)
+                val local = withContext(Dispatchers.IO) {
+                    runCatching {
+                        link.recordSentElsewhere(id, text, null, shared.mapNotNull { (uri, mime) -> handOffFileOf(uri)?.let { it to mime } })
+                    }.getOrNull()
+                }
+                val job = com.lightdecoder.wrapper.Wrapper.Job(
+                    com.lightdecoder.wrapper.Wrapper.Kind.SEND, id, "", text,
+                    RelayIntents.thread(this@ThreadActivity, conversationId, service = manager.service), local, open = open,
+                )
+                if (com.lightdecoder.wrapper.Wrapper.start(this@ThreadActivity, job)) {
+                    if (clearComposer) {
+                        binding.input.setText("")
+                        clearReply()
+                        clearAttachment()
+                    }
+                    scrollToBottomNext = true
+                    return@launch
+                }
+                local?.let { withContext(Dispatchers.IO) { link.forgetSentElsewhere(it) } }
             }
             if (!link.handOff(this@ThreadActivity, id, text, shared)) {
                 dropCopies()
@@ -1872,7 +1915,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         // Through OpenBubbles' notification an iMessage goes as a message of its own: say so, rather than promise a thread.
         val asIMessage = backendFor(row).service == ChatService.IMESSAGE || manager.service == ChatService.IMESSAGE ||
             (manager.service == ChatService.MESSAGES && companionId != null)
-        val inline = backendFor(row).service == ChatService.IMESSAGE && row.text.isNotBlank() && com.lightdecoder.wrapper.Wrapper.available(this)
+        val inline = backendFor(row).service == ChatService.IMESSAGE && row.text.isNotBlank() && com.lightdecoder.wrapper.Wrapper.repliesInline(this)
         binding.replySender.text = getString(
             when {
                 inline -> R.string.wrapper_replying_to

@@ -655,6 +655,10 @@ class ConversationsActivity : AppCompatActivity() {
             item.isVisible = backend.service == ChatService.MESSAGES && blueBubbles.isOn()
             item.isChecked = com.lightdecoder.wrapper.Wrapper.enabled(this) && com.lightdecoder.wrapper.Wrapper.serviceOn()
         }
+        menu.findItem(R.id.action_wrapper_inline)?.let { item ->
+            item.isVisible = backend.service == ChatService.MESSAGES && blueBubbles.isOn() && com.lightdecoder.wrapper.Wrapper.available(this)
+            item.isChecked = com.lightdecoder.wrapper.Wrapper.inlineReplies(this)
+        }
         // The iMessage light: Messages tab, while Blue Bubbles is on.
         menu.findItem(R.id.action_imessage_light)?.let { item ->
             if (backend.service == ChatService.MESSAGES) IMessageLight.bind(this, item, IMessageLight.overall(this), hideWhenOff = true)
@@ -672,6 +676,10 @@ class ConversationsActivity : AppCompatActivity() {
             android.R.id.home -> finish()
             R.id.action_refresh -> refreshFromPhone()
             R.id.action_wrapper -> toggleWrapper()
+            R.id.action_wrapper_inline -> {
+                com.lightdecoder.wrapper.Wrapper.setInlineReplies(this, !com.lightdecoder.wrapper.Wrapper.inlineReplies(this))
+                invalidateOptionsMenu()
+            }
             R.id.action_blue_bubbles -> blueBubbles.toggle()
             R.id.action_link_status -> startActivity(ServiceUi.status(this, backend.service))
             R.id.action_delete_archive -> LocalArchive.confirmDelete(this, backend) { reload() }

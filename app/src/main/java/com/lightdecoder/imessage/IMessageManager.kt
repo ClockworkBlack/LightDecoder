@@ -357,15 +357,25 @@ class IMessageManager private constructor(
      * A message the wrapper sent from OpenBubbles' own screen (an inline reply to [replyToId]): OpenBubbles
      * never notifies its own messages, so it is shown from here. Returns its id.
      */
-    fun recordSentElsewhere(conversationId: String, text: String, replyToId: String?): String {
+    fun recordSentElsewhere(conversationId: String, text: String, replyToId: String?, files: List<Pair<File, String>> = emptyList()): String {
         val id = SENT_PREFIX + "wrap-" + UUID.randomUUID()
         repo.upsertMessage(
             MessageDto(
                 id = id, conversationId = conversationId, fromMe = true, direction = "out", status = STATUS_SENT,
                 transport = TRANSPORT, text = text, replyToId = replyToId.orEmpty(),
                 timestampMs = System.currentTimeMillis(), isOld = true,
+                parts = files.mapIndexed { i, (_, mime) -> com.lightdecoder.relay.PartDto(partId = i.toString(), kind = "media", mime = mime) },
             ),
         )
+        // Its pictures, from copies of its own (the hand-off copies are cleared after a day).
+        val dir = com.lightdecoder.archive.MediaCache.mediaDir(appContext, ChatService.IMESSAGE).apply { mkdirs() }
+        files.forEachIndexed { i, (file, _) ->
+            runCatching {
+                val copy = File(dir, "sent-${UUID.randomUUID()}-${file.name}")
+                file.copyTo(copy, overwrite = true)
+                repo.setMediaLocalPath(id, i.toString(), copy.path, thumbnail = false)
+            }
+        }
         return id
     }
 

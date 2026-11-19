@@ -646,6 +646,7 @@ class BlueBubblesScreenTest {
         seedIMessage("Dinner at 7?", ts = 5_000)
         val jobs = ArrayList<com.lightdecoder.wrapper.Wrapper.Job>()
         com.lightdecoder.wrapper.Wrapper.setEnabled(two.app, true)
+        com.lightdecoder.wrapper.Wrapper.setInlineReplies(two.app, true)
         com.lightdecoder.wrapper.Wrapper.runner = { _, job -> jobs += job }
         try {
             ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
@@ -671,6 +672,77 @@ class BlueBubblesScreenTest {
                 // It did not go: taken back here.
                 com.lightdecoder.wrapper.Wrapper.finish(two.app, job, com.lightdecoder.wrapper.Wrapper.Result(false, "send button", 900))
                 scenario.waitFor("taken back") { !shownTexts(it).contains("8 works") }
+            }
+        } finally {
+            com.lightdecoder.wrapper.Wrapper.runner = null
+            com.lightdecoder.wrapper.Wrapper.setEnabled(two.app, false)
+            com.lightdecoder.wrapper.Wrapper.setInlineReplies(two.app, false)
+        }
+    }
+
+    @Test
+    fun withTheWrapperOnARegularReplyStillGoesStraightThroughTheReplyButton() {
+        two.env.pairedManager()
+        installOpenBubbles()
+        IMessagePrefs.setEnabled(two.app, true)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        seedIMessage("Dinner at 7?", ts = 5_000)
+        val jobs = ArrayList<com.lightdecoder.wrapper.Wrapper.Job>()
+        com.lightdecoder.wrapper.Wrapper.setEnabled(two.app, true)
+        com.lightdecoder.wrapper.Wrapper.runner = { _, job -> jobs += job }
+        try {
+            withReplyButton { replies ->
+                ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+                    scenario.waitFor("her iMessage") { shownTexts(it).contains("Dinner at 7?") }
+                    scenario.onActivity { activity ->
+                        activity.onReply(rowOf(activity, "Dinner at 7?"))
+                        activity.findViewById<EditText>(R.id.input).setText("Sure")
+                        activity.findViewById<View>(R.id.send).performClick()
+                    }
+                    scenario.waitFor("sent through the Reply button") {
+                        org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                        replies == listOf("Sure")
+                    }
+                    assertTrue("not through OpenBubbles' screen", jobs.isEmpty())
+                }
+            }
+        } finally {
+            com.lightdecoder.wrapper.Wrapper.runner = null
+            com.lightdecoder.wrapper.Wrapper.setEnabled(two.app, false)
+        }
+    }
+
+    @Test
+    fun withTheWrapperAPictureIsSentFromOpenBubblesOutOfSight() {
+        two.env.pairedManager()
+        installOpenBubbles()
+        IMessagePrefs.setEnabled(two.app, true)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        seedIMessage("Show me", ts = 5_000)
+        val picture = java.io.File(two.app.cacheDir, "pic.png").apply {
+            outputStream().use { android.graphics.Bitmap.createBitmap(8, 8, android.graphics.Bitmap.Config.ARGB_8888).compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+        }
+        val jobs = ArrayList<com.lightdecoder.wrapper.Wrapper.Job>()
+        com.lightdecoder.wrapper.Wrapper.setEnabled(two.app, true)
+        com.lightdecoder.wrapper.Wrapper.runner = { _, job -> jobs += job }
+        try {
+            ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+                scenario.waitFor("her iMessage") { shownTexts(it).contains("Show me") }
+                scenario.onActivity { a ->
+                    a.setAttachment(android.net.Uri.fromFile(picture))
+                    a.findViewById<View>(R.id.send).performClick()
+                }
+                scenario.waitFor("the wrapper asked") { jobs.size == 1 }
+                val job = jobs.single()
+                assertEquals(com.lightdecoder.wrapper.Wrapper.Kind.SEND, job.kind)
+                assertEquals("OpenBubbles' composer for her chat", ALICE, job.open?.getStringExtra(Intent.EXTRA_SHORTCUT_ID))
+                assertNotNull(job.open?.getParcelableExtra<android.net.Uri>(Intent.EXTRA_STREAM))
+                scenario.onActivity { assertEquals("OpenBubbles not brought up for the user", null, shadowOf(it).peekNextStartedActivity()) }
+                // Shown here at once, with its picture.
+                scenario.waitFor("the picture shown") { _ -> imRepo.messages(ALICE).any { it.isOutgoing && it.media.singleOrNull()?.localPath?.isNotEmpty() == true } }
+                // Not sent after all: taken back here, OpenBubbles left open for the user.
+                com.lightdecoder.wrapper.Wrapper.finish(two.app, job, com.lightdecoder.wrapper.Wrapper.Result(false, "send button", 2000))
+                scenario.waitFor("taken back") { _ -> imRepo.messages(ALICE).none { it.isOutgoing && it.media.isNotEmpty() } }
             }
         } finally {
             com.lightdecoder.wrapper.Wrapper.runner = null
@@ -757,6 +829,30 @@ class BlueBubblesScreenTest {
         } finally {
             com.lightdecoder.wrapper.Wrapper.runner = null
             com.lightdecoder.wrapper.Wrapper.setEnabled(two.app, false)
+        }
+    }
+
+    @Test
+    fun aReplyToAnIMessageQuotesItAndTheQuoteGoesToIt() {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        two.seedIncoming(ChatService.MESSAGES, "sms1", "c1", "A text", ts = 1_000)
+        seedIMessage("Ever heard of Father?", ts = 5_000)
+        val quoted = imRepo.messages(ALICE).single { it.text == "Ever heard of Father?" }
+        // An inline reply sent through the wrapper (shown from here, quoting the iMessage).
+        iMessage.recordSentElsewhere(ALICE, "Have actually heard of Father", quoted.id)
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            fun items(a: Activity) = (a.findViewById<RecyclerView>(R.id.messages).adapter as MessagesAdapter).currentList
+                .filterIsInstance<com.lightdecoder.ui.chat.ThreadItem.Message>()
+            scenario.waitFor("the reply") { shownTexts(it).contains("Have actually heard of Father") }
+            scenario.onActivity { a ->
+                val reply = items(a).single { it.row.text == "Have actually heard of Father" }
+                assertEquals("what it replied to, not \"an earlier message\"", "Ever heard of Father?", reply.quote?.text)
+                assertEquals("Alice", reply.quote?.sender)
+                a.onQuoteTap(reply.quote!!.messageId)
+            }
+            scenario.waitFor("the quoted message highlighted") { a -> items(a).single { it.row.id == quoted.id }.highlighted }
         }
     }
 

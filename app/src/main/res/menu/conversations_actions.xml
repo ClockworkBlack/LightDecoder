@@ -32,6 +32,13 @@
         android:title="@string/wrapper_setting"
         android:visible="false"
         app:showAsAction="never" />
+    <!-- Only with the wrapper on: replies too, as inline replies through OpenBubbles' screen (off by default). -->
+    <item
+        android:id="@+id/action_wrapper_inline"
+        android:checkable="true"
+        android:title="@string/wrapper_inline_setting"
+        android:visible="false"
+        app:showAsAction="never" />
     <item
         android:id="@+id/action_link_status"
         android:title="@string/chat_link_status"

@@ -63,7 +63,7 @@ class WrapperService : AccessibilityService() {
     override fun onDestroy() {
         if (running === this) running = null
         scope.cancel()
-        hideCover()
+        unfreeze()
         super.onDestroy()
     }
 
@@ -83,14 +83,8 @@ class WrapperService : AccessibilityService() {
                 steps += "$name ${now - stepAt}ms"
                 stepAt = now
             }
-            showCover(
-                when (job.kind) {
-                    Wrapper.Kind.UNSEND -> R.string.wrapper_cover_unsend
-                    Wrapper.Kind.EDIT -> R.string.wrapper_cover_edit
-                    Wrapper.Kind.REACT -> R.string.wrapper_cover_react
-                    Wrapper.Kind.REPLY -> R.string.wrapper_cover_reply
-                },
-            )
+            // Silent: a still of the screen as it is now stays in front while OpenBubbles works underneath.
+            freeze()
             val failedAt: String? = try {
                 perform(job, ::mark)
             } catch (e: Exception) {
@@ -102,9 +96,13 @@ class WrapperService : AccessibilityService() {
                 "Wrapper ${job.kind.name.lowercase()} ${IMessageLog.chatRef(job.chatGuid)}: " +
                     (if (failedAt == null) "done" else "stopped at $failedAt") + " in ${total}ms (${steps.joinToString(", ")})",
             )
-            hideCover()
             busy = false
-            if (failedAt == null) bringBack(job)
+            if (failedAt == null) {
+                bringBack(job)
+                // LightDecoder is drawn again behind the still before it goes: no flash.
+                delay(RETURN_MS)
+            }
+            unfreeze()
             Wrapper.finish(this@WrapperService, job, Wrapper.Result(failedAt == null, failedAt, total))
         }
     }
@@ -114,6 +112,7 @@ class WrapperService : AccessibilityService() {
 
     /** The steps; null when all went, else the step it stopped at. */
     private suspend fun perform(job: Wrapper.Job, mark: (String) -> Unit): String? {
+        if (job.kind == Wrapper.Kind.SEND) return send(job, mark)
         if (!Wrapper.openChat(this, job.chatGuid)) return "open"
         // 1. The chat is open: its message field is there.
         waitFor(OPEN_MS) { root -> WrapperNodes.field(root) } ?: return "chat"
@@ -196,6 +195,27 @@ class WrapperService : AccessibilityService() {
         return null
     }
 
+    /** OpenBubbles' composer opened with the files (and text) in it: press send. */
+    private suspend fun send(job: Wrapper.Job, mark: (String) -> Unit): String? {
+        val intent = job.open ?: return "open"
+        val started = runCatching {
+            startActivity(
+                Intent(intent).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION),
+                android.app.ActivityOptions.makeCustomAnimation(this, 0, 0).toBundle(),
+            )
+        }.isSuccess
+        if (!started) return "open"
+        waitFor(OPEN_MS) { root -> WrapperNodes.field(root) } ?: return "chat"
+        mark("chat")
+        // The shared files load into the composer; the send button shows once they have.
+        delay(ATTACH_MS)
+        val button = waitFor(SHORT_MS) { root -> WrapperNodes.field(root)?.let { f -> WrapperNodes.send(root, f) } } ?: return "send button"
+        if (!click(button)) return "send"
+        delay(SETTLE_MS)
+        mark("sent")
+        return null
+    }
+
     // --- OpenBubbles' screen ---------------------------------------------------------------
 
     /** OpenBubbles' window, wherever it is in the window list (LightDecoder's cover is above it). */
@@ -231,55 +251,112 @@ class WrapperService : AccessibilityService() {
         if (bounds.isEmpty) return false
         val path = Path().apply { moveTo(bounds.exactCenterX(), bounds.exactCenterY()) }
         val stroke = GestureDescription.StrokeDescription(path, 0, if (long) LONG_PRESS_MS else 50)
+        letTouchesThrough(true)
         val ok = dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
         if (ok) delay(if (long) LONG_PRESS_MS + 100 else 120)
+        letTouchesThrough(false)
         return ok
     }
 
     /** Back to the LightDecoder conversation it was started from. */
     private fun bringBack(job: Wrapper.Job) {
         runCatching {
-            startActivity(job.returnTo.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
+            startActivity(
+                job.returnTo.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_NO_ANIMATION),
+                android.app.ActivityOptions.makeCustomAnimation(this, 0, 0).toBundle(),
+            )
         }
     }
 
-    // --- the cover --------------------------------------------------------------------------
+    // --- the still ----------------------------------------------------------------------------
 
-    private fun showCover(textRes: Int) {
+    private var params: WindowManager.LayoutParams? = null
+
+    /**
+     * Puts a still picture of the screen (Android 11+: the service's own screenshot) in front of
+     * everything, taking touches, so nothing is seen or tapped while OpenBubbles works. Without a
+     * screenshot, a plain cover of LightDecoder's own colour.
+     */
+    private suspend fun freeze() {
         if (cover != null) return
         val wm = getSystemService(WindowManager::class.java) ?: return
-        val pad = (24 * resources.displayMetrics.density).toInt()
-        val view = FrameLayout(this).apply {
-            setBackgroundColor(ContextCompat.getColor(this@WrapperService, R.color.wrapper_cover))
-            addView(LinearLayout(this@WrapperService).apply {
-                orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER_HORIZONTAL
-                addView(ProgressBar(this@WrapperService))
-                addView(TextView(this@WrapperService).apply {
-                    setText(textRes)
-                    setTextColor(Color.WHITE)
-                    textSize = 16f
-                    setPadding(pad, pad / 2, pad, 0)
-                })
-            }, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
+        val still = screenshot()
+        val view: View = if (still != null) {
+            android.widget.ImageView(this).apply {
+                setImageBitmap(still)
+                scaleType = android.widget.ImageView.ScaleType.FIT_XY
+            }
+        } else {
+            FrameLayout(this).apply {
+                setBackgroundColor(ContextCompat.getColor(this@WrapperService, R.color.wrapper_cover))
+                addView(ProgressBar(this@WrapperService), FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER,
+                ))
+            }
         }
-        val params = WindowManager.LayoutParams(
+        // Touches stop here (they would land in OpenBubbles).
+        view.setOnTouchListener { _, _ -> true }
+        val p = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT,
-        )
+        ).apply {
+            if (android.os.Build.VERSION.SDK_INT >= 30) {
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                setFitInsetsTypes(0)
+            }
+            windowAnimations = 0
+        }
         runCatching {
-            wm.addView(view, params)
+            wm.addView(view, p)
             cover = view
+            params = p
         }
     }
 
-    private fun hideCover() {
+    private fun unfreeze() {
         val view = cover ?: return
         cover = null
-        runCatching { getSystemService(WindowManager::class.java)?.removeView(view) }
+        params = null
+        runCatching { getSystemService(WindowManager::class.java)?.removeViewImmediate(view) }
+    }
+
+    /** While a gesture is made, touches go through the still (to OpenBubbles under it). */
+    private fun letTouchesThrough(through: Boolean) {
+        val view = cover ?: return
+        val p = params ?: return
+        p.flags = if (through) p.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        else p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+        runCatching { getSystemService(WindowManager::class.java)?.updateViewLayout(view, p) }
+    }
+
+    /** The screen as it is now (Android 11+), or null. */
+    private suspend fun screenshot(): android.graphics.Bitmap? {
+        if (android.os.Build.VERSION.SDK_INT < 30) return null
+        return kotlinx.coroutines.withTimeoutOrNull(SHOT_MS) {
+            kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+                try {
+                    takeScreenshot(android.view.Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
+                        override fun onSuccess(result: ScreenshotResult) {
+                            val bitmap = runCatching {
+                                android.graphics.Bitmap.wrapHardwareBuffer(result.hardwareBuffer, result.colorSpace)
+                                    ?.copy(android.graphics.Bitmap.Config.ARGB_8888, false)
+                            }.getOrNull()
+                            runCatching { result.hardwareBuffer.close() }
+                            if (cont.isActive) cont.resumeWith(Result.success(bitmap))
+                        }
+
+                        override fun onFailure(errorCode: Int) {
+                            if (cont.isActive) cont.resumeWith(Result.success(null))
+                        }
+                    })
+                } catch (e: Exception) {
+                    if (cont.isActive) cont.resumeWith(Result.success(null))
+                }
+            }
+        }
     }
 
     /** An accessibility node as a [UiNode]. */
@@ -311,5 +388,8 @@ class WrapperService : AccessibilityService() {
         private const val SETTLE_MS = 350L
         private const val LONG_PRESS_MS = 600L
         private const val MAX_SCROLLS = 8
+        private const val SHOT_MS = 700L
+        private const val ATTACH_MS = 600L
+        private const val RETURN_MS = 250L
     }
 }

@@ -21,7 +21,12 @@ import com.lightdecoder.imessage.OpenBubbles
  */
 object Wrapper {
 
-    enum class Kind { REPLY, UNSEND, EDIT, REACT }
+    enum class Kind {
+        REPLY, UNSEND, EDIT, REACT,
+
+        /** Pictures, a voice message, stickers, or a text to a chat with no Reply button: sent from OpenBubbles' composer. */
+        SEND,
+    }
 
     /**
      * One thing to do in OpenBubbles: an inline reply with [text] to the message reading [targetText],
@@ -37,12 +42,27 @@ object Wrapper {
         val localId: String? = null,
         /** For Undo Send: LightDecoder's row of the message, removed here once it is undone. */
         val targetId: String? = null,
+        /** For [Kind.SEND]: OpenBubbles' composer for the chat with the files and text in it. */
+        val open: Intent? = null,
     )
 
     data class Result(val ok: Boolean, val stoppedAt: String?, val ms: Long)
 
     private const val PREFS = "wrapper"
     private const val KEY_ON = "on"
+    private const val KEY_INLINE = "inline_replies"
+
+    /** Replies too (inline, through OpenBubbles' screen)? Off: replies go straight through OpenBubbles' Reply button. */
+    fun inlineReplies(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_INLINE, false)
+
+    fun setInlineReplies(context: Context, on: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_INLINE, on).apply()
+        IMessageLog.add(context, "Wrapper: inline replies ${if (on) "on" else "off"}")
+    }
+
+    /** Whether a reply to an iMessage goes inline through the wrapper. */
+    fun repliesInline(context: Context): Boolean = available(context) && inlineReplies(context)
 
     fun enabled(context: Context): Boolean = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_ON, false)
 
@@ -78,9 +98,15 @@ object Wrapper {
 
     /** OpenBubbles on [chatGuid]: its own notification's "open" intent, else its share screen for the chat. */
     internal fun openChat(context: Context, chatGuid: String): Boolean {
-        if (IMessageReplies.open(context, chatGuid)) return true
+        if (IMessageReplies.open(context, chatGuid, quiet = true)) return true
         val pkg = OpenBubbles.installedPackage(context) ?: return false
-        return OpenBubbles.start(context, OpenBubbles.shareToChatIntent(pkg, chatGuid, "", emptyList()))
+        val intent = OpenBubbles.shareToChatIntent(pkg, chatGuid, "", emptyList()).addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
+        return try {
+            context.startActivity(intent, android.app.ActivityOptions.makeCustomAnimation(context, 0, 0).toBundle())
+            true
+        } catch (e: Exception) {
+            false
+        }
     }
 
     /** After a job: a reply shown as sent stays; one that did not go is taken back and left for the user in OpenBubbles. */
@@ -114,6 +140,7 @@ object Wrapper {
             job.kind == Kind.REPLY -> app.getString(R.string.wrapper_failed_reply)
             job.kind == Kind.EDIT -> app.getString(R.string.wrapper_failed_edit)
             job.kind == Kind.REACT -> app.getString(R.string.wrapper_failed_react, job.text)
+            job.kind == Kind.SEND -> app.getString(R.string.wrapper_failed_send)
             else -> app.getString(R.string.wrapper_failed_unsend)
         }
         if (words != null) Handler(Looper.getMainLooper()).post { Toast.makeText(app, words, Toast.LENGTH_LONG).show() }

@@ -9,6 +9,7 @@
     android:accessibilityFlags="flagRetrieveInteractiveWindows|flagReportViewIds"
     android:canPerformGestures="true"
     android:canRetrieveWindowContent="true"
+    android:canTakeScreenshot="true"
     android:description="@string/wrapper_service_description"
     android:notificationTimeout="0"
     android:packageNames="com.openbubbles.messaging,com.bluebubbles.messaging.alpha,com.bluebubbles.messaging.beta" />

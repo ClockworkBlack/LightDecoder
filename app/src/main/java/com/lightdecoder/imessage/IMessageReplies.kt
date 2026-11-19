@@ -133,10 +133,10 @@ object IMessageReplies {
     }
 
     /** Opens the chat in OpenBubbles through its notification's own tap. False if there is none. */
-    fun open(context: Context, chatGuid: String): Boolean {
+    fun open(context: Context, chatGuid: String, quiet: Boolean = false): Boolean {
         val open = entries[chatGuid]?.open ?: return false
         return try {
-            open.send(context, 0, null, null, null, null, startFromHere())
+            open.send(context, 0, null, null, null, null, if (quiet) quietStart(context) else startFromHere())
             true
         } catch (e: PendingIntent.CanceledException) {
             false
@@ -157,6 +157,18 @@ object IMessageReplies {
             ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
         }
         return ActivityOptions.makeBasic().setPendingIntentBackgroundActivityStartMode(mode).toBundle()
+    }
+
+    /** [startFromHere] with no opening animation (the wrapper's work behind a still of the screen). */
+    private fun quietStart(context: Context): Bundle {
+        val options = ActivityOptions.makeCustomAnimation(context, 0, 0)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            options.setPendingIntentBackgroundActivityStartMode(
+                if (Build.VERSION.SDK_INT >= 36) ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOW_IF_VISIBLE
+                else ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED,
+            )
+        }
+        return options.toBundle()
     }
 
     fun forget(chatGuid: String) {
