@@ -28,6 +28,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * The OpenBubbles wrapper (experimental, off unless the user turns it on): an
@@ -115,7 +116,9 @@ class WrapperService : AccessibilityService() {
                 stepAt = now
             }
             val failedAt: String? = try {
-                perform(job, ::mark)
+                // Reading OpenBubbles' screen is many calls to Android: off LightDecoder's main thread,
+                // so LightDecoder itself never stutters while the wrapper works.
+                withContext(Dispatchers.Default) { perform(job, ::mark) }
             } catch (e: Exception) {
                 "error ${e.javaClass.simpleName}"
             }.let { if (it != null && stop) "stopped for you" else it }
@@ -134,11 +137,11 @@ class WrapperService : AccessibilityService() {
                 current = null
                 busy = false
                 unfreeze()
-                Wrapper.finish(this@WrapperService, job, Wrapper.Result(failedAt == null, failedAt, total))
+                withContext(Dispatchers.IO) { Wrapper.finish(this@WrapperService, job, Wrapper.Result(failedAt == null, failedAt, total)) }
                 return
             }
             // The next one goes on behind the same still, with no trip back to LightDecoder between.
-            Wrapper.finish(this@WrapperService, job, Wrapper.Result(failedAt == null, failedAt, total))
+            withContext(Dispatchers.IO) { Wrapper.finish(this@WrapperService, job, Wrapper.Result(failedAt == null, failedAt, total)) }
             job = next
             current = job
             stop = false
@@ -184,7 +187,9 @@ class WrapperService : AccessibilityService() {
         val mine = job.kind != Wrapper.Kind.REPLY && job.kind != Wrapper.Kind.REACT
         var bubble = waitFor(SHORT_MS) { root -> WrapperNodes.message(root, job.targetText, mine) }
         var scrolls = 0
-        while (bubble == null && scrolls < MAX_SCROLLS) {
+        // Undo Send (2 min) and Edit (15 min) are for recent messages, near the bottom: no long hunt.
+        val maxScrolls = if (job.kind == Wrapper.Kind.UNSEND || job.kind == Wrapper.Kind.EDIT) RECENT_SCROLLS else MAX_SCROLLS
+        while (bubble == null && scrolls < maxScrolls && !stop) {
             val list = root()?.let(WrapperNodes::scrollable) ?: break
             act(list, AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
             scrolls++
@@ -333,10 +338,10 @@ class WrapperService : AccessibilityService() {
         if (bounds.isEmpty) return false
         val path = Path().apply { moveTo(bounds.exactCenterX(), bounds.exactCenterY()) }
         val stroke = GestureDescription.StrokeDescription(path, 0, if (long) LONG_PRESS_MS else 50)
-        letTouchesThrough(true)
+        withContext(Dispatchers.Main) { letTouchesThrough(true) }
         val ok = dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
         if (ok) delay(if (long) LONG_PRESS_MS + 100 else 120)
-        letTouchesThrough(false)
+        withContext(Dispatchers.Main) { letTouchesThrough(false) }
         return ok
     }
 
@@ -480,6 +485,7 @@ class WrapperService : AccessibilityService() {
         private const val SETTLE_MS = 350L
         private const val LONG_PRESS_MS = 600L
         private const val MAX_SCROLLS = 8
+        private const val RECENT_SCROLLS = 1
         private const val SHOT_MS = 700L
         private const val ATTACH_MS = 600L
         private const val RECEIPT_MS = 900L

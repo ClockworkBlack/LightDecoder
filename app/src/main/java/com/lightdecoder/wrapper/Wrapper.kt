@@ -172,7 +172,8 @@ object Wrapper {
                 app.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText("reply", job.text))
             }
         }
-        val words = failureWords(app, job)
+        // Only a job that did not go is shown (a done one says nothing).
+        val words = if (result.ok) null else failureWords(app, job)
         if (words != null) {
             failed = Failure(job, result, words)
             val main = Handler(Looper.getMainLooper())

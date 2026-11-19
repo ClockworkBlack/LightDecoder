@@ -34,6 +34,16 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - Pictures were already shown from the original file, decoded at the bubble's size, and full resolution and
   zoomable in the gallery (HEIC included).
 - versionCode 55–57 were wrapper-branch builds, so main jumps to 58 to install over them.
+## 0.5.51-wrapper (versionCode 61) - BRANCH ccr-4fee5e9f-jrrlhu-wrapper: no false "Not finished", no stutter
+- 0.5.50 bug: `Wrapper.finish` showed the "Not finished in OpenBubbles" dialog after every job, done or not
+  (the `result.ok` check was lost when the toast became a dialog). The user's log: both Unsends and sends
+  "done", yet dialogs. Fixed, with `WrapperFinishTest`.
+- The freeze: "Try again" on an already-unsent message hunted 8 scrolls back (7 s behind the still). Unsend
+  and Edit (recent messages, near the bottom) now scroll back at most once.
+- Stutter: the wrapper read OpenBubbles' screen (accessibility calls every 40 ms) on LightDecoder's main
+  thread. `perform` now runs on `Dispatchers.Default`; only the still (add, remove, touch-through) is on Main;
+  `Wrapper.finish` (database writes) on IO.
+
 ## 0.5.50-wrapper (versionCode 60) - BRANCH ccr-4fee5e9f-jrrlhu-wrapper: wrapper faster and steadier
 - User report: laggy, Unsend took two presses then "could not be finished", sometimes left in OpenBubbles.
   Causes found: the receipt look (`Kind.STATUS`) ran as soon as a conversation opened, behind a
