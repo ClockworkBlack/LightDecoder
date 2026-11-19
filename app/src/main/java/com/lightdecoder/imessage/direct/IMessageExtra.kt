@@ -55,7 +55,20 @@ data class IMessageExtra(
         val secondarySubcaption: String = "",
         val tertiarySubcaption: String = "",
         val root: String = "",
-    )
+    ) {
+        /** The app's name as an iPhone shows it; empty when Apple did not say (the library then calls it "None"). */
+        val shownName: String get() = name.takeIf { it.isNotBlank() && it != UNNAMED_APP }.orEmpty()
+
+        /** The card's main line: its caption, else the app's summary of it. */
+        val cardCaption: String get() = caption.ifBlank { ldText }
+
+        /** What the card says in one line, as a message's text (the list's snippet, search): [cardCaption], else the app's name. */
+        fun summary(): String = cardCaption.ifBlank { shownName }
+
+        /** Whether a tap can open it in the browser (an app that keeps its state in a web address, as a Mac opens it). */
+        val opensInBrowser: Boolean
+            get() = url.startsWith("https://", ignoreCase = true) || url.startsWith("http://", ignoreCase = true)
+    }
 
     /** The message's text from [parts]: each part's text in part order, one per line. */
     fun text(): String = parts.toSortedMap().values.filter { it.isNotEmpty() }.joinToString("\n")
@@ -101,6 +114,9 @@ data class IMessageExtra(
 
         /** Apple's id of the invisible ink effect: the text stays hidden until tapped. */
         const val INVISIBLE_INK = "com.apple.MobileSMS.expressivesend.invisibleink"
+
+        /** The name the library gives an app Apple did not name. */
+        const val UNNAMED_APP = "None"
 
         /** Apple's effects, by id, with the string resource of the name an iPhone shows ("Sent with Slam"). */
         val EFFECTS: List<Pair<String, Int>> = listOf(

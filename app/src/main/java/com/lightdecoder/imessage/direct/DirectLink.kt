@@ -54,8 +54,8 @@ import uniffi.rust_bridge.Reaction
  * reused, so its history and the new messages stay together. New chats get `imsg:` ids
  * ([DirectArchive]); messages sent or received here are `imsg:<GUID>`, the GUID Apple knows them by.
  *
- * [IMessageManager] hands sends (attachments too), retries, unsends, edits, tapbacks, typing, read
- * receipts and downloads of attachments here while [active]; [DirectSinkService] hands over what
+ * [IMessageManager] hands sends (attachments and effects too), retries, unsends, edits, tapbacks,
+ * typing, read receipts, downloads of attachments and new groups here while [active]; [DirectSinkService] hands over what
  * Apple sent ([apply]). What arrives for a message that is not stored yet (a receipt for a message
  * whose send has not returned yet) is held for a while ([HeldUpdates]) and applied once it is.
  */
@@ -97,6 +97,9 @@ class DirectLink private constructor(
     /** Addresses Apple was asked about when their conversation opened ([reachOnce]), and when. */
     private val reachAsked = HashMap<String, Long>()
 
+    /** Each group's own name, as Apple has it ([GroupNames]). */
+    private val groupNames = GroupNames(app)
+
     init {
         if (active) scope.launch { failInterruptedSends() }
         scope.launch { for (notice in typingOut) tell(notice) }
@@ -116,7 +119,10 @@ class DirectLink private constructor(
         val guid = DirectArchive.groupGuid(conversationId)
         if (group && guid == null) return null
         val after = repo.latestMessageId(conversationId, DirectArchive.PREFIX)?.let(DirectArchive::guidOf)
-        return DirectWire.Target(others, if (group) row.name.ifBlank { null } else null, guid, row.defaultOutgoingId, after)
+        // The group's own name, never the members' names it is shown by here: the iPhones in it
+        // would take those for its name. A group stored before its own name was kept: as stored.
+        val name = if (group) (groupNames.of(conversationId) ?: row.name).ifBlank { null } else null
+        return DirectWire.Target(others, name, guid, row.defaultOutgoingId, after)
     }
 
     /** Whether a reply to [row] threads under it on iPhones (sent through the library, to a message with a GUID). */
@@ -167,15 +173,90 @@ class DirectLink private constructor(
         }
     }
 
+    /**
+     * Starts an iMessage group with the people at [addresses] (numbers or email addresses), named
+     * [groupName] (none: here it is named after its members, and on their iPhones too). Apple is
+     * asked first whether each of them is on iMessage; if any is not, nothing is made and the
+     * error names them. The group is kept as `imsg:group:<a new GUID>`, the GUID its first message
+     * carries, so the iPhones in it keep it together. A group here with the same people (and the
+     * same name, when one is given) is that one; the same person twice is a chat with them
+     * ([conversationFor]). Throws [DirectEngine.ImessageError] saying why it cannot be started.
+     */
+    suspend fun startGroup(addresses: List<String>, groupName: String?): String {
+        if (!active) throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
+        val notOnIMessage = ArrayList<String>()
+        // The library's address of each person, by the key that two spellings of it share.
+        val people = LinkedHashMap<String, String>()
+        for (address in addresses.map { it.trim() }.filter { it.isNotEmpty() }) {
+            val handle = Handles.normalize(address)
+            val key = handle?.let(IMessageAddress::key)
+            if (handle == null || key == null) notOnIMessage += address else people.putIfAbsent(key, handle)
+        }
+        if (notOnIMessage.isEmpty() && people.size <= 1) {
+            val only = people.values.singleOrNull() ?: throw RelayException(RelayException.INVALID_ARGUMENT, "nobody to start a group with")
+            return conversationFor(only) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_not_on_imessage, Handles.display(only)))
+        }
+        var from = ""
+        for (handle in people.values) {
+            val reply = requests.call(DirectWire.REACH, DirectWire.reach(handle), REACH_TIMEOUT_MS)
+            // The library could not be asked: that says nothing about whether they have iMessage.
+            DirectWire.errorOf(reply)?.let { throw DirectEngine.ImessageError(it) }
+            val reached = reply.optJSONObject("conversation")?.let(ConversationDto::fromJson)
+            if (reached == null) notOnIMessage += nameOf(handle) else if (from.isEmpty()) from = reached.defaultOutgoingId
+        }
+        if (notOnIMessage.isNotEmpty()) {
+            throw DirectEngine.ImessageError(
+                app.resources.getQuantityString(R.plurals.imessage_group_not_on_imessage, notOnIMessage.size, notOnIMessage.joinToString(", ")),
+            )
+        }
+        val name = groupName?.trim()?.takeIf { it.isNotEmpty() }
+        sameGroup(people.keys, name)?.let { return it }
+        val id = DirectArchive.groupConversationId(UUID.randomUUID().toString().uppercase())
+        val members = people.values.map { h ->
+            val address = Handles.display(h)
+            ParticipantDto(id = address, name = nameOf(h), number = address, formattedNumber = address)
+        }
+        synchronized(this) {
+            repo.upsertConversation(
+                ConversationDto(
+                    id = id,
+                    name = name ?: members.joinToString(", ") { it.name },
+                    isGroup = true,
+                    type = IMessageManager.TRANSPORT,
+                    folder = Folder.INBOX.wire,
+                    defaultOutgoingId = from,
+                    participants = listOf(ParticipantDto(id = ME, isMe = true)) + members,
+                ),
+            )
+            groupNames.note(id, name.orEmpty())
+        }
+        IMessageLog.add(app, "${IMessageLog.chatRef(id)}: iMessage group of ${members.size + 1} started through the iMessage library")
+        return id
+    }
+
+    /** A group here that the library can send to, with exactly the people [keys] ([IMessageAddress.key]) and, when given, [name]. */
+    private fun sameGroup(keys: Set<String>, name: String?): String? =
+        repo.conversations(null)
+            .filter { it.isGroup && it.folderEnum != Folder.DELETED && DirectArchive.groupGuid(it.id) != null }
+            .firstOrNull { row ->
+                (name == null || row.name == name) &&
+                    repo.participants(row.id).filter { !it.isMe }.mapNotNull { IMessageAddress.key(it.number.ifBlank { it.id }) }.toSet() == keys
+            }?.id
+
     // --- sending ----------------------------------------------------------------------------------
 
-    /** Like every send in the app: a local copy now ("tmp:<tmpId>"), the sent message once Apple confirms it. */
-    fun sendText(conversationId: String, text: String, replyToId: String?): String {
+    /**
+     * Like every send in the app: a local copy now ("tmp:<tmpId>"), the sent message once Apple
+     * confirms it. [effect] is the Apple effect it is sent with ("Sent with Slam"), if any.
+     */
+    fun sendText(conversationId: String, text: String, replyToId: String?, effect: String? = null): String {
         // The message ends the typing indicator on their side: no "stopped typing" after it.
         typingThrottle.sent(conversationId)
         val tmpId = UUID.randomUUID().toString()
-        repo.insertLocalOutgoing(tmpId, conversationId, text, null, null, null, replyToId, System.currentTimeMillis())
-        inTurn(conversationId) { deliver(tmpId, conversationId, text, replyToId) }
+        repo.insertLocalOutgoing(
+            tmpId, conversationId, text, null, null, null, replyToId, System.currentTimeMillis(), IMessageExtra(effect = effect).toJson(),
+        )
+        inTurn(conversationId) { deliver(tmpId, conversationId, text, replyToId, effect = effect) }
         return tmpId
     }
 
@@ -185,9 +266,9 @@ class DirectLink private constructor(
      * text: a local copy now ("tmp:<tmpId>"), the sent message once Apple confirms it. The file
      * is copied here first, so the send (and a retry, even after a restart) no longer needs [uri].
      * Throws [DirectEngine.ImessageError] when the file cannot be read or is over Apple's
-     * [DirectMedia.MAX_SEND_BYTES].
+     * [DirectMedia.MAX_SEND_BYTES]. [effect] is the Apple effect it is sent with, if any.
      */
-    fun sendMedia(conversationId: String, uri: Uri, caption: String?, replyToId: String?, voice: Boolean = false): String {
+    fun sendMedia(conversationId: String, uri: Uri, caption: String?, replyToId: String?, voice: Boolean = false, effect: String? = null): String {
         val tmpId = UUID.randomUUID().toString()
         val file = repo.outboxFileFor(tmpId)
         copyCapped(uri, file)
@@ -197,9 +278,9 @@ class DirectLink private constructor(
         val name = if (voice) "$VOICE_NAME.${DirectMedia.extensionFor(mime, given)}" else given.ifBlank { DirectMedia.nameFor(mime) }
         val text = caption?.trim().orEmpty()
         typingThrottle.sent(conversationId)
-        val extra = if (voice) IMessageExtra(voice = true).toJson() else ""
+        val extra = IMessageExtra(voice = voice, effect = effect).toJson()
         repo.insertLocalOutgoing(tmpId, conversationId, text, file.path, mime, name, replyToId, System.currentTimeMillis(), extra)
-        inTurn(conversationId) { deliver(tmpId, conversationId, text, replyToId, Outgoing(file, mime, name, voice)) }
+        inTurn(conversationId) { deliver(tmpId, conversationId, text, replyToId, Outgoing(file, mime, name, voice), effect) }
         return tmpId
     }
 
@@ -275,13 +356,14 @@ class DirectLink private constructor(
             ?: DirectMedia.OCTET_STREAM
     }
 
-    /** Sends a failed message again, from its local copy (which survives restarts), its file included. */
+    /** Sends a failed message again, from its local copy (which survives restarts), its file and effect included. */
     fun retry(tmpId: String): Boolean {
         val row = repo.message(MessageRow.tmpMessageId(tmpId)) ?: return false
         if (!canSend(row.conversationId)) return false
-        val media = row.media.firstOrNull()?.let { Outgoing(File(it.localPath), it.mime, it.fileName, IMessageExtra.parse(row.extra).voice) }
+        val extra = IMessageExtra.parse(row.extra)
+        val media = row.media.firstOrNull()?.let { Outgoing(File(it.localPath), it.mime, it.fileName, extra.voice) }
         repo.setLocalState(tmpId, LocalState.PENDING)
-        inTurn(row.conversationId) { deliver(tmpId, row.conversationId, row.text, row.replyToId.ifEmpty { null }, media) }
+        inTurn(row.conversationId) { deliver(tmpId, row.conversationId, row.text, row.replyToId.ifEmpty { null }, media, extra.effect) }
         return true
     }
 
@@ -318,7 +400,14 @@ class DirectLink private constructor(
     /** A file going with a message: the copy here, its type and name, and whether it is a voice message. */
     private class Outgoing(val file: File, val mime: String, val name: String, val voice: Boolean)
 
-    private suspend fun deliver(tmpId: String, conversationId: String, text: String, replyToId: String?, media: Outgoing? = null) {
+    private suspend fun deliver(
+        tmpId: String,
+        conversationId: String,
+        text: String,
+        replyToId: String?,
+        media: Outgoing? = null,
+        effect: String? = null,
+    ) {
         try {
             repo.setLocalState(tmpId, LocalState.SENDING)
             val target = targetOf(conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
@@ -328,7 +417,7 @@ class DirectLink private constructor(
             val replyGuid = replyToId?.let(DirectArchive::guidOf)
             val replyPart = replyGuid?.let { DirectWire.replyPart(repo.message(replyToId)?.text.orEmpty()) }
             val request = DirectWire.send(
-                target, text, replyGuid, replyPart,
+                target, text, replyGuid, replyPart, effect,
                 attachments = listOfNotNull(media?.let { DirectWire.Attachment(it.file.path, it.mime, it.name) }),
                 voice = media?.voice == true,
             )
@@ -361,7 +450,7 @@ class DirectLink private constructor(
                 parts = listOfNotNull(text.takeIf { it.isNotEmpty() }?.let { PartDto(partId = "0", kind = "text", text = it) }) + mediaParts,
                 replyToId = replyToId.orEmpty(),
                 isOld = true,
-                extra = if (media?.voice == true) IMessageExtra(voice = true).toJson() else "",
+                extra = IMessageExtra(voice = media?.voice == true, effect = effect).toJson(),
             )
             // A receipt (or a reaction) can come from Apple before the send's answer did: what
             // [apply] held for it is applied now, under the same lock, so none slips between.
@@ -375,7 +464,8 @@ class DirectLink private constructor(
             IMessageLog.add(
                 app,
                 "${IMessageLog.chatRef(conversationId)}: sent through the iMessage library (Apple confirmed)" +
-                    if (media != null) " with ${if (media.voice) "a voice message" else media.mime.substringBefore('/')}" else "",
+                    (if (media != null) " with ${if (media.voice) "a voice message" else media.mime.substringBefore('/')}" else "") +
+                    (if (effect != null) ", with an effect" else ""),
             )
         } catch (e: Exception) {
             Log.w(TAG, "direct send failed", e)
@@ -817,6 +907,8 @@ class DirectLink private constructor(
         if (existing != null && existing.direction == "system" && !system) return
         // The message moves the chat's latest message, time and snippet (see toArchive).
         repo.upsertConversation(conversation.copy(unread = (conversation.unread || incoming) && !onScreen, lastMessageTs = 0))
+        // What the group is called on Apple's side (none, for one shown by its members' names), as of this.
+        if (DirectArchive.isGroup(conversation.id)) groupNames.note(conversation.id, update.conversation.name)
         val fresh = update.message.copy(
             conversationId = conversation.id,
             senderId = if (update.message.fromMe) "" else Handles.display(update.message.senderId),
@@ -850,12 +942,17 @@ class DirectLink private constructor(
         }
     }
 
-    /** A notification for [message], just stored, unless it was unsent or its chat read since; with its text as it now is. */
+    /**
+     * A notification for [message], just stored, unless it was unsent or its chat read since; with
+     * its text as it now is. Invisible ink stays hidden there too: it says only how it was sent.
+     */
     private fun notifyIfStillNew(message: MessageDto) {
         val row = repo.message(message.id) ?: return
         if (row.direction != "in") return
         if (repo.conversation(row.conversationId)?.unread != true) return
-        MessageNotifier.onIncoming(app, repo, message.copy(text = row.text))
+        val inked = IMessageExtra.isInvisibleInk(IMessageExtra.parse(row.extra).effect)
+        val text = if (inked) app.getString(R.string.imessage_sent_with, app.getString(R.string.imessage_effect_invisible_ink)) else row.text
+        MessageNotifier.onIncoming(app, repo, message.copy(text = text))
     }
 
     /**
@@ -1273,5 +1370,26 @@ internal class OnceSet(private val max: Int = 500) {
     @Synchronized
     fun release(key: String) {
         done.remove(key)
+    }
+}
+
+/**
+ * Each iMessage group's own name, as Apple has it, by conversation id: "" for a group its members
+ * did not name, which the archive names after its members, for showing. What is sent to a group
+ * carries this one: the iPhones in it would take its members' names for the group's name. Main
+ * process only.
+ */
+internal class GroupNames(context: Context) {
+    private val prefs = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+
+    /** [conversationId]'s own name ("" for none), or null when not known (a group stored before these were kept). */
+    fun of(conversationId: String): String? = prefs.getString(conversationId, null)
+
+    fun note(conversationId: String, name: String) {
+        if (prefs.getString(conversationId, null) != name) prefs.edit().putString(conversationId, name).apply()
+    }
+
+    private companion object {
+        const val FILE = "imessage_group_names"
     }
 }

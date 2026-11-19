@@ -17,6 +17,7 @@ import com.lightdecoder.archive.ArchiveRepository
 import com.lightdecoder.archive.ContactRow
 import com.lightdecoder.chat.Capability
 import com.lightdecoder.chat.ChatBackend
+import com.lightdecoder.chat.ChatService
 import com.lightdecoder.databinding.ActivityNewConversationBinding
 import com.lightdecoder.databinding.DialogGroupNameBinding
 import com.lightdecoder.relay.RelayIntents
@@ -35,11 +36,18 @@ import kotlinx.coroutines.withContext
  * one (RCS groups can have a name); elsewhere a new pick replaces the last.
  * The service finds an existing conversation with the same people instead
  * of making a second one.
+ *
+ * iMessage ("New iMessage group", through the iMessage library) has no
+ * contacts of its own: they are Messages', and an email address can be typed
+ * as well as a number.
  */
 class NewConversationActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityNewConversationBinding
     private lateinit var manager: ChatBackend
+
+    /** Where the contacts come from: the service's own, or Messages' for iMessage. */
+    private lateinit var contactsFrom: ChatBackend
     private lateinit var repo: ArchiveRepository
     private lateinit var adapter: ContactsAdapter
 
@@ -61,8 +69,14 @@ class NewConversationActivity : AppCompatActivity() {
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
         manager = ScreenBackends.get(this, RelayIntents.serviceOf(intent))
-        repo = manager.repo
+        val iMessage = manager.service == ChatService.IMESSAGE
+        contactsFrom = if (iMessage) ScreenBackends.get(this, ChatService.MESSAGES) else manager
+        repo = contactsFrom.repo
         groups = Capability.NEW_GROUP in manager.capabilities
+        if (iMessage) {
+            supportActionBar?.title = getString(R.string.imessage_new_group)
+            binding.queryLayout.hint = getString(R.string.imessage_to_hint)
+        }
 
         savedInstanceState?.getStringArrayList(STATE_NUMBERS)?.let { numbers ->
             val labels = savedInstanceState.getStringArrayList(STATE_LABELS).orEmpty()
@@ -118,7 +132,7 @@ class NewConversationActivity : AppCompatActivity() {
     private fun refreshContacts() {
         binding.progress.visibility = View.VISIBLE
         lifecycleScope.launch {
-            val fromPhone = relayAttempt { manager.contacts(refresh = true) }.getOrNull()?.fromPhone == true
+            val fromPhone = relayAttempt { contactsFrom.contacts(refresh = true) }.getOrNull()?.fromPhone == true
             binding.offlineHint.visibility = if (fromPhone) View.GONE else View.VISIBLE
             binding.progress.visibility = View.GONE
             filter(debounce = false)
@@ -151,10 +165,10 @@ class NewConversationActivity : AppCompatActivity() {
 
     // --- picking -------------------------------------------------------------
 
-    /** The typed text when it looks like a phone number (digits, maybe +, spaces, dashes). */
+    /** The typed text when it looks like a phone number (digits, maybe +, spaces, dashes), or for iMessage an email address. */
     private fun typedNumber(): String? {
         val text = binding.query.text?.toString()?.trim().orEmpty()
-        return text.takeIf { looksLikeNumber(it) }
+        return text.takeIf { looksLikeNumber(it) || (manager.service == ChatService.IMESSAGE && looksLikeEmail(it)) }
     }
 
     private fun renderUseNumber() {
@@ -200,6 +214,8 @@ class NewConversationActivity : AppCompatActivity() {
             return
         }
         val dialogBinding = DialogGroupNameBinding.inflate(layoutInflater)
+        // Every iMessage group shows its name (the default words are about RCS groups).
+        if (manager.service == ChatService.IMESSAGE) dialogBinding.groupBody.setText(R.string.imessage_group_body)
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.chat_group_title)
             .setView(dialogBinding.root)
@@ -249,5 +265,9 @@ class NewConversationActivity : AppCompatActivity() {
             // A "+" only as the first character (international prefix).
             return t.all { it.isDigit() || it in "+-() ./" } && t.lastIndexOf('+') <= 0
         }
+
+        /** An email address (someone's iMessage address). */
+        fun looksLikeEmail(text: String): Boolean =
+            com.lightdecoder.imessage.direct.Handles.normalize(text)?.startsWith("mailto:") == true
     }
 }

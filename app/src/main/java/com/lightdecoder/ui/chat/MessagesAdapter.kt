@@ -24,12 +24,15 @@ import com.lightdecoder.databinding.ItemMediaPartBinding
 import com.lightdecoder.databinding.ItemMessageBinding
 import com.lightdecoder.databinding.ItemMessageSystemBinding
 import com.lightdecoder.databinding.ItemThreadHeaderBinding
+import com.lightdecoder.imessage.direct.IMessageExtra
 import com.lightdecoder.relay.ReactionDto
 
 /**
  * Draws a thread: day headers, incoming and outgoing bubbles (sender name in
  * groups, reply quote, media, text, "Edited", time and delivery status,
- * reactions, an iPhone's "Delivered" / "Read"), and system notices.
+ * reactions, an iPhone's "Delivered" / "Read"), and system notices. An
+ * iMessage also shows what it carries beyond its text ([IMessageBubbles]): the
+ * effect it was sent with, invisible ink, a link preview, an iMessage app's card.
  */
 class MessagesAdapter(
     private val media: MediaLoader,
@@ -70,7 +73,16 @@ class MessagesAdapter(
         /** A reaction chip held down: who reacted with what, and when. */
         fun onReactionDetails(row: MessageRow, reaction: ReactionDto) = Unit
         fun onReply(row: MessageRow)
+
+        /** An iMessage's link preview tapped: open [url]. */
+        fun onOpenLink(url: String) = Unit
+
+        /** An iMessage app's card tapped (a game, a poll). */
+        fun onAppCardTap(row: MessageRow) = Unit
     }
+
+    /** Messages whose invisible ink was tapped away, by id: their text shows. */
+    private val revealed = HashSet<String>()
 
     private val ids = StableIds()
 
@@ -167,9 +179,11 @@ class MessagesAdapter(
         }
         val onOwn = if (blue) holder.onBlue else holder.onOutgoing
         val textColor = if (outgoing) onOwn else holder.onIncoming
+        val extra = if (row.extra.isEmpty()) NO_EXTRA else IMessageExtra.parse(row.extra)
+        val app = extra.app
         // A picture or sticker on its own has no bubble: it sits on the conversation itself
         // (as on an iPhone), with its time under it in the conversation's own colours.
-        val bare = isBare(item)
+        val bare = isBare(item) && app == null
         val metaColor = if (outgoing && !bare) onOwn else holder.incomingMeta
         bindBubbleShape(holder, bare, outgoing)
         b.bubble.backgroundTintList = ColorStateList.valueOf(bubbleColor)
@@ -205,10 +219,18 @@ class MessagesAdapter(
         b.subject.visibility = if (row.subject.isNotBlank()) View.VISIBLE else View.GONE
         b.subject.text = row.subject
 
-        bindMedia(holder, row, textColor)
+        // An app's card opens the app from its picture too.
+        bindMedia(holder, row, textColor, opensApp = app != null)
 
-        b.body.visibility = if (row.text.isNotEmpty()) View.VISIBLE else View.GONE
-        b.body.text = row.text
+        // An app's card draws its own lines instead of the text that stands for them.
+        val inked = IMessageBubbles.hidden(extra, row.text, row.id in revealed)
+        b.body.visibility = if (row.text.isNotEmpty() && app == null) View.VISIBLE else View.GONE
+        b.body.text = if (inked) IMessageBubbles.inked(row.text) else row.text
+        bindAppCard(holder, app, textColor, metaColor)
+        bindLinkCard(holder, extra.link.takeIf { app == null }, textColor, metaColor)
+        val effect = IMessageBubbles.effectCaption(context, extra)
+        b.effect.visibility = if (effect == null) View.GONE else View.VISIBLE
+        b.effect.text = effect.orEmpty()
 
         // Time and delivery status.
         b.time.text = TimeFormat.clock(context, row.timestampMs)
@@ -266,11 +288,37 @@ class MessagesAdapter(
         }
         b.bubble.setOnLongClickListener(longPress)
         b.body.setOnLongClickListener(longPress)
-        b.bubble.setOnClickListener(if (tick == Tick.FAILED) View.OnClickListener { callbacks.onFailedTap(row) } else null)
-        if (tick != Tick.FAILED) b.bubble.isClickable = false
-        ViewCompat.replaceAccessibilityAction(b.bubble, AccessibilityActionCompat.ACTION_CLICK, failedTapLabel, null)
+        b.linkCard.setOnLongClickListener(longPress)
+        // A tap: a failed one sends again (or asks), invisible ink shows its text, an app's card opens.
+        val reveal = View.OnClickListener {
+            revealed += row.id
+            val at = holder.bindingAdapterPosition
+            if (at != RecyclerView.NO_POSITION) notifyItemChanged(at)
+        }
+        val tap = when {
+            tick == Tick.FAILED -> View.OnClickListener { callbacks.onFailedTap(row) }
+            inked -> reveal
+            app != null -> View.OnClickListener { callbacks.onAppCardTap(row) }
+            else -> null
+        }
+        b.bubble.setOnClickListener(tap)
+        if (tap == null) b.bubble.isClickable = false
+        // The text takes its own touches (for its links): hidden, a tap on it shows it. Otherwise it
+        // is clickable only for its links, so a tap beside them reaches the bubble.
+        if (inked && tick != Tick.FAILED) {
+            b.body.setOnClickListener(reveal)
+        } else if (b.body.hasOnClickListeners()) {
+            b.body.setOnClickListener(null)
+            b.body.isClickable = b.body.movementMethod != null
+        }
+        val tapLabel = failedTapLabel ?: when {
+            inked -> context.getString(R.string.imessage_invisible_ink_hidden)
+            app != null -> app.shownName.ifBlank { context.getString(R.string.imessage_app_unnamed) }
+            else -> null
+        }
+        ViewCompat.replaceAccessibilityAction(b.bubble, AccessibilityActionCompat.ACTION_CLICK, tapLabel, null)
 
-        b.bubble.contentDescription = describe(holder, item, shownTick, receipt)
+        b.bubble.contentDescription = describe(holder, item, shownTick, receipt, inked, effect)
         // TalkBack users cannot swipe a bubble: offer reply as an action.
         ViewCompat.replaceAccessibilityAction(
             b.bubble, AccessibilityActionCompat.ACTION_LONG_CLICK, context.getString(R.string.chat_message_actions), null,
@@ -286,6 +334,53 @@ class MessagesAdapter(
         }
         // The text view is hidden from TalkBack (the bubble reads it): its links are bubble actions.
         holder.linkActionIds = BubbleLinks.bind(b.bubble, b.body, holder.linkActionIds)
+    }
+
+    /**
+     * An iMessage app's card ([app], none: hidden): the lines its app gave it
+     * ([IMessageBubbles.appLines]), the app's name small under them.
+     */
+    private fun bindAppCard(holder: MessageHolder, app: IMessageExtra.App?, textColor: Int, metaColor: Int) {
+        val b = holder.binding
+        if (app == null) {
+            b.appCard.visibility = View.GONE
+            return
+        }
+        b.appCard.visibility = View.VISIBLE
+        val lines = IMessageBubbles.appLines(app)
+        fun line(view: TextView, text: String, color: Int) {
+            view.visibility = if (text.isBlank()) View.GONE else View.VISIBLE
+            view.text = text
+            view.setTextColor(color)
+        }
+        line(b.appImageTitle, lines.imageTitle, textColor)
+        line(b.appImageSubtitle, lines.imageSubtitle, metaColor)
+        line(b.appCaption, lines.caption, textColor)
+        line(b.appSubcaption, lines.subcaption, metaColor)
+        line(b.appSecondary, lines.secondary, metaColor)
+        line(b.appName, lines.appName, metaColor)
+    }
+
+    /** A link's preview card under the text ([link], none: hidden); a tap opens the page. */
+    private fun bindLinkCard(holder: MessageHolder, link: IMessageExtra.Link?, textColor: Int, metaColor: Int) {
+        val b = holder.binding
+        if (link == null || link.url.isBlank()) {
+            b.linkCard.visibility = View.GONE
+            b.linkCard.setOnClickListener(null)
+            return
+        }
+        val lines = IMessageBubbles.linkLines(link)
+        b.linkCard.visibility = View.VISIBLE
+        b.linkTitle.text = lines.title
+        b.linkTitle.setTextColor(textColor)
+        b.linkSummary.text = lines.summary
+        b.linkSummary.visibility = if (lines.summary.isBlank()) View.GONE else View.VISIBLE
+        b.linkSummary.setTextColor(textColor)
+        b.linkSite.text = lines.site
+        b.linkSite.visibility = if (lines.site.isBlank()) View.GONE else View.VISIBLE
+        b.linkSite.setTextColor(metaColor)
+        b.linkCard.contentDescription = b.root.context.getString(R.string.imessage_link_preview, lines.title)
+        b.linkCard.setOnClickListener { callbacks.onOpenLink(link.url) }
     }
 
     /**
@@ -358,7 +453,8 @@ class MessagesAdapter(
     /** A voice message's length once known (it has been played), else 0. */
     var voiceDuration: (String) -> Int = { 0 }
 
-    private fun bindMedia(holder: MessageHolder, row: MessageRow, contentColor: Int) {
+    /** [opensApp]: the pictures are an iMessage app's card, and a tap on one opens it ([Callbacks.onAppCardTap]). */
+    private fun bindMedia(holder: MessageHolder, row: MessageRow, contentColor: Int, opensApp: Boolean = false) {
         val container = holder.binding.mediaContainer
         // The old part views go: stop their loads first, or every rebind (a status
         // or reaction change) would leave a download running for a detached view.
@@ -388,7 +484,7 @@ class MessagesAdapter(
                 pb.mediaImage.contentDescription = container.context.getString(
                     if (part.mime.startsWith("video/")) R.string.chat_media_video else R.string.chat_media_picture
                 )
-                pb.mediaFrame.setOnClickListener { callbacks.onMediaTap(row, part) }
+                pb.mediaFrame.setOnClickListener { if (opensApp) callbacks.onAppCardTap(row) else callbacks.onMediaTap(row, part) }
                 pb.mediaFrame.setOnLongClickListener {
                     callbacks.onMessageLongPress(row)
                     true
@@ -528,8 +624,11 @@ class MessagesAdapter(
         else -> context.getString(R.string.imessage_receipt_read_at, TimeFormat.receiptTime(context, receipt.readAtMs))
     }
 
-    /** What TalkBack reads for a bubble: who, what, when, and how far it got ([receipt] when it says). */
-    private fun describe(holder: MessageHolder, item: ThreadItem.Message, tick: Tick, receipt: String?): String {
+    /**
+     * What TalkBack reads for a bubble: who, what (not invisible ink's words while [inked]), the
+     * [effect] it was sent with, when, and how far it got ([receipt] when it says).
+     */
+    private fun describe(holder: MessageHolder, item: ThreadItem.Message, tick: Tick, receipt: String?, inked: Boolean, effect: String?): String {
         val context = holder.binding.root.context
         val row = item.row
         val who = if (row.isOutgoing) context.getString(R.string.chat_you)
@@ -540,7 +639,8 @@ class MessagesAdapter(
         if (row.media.isNotEmpty()) {
             parts += context.resources.getQuantityString(R.plurals.chat_attachments, row.media.size, row.media.size)
         }
-        if (row.text.isNotEmpty()) parts += row.text
+        if (inked) parts += context.getString(R.string.imessage_invisible_ink_hidden) else if (row.text.isNotEmpty()) parts += row.text
+        effect?.takeIf { !inked }?.let { parts += it }
         if (row.editedAtMs > 0) parts += context.getString(R.string.imessage_edited)
         parts += TimeFormat.clock(context, row.timestampMs)
         holder.binding.statusIcon.contentDescription?.takeIf { tick != Tick.NONE }?.let { parts += it.toString() }
@@ -558,6 +658,9 @@ class MessagesAdapter(
 
         /** How Material dims a control that cannot be used. */
         const val DISABLED_ALPHA = 0.38f
+
+        /** A message that carries nothing beyond its text (every service's but iMessage's). */
+        val NO_EXTRA = IMessageExtra()
 
         /** The ticks that receipts in words stand in for ([appleReceipts]). */
         val RECEIPT_TICKS = setOf(Tick.SENT, Tick.DELIVERED, Tick.READ)

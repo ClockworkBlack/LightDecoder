@@ -1159,6 +1159,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     private fun setUpComposer() {
         binding.send.setOnClickListener { send() }
+        // As on an iPhone: held down, it offers Apple's effects, in a chat that goes through the iMessage library.
+        binding.send.setOnLongClickListener { offerEffects() }
         binding.attach.setOnClickListener {
             pickMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
         }
@@ -1521,7 +1523,35 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         binding.input.setText("")
     }
 
-    private fun send() {
+    /**
+     * Whether what is typed goes to an iMessage chat through the iMessage library, which can send
+     * it with one of Apple's effects: this iMessage chat, or the person's iMessage chat shown in this
+     * Messages conversation.
+     */
+    private fun sendsWithEffects(): Boolean {
+        if (!directMode()) return false
+        return when (manager.service) {
+            ChatService.MESSAGES -> companionId?.let { it in directReachable } == true
+            ChatService.IMESSAGE -> conversationId in directReachable
+            else -> false
+        }
+    }
+
+    /** The send button held down: Apple's effects to send it with ("Sent with Slam"), as on an iPhone. False when it offers none. */
+    private fun offerEffects(): Boolean {
+        if (!binding.send.isEnabled || !sendsWithEffects()) return false
+        val effects = com.lightdecoder.imessage.direct.IMessageExtra.EFFECTS
+        confirmDialog?.dismiss()
+        confirmDialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.imessage_effect_pick_title)
+            .setItems(effects.map { getString(it.second) }.toTypedArray()) { _, which -> send(effect = effects[which].first) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+        return true
+    }
+
+    /** Sends what the composer holds; [effect] is Apple's effect to send it with (iMessage through the library only). */
+    private fun send(effect: String? = null) {
         val text = binding.input.text?.toString()?.trim().orEmpty()
         val files = attachments
         if (text.isEmpty() && files.isEmpty()) return
@@ -1559,7 +1589,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             clearAttachment()
             lifecycleScope.launch {
                 withContext(Dispatchers.IO) {
-                    relayAttempt { if (files.isEmpty()) im.sendText(companion, text, replyTo) else sendFiles(im, companion, files, text, replyTo) }
+                    relayAttempt {
+                        if (files.isEmpty()) im.sendText(companion, text, replyTo, effect) else sendFiles(im, companion, files, text, replyTo, effect)
+                    }
                 }.onFailure { toast(errorText(im, it)) }
             }
             return
@@ -1597,8 +1629,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             val result = withContext(Dispatchers.IO) {
                 relayAttempt {
                     when {
+                        files.isEmpty() && link is com.lightdecoder.imessage.IMessageManager -> link.sendText(id, text, replyTo, effect)
                         files.isEmpty() -> link.sendText(id, text, replyTo)
-                        link is com.lightdecoder.imessage.IMessageManager -> sendFiles(link, id, files, text, replyTo)
+                        link is com.lightdecoder.imessage.IMessageManager -> sendFiles(link, id, files, text, replyTo, effect)
                         else -> {
                             // Each picture as a message of its own, in the order picked (queued in turn, they go
                             // out in it): the phone keeps only one part of a message with several. The text goes
@@ -1627,12 +1660,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     /**
      * Pictures and files to an iMessage chat through the iMessage library: each an iMessage of its
-     * own, in the order picked, the text with the first (above it, as Apple numbers the parts) and
-     * the reply too. Runs on IO; stops at the first that cannot go.
+     * own, in the order picked, the text with the first (above it, as Apple numbers the parts), the
+     * reply and the [effect] too. Runs on IO; stops at the first that cannot go.
      */
-    private fun sendFiles(im: com.lightdecoder.imessage.IMessageManager, chat: String, files: List<Uri>, text: String, replyTo: String?) {
+    private fun sendFiles(im: com.lightdecoder.imessage.IMessageManager, chat: String, files: List<Uri>, text: String, replyTo: String?, effect: String?) {
         files.forEachIndexed { i, file ->
-            im.sendMedia(chat, file, text.ifEmpty { null }.takeIf { i == 0 }, replyTo.takeIf { i == 0 })
+            im.sendMedia(chat, file, text.ifEmpty { null }.takeIf { i == 0 }, replyTo.takeIf { i == 0 }, effect.takeIf { i == 0 })
         }
     }
 
@@ -2484,6 +2517,31 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             } else {
                 openWithOtherApp(file, mime)
             }
+        }
+    }
+
+    /** An iMessage's link preview tapped: the page opens in the browser. */
+    override fun onOpenLink(url: String) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE))
+        } catch (e: ActivityNotFoundException) {
+            toast(getString(R.string.chat_no_app))
+        }
+    }
+
+    /**
+     * An iMessage app's card tapped (a game, a poll): an installed extension app that plays it here
+     * takes it; else one that keeps its state in a web address opens in the browser; else it opens
+     * only on an Apple device, which a toast says ([com.lightdecoder.imessage.direct.IMessageApps]).
+     */
+    override fun onAppCardTap(row: MessageRow) {
+        val app = com.lightdecoder.imessage.direct.IMessageExtra.parse(row.extra).app ?: return
+        val apps = com.lightdecoder.imessage.direct.IMessageApps
+        when (val tap = apps.tap(app) { apps.host?.engage(this, row, it) == true }) {
+            com.lightdecoder.imessage.direct.IMessageApps.Tap.Engaged -> Unit
+            is com.lightdecoder.imessage.direct.IMessageApps.Tap.Open -> onOpenLink(tap.url)
+            is com.lightdecoder.imessage.direct.IMessageApps.Tap.OnlyOnApple ->
+                toast(getString(R.string.imessage_app_only_on_apple, tap.name.ifBlank { getString(R.string.imessage_app_unnamed) }))
         }
     }
 

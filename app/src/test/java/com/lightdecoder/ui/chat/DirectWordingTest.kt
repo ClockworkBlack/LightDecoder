@@ -50,11 +50,25 @@ class DirectWordingTest {
             R.string.imessage_media_waiting_direct, R.string.imessage_media_not_here_direct, R.string.imessage_direct_no_own_address,
             R.string.imessage_direct_attachment_too_big, R.string.imessage_direct_attachment_unreadable,
             R.string.imessage_direct_attachment_no_file, R.string.imessage_direct_attachment_not_saved,
+            R.string.imessage_event_app_updated, R.string.imessage_event_app_updated_unnamed, R.string.imessage_sent_with,
+            R.string.imessage_effect_pick_title, R.string.imessage_invisible_ink_hidden, R.string.imessage_app_only_on_apple,
+            R.string.imessage_app_unnamed, R.string.imessage_link_preview, R.string.imessage_new_group, R.string.imessage_to_hint,
+            R.string.imessage_group_body, R.string.imessage_not_on_imessage,
         )
         for (res in direct) {
             val text = context.getString(res)
             assertFalse(text, text.contains("OpenBubbles"))
         }
+        for (count in listOf(1, 2)) {
+            val text = context.resources.getQuantityString(R.plurals.imessage_group_not_on_imessage, count, "Bob")
+            assertFalse(text, text.contains("OpenBubbles"))
+        }
+        assertEquals("Sent with Slam", context.getString(R.string.imessage_sent_with, context.getString(R.string.imessage_effect_slam)))
+        assertEquals(
+            "GamePigeon can only be opened on an iPhone, iPad or Mac.",
+            context.getString(R.string.imessage_app_only_on_apple, "GamePigeon"),
+        )
+        assertEquals("Bob updated Polls.", context.getString(R.string.imessage_event_app_updated, "Bob", "Polls"))
         assertEquals("Delivered", context.getString(R.string.imessage_receipt_delivered))
         assertEquals("Read 9:41", context.getString(R.string.imessage_receipt_read_at, "9:41"))
         assertEquals(

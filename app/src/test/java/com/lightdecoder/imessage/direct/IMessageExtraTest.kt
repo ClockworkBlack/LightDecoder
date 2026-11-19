@@ -70,4 +70,44 @@ class IMessageExtraTest {
         assertTrue(IMessageExtra.isInvisibleInk("com.apple.MobileSMS.expressivesend.invisibleink"))
         assertFalse(IMessageExtra.isInvisibleInk("com.apple.MobileSMS.expressivesend.loud"))
     }
+
+    @Test
+    fun everyEffectHasTheNameAnIphoneGivesIt() {
+        val context: Context = ApplicationProvider.getApplicationContext()
+        val names = IMessageExtra.EFFECTS.associate { (id, res) -> id to context.getString(res) }
+        assertEquals(
+            mapOf(
+                "com.apple.MobileSMS.expressivesend.impact" to "Slam",
+                "com.apple.MobileSMS.expressivesend.loud" to "Loud",
+                "com.apple.MobileSMS.expressivesend.gentle" to "Gentle",
+                "com.apple.MobileSMS.expressivesend.invisibleink" to "Invisible Ink",
+                "com.apple.messages.effect.CKEchoEffect" to "Echo",
+                "com.apple.messages.effect.CKSpotlightEffect" to "Spotlight",
+                "com.apple.messages.effect.CKHappyBirthdayEffect" to "Balloons",
+                "com.apple.messages.effect.CKConfettiEffect" to "Confetti",
+                "com.apple.messages.effect.CKHeartEffect" to "Love",
+                "com.apple.messages.effect.CKLasersEffect" to "Lasers",
+                "com.apple.messages.effect.CKFireworksEffect" to "Fireworks",
+                "com.apple.messages.effect.CKSparklesEffect" to "Celebration",
+            ),
+            names,
+        )
+    }
+
+    @Test
+    fun anAppsCardSaysItsCaptionElseItsSummaryElseItsName() {
+        val app = IMessageExtra.App(name = "GamePigeon", ldText = "8 Ball", caption = "Your move")
+        assertEquals("Your move", app.cardCaption)
+        assertEquals("Your move", app.summary())
+        assertEquals("8 Ball", app.copy(caption = "").summary())
+        assertEquals("GamePigeon", app.copy(caption = "", ldText = "").summary())
+        // The library's name for an app Apple did not name is not shown.
+        assertEquals("", app.copy(name = IMessageExtra.UNNAMED_APP).shownName)
+        assertEquals("", app.copy(name = IMessageExtra.UNNAMED_APP, caption = "", ldText = "").summary())
+        // Only a web address opens in the browser (as on a Mac); an app's own state does not.
+        assertTrue(app.copy(url = "https://example.com/poll").opensInBrowser)
+        assertTrue(app.copy(url = "HTTP://example.com").opensInBrowser)
+        assertFalse(app.copy(url = "data:game-state").opensInBrowser)
+        assertFalse(app.copy(url = "").opensInBrowser)
+    }
 }

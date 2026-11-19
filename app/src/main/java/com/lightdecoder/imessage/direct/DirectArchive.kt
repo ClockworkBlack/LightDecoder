@@ -14,7 +14,6 @@ import uniffi.rust_bridge.LinkMeta
 import uniffi.rust_bridge.MessageAttachment
 import uniffi.rust_bridge.MessageInst
 import uniffi.rust_bridge.MessagePart
-import uniffi.rust_bridge.NormalMessage
 import uniffi.rust_bridge.PartExtension
 import uniffi.rust_bridge.PushChatMessage
 import uniffi.rust_bridge.ReactMessageType
@@ -77,12 +76,15 @@ object DirectArchive {
         return when {
             others.size <= 1 && (others.isNotEmpty() || participants.isNotEmpty()) ->
                 PREFIX + (others.firstOrNull() ?: participants.first())
-            !groupGuid.isNullOrBlank() -> PREFIX + GROUP + groupGuid
+            !groupGuid.isNullOrBlank() -> groupConversationId(groupGuid)
             else -> PREFIX + GROUP + "members:" + others.joinToString(",")
         }
     }
 
     fun isGroup(conversationId: String): Boolean = conversationId.startsWith(PREFIX + GROUP)
+
+    /** The conversation id of the group whose guid is [guid]. */
+    fun groupConversationId(guid: String): String = PREFIX + GROUP + guid
 
     /** A group's guid from its conversation id, null for one-to-one or a members-only group. */
     fun groupGuid(conversationId: String): String? =
@@ -160,6 +162,9 @@ object DirectArchive {
         fun left(who: String): String
         fun changedPhoto(who: String): String
         fun removedPhoto(who: String): String
+
+        /** Someone voted in a poll or did the like in an iMessage app ([app]: its name, empty when unknown). */
+        fun updated(who: String, app: String): String
     }
 
     /**
@@ -182,11 +187,17 @@ object DirectArchive {
         // OpenBubbles drops these when Apple could not verify who sent them.
         if (inst.verificationFailed && droppedUnverified(m)) return Update.Ignore
         return when (m) {
-            is PushChatMessage.Message -> message(inst, m.v1, me, nameOf, describe)
-            is PushChatMessage.React -> {
-                val r = m.v1.reaction as? ReactMessageType.React ?: return Update.Ignore
-                if (sender == null) return Update.Ignore
-                Update.Reaction(messageId(m.v1.toUuid), Handles.display(sender), emojiOf(r.reaction), r.enable, fromMe, timestampOf(inst))
+            is PushChatMessage.Message -> {
+                val n = m.v1
+                val body = Body(n.parts, n.effect, n.voice, linkOf(n.linkMeta), appOf(n.app, messageId(inst.id)), n.subject, n.replyGuid)
+                message(inst, body, me, nameOf, describe)
+            }
+            is PushChatMessage.React -> when (val r = m.v1.reaction) {
+                is ReactMessageType.React -> {
+                    if (sender == null) return Update.Ignore
+                    Update.Reaction(messageId(m.v1.toUuid), Handles.display(sender), emojiOf(r.reaction), r.enable, fromMe, timestampOf(inst))
+                }
+                is ReactMessageType.Extension -> appUpdate(inst, m.v1.toUuid, r, me, nameOf, texts, describe)
             }
             is PushChatMessage.Unsend ->
                 Update.Unsent(messageId(m.v1.tuuid), m.v1.editPart.toInt(), fromMe, if (fromMe || sender == null) "" else nameOf(sender))
@@ -233,9 +244,20 @@ object DirectArchive {
     /** Apple's time of the event, else now. */
     private fun timestampOf(inst: MessageInst): Long = inst.sentTimestamp.toLong().takeIf { it > 0 } ?: System.currentTimeMillis()
 
+    /** What a stored message is made of: an iMessage's, or an iMessage app's new move's. */
+    private class Body(
+        val parts: List<IndexedMessagePart>,
+        val effect: String?,
+        val voice: Boolean,
+        val link: IMessageExtra.Link?,
+        val app: IMessageExtra.App?,
+        val subject: String?,
+        val replyGuid: String?,
+    )
+
     private fun message(
         inst: MessageInst,
-        n: NormalMessage,
+        n: Body,
         me: Set<String>,
         nameOf: (String) -> String,
         describe: (MessageAttachment) -> String,
@@ -247,14 +269,15 @@ object DirectArchive {
         val id = conversationId(participants, me, conversation.senderGuid)
         val conv = conversationDto(id, participants, conversation.cvName, me, nameOf)
         val texts = partTexts(n.parts)
-        val text = IMessageExtra(parts = texts).text()
+        // An app's card has no words of its own on the wire: what it shows stands for them.
+        val text = n.app?.summary() ?: IMessageExtra(parts = texts).text()
         val attachments = attachments(n.parts)
         val extra = IMessageExtra(
             parts = texts,
             effect = n.effect?.takeIf { it.isNotBlank() },
             voice = n.voice,
-            link = linkOf(n.linkMeta),
-            app = appOf(n.app, messageId(inst.id)),
+            link = n.link,
+            app = n.app,
             sticker = attachments.any { it.sticker },
         )
         val msg = MessageDto(
@@ -275,6 +298,45 @@ object DirectArchive {
             extra = extra.toJson(),
         )
         return Update.Upsert(conv, msg)
+    }
+
+    /**
+     * An iMessage app's update to the card that started its session (message [rootGuid]). A move
+     * (a game's turn) is a card of its own, a new message with the app's new state and picture,
+     * as an iPhone shows it; a vote in a poll and the like ([ReactMessageType.Extension.isMeta])
+     * is a row of the conversation's own saying who did it.
+     */
+    private fun appUpdate(
+        inst: MessageInst,
+        rootGuid: String,
+        ext: ReactMessageType.Extension,
+        me: Set<String>,
+        nameOf: (String) -> String,
+        texts: Texts,
+        describe: (MessageAttachment) -> String,
+    ): Update {
+        val conversation = inst.conversation ?: return Update.Ignore
+        val sender = inst.sender
+        val app = appOf(ext.spec, messageId(rootGuid)) ?: return Update.Ignore
+        if (ext.isMeta) {
+            val who = actor(sender, sender != null && sender in me, nameOf, texts) ?: return Update.Ignore
+            val members = (conversation.participants + listOfNotNull(sender)).distinct()
+            return eventRow(inst, conversation, members, conversation.cvName, me, nameOf, texts.updated(who, app.shownName))
+        }
+        // Without a card it is nothing an iPhone shows.
+        if (ext.spec.balloon == null) return Update.Ignore
+        return message(inst, Body(ext.body, null, false, null, app, null, null), me, nameOf, describe)
+    }
+
+    /**
+     * The parts whose attachments [m] stores (see [attachments]): an iMessage's own, or an iMessage
+     * app's new move's; none for anything else.
+     */
+    fun storedParts(m: PushChatMessage): List<IndexedMessagePart> = when (m) {
+        is PushChatMessage.Message -> m.v1.parts
+        is PushChatMessage.React ->
+            (m.v1.reaction as? ReactMessageType.Extension)?.takeIf { !it.isMeta && it.spec.balloon != null }?.body.orEmpty()
+        else -> emptyList()
     }
 
     /**
@@ -400,10 +462,27 @@ object DirectArchive {
         nameOf: (String) -> String,
         text: String,
     ): Update {
-        val sender = inst.sender
         // The group as it was, so that members leaving never turn it into a one-to-one chat.
-        val id = conversationId((conversation.participants + listOfNotNull(sender)).distinct(), me, conversation.senderGuid)
+        val id = conversationId((conversation.participants + listOfNotNull(inst.sender)).distinct(), me, conversation.senderGuid)
         if (!isGroup(id)) return Update.Ignore
+        return eventRow(inst, conversation, members, groupName, me, nameOf, text)
+    }
+
+    /**
+     * A row of a conversation's own (direction "system") saying [text], with the conversation as it
+     * now is: [members] and [groupName] (a group's; the conversation's own when null).
+     */
+    private fun eventRow(
+        inst: MessageInst,
+        conversation: ConversationData,
+        members: List<String>,
+        groupName: String?,
+        me: Set<String>,
+        nameOf: (String) -> String,
+        text: String,
+    ): Update {
+        val sender = inst.sender
+        val id = conversationId((conversation.participants + listOfNotNull(sender)).distinct(), me, conversation.senderGuid)
         val fromMe = sender != null && sender in me
         val conv = conversationDto(id, members.distinct(), groupName, me, nameOf)
         val msg = MessageDto(

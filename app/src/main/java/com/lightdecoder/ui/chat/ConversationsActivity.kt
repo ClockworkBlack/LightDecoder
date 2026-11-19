@@ -638,6 +638,9 @@ class ConversationsActivity : AppCompatActivity() {
             item.isChecked = blueBubbles.isOn()
         }
         menu.findItem(R.id.action_imessage_direct)?.isVisible = backend.service == ChatService.MESSAGES
+        // iMessage groups start here only through the iMessage library (OpenBubbles' notifications start nothing).
+        menu.findItem(R.id.action_new_imessage_group)?.isVisible =
+            backend.service == ChatService.MESSAGES && com.lightdecoder.imessage.direct.DirectLink.get(this).active
         // The iMessage light: Messages tab, while Blue Bubbles is on.
         menu.findItem(R.id.action_imessage_light)?.let { item ->
             if (backend.service == ChatService.MESSAGES) IMessageLight.bind(this, item, IMessageLight.overall(this), hideWhenOff = true)
@@ -656,6 +659,9 @@ class ConversationsActivity : AppCompatActivity() {
             R.id.action_refresh -> refreshFromPhone()
             R.id.action_blue_bubbles -> blueBubbles.toggle()
             R.id.action_imessage_direct -> startActivity(Intent(this, com.lightdecoder.ui.imessage.DirectSetupActivity::class.java))
+            R.id.action_new_imessage_group -> startActivity(
+                Intent(this, NewConversationActivity::class.java).putExtra(RelayIntents.EXTRA_SERVICE, ChatService.IMESSAGE.key)
+            )
             R.id.action_link_status -> startActivity(ServiceUi.status(this, backend.service))
             R.id.action_delete_archive -> LocalArchive.confirmDelete(this, backend) { reload() }
             R.id.action_empty_deleted -> confirmEmptyDeleted()

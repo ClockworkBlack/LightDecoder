@@ -16,4 +16,6 @@ class DirectTexts(context: Context) : DirectArchive.Texts {
     override fun left(who: String): String = res.getString(R.string.imessage_event_left, who)
     override fun changedPhoto(who: String): String = res.getString(R.string.imessage_event_photo_changed, who)
     override fun removedPhoto(who: String): String = res.getString(R.string.imessage_event_photo_removed, who)
+    override fun updated(who: String, app: String): String =
+        if (app.isBlank()) res.getString(R.string.imessage_event_app_updated_unnamed, who) else res.getString(R.string.imessage_event_app_updated, who, app)
 }

@@ -200,9 +200,30 @@
     <string name="imessage_check_not_confirmed_direct">Apple has not confirmed it yet. Is iMessage connected?</string>
     <!-- %1$s: the number or email address Apple was asked about. -->
     <string name="imessage_not_on_imessage">%1$s is not on iMessage.</string>
-    <string name="imessage_direct_no_new_groups">New iMessage groups can\'t be started from LightDecoder yet.</string>
     <string name="imessage_error_no_reply_direct">This chat can\'t be reached through iMessage (no address or group id).</string>
     <string name="imessage_error_internal_direct">Something went wrong with iMessage.</string>
+
+    <!-- Direct mode: groups, message effects, link previews and iMessage app cards, as an iPhone words them. -->
+    <!-- %1$s: who; %2$s: the iMessage app (a poll's vote, and the like). -->
+    <string name="imessage_event_app_updated">%1$s updated %2$s.</string>
+    <string name="imessage_event_app_updated_unnamed">%1$s updated an iMessage app.</string>
+    <!-- Under a message sent with an effect. %1$s: the effect (imessage_effect_*). -->
+    <string name="imessage_sent_with">Sent with %1$s</string>
+    <string name="imessage_effect_pick_title">Send with effect</string>
+    <string name="imessage_invisible_ink_hidden">Invisible Ink: tap to reveal</string>
+    <!-- %1$s: the iMessage app's name, or imessage_app_unnamed. -->
+    <string name="imessage_app_only_on_apple">%1$s can only be opened on an iPhone, iPad or Mac.</string>
+    <string name="imessage_app_unnamed">This iMessage app</string>
+    <!-- For TalkBack. %1$s: the page's title, or its address. -->
+    <string name="imessage_link_preview">Link preview: %1$s</string>
+    <string name="imessage_new_group">New iMessage group</string>
+    <string name="imessage_to_hint">Name, number or email</string>
+    <string name="imessage_group_body">Group name (optional). Everyone in the group sees it.</string>
+    <!-- %1$s: the people Apple says are not on iMessage, by name or address, comma-separated. -->
+    <plurals name="imessage_group_not_on_imessage">
+        <item quantity="one">%1$s is not on iMessage, so the group can\'t be started.</item>
+        <item quantity="other">%1$s are not on iMessage, so the group can\'t be started.</item>
+    </plurals>
 
     <!-- Under the user's latest iMessages, as on an iPhone. %1$s: when ("9:41", "Yesterday", "Mon", a date). -->
     <string name="imessage_receipt_delivered">Delivered</string>

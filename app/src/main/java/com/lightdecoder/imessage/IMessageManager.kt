@@ -67,7 +67,10 @@ class IMessageManager private constructor(
 
     override val service: ChatService get() = ChatService.IMESSAGE
 
-    /** Through the iMessage library the user's iMessages can be edited ([editMessage]); through OpenBubbles' notifications nothing more. */
+    /**
+     * Through the iMessage library the user's iMessages can be edited ([editMessage]) and groups
+     * started ([startConversation]); through OpenBubbles' notifications nothing more.
+     */
     override val capabilities: Set<Capability> get() = if (direct.active) DIRECT_CAPABILITIES else emptySet()
 
     private val _state = MutableStateFlow(currentState())
@@ -343,12 +346,18 @@ class IMessageManager private constructor(
      * notification is not shown there as sent; the conversation screen
      * hands such a message to OpenBubbles instead.
      */
-    override fun sendText(conversationId: String, text: String, replyToId: String?): String {
+    override fun sendText(conversationId: String, text: String, replyToId: String?): String = sendText(conversationId, text, replyToId, effect = null)
+
+    /**
+     * [sendText], sent with Apple's [effect] ("Sent with Slam"; null: none). Effects go only through
+     * the iMessage library: without it [effect] is left out.
+     */
+    fun sendText(conversationId: String, text: String, replyToId: String?, effect: String?): String {
         val body = text.trim()
         if (body.isEmpty()) throw RelayException(RelayException.INVALID_ARGUMENT, "empty message")
         // Straight to Apple through the library: a real iMessage with its own GUID (Unsend works),
         // replies inline, and Apple's answer decides sent or failed.
-        if (direct.canSend(conversationId)) return direct.sendText(conversationId, body, replyToId)
+        if (direct.canSend(conversationId)) return direct.sendText(conversationId, body, replyToId, effect)
         requireEnabled()
         val tmpId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
@@ -407,14 +416,18 @@ class IMessageManager private constructor(
      * [IMessageErrors.NO_REPLY_BUTTON].
      */
     override fun sendMedia(conversationId: String, uri: Uri, caption: String?, replyToId: String?): String =
-        sendThroughLibrary(conversationId, uri, caption, replyToId, voice = false)
+        sendThroughLibrary(conversationId, uri, caption, replyToId, voice = false, effect = null)
+
+    /** [sendMedia], sent with Apple's [effect] (null: none). */
+    fun sendMedia(conversationId: String, uri: Uri, caption: String?, replyToId: String?, effect: String?): String =
+        sendThroughLibrary(conversationId, uri, caption, replyToId, voice = false, effect = effect)
 
     /** A recorded voice message, which an iPhone shows as one: as [sendMedia]. */
     fun sendVoice(conversationId: String, uri: Uri, replyToId: String?): String =
-        sendThroughLibrary(conversationId, uri, null, replyToId, voice = true)
+        sendThroughLibrary(conversationId, uri, null, replyToId, voice = true, effect = null)
 
-    private fun sendThroughLibrary(conversationId: String, uri: Uri, caption: String?, replyToId: String?, voice: Boolean): String {
-        if (direct.canSend(conversationId)) return direct.sendMedia(conversationId, uri, caption, replyToId, voice)
+    private fun sendThroughLibrary(conversationId: String, uri: Uri, caption: String?, replyToId: String?, voice: Boolean, effect: String?): String {
+        if (direct.canSend(conversationId)) return direct.sendMedia(conversationId, uri, caption, replyToId, voice, effect)
         if (direct.active) throw RelayException(IMessageErrors.NO_REPLY_BUTTON, "this chat cannot be reached through the iMessage library")
         throw RelayException(IMessageErrors.HAND_OFF, "attachments are sent in OpenBubbles")
     }
@@ -635,14 +648,19 @@ class IMessageManager private constructor(
 
     /**
      * New chats start in OpenBubbles. Through the iMessage library, a chat with one person is
-     * the stored one or a new one once Apple says they have iMessage; groups come later.
+     * the stored one or a new one once Apple says they have iMessage; several people start a
+     * group named [groupName], once Apple says each of them has iMessage
+     * ([com.lightdecoder.imessage.direct.DirectLink.startGroup]).
      */
     override suspend fun startConversation(numbers: List<String>, groupName: String?): String = withContext(Dispatchers.IO) {
         if (!direct.active) throw RelayException(IMessageErrors.HAND_OFF, "new chats start in OpenBubbles")
-        val address = numbers.map { it.trim() }.filter { it.isNotEmpty() }.distinct().singleOrNull()
-            ?: throw com.lightdecoder.imessage.direct.DirectEngine.ImessageError(appContext.getString(com.lightdecoder.R.string.imessage_direct_no_new_groups))
-        direct.conversationFor(address)
-            ?: throw com.lightdecoder.imessage.direct.DirectEngine.ImessageError(appContext.getString(com.lightdecoder.R.string.imessage_not_on_imessage, address))
+        val addresses = numbers.map { it.trim() }.filter { it.isNotEmpty() }.distinctBy { IMessageAddress.key(it) ?: it }
+        when (addresses.size) {
+            0 -> throw RelayException(RelayException.INVALID_ARGUMENT, "no address")
+            1 -> direct.conversationFor(addresses[0])
+                ?: throw com.lightdecoder.imessage.direct.DirectEngine.ImessageError(appContext.getString(com.lightdecoder.R.string.imessage_not_on_imessage, addresses[0]))
+            else -> direct.startGroup(addresses, groupName)
+        }
     }
 
     override suspend fun markNotSpam(conversationId: String): Unit = throw RelayException(WA_UNSUPPORTED, "no spam folder")
@@ -685,7 +703,7 @@ class IMessageManager private constructor(
         private const val WA_UNSUPPORTED = "unsupported"
 
         /** What the iMessage library adds. */
-        private val DIRECT_CAPABILITIES = setOf(Capability.EDIT)
+        private val DIRECT_CAPABILITIES = setOf(Capability.EDIT, Capability.NEW_GROUP)
 
         @Volatile
         private var instance: IMessageManager? = null

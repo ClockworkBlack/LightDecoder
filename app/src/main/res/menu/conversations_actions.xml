@@ -31,6 +31,12 @@
         android:title="@string/imessage_menu"
         android:visible="false"
         app:showAsAction="never" />
+    <!-- Messages tab, through the iMessage library: an iMessage group with people picked from the contacts. -->
+    <item
+        android:id="@+id/action_new_imessage_group"
+        android:title="@string/imessage_new_group"
+        android:visible="false"
+        app:showAsAction="never" />
     <item
         android:id="@+id/action_link_status"
         android:title="@string/chat_link_status"

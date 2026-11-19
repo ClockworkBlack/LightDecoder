@@ -163,8 +163,7 @@ class DirectEngine private constructor(private val app: Context) {
      * processes.
      */
     private fun keepInlineFiles(inst: MessageInst) {
-        val n = (inst.message as? PushChatMessage.Message)?.v1 ?: return
-        for (a in DirectArchive.attachments(n.parts)) {
+        for (a in DirectArchive.attachments(DirectArchive.storedParts(inst.message))) {
             val bytes = a.inlineBytes?.takeIf { it.isNotEmpty() } ?: continue
             val file = MediaCache.fileFor(app, DirectArchive.mediaId(inst.id, a.idx), DirectMedia.extensionFor(a.mime, a.name), ChatService.IMESSAGE)
             if (file.length() == bytes.size.toLong()) continue

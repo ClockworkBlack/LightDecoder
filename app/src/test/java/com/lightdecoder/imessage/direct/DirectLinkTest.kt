@@ -1119,7 +1119,7 @@ class DirectLinkTest {
         manager.retry(failed.tmpId)
         assertEquals(failed, repo.messages("iMessage;+;chat123").single())
         assertTrue("nothing asked of the library for it", synchronized(asked) { asked.none { it.first == DirectWire.SEND } })
-        // New chats: with one person once Apple says they have iMessage; groups not yet.
+        // New chats: with one person once Apple says they have iMessage; a group once Apple says each has.
         try {
             runBlocking { manager.startConversation(listOf("+15557777777"), null) }
             fail("a chat with someone not on iMessage")
@@ -1128,9 +1128,9 @@ class DirectLinkTest {
         }
         try {
             runBlocking { manager.startConversation(listOf("+15557777777", "+15558888888"), "Trip") }
-            fail("a group")
+            fail("a group with people not on iMessage")
         } catch (e: DirectEngine.ImessageError) {
-            assertEquals(context.getString(com.lightdecoder.R.string.imessage_direct_no_new_groups), e.message)
+            assertEquals("+15557777777, +15558888888 are not on iMessage, so the group can't be started.", e.message)
         }
         assertEquals(chat, runBlocking { manager.startConversation(listOf("+1 555 987 6543"), null) })
         // What the logs and the problem report say of it names the library, not OpenBubbles.
@@ -1140,6 +1140,172 @@ class DirectLinkTest {
         DirectPrefs.setLastStatus(context, DirectEngine.describe(DirectEngine.Status.Retrying("busy", 30)))
         assertTrue(manager.setupSummary(), manager.setupSummary().contains("last status: not connected, Apple's library tries again in 30 s: busy ("))
         assertFalse(com.lightdecoder.imessage.IMessageLog.read(context).any { it.contains("OpenBubbles") })
+    }
+
+    /** Apple's answer to whether [handle] has iMessage: their chat, as the library describes it, or nothing. */
+    private fun reached(handle: String): JSONObject = JSONObject().put(
+        "conversation",
+        ConversationDto(
+            id = "imsg:$handle", type = DirectArchive.TRANSPORT, defaultOutgoingId = me,
+            participants = listOf(
+                ParticipantDto(id = handle, number = Handles.display(handle)),
+                ParticipantDto(id = me, isMe = true),
+            ),
+            otherParticipantIds = listOf(handle),
+        ).toJson(),
+    )
+
+    @Test
+    fun aGroupStartsOnceAppleSaysEveryoneIsOnIMessageAndWhatGoesToItCarriesItsGuid() {
+        directModeOn()
+        val asked = Collections.synchronizedList(ArrayList<Pair<Int, JSONObject>>())
+        val onIMessage = setOf(alice, bob)
+        val link = fakeLink(asked) { what, request ->
+            when (what) {
+                DirectWire.REACH -> Handles.normalize(request.getString("recipient"))!!.let { if (it in onIMessage) reached(it) else JSONObject() }
+                DirectWire.SEND -> DirectWire.sent("GS-1", NOW)
+                else -> DirectWire.ok()
+            }
+        }
+        val manager = IMessageManager.get(context)
+        assertTrue(com.lightdecoder.chat.Capability.NEW_GROUP in manager.capabilities)
+        // Someone not on iMessage: nothing is made, and the error names them.
+        try {
+            runBlocking { manager.startConversation(listOf("+1 555 123 4567", "+15557777777"), null) }
+            fail("a group with someone not on iMessage")
+        } catch (e: DirectEngine.ImessageError) {
+            assertEquals("+15557777777 is not on iMessage, so the group can't be started.", e.message)
+        }
+        try {
+            runBlocking { manager.startConversation(listOf("+15551234567", "not an address"), null) }
+            fail("a group with something that is no address")
+        } catch (e: DirectEngine.ImessageError) {
+            assertEquals("not an address is not on iMessage, so the group can't be started.", e.message)
+        }
+        assertTrue(repo.conversations(null).none { it.isGroup })
+        val id = runBlocking { manager.startConversation(listOf("+1 555 123 4567", "+15559876543"), null) }
+        assertTrue(id, Regex("imsg:group:[0-9A-F-]{36}").matches(id))
+        val row = repo.conversation(id)!!
+        assertTrue(row.isGroup)
+        assertEquals("+15551234567, +15559876543", row.name)
+        assertEquals(me, row.defaultOutgoingId)
+        assertEquals(setOf("me", "+15551234567", "+15559876543"), repo.participants(id).map { it.id }.toSet())
+        assertEquals("me", repo.participants(id).single { it.isMe }.id)
+        // What goes to it carries its GUID, and no name: their iPhones show it by its members too.
+        val target = link.targetOf(id)!!
+        assertEquals(DirectArchive.groupGuid(id), target.groupGuid)
+        assertNull(target.groupName)
+        assertEquals(setOf(alice, bob), target.participants.toSet())
+        assertTrue(link.canSend(id))
+        link.sendText(id, "hi all", null)
+        waitFor("sent to Apple") { repo.message("imsg:GS-1") != null }
+        val sent = synchronized(asked) { asked.single { it.first == DirectWire.SEND } }.second.getJSONObject("target")
+        assertEquals(DirectArchive.groupGuid(id), sent.getString("groupGuid"))
+        assertTrue(sent.isNull("groupName"))
+        // The same people again: the same group. Named: a group of its own, whose name goes with what is sent to it.
+        assertEquals(id, runBlocking { manager.startConversation(listOf("+15559876543", "+15551234567"), null) })
+        val named = runBlocking { manager.startConversation(listOf("+15559876543", "+15551234567"), " Trip ") }
+        assertFalse(named == id)
+        assertEquals("Trip", repo.conversation(named)!!.name)
+        assertEquals("Trip", link.targetOf(named)!!.groupName)
+        // One person twice: a chat with them.
+        assertEquals("imsg:$alice", runBlocking { link.startGroup(listOf("+15551234567", "(555) 123-4567"), null) })
+    }
+
+    @Test
+    fun aGroupFollowsItsRenamesAndMembersAndWhatIsSentCarriesOnlyItsOwnName() {
+        val link = DirectLink.get(context)
+        val carol = "tel:+15550001111"
+        val members = listOf(me, bob, alice, carol)
+        val id = "imsg:group:G-N"
+        link.apply(
+            event(
+                "GN1", bob,
+                PushChatMessage.Message(
+                    NormalMessage(
+                        listOf(IndexedMessagePart(MessagePart.Text("hi all", TextFormat.Flags(TextFlags(false, false, false, false))), null, null)),
+                        null, null, null, MessageType.IMessage, null, null, null, false, null, null,
+                    ),
+                ),
+                members, "G-N",
+            ),
+        )
+        // Shown by its members' names, sent with none.
+        assertEquals(setOf("+15559876543", "+15551234567", "+15550001111"), repo.conversation(id)!!.name.split(", ").toSet())
+        assertNull(link.targetOf(id)!!.groupName)
+        link.apply(event("GN2", bob, PushChatMessage.RenameMessage(ChatRenameMessage("Ski trip")), members, "G-N", ts = 1_700_000_010_000L))
+        assertEquals("Ski trip", repo.conversation(id)!!.name)
+        assertEquals("Ski trip", link.targetOf(id)!!.groupName)
+        // Someone leaves: the group follows, and the user is still in it.
+        link.apply(
+            event("GN3", carol, PushChatMessage.ChangeParticipants(uniffi.rust_bridge.ChangeParticipantMessage(listOf(me, bob, alice), 2UL)), members, "G-N", ts = 1_700_000_011_000L),
+        )
+        assertEquals(setOf("me", "+15559876543", "+15551234567"), repo.participants(id).map { it.id }.toSet())
+        assertEquals("Ski trip", repo.conversation(id)!!.name)
+        // The user removed from it: still "me" in it here, with the others.
+        link.apply(
+            event("GN4", bob, PushChatMessage.ChangeParticipants(uniffi.rust_bridge.ChangeParticipantMessage(listOf(bob, alice), 3UL)), listOf(me, bob, alice), "G-N", ts = 1_700_000_012_000L),
+        )
+        assertEquals("me", repo.participants(id).single { it.isMe }.id)
+        assertEquals(setOf("me", "+15559876543", "+15551234567"), repo.participants(id).map { it.id }.toSet())
+        assertEquals("+15559876543 removed you.", repo.message("imsg:GN4")!!.text)
+        assertEquals(id, repo.message("imsg:GN4")!!.conversationId)
+    }
+
+    @Test
+    fun aMessageGoesWithItsEffectAndKeepsItWhenSentAgain() {
+        DirectLink.get(context).apply(incoming("B0", bob, "hi"))
+        directModeOn()
+        val slam = "com.apple.MobileSMS.expressivesend.impact"
+        val asked = Collections.synchronizedList(ArrayList<Pair<Int, JSONObject>>())
+        val refuse = java.util.concurrent.atomic.AtomicBoolean(true)
+        val link = fakeLink(asked) { what, _ ->
+            when {
+                what != DirectWire.SEND -> DirectWire.ok()
+                refuse.get() -> DirectWire.error("Apple refused the message: no")
+                else -> DirectWire.sent("FX-1", NOW)
+            }
+        }
+        val chat = "imsg:$bob"
+        val tmpId = IMessageManager.get(context).sendText(chat, "boom", null, slam)
+        fun local() = repo.message(MessageRow.tmpMessageId(tmpId))!!
+        waitFor("refused") { local().localState == com.lightdecoder.archive.LocalState.FAILED }
+        assertEquals(slam, IMessageExtra.parse(local().extra).effect)
+        assertEquals(slam, synchronized(asked) { asked.single { it.first == DirectWire.SEND } }.second.getString("effect"))
+        refuse.set(false)
+        assertTrue(link.retry(tmpId))
+        waitFor("sent") { repo.message("imsg:FX-1") != null }
+        assertEquals(slam, IMessageExtra.parse(repo.message("imsg:FX-1")!!.extra).effect)
+        val sends = synchronized(asked) { asked.filter { it.first == DirectWire.SEND } }
+        assertEquals(listOf(slam, slam), sends.map { it.second.getString("effect") })
+        // Without an effect, none goes.
+        link.sendText(chat, "plain", null)
+        waitFor("sent plain") { synchronized(asked) { asked.count { it.first == DirectWire.SEND } } == 3 }
+        assertTrue(synchronized(asked) { asked.last { it.first == DirectWire.SEND } }.second.isNull("effect"))
+    }
+
+    @Test
+    fun invisibleInkStaysHiddenInTheNotification() {
+        IMessagePrefs.setEnabled(context, true)
+        IMessagePrefs.setNotifyMessages(context, true)
+        val link = DirectLink.get(context)
+        fun said() = shadowOf(context.getSystemService(NotificationManager::class.java)).activeNotifications
+            .filter { it.tag?.startsWith("im:") == true }
+            .flatMap { androidx.core.app.NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(it.notification)?.messages.orEmpty() }
+            .map { it.text.toString() }
+        link.apply(
+            event(
+                "INK1", bob,
+                PushChatMessage.Message(
+                    NormalMessage(
+                        listOf(IndexedMessagePart(MessagePart.Text("the secret", TextFormat.Flags(TextFlags(false, false, false, false))), null, null)),
+                        IMessageExtra.INVISIBLE_INK, null, null, MessageType.IMessage, null, null, null, false, null, null,
+                    ),
+                ),
+            ),
+        )
+        assertEquals(listOf("Sent with Invisible Ink"), said())
+        assertEquals("the secret", repo.message("imsg:INK1")!!.text)
     }
 
     @Test

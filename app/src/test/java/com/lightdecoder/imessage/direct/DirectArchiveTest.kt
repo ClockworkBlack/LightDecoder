@@ -362,6 +362,82 @@ class DirectArchiveTest {
         assertTrue(a.isLive)
     }
 
+    private val gamePigeon = "com.apple.messages.MSMessageExtensionBalloonPlugin:EWFNLB79LQ:com.gamerdelights.gamepigeon.ext"
+
+    private fun game(caption: String = "Your move", ldText: String? = "8 Ball", name: String = "GamePigeon", url: String = "data:state") = ExtensionApp(
+        name, 1124197642UL, gamePigeon,
+        Balloon(url, "S-1", BalloonLayout.TemplateLayout("", "8 Ball", caption, "", "", "", NsDictionaryClass.NS_DICTIONARY), ldText, false, null),
+    )
+
+    private fun objectPart(text: String, idx: Int? = null) = IndexedMessagePart(MessagePart.Object(text), idx?.toULong(), null)
+
+    @Test
+    fun anAppsCardReadsAsItsCaptionElseItsSummaryElseTheAppsName() {
+        fun textOf(app: ExtensionApp) = (map(
+            MessageInst(
+                "A1", bob, ConversationData(listOf(me, bob), null, null, null),
+                PushChatMessage.Message(normal(listOf(objectPart("8 Ball", 0), attachment("card.jpeg", 1)), app = app)), 1UL, null, false, false, null,
+            ),
+        ) as DirectArchive.Update.Upsert).message
+        val card = textOf(game())
+        assertEquals("Your move", card.text)
+        // Its picture is a media part of its own, numbered as Apple numbered it.
+        assertEquals(listOf("0", "p1"), card.parts.map { it.partId })
+        assertEquals("A1/p1", card.parts[1].mediaId)
+        assertEquals("8 Ball", textOf(game(caption = "")).text)
+        assertEquals("GamePigeon", textOf(game(caption = "", ldText = null)).text)
+        // Apple did not name the app: nothing to stand for it, and no text part.
+        val bare = textOf(game(caption = "", ldText = null, name = IMessageExtra.UNNAMED_APP))
+        assertEquals("", bare.text)
+        assertEquals(listOf("p1"), bare.parts.map { it.partId })
+    }
+
+    @Test
+    fun aGameMoveIsANewCardOfTheSessionAndAVoteIsARow() {
+        fun ext(app: ExtensionApp, meta: Boolean, body: List<IndexedMessagePart> = listOf(objectPart("8 Ball", 0), attachment("move.jpeg", 1))) =
+            PushChatMessage.React(ReactMessage("ROOT", null, ReactMessageType.Extension(app, body, meta), "", null))
+        val move = map(inst("MV1", bob, ext(game(caption = "Bob's turn done"), meta = false))) as DirectArchive.Update.Upsert
+        assertEquals("imsg:MV1", move.message.id)
+        assertEquals("imsg:$bob", move.message.conversationId)
+        assertEquals("in", move.message.direction)
+        assertEquals("Bob's turn done", move.message.text)
+        assertEquals(listOf("0", "p1"), move.message.parts.map { it.partId })
+        assertEquals("MV1/p1", move.message.parts[1].mediaId)
+        val app = IMessageExtra.parse(move.message.extra).app!!
+        assertEquals("imsg:ROOT", app.root)
+        assertEquals("S-1", app.session)
+        assertEquals(gamePigeon, app.bundleId)
+        // The user's own move, from their iPhone.
+        val mine = map(inst("MV2", me, ext(game(), meta = false))) as DirectArchive.Update.Upsert
+        assertTrue(mine.message.fromMe)
+        assertEquals("out", mine.message.direction)
+        // A vote in a poll: a row saying who, in a group or one to one.
+        val polls = ExtensionApp("Polls", null, "com.apple.messages.MSMessageExtensionBalloonPlugin:0000000000:com.apple.messages.Polls", Balloon("data:,x", null, null, "Lunch?", true, null))
+        val vote = map(inst("V1", bob, ext(polls, meta = true, body = listOf(objectPart(""))), listOf(me, bob, carol), "G-9")) as DirectArchive.Update.Upsert
+        assertEquals("system", vote.message.direction)
+        assertEquals("imsg:V1", vote.message.id)
+        assertEquals("imsg:group:G-9", vote.message.conversationId)
+        assertEquals("Bob updated Polls.", vote.message.text)
+        assertEquals("You updated Polls.", (map(inst("V2", me, ext(polls, meta = true))) as DirectArchive.Update.Upsert).message.text)
+        val unnamed = ExtensionApp(IMessageExtra.UNNAMED_APP, null, "x", Balloon("data:,x", null, null, null, false, null))
+        val oneToOne = map(inst("V3", bob, ext(unnamed, meta = true))) as DirectArchive.Update.Upsert
+        assertEquals("imsg:$bob", oneToOne.message.conversationId)
+        assertEquals("Bob updated an iMessage app.", oneToOne.message.text)
+        // Not a card (an app's note on a message): nothing to show.
+        val noCard = ExtensionApp("Something", null, "x", null)
+        assertEquals(DirectArchive.Update.Ignore, map(inst("V4", bob, ext(noCard, meta = false))))
+    }
+
+    @Test
+    fun theFilesOfAMessageOrOfAMoveAreTheOnesKept() {
+        val parts = listOf(text("hi"), attachment("a.jpeg"))
+        assertEquals(parts, DirectArchive.storedParts(PushChatMessage.Message(normal(parts))))
+        val body = listOf(objectPart("x", 0), attachment("move.jpeg", 1))
+        assertEquals(body, DirectArchive.storedParts(PushChatMessage.React(ReactMessage("R", null, ReactMessageType.Extension(game(), body, false), "", null))))
+        assertEquals(emptyList<IndexedMessagePart>(), DirectArchive.storedParts(PushChatMessage.React(ReactMessage("R", null, ReactMessageType.Extension(game(), body, true), "", null))))
+        assertEquals(emptyList<IndexedMessagePart>(), DirectArchive.storedParts(PushChatMessage.Typing(true, null)))
+    }
+
     @Test
     fun tapbacksBecomeOnePersonsReaction() {
         fun react(r: Reaction, enable: Boolean = true, sender: String = bob) =
@@ -512,5 +588,6 @@ class DirectArchiveTest {
         override fun left(who: String) = "$who left the conversation."
         override fun changedPhoto(who: String) = "$who changed the group photo."
         override fun removedPhoto(who: String) = "$who removed the group photo."
+        override fun updated(who: String, app: String) = if (app.isEmpty()) "$who updated an iMessage app." else "$who updated $app."
     }
 }

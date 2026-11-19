@@ -2114,6 +2114,230 @@ class BlueBubblesScreenTest {
 
     // --- helpers ------------------------------------------------------------------------
 
+    /** Alice's iMessage carrying [extra] (what it has beyond its text), as the library stores it. */
+    private fun directMessageWith(guid: String, text: String, ts: Long, extra: com.lightdecoder.imessage.direct.IMessageExtra) {
+        imRepo.upsertMessage(
+            com.lightdecoder.relay.MessageDto(
+                id = "imsg:$guid", conversationId = ALICE_DIRECT, senderId = "+15551234567", senderName = "Alice",
+                timestampMs = ts, direction = "in", status = "INCOMING_COMPLETE", transport = IMessageManager.TRANSPORT,
+                text = text, parts = listOf(com.lightdecoder.relay.PartDto("0", "text", text)), isOld = true, extra = extra.toJson(),
+            ),
+        )
+    }
+
+    /** The message on screen whose view [matches]. */
+    private fun itemWhere(activity: Activity, matches: (View) -> Boolean): View? {
+        val list = activity.findViewById<RecyclerView>(R.id.messages)
+        return (0 until list.childCount).map { list.getChildAt(it) }.firstOrNull(matches)
+    }
+
+    private fun appCardOf(activity: Activity, caption: String): View? =
+        itemWhere(activity) { it.findViewById<android.widget.TextView>(R.id.appCaption)?.text?.toString() == caption }
+
+    @Test
+    fun withTheLibraryEffectsShowAndGoAsOnAnIphone() {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        val answer = appleSends()
+        directMode(asked)
+        com.lightdecoder.imessage.direct.DirectLink.installForTesting(two.app) { what, request, _ ->
+            if (what == com.lightdecoder.imessage.direct.DirectWire.SEND) asked += what to request
+            answer(what, request)
+        }
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        val slam = "com.apple.MobileSMS.expressivesend.impact"
+        val now = System.currentTimeMillis()
+        directMessageWith("E1", "Boom", now - 120_000, com.lightdecoder.imessage.direct.IMessageExtra(effect = slam))
+        directMessageWith(
+            "E2", "the secret", now - 60_000,
+            com.lightdecoder.imessage.direct.IMessageExtra(effect = com.lightdecoder.imessage.direct.IMessageExtra.INVISIBLE_INK),
+        )
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("her iMessages") { shownTexts(it).containsAll(listOf("Boom", "the secret")) }
+            scenario.onActivity { activity ->
+                val effect = bubbleOf(activity, "Boom")!!.findViewById<android.widget.TextView>(R.id.effect)
+                assertEquals(View.VISIBLE, effect.visibility)
+                assertEquals("Sent with Slam", effect.text.toString())
+                // Invisible ink: hidden until tapped.
+                assertEquals(null, bubbleOf(activity, "the secret"))
+                val inked = bubbleOf(activity, "▒▒▒ ▒▒▒▒▒▒")!!
+                assertEquals("Sent with Invisible Ink", inked.findViewById<android.widget.TextView>(R.id.effect).text.toString())
+                inked.findViewById<View>(R.id.bubble).performClick()
+            }
+            scenario.waitFor("the ink tapped away") { bubbleOf(it, "the secret") != null }
+            // Send held down: Apple's twelve effects; one picked goes with the message.
+            scenario.onActivity { activity ->
+                activity.findViewById<EditText>(R.id.input).setText("Kaboom")
+                assertTrue(activity.findViewById<View>(R.id.send).performLongClick())
+            }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val picker = latestDialog()
+            assertEquals(two.app.getString(R.string.imessage_effect_pick_title), picker.findViewById<android.widget.TextView>(androidx.appcompat.R.id.alertTitle)?.text?.toString())
+            val list = picker.listView
+            assertEquals(12, list.adapter.count)
+            assertEquals("Slam", list.adapter.getItem(0).toString())
+            assertEquals("Celebration", list.adapter.getItem(11).toString())
+            list.performItemClick(null, 0, 0)
+            two.waitUntil("sent with the effect") { asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).isNotEmpty() }
+            val sent = com.lightdecoder.imessage.direct.DirectWire.SendRequest.fromJson(asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).single())
+            assertEquals("Kaboom", sent.text)
+            assertEquals(slam, sent.effect)
+            two.waitUntil("stored with it") { imRepo.message("imsg:S1") != null }
+            assertEquals(slam, com.lightdecoder.imessage.direct.IMessageExtra.parse(imRepo.message("imsg:S1")!!.extra).effect)
+            scenario.waitFor("shown with it") { bubbleOf(it, "Kaboom")?.findViewById<android.widget.TextView>(R.id.effect)?.text?.toString() == "Sent with Slam" }
+            scenario.onActivity { activity -> assertEquals(null, shadowOf(activity).nextStartedActivity) }
+        }
+    }
+
+    @Test
+    fun withoutAnIMessageChatSendOffersNoEffects() {
+        two.env.pairedManager()
+        two.seedConversation(ChatService.MESSAGES, "c1", "Bob", lastTs = 1_000)
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("the composer") { it.findViewById<View>(R.id.input).isEnabled }
+            scenario.onActivity { activity ->
+                activity.findViewById<EditText>(R.id.input).setText("Green one")
+                assertFalse(activity.findViewById<View>(R.id.send).performLongClick())
+            }
+        }
+    }
+
+    @Test
+    fun withTheLibraryALinksPreviewAndAnAppsCardShowAndOpen() {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        directMode(java.util.Collections.synchronizedList(ArrayList()))
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        val now = System.currentTimeMillis()
+        fun extra(link: com.lightdecoder.imessage.direct.IMessageExtra.Link? = null, app: com.lightdecoder.imessage.direct.IMessageExtra.App? = null) =
+            com.lightdecoder.imessage.direct.IMessageExtra(link = link, app = app)
+        directMessageWith(
+            "L1", "https://www.example.com/a", now - 180_000,
+            extra(link = com.lightdecoder.imessage.direct.IMessageExtra.Link("https://www.example.com/a", "A page", "About it", "example.com")),
+        )
+        val game = com.lightdecoder.imessage.direct.IMessageExtra.App(
+            name = "GamePigeon", appId = 1124197642L, url = "data:state", ldText = "8 Ball", imageTitle = "8 Ball", caption = "Your move", root = "imsg:G1",
+        )
+        directMessageWith("G1", "Your move", now - 120_000, extra(app = game))
+        directMessageWith("P1", "Lunch?", now - 60_000, extra(app = game.copy(name = "Polls", url = "https://example.com/poll", caption = "Lunch?", imageTitle = "")))
+        try {
+            ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+                scenario.waitFor("her iMessages") { shownTexts(it).containsAll(listOf("https://www.example.com/a", "Your move", "Lunch?")) }
+                scenario.onActivity { activity ->
+                    // The link's preview, under its text: a tap opens the page.
+                    val card = bubbleOf(activity, "https://www.example.com/a")!!.findViewById<View>(R.id.linkCard)
+                    assertEquals(View.VISIBLE, card.visibility)
+                    assertEquals("A page", card.findViewById<android.widget.TextView>(R.id.linkTitle).text.toString())
+                    assertEquals("About it", card.findViewById<android.widget.TextView>(R.id.linkSummary).text.toString())
+                    assertEquals("example.com", card.findViewById<android.widget.TextView>(R.id.linkSite).text.toString())
+                    card.performClick()
+                    val opened = shadowOf(activity).nextStartedActivity
+                    assertEquals(Intent.ACTION_VIEW, opened.action)
+                    assertEquals("https://www.example.com/a", opened.dataString)
+                    // A game's card: its lines instead of the text that stands for them, the app's name small.
+                    val item = appCardOf(activity, "Your move")!!
+                    assertEquals(View.GONE, item.findViewById<View>(R.id.body).visibility)
+                    assertEquals("8 Ball", item.findViewById<android.widget.TextView>(R.id.appImageTitle).text.toString())
+                    assertEquals("GamePigeon", item.findViewById<android.widget.TextView>(R.id.appName).text.toString())
+                    assertEquals(View.GONE, item.findViewById<View>(R.id.appSubcaption).visibility)
+                    // Nothing here plays it: it opens on an Apple device, and nothing is opened.
+                    item.findViewById<View>(R.id.bubble).performClick()
+                    assertEquals("GamePigeon can only be opened on an iPhone, iPad or Mac.", org.robolectric.shadows.ShadowToast.getTextOfLatestToast())
+                    assertEquals(null, shadowOf(activity).nextStartedActivity)
+                    // An app that keeps its state in a web address opens in the browser.
+                    appCardOf(activity, "Lunch?")!!.findViewById<View>(R.id.bubble).performClick()
+                    assertEquals("https://example.com/poll", shadowOf(activity).nextStartedActivity.dataString)
+                    // An installed extension takes the card first.
+                    val engaged = ArrayList<String>()
+                    com.lightdecoder.imessage.direct.IMessageApps.host =
+                        com.lightdecoder.imessage.direct.IMessageApps.Host { _, row, app -> engaged += row.id + " " + app.name; true }
+                    org.robolectric.shadows.ShadowToast.reset()
+                    item.findViewById<View>(R.id.bubble).performClick()
+                    assertEquals(listOf("imsg:G1 GamePigeon"), engaged)
+                    assertEquals(0, org.robolectric.shadows.ShadowToast.shownToastCount())
+                    assertEquals(null, shadowOf(activity).nextStartedActivity)
+                }
+            }
+        } finally {
+            com.lightdecoder.imessage.direct.IMessageApps.host = null
+        }
+    }
+
+    @Test
+    fun withTheLibraryAnIMessageGroupIsStartedFromTheMessagesMenu() {
+        two.env.pairedManager()
+        two.seedConversation(ChatService.MESSAGES, "c1", "Bob", lastTs = 1_000)
+        launchList().use { scenario ->
+            scenario.waitFor("the Messages inbox") { titles(it) == listOf("Bob") }
+            // Not without the library: OpenBubbles' notifications start nothing.
+            scenario.onActivity { activity -> assertFalse(menu(activity).findItem(R.id.action_new_imessage_group).isVisible) }
+        }
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        directMode(asked)
+        com.lightdecoder.imessage.direct.DirectLink.installForTesting(two.app) { what, request, _ ->
+            asked += what to request
+            if (what != com.lightdecoder.imessage.direct.DirectWire.REACH) return@installForTesting com.lightdecoder.imessage.direct.DirectWire.ok()
+            val to = com.lightdecoder.imessage.direct.Handles.normalize(request.getString("recipient"))!!
+            org.json.JSONObject().put(
+                "conversation",
+                com.lightdecoder.relay.ConversationDto(
+                    id = "imsg:$to", type = IMessageManager.TRANSPORT, defaultOutgoingId = "tel:+15550000001",
+                    participants = listOf(
+                        com.lightdecoder.relay.ParticipantDto(id = to),
+                        com.lightdecoder.relay.ParticipantDto(id = "tel:+15550000001", isMe = true),
+                    ),
+                ).toJson(),
+            )
+        }
+        val picker = launchList().use { scenario ->
+            scenario.waitFor("the Messages inbox") { titles(it).contains("Bob") }
+            var started: Intent? = null
+            scenario.onActivity { activity ->
+                val item = menu(activity).findItem(R.id.action_new_imessage_group)
+                assertTrue(item.isVisible)
+                assertEquals("New iMessage group", item.title.toString())
+                activity.onOptionsItemSelected(item)
+                started = shadowOf(activity).nextStartedActivity
+            }
+            started!!
+        }
+        assertEquals(com.lightdecoder.ui.chat.NewConversationActivity::class.java.name, picker.component?.className)
+        assertEquals(ChatService.IMESSAGE.key, picker.getStringExtra(RelayIntents.EXTRA_SERVICE))
+        ActivityScenario.launch<com.lightdecoder.ui.chat.NewConversationActivity>(picker.setFlags(0)).use { scenario ->
+            scenario.onActivity { activity ->
+                assertEquals("New iMessage group", activity.supportActionBar?.title?.toString())
+                val query = activity.findViewById<EditText>(R.id.query)
+                // A number and an email address, both picked.
+                query.setText("+1 555 222 3333")
+                activity.findViewById<View>(R.id.useNumber).performClick()
+                query.setText("carol@example.com")
+                assertEquals(View.VISIBLE, activity.findViewById<View>(R.id.useNumber).visibility)
+                activity.findViewById<View>(R.id.useNumber).performClick()
+                assertEquals(2, activity.findViewById<android.view.ViewGroup>(R.id.selectedChips).childCount)
+                activity.findViewById<View>(R.id.start).performClick()
+            }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val dialog = latestDialog()
+            assertEquals(two.app.getString(R.string.imessage_group_body), dialog.findViewById<android.widget.TextView>(R.id.groupBody)?.text?.toString())
+            dialog.findViewById<EditText>(R.id.groupName)!!.setText("Book club")
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+            var opened: Intent? = null
+            two.waitUntil("the group's chat opened") {
+                opened = opened ?: shadowOf(two.app).nextStartedActivity
+                opened != null
+            }
+            val id = opened!!.getStringExtra(RelayIntents.EXTRA_CONVERSATION_ID)!!
+            assertEquals(ChatService.IMESSAGE.key, opened!!.getStringExtra(RelayIntents.EXTRA_SERVICE))
+            assertTrue(id, id.startsWith("imsg:group:"))
+            val group = imRepo.conversation(id)!!
+            assertTrue(group.isGroup)
+            assertEquals("Book club", group.name)
+            assertEquals(setOf("me", "+15552223333", "carol@example.com"), imRepo.participants(id).map { it.id }.toSet())
+            assertEquals(2, asked(asked, com.lightdecoder.imessage.direct.DirectWire.REACH).size)
+        }
+    }
+
     private fun launchList(): ActivityScenario<ConversationsActivity> =
         ActivityScenario.launch(RelayIntents.conversations(two.app, ChatService.MESSAGES).setFlags(0))
 

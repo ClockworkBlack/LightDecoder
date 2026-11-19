@@ -93,6 +93,58 @@
                 android:orientation="vertical"
                 android:visibility="gone" />
 
+            <!--
+                An iMessage app's card (a game, a poll), under its picture: the picture's title and
+                subtitle, the caption, the subcaptions, then the app's name. Tapped, it opens.
+            -->
+            <LinearLayout
+                android:id="@+id/appCard"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:importantForAccessibility="no"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/appImageTitle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textAppearance="?attr/textAppearanceTitleSmall"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/appImageSubtitle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                <TextView
+                    android:id="@+id/appCaption"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textAppearance="?attr/textAppearanceBodyLarge" />
+
+                <TextView
+                    android:id="@+id/appSubcaption"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                <TextView
+                    android:id="@+id/appSecondary"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                <TextView
+                    android:id="@+id/appName"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:textAppearance="?attr/textAppearanceLabelSmall" />
+            </LinearLayout>
+
             <TextView
                 android:id="@+id/body"
                 android:layout_width="wrap_content"
@@ -100,6 +152,48 @@
                 android:autoLink="web|email|phone"
                 android:importantForAccessibility="no"
                 android:textAppearance="?attr/textAppearanceBodyLarge" />
+
+            <!-- An iMessage's link preview (no picture): the page's title, summary and site. Tapped, it opens. -->
+            <LinearLayout
+                android:id="@+id/linkCard"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:background="@drawable/bg_quote"
+                android:focusable="true"
+                android:minHeight="48dp"
+                android:orientation="vertical"
+                android:paddingHorizontal="8dp"
+                android:paddingVertical="6dp"
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/linkTitle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="end"
+                    android:importantForAccessibility="no"
+                    android:maxLines="2"
+                    android:textAppearance="?attr/textAppearanceLabelLarge"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/linkSummary"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="end"
+                    android:importantForAccessibility="no"
+                    android:maxLines="3"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                <TextView
+                    android:id="@+id/linkSite"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:importantForAccessibility="no"
+                    android:maxLines="1"
+                    android:textAppearance="?attr/textAppearanceLabelSmall" />
+            </LinearLayout>
 
             <LinearLayout
                 android:id="@+id/meta"
@@ -144,6 +238,18 @@
             android:layout_height="wrap_content"
             android:layout_marginHorizontal="8dp"
             android:layout_marginTop="-8dp"
+            android:visibility="gone" />
+
+        <!-- "Sent with Slam" under an iMessage sent with an effect, as an iPhone shows it. -->
+        <TextView
+            android:id="@+id/effect"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginHorizontal="8dp"
+            android:layout_marginTop="2dp"
+            android:importantForAccessibility="no"
+            android:textAppearance="?attr/textAppearanceLabelSmall"
+            android:textColor="?attr/colorOnSurfaceVariant"
             android:visibility="gone" />
 
         <!-- "Delivered" or "Read 9:41" under the user's latest iMessages, as an iPhone shows them. -->
