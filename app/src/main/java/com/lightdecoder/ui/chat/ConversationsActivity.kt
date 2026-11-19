@@ -517,7 +517,7 @@ class ConversationsActivity : AppCompatActivity() {
                 val own = from.repo.conversations(shown).map { ConversationItem(it, titleFor(from.repo, it), from.service) }
                 val extra = if (!iMessageHere) emptyList() else runCatching { iMessage!!.repo.conversations(shown) }.getOrDefault(emptyList())
                     .map { ConversationItem(it, titleFor(iMessage!!.repo, it), iMessage.service) }
-                val rows = if (extra.isEmpty()) own else foldIn(own, extra, from.repo, iMessage!!)
+                val rows = if (extra.isEmpty()) own else foldIn(own, extra, BlueBubblesLinks.pairs(applicationContext))
                 val ownEmpty = from.repo.conversations(null, 1).isEmpty()
                 val iMessageEmpty = iMessage == null || runCatching { iMessage.repo.conversations(null, 1).isEmpty() }.getOrDefault(true)
                 rows to (ownEmpty to (ownEmpty && iMessageEmpty))
@@ -815,22 +815,19 @@ class ConversationsActivity : AppCompatActivity() {
         private fun foldIn(
             own: List<ConversationItem>,
             iMessages: List<ConversationItem>,
-            messagesRepo: ArchiveRepository,
-            iMessage: ChatBackend,
+            pairs: Map<String, com.lightdecoder.imessage.IMessageLinks.Pair>,
         ): List<ConversationItem> {
-            val byAddress = HashMap<String, ConversationItem>()
+            // Messages conversation id -> the iMessage chat shown inside it.
+            val byConversation = HashMap<String, ConversationItem>()
             for (item in iMessages) {
-                if (item.row.isGroup) continue
-                val key = (iMessage as? com.lightdecoder.imessage.IMessageManager)?.addressOf(item.row.id)
-                    ?.let(com.lightdecoder.imessage.IMessageAddress::key) ?: continue
-                byAddress.putIfAbsent(key, item)
+                val to = pairs[item.row.id]?.messagesId ?: continue
+                byConversation.putIfAbsent(to, item)
             }
-            if (byAddress.isEmpty()) return mergeByTime(own, iMessages)
+            if (byConversation.isEmpty()) return mergeByTime(own, iMessages)
             val folded = HashSet<String>()
             val merged = own.map { item ->
                 if (item.row.isGroup) return@map item
-                val key = BlueBubblesLinks.addressKey(runCatching { messagesRepo.participants(item.row.id) }.getOrDefault(emptyList()))
-                val im = key?.let { byAddress[it] } ?: return@map item
+                val im = byConversation[item.row.id] ?: return@map item
                 folded += im.row.id
                 val newer = im.row.lastMessageTs > item.row.lastMessageTs
                 item.copy(

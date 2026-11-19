@@ -27,6 +27,17 @@
         android:title="@string/imessage_check"
         android:visible="false"
         app:showAsAction="never" />
+    <!-- Blue Bubbles: put an iMessage chat inside this conversation by hand, or take it out. -->
+    <item
+        android:id="@+id/action_link_imessage"
+        android:title="@string/imessage_link"
+        android:visible="false"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_unlink_imessage"
+        android:title="@string/imessage_unlink"
+        android:visible="false"
+        app:showAsAction="never" />
     <!-- An iMessage chat: the same chat in OpenBubbles. -->
     <item
         android:id="@+id/action_open_openbubbles"

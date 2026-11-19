@@ -130,7 +130,11 @@ object IMessageCapture {
         val shownTitle = extras.getCharSequence(NotificationCompat.EXTRA_TITLE)?.toString()?.trim().orEmpty().removePrefix(NOTIFY_ANYWAYS)
         val groupTitle = style.conversationTitle?.toString()?.trim().orEmpty().removePrefix(NOTIFY_ANYWAYS)
         val other = messages.lastOrNull { !it.fromMe && it.sender.isNotEmpty() }?.sender.orEmpty()
-        val address = if (isGroup) "" else addressOf(messages)
+        // No handle on the person (some OpenBubbles builds leave it out), but the chat is named by a
+        // number or an email address (someone not in the contacts): that is the address.
+        val address = if (isGroup) "" else addressOf(messages).ifEmpty {
+            listOf(other, shownTitle).firstOrNull { IMessageAddress.key(it) != null }.orEmpty()
+        }
         val title = (if (isGroup) groupTitle else "")
             .ifEmpty { other }
             .ifEmpty { shownTitle.takeUnless { it == user.name?.toString()?.trim() }.orEmpty() }

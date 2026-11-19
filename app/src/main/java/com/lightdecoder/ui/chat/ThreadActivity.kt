@@ -1895,6 +1895,13 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             copy(row.text)
         }
         b.actionEdit.visibility = if (manager.isPaired() && EditRule.canEdit(row, backendFor(row).capabilities)) View.VISIBLE else View.GONE
+        val ownIMessage = backendFor(row).service == ChatService.IMESSAGE && (row.isOutgoing || row.direction == "out") &&
+            row.localState != LocalState.FAILED && !row.isLocal
+        b.actionUnsend.visibility = if (ownIMessage) View.VISIBLE else View.GONE
+        b.actionUnsend.setOnClickListener {
+            sheet.dismiss()
+            if (isShown(row)) unsendIMessage(row)
+        }
         b.actionEdit.setOnClickListener {
             sheet.dismiss()
             askEdit(row)
@@ -2310,6 +2317,83 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         clipboard.setPrimaryClip(android.content.ClipData.newPlainText(getString(R.string.imessage_address_label), address))
     }
 
+    // --- linking an iMessage chat by hand ---------------------------------------------------
+
+    /** The iMessage chats not inside any conversation; the one picked is shown inside this one from now on. */
+    private fun chooseIMessageToLink() {
+        val id = conversationId
+        lifecycleScope.launch {
+            val chats = withContext(Dispatchers.IO) {
+                BlueBubblesLinks.unpaired(applicationContext).map { row ->
+                    val name = BlueBubblesLinks.iMessageName(applicationContext, row.id).ifBlank { getString(R.string.chat_untitled) }
+                    row.id to (if (row.snippet.isBlank()) name else "$name \u2014 ${row.snippet.take(40)}")
+                }
+            }
+            if (conversationId != id) return@launch
+            if (chats.isEmpty()) {
+                toast(getString(R.string.imessage_link_none))
+                return@launch
+            }
+            MaterialAlertDialogBuilder(this@ThreadActivity)
+                .setTitle(R.string.imessage_link_pick_title)
+                .setItems(chats.map { it.second }.toTypedArray()) { _, which ->
+                    if (conversationId != id) return@setItems
+                    val chosen = chats[which].first
+                    lifecycleScope.launch {
+                        withContext(Dispatchers.IO) { com.lightdecoder.imessage.IMessageLinks.setManual(applicationContext, chosen, id) }
+                        toast(getString(R.string.imessage_linked))
+                        reload()
+                        invalidateOptionsMenu()
+                    }
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+        }
+    }
+
+    private fun confirmUnlinkIMessage() {
+        val companion = companionId ?: return
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.imessage_unlink)
+            .setMessage(R.string.imessage_unlink_body)
+            .setPositiveButton(R.string.imessage_unlink_confirm) { _, _ ->
+                lifecycleScope.launch {
+                    withContext(Dispatchers.IO) { com.lightdecoder.imessage.IMessageLinks.setManual(applicationContext, companion, null) }
+                    reload()
+                    invalidateOptionsMenu()
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    // --- unsending an iMessage ------------------------------------------------------------
+
+    /**
+     * One of the user's iMessages: OpenBubbles' notification has no unsend button, so OpenBubbles opens
+     * on the chat, where a long press on it offers Undo Send. Apple allows that for [UNSEND_WINDOW_MS].
+     */
+    private fun unsendIMessage(row: MessageRow) {
+        val chat = row.conversationId
+        val ref = com.lightdecoder.imessage.IMessageLog.chatRef(chat)
+        val age = System.currentTimeMillis() - row.timestampMs
+        if (age > UNSEND_WINDOW_MS) {
+            com.lightdecoder.imessage.IMessageLog.add(this, "$ref: unsend asked ${age / 60_000} min after sending (too late for Apple)")
+            MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.imessage_unsend)
+                .setMessage(R.string.imessage_unsend_too_late)
+                .setPositiveButton(R.string.imessage_delete_here) { _, _ -> confirmDeleteMessage(row) }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+            return
+        }
+        val opened = com.lightdecoder.imessage.IMessageReplies.open(this, chat) ||
+            iMessageLink.handOff(this, chat, "") ||
+            com.lightdecoder.imessage.OpenBubbles.launch(this)
+        com.lightdecoder.imessage.IMessageLog.add(this, "$ref: unsend: ${if (opened) "OpenBubbles opened on the chat for Undo Send" else "OpenBubbles would not open"}")
+        if (opened) toast(getString(R.string.imessage_unsend_how)) else toast(errorText(iMessageLink, com.lightdecoder.imessage.IMessageErrors.NOT_INSTALLED))
+    }
+
     // --- Check iMessage -------------------------------------------------------------------
 
     /** Shows what the check sends, and to whom, before anything is sent. */
@@ -2449,6 +2533,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         // Also before they have an iMessage chat: the check then starts one in OpenBubbles.
         menu.findItem(R.id.action_check_imessage)?.isVisible = manager.service == ChatService.MESSAGES &&
             (companionId != null || (com.lightdecoder.imessage.IMessagePrefs.enabled(this) && conv != null && !conv.isGroup && otherAddress() != null))
+        val blueOn = com.lightdecoder.imessage.IMessagePrefs.enabled(this)
+        menu.findItem(R.id.action_link_imessage)?.isVisible =
+            manager.service == ChatService.MESSAGES && blueOn && companionId == null && conv != null && !conv.isGroup
+        menu.findItem(R.id.action_unlink_imessage)?.isVisible = manager.service == ChatService.MESSAGES && companionId != null
         val checking = com.lightdecoder.imessage.IMessageChecks.current.value?.let { it.running && it.conversationId == conversationId } == true
         menu.findItem(R.id.action_check_imessage)?.setTitle(if (checking) R.string.imessage_check_running else R.string.imessage_check)
         val archived = conv?.folderEnum == Folder.ARCHIVE
@@ -2516,6 +2604,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             R.id.action_delete_forever -> confirmDeleteForever()
             R.id.action_delete_conversation -> confirmDeleteConversation()
             R.id.action_send_imessage -> sendIMessage()
+            R.id.action_link_imessage -> chooseIMessageToLink()
+            R.id.action_unlink_imessage -> confirmUnlinkIMessage()
             R.id.action_check_imessage ->
                 if (com.lightdecoder.imessage.IMessageChecks.current.value?.let { it.running && it.conversationId == conversationId } == true) {
                     showIMessageCheck()
@@ -2675,6 +2765,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         private const val REMOTE_RETRY_MS = 30_000L
         private const val MAX_PREVIEW_READ = 32 * 1024 * 1024
         private const val ATTACHMENT_THUMB_DP = 96
+
+        /** How long after sending Apple lets an iMessage be unsent. */
+        private const val UNSEND_WINDOW_MS = 2 * 60 * 1000L
 
         /** Most pictures picked for one message. */
         private const val MAX_ATTACHMENTS = 10

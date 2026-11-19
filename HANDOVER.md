@@ -23,6 +23,19 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.38 (versionCode 46) - iMessages in the right conversation; Unsend
+- **Linking** (`imessage/IMessageLinks.pair`, pure; `BlueBubblesLinks.pairs` builds it from both archives,
+  cached and dropped on any conversation change of either archive). Order: by hand (thread menu "Link an
+  iMessage chat..." / "Unlink iMessage chat"; an unlink is kept as "" and blocks automatic linking), same
+  number/email key, then same name when unambiguous (one conversation and one chat with that name, and the
+  chat has no phone number of its own that no conversation has). The conversation list (`foldIn`), the thread's
+  companion, the redirect of a standalone iMessage chat and notification taps all use it. Capture now takes a
+  chat title that is itself a number or email (unknown sender) as the address. Logged: link counts (by name,
+  left on their own) and every link or unlink by hand.
+- **Unsend** (long press on one's own iMessage): OpenBubbles' notification has no unsend button, so OpenBubbles
+  opens on the chat (its own notification intent, else the share screen, else its main screen) with "long-press
+  it and tap Undo Send". After 2 minutes (Apple's limit) it says so and offers Delete here.
+
 ## 0.5.37 (versionCode 45) - Check iMessage wording
 - The check message is now exactly `Reply "OK" (without quotes) to this to start chatting in iMessage`
   (`IMessageCheck.TEXT`, user's wording). No code in it any more: a check is told apart from an earlier one

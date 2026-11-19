@@ -93,6 +93,13 @@ class IMessageCaptureTest {
     }
 
     @Test
+    fun aChatNamedByANumberHasThatNumberAsItsAddress() {
+        // Someone not in the contacts, and no handle on the person.
+        val captured = parse(chat(context, listOf(Line("Hello?", 1_000_000_000_000L, sender("+1 (555) 222-3333")))))!!
+        assertEquals("+1 (555) 222-3333", captured.address)
+    }
+
+    @Test
     fun withoutAChatGuidTheConversationShortcutNamesTheChat() {
         val n = chat(context, listOf(Line("Hi", 1_000_000_000_000L, alice)))
         n.extras.remove("chatGuid")

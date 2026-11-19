@@ -532,12 +532,14 @@ class IMessageManager private constructor(
 
         internal fun installForTesting(context: Context, repo: ArchiveRepository): IMessageManager {
             require(repo.service == ChatService.IMESSAGE) { "the repository is ${repo.service}'s, not iMessage's" }
+            IMessageLinks.invalidate()
             return synchronized(this) { IMessageManager(context, repo).also { instance = it } }
         }
 
         internal fun resetForTesting() = synchronized(this) {
             instance = null
             IMessageReplies.clear()
+            IMessageLinks.invalidate()
         }
     }
 }

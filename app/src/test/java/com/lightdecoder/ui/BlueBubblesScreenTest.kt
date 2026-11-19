@@ -524,6 +524,107 @@ class BlueBubblesScreenTest {
         }
     }
 
+    // --- iMessages in the right conversation, and unsending -----------------------------
+
+    @Test
+    fun anIMessageChatWithoutANumberShowsInTheConversationWithItsName() {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Nina", lastTs = 1_000, number = "+1 555-123-4567")
+        two.seedIncoming(ChatService.MESSAGES, "sms1", "c1", "An earlier text", ts = 1_000)
+        // OpenBubbles' notification names her but carries no number.
+        iMessage.record(
+            CapturedIMessageChat(ALICE, "m1", "Nina", false, "", listOf(CapturedIMessage("Nina", "", false, "OK", 5_000))),
+            live = true,
+        )
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("her iMessage inside the ongoing conversation") { shownTexts(it) == listOf("An earlier text", "OK") }
+            scenario.onActivity { activity ->
+                assertEquals(activity.getString(R.string.imessage_compose_hint), activity.findViewById<EditText>(R.id.input).hint.toString())
+                assertTrue(menu(activity).findItem(R.id.action_unlink_imessage).isVisible)
+            }
+        }
+        launchList().use { scenario ->
+            scenario.waitFor("one row for Nina") { titles(it) == listOf("Nina") }
+        }
+    }
+
+    @Test
+    fun anIMessageChatCanBeLinkedByHand() {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Bob", lastTs = 1_000, number = "+1 555-987-6543")
+        // His iMessages come from his Apple ID under another name: nothing links them by itself.
+        iMessage.record(
+            CapturedIMessageChat(ALICE, "m1", "Robert", false, "robert@example.com", listOf(CapturedIMessage("Robert", "mailto:robert@example.com", false, "From my Mac", 5_000))),
+            live = false,
+        )
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("the conversation") { it.findViewById<View>(R.id.input).isEnabled }
+            scenario.onActivity { activity ->
+                assertFalse(shownTexts(activity).contains("From my Mac"))
+                val item = menu(activity).findItem(R.id.action_link_imessage)
+                assertTrue(item.isVisible)
+                activity.onOptionsItemSelected(item)
+            }
+            scenario.waitFor("the list of chats") { ShadowDialog.getLatestDialog()?.isShowing == true }
+            val dialog = latestDialog()
+            assertEquals(1, dialog.listView.adapter.count)
+            assertTrue(dialog.listView.adapter.getItem(0).toString().startsWith("Robert"))
+            shadowOf(dialog.listView).performItemClick(0)
+            scenario.waitFor("his iMessages here") { shownTexts(it).contains("From my Mac") }
+            assertEquals("c1", IMessageManager.get(two.app).let { com.lightdecoder.imessage.IMessageLinks.manual(two.app)[ALICE] })
+        }
+    }
+
+    @Test
+    fun myIMessageCanBeUnsentInOpenBubblesWithinTwoMinutes() {
+        two.env.pairedManager()
+        installOpenBubbles()
+        IMessagePrefs.setEnabled(two.app, true)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        seedIMessage("An iMessage", ts = 5_000)
+        val now = System.currentTimeMillis()
+        iMessage.record(
+            CapturedIMessageChat(ALICE, "m2", "Alice", false, "+15551234567", listOf(
+                CapturedIMessage("", "", true, "Oops, wrong one", now - 30_000),
+                CapturedIMessage("", "", true, "An old one", now - 10 * 60_000),
+            )),
+            live = false,
+        )
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("my iMessages") { shownTexts(it).contains("Oops, wrong one") }
+            fun rowOf(activity: ThreadActivity, text: String) =
+                ((activity.findViewById<RecyclerView>(R.id.messages).adapter as MessagesAdapter).currentList)
+                    .filterIsInstance<com.lightdecoder.ui.chat.ThreadItem.Message>().map { it.row }.single { it.text == text }
+            // Within two minutes: OpenBubbles opens for Undo Send.
+            scenario.onActivity { activity -> activity.onMessageLongPress(rowOf(activity, "Oops, wrong one")) }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val sheet = ShadowDialog.getLatestDialog()
+            val unsend = sheet.findViewById<View>(R.id.actionUnsend)
+            assertEquals(View.VISIBLE, unsend.visibility)
+            unsend.performClick()
+            scenario.onActivity { activity ->
+                val opened = shadowOf(activity).nextStartedActivity
+                assertEquals(OpenBubbles.PACKAGES.first(), opened?.`package` ?: opened?.component?.packageName)
+            }
+            assertTrue(com.lightdecoder.imessage.IMessageLog.read(two.app).any { it.contains("OpenBubbles opened on the chat for Undo Send") })
+            // Too late: Apple would not undo it; it can be deleted here only.
+            scenario.onActivity { activity -> activity.onMessageLongPress(rowOf(activity, "An old one")) }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            ShadowDialog.getLatestDialog().findViewById<View>(R.id.actionUnsend).performClick()
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            scenario.onActivity { activity ->
+                val shown = latestDialog().findViewById<android.widget.TextView>(android.R.id.message)?.text?.toString()
+                assertEquals(activity.getString(R.string.imessage_unsend_too_late), shown)
+            }
+            // Not offered on someone else's message.
+            scenario.onActivity { activity -> activity.onMessageLongPress(rowOf(activity, "An iMessage")) }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            assertEquals(View.GONE, ShadowDialog.getLatestDialog().findViewById<View>(R.id.actionUnsend).visibility)
+        }
+    }
+
     private fun steps(activity: Activity): String =
         (activity as ThreadActivity).checkDialog?.findViewById<android.widget.TextView>(R.id.checkSteps)?.text?.toString().orEmpty()
 

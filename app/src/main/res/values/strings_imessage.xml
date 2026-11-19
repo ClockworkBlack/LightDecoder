@@ -39,6 +39,17 @@
     <string name="imessage_check">Check iMessage (blue on their iPhone?)</string>
     <string name="imessage_check_explain">LightDecoder will send this to %1$s as an iMessage:\n\n\u201c%2$s\u201d\n\nAsk them to reply. An iPhone replies the way the conversation shows on it: by iMessage when it is blue, by text when it is green. So their reply tells you which colour they see.</string>
     <string name="imessage_check_send">Send check</string>
+    <string name="imessage_unsend">Unsend (in OpenBubbles)</string>
+    <string name="imessage_unsend_how">In OpenBubbles, long-press the message and tap Undo Send. Then delete it here too.</string>
+    <string name="imessage_unsend_too_late">Apple only lets an iMessage be unsent within 2 minutes of sending, so it stays on their iPhone. You can still delete it here, on this phone only.</string>
+    <string name="imessage_delete_here">Delete here</string>
+    <string name="imessage_link">Link an iMessage chat\u2026</string>
+    <string name="imessage_link_pick_title">Show which iMessage chat here?</string>
+    <string name="imessage_link_none">Every iMessage chat is already inside a conversation. A chat shows up here once OpenBubbles has notified about a message in it.</string>
+    <string name="imessage_linked">Linked: its iMessages show in this conversation</string>
+    <string name="imessage_unlink">Unlink iMessage chat</string>
+    <string name="imessage_unlink_body">Its iMessages will show as a conversation of their own instead of here. Messages to this person go as texts (green) until you link it again.</string>
+    <string name="imessage_unlink_confirm">Unlink</string>
     <string name="imessage_check_new_chat">There is no iMessage chat with them in LightDecoder yet: OpenBubbles opens a new one with the check filled in. Tap send there.</string>
     <string name="imessage_pick_chat_in_share">OpenBubbles opened its share screen with the message. Pick or start the chat with them there (their number is copied).</string>
     <string name="imessage_start_chat_in_app">OpenBubbles opened. Start a chat with them there: their number is copied, paste it as the recipient.</string>
