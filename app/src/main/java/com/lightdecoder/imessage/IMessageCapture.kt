@@ -64,6 +64,13 @@ class IMessageAction(val intent: PendingIntent, val inputs: Array<RemoteInput>)
  */
 object IMessageCapture {
 
+    /** What OpenBubbles shows in place of a message with its "Hide Message Text" setting on. */
+    const val HIDDEN_TEXT = "iMessage"
+
+    /** [parseOrWhyNot]'s reason for such a notification. */
+    const val HIDDEN_REASON = "OpenBubbles hides message text (its setting Hide Message Text is on)"
+
+
     /**
      * Times below this are seconds, not milliseconds: OpenBubbles stamps the
      * line of a reply sent from its notification that way. (It is 1973 in
@@ -125,6 +132,8 @@ object IMessageCapture {
                 },
             )
         }
+        // OpenBubbles' "Hide Message Text" setting: every line reads "iMessage". Not a message to keep.
+        if (messages.isNotEmpty() && messages.all { it.text == HIDDEN_TEXT }) return no(HIDDEN_REASON)
         if (messages.isEmpty()) return no("no message with text in it (${style.messages.size} without text: a picture, a reaction?)")
         val isGroup = style.isGroupConversation
         val shownTitle = extras.getCharSequence(NotificationCompat.EXTRA_TITLE)?.toString()?.trim().orEmpty().removePrefix(NOTIFY_ANYWAYS)

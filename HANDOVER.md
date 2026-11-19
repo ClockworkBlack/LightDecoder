@@ -23,6 +23,23 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.40 (versionCode 48) - catching every message the notifications allow
+- From OpenBubbles' source (`lib/helpers/types/helpers/message_helper.dart`, `handleNotification`):
+  it posts no notification
+  - for a chat that is open on its screen;
+  - on its chat list, unless its setting "Send Notifications on Chat List" is on;
+  - for muted chats;
+  - for its own sent messages.
+
+  With "Hide Message Text" on, each line just reads "iMessage".
+- Now: such hidden-text notifications are not stored (`IMessageCapture.HIDDEN_REASON`), and
+  `IMessagePrefs.hiddenTextAt` makes the iMessage light red, naming the setting; it clears with the
+  next readable notification. The Blue Bubbles switch-on message and the light's explanation say to
+  turn ON "Send Notifications on Chat List" and OFF "Hide Message Text" (OpenBubbles: Settings →
+  Notifications), and that a chat open in OpenBubbles is not seen.
+- Full sync, which the user wants, is only possible with the link: see "Goal: full sync" in
+  `docs/openbubbles-link-plan.md` (on hold).
+
 ## 0.5.39 (versionCode 47) - the iMessage light
 - `ui/chat/IMessageLight`: a dot in the top bar (menu item with `action_imessage_light` layout), Messages tab
   only, hidden while Blue Bubbles is off. List: blue = working, red = OpenBubbles missing / no notification

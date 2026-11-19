@@ -93,6 +93,17 @@ class IMessageCaptureTest {
     }
 
     @Test
+    fun hiddenMessageTextIsNotKeptAsAMessage() {
+        // OpenBubbles' "Hide Message Text": every line reads "iMessage".
+        val hidden = chat(context, listOf(Line("iMessage", 1_000_000_000_000L, alice), Line("iMessage", 1_000_000_001_000L, alice)))
+        val (chat, why) = IMessageCapture.parseOrWhyNot(PACKAGE, OpenBubbles.MESSAGE_TAG, hidden, 5_000L)
+        assertNull(chat)
+        assertEquals(IMessageCapture.HIDDEN_REASON, why)
+        // Someone who really wrote "iMessage" among other things is kept.
+        assertNotNull(parse(chat(context, listOf(Line("Do you have iMessage?", 1L, alice), Line("iMessage", 2L, alice)))))
+    }
+
+    @Test
     fun aChatNamedByANumberHasThatNumberAsItsAddress() {
         // Someone not in the contacts, and no handle on the person.
         val captured = parse(chat(context, listOf(Line("Hello?", 1_000_000_000_000L, sender("+1 (555) 222-3333")))))!!

@@ -37,6 +37,36 @@ The link removes all of that.
 - Reliable linking to Messages conversations: the link reports each chat's handles (number or
   email).
 
+## Goal: full sync (the user's requirement)
+
+LightDecoder and OpenBubbles show the **same** iMessages, whichever app is on screen. Done means
+all of the following is true:
+
+| What | Today (notifications) | With the link |
+| --- | --- | --- |
+| Message arriving while its chat is **open in OpenBubbles** | missed (OpenBubbles posts no notification: `MessageHelper.handleNotification` returns when `cm.isChatActive`) | `MESSAGE` event from where it is saved, whatever is on screen |
+| Message arriving while OpenBubbles' **chat list** is on screen | missed unless OpenBubbles' "Send Notifications on Chat List" is on | event |
+| Messages **sent in OpenBubbles** (or on the user's other Apple devices) | missed (OpenBubbles never notifies its own) | event (`isFromMe`) |
+| Messages sent from LightDecoder | shown in OpenBubbles (sent through it) | same, and the result carries the real guid |
+| **History** and messages from while LightDecoder was not running | missed | `HISTORY` catch-up: on link start, and after any gap, ask for each chat since the newest guid/time LightDecoder has |
+| **Read** | LightDecoder → OpenBubbles only (Mark As Read button) | both ways: `MARK_READ` in, `dateRead` / unread changes out |
+| **Edits, unsends, reactions** (both people) | none | events; LightDecoder updates or removes the bubble |
+| Delivered / read ticks on the user's own messages | none | `dateDelivered`, `dateRead` |
+| Pictures, voice messages, files | text only (pictures through OpenBubbles' screen) | attachments both ways (content uris granted per message) |
+| Hidden text (OpenBubbles' "Hide Message Text") | unusable (detected and flagged since 0.5.40) | not involved: events carry the real text |
+| Deleting a chat or message | here only | optional: mirror deletes (ask the user first; the default is here only) |
+
+Rules for the sync:
+- **Ids:** OpenBubbles' message guid is the id in LightDecoder's archive, so an event that arrives
+  twice, or a history page that overlaps, is stored once. On first link, existing `ob:` rows are
+  matched to guids by chat, text and time (within the 3 s echo window) and re-keyed.
+- **Order of truth:** OpenBubbles is the source of truth for iMessages. LightDecoder never invents
+  a state; local-only deletes stay local.
+- **Catch-up:** the link keeps a per-chat cursor (newest guid and time). `PING` returns
+  OpenBubbles' newest message time, so LightDecoder knows whether to ask for `HISTORY`.
+- **Tests:** the emulator test gets one case per row of the table, driven by the extended
+  `:fakebubbles`.
+
 ## Phase 0: gates (do these first; stop if one fails)
 
 1. **Can a source build register?** The public CI (`.github/workflows/build.yml`) copies

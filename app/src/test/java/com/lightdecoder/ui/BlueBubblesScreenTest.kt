@@ -668,6 +668,18 @@ class BlueBubblesScreenTest {
             org.robolectric.shadows.ShadowLooper.idleMainLooper()
             assertEquals(two.app.getString(R.string.imessage_light_on), latestDialog().findViewById<android.widget.TextView>(android.R.id.message)?.text?.toString())
         }
+        // OpenBubbles hides message text: the light turns red and says which setting to change.
+        IMessagePrefs.setHiddenTextAt(two.app, 1L)
+        launchList().use { scenario ->
+            scenario.waitFor("the list") { titles(it).isNotEmpty() }
+            scenario.onActivity { activity ->
+                assertEquals(true to com.lightdecoder.ui.chat.IMessageLight.State.PROBLEM, light(activity))
+                menu(activity).findItem(R.id.action_imessage_light).actionView!!.performClick()
+            }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            assertEquals(two.app.getString(R.string.imessage_light_hidden_text), latestDialog().findViewById<android.widget.TextView>(android.R.id.message)?.text?.toString())
+        }
+        IMessagePrefs.setHiddenTextAt(two.app, 0L)
     }
 
     @Test

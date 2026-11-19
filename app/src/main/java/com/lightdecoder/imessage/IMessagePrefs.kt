@@ -13,6 +13,7 @@ import java.security.SecureRandom
 object IMessagePrefs {
     private const val FILE = "imessage"
     private const val KEY_ENABLED = "blue_bubbles"
+    private const val KEY_HIDDEN_TEXT = "hidden_text_at"
     private const val KEY_NOTIFY = "notify_messages"
     private const val KEY_ID_SALT = "id_salt"
     private const val KEY_DELETED = "deleted_messages"
@@ -26,6 +27,11 @@ object IMessagePrefs {
      * "Blue Bubbles": OpenBubbles' iMessages are read into the Messages tab
      * and can be answered from there. Off until the user ticks it.
      */
+    /** When OpenBubbles was last seen hiding message text (0: not since its last readable message). */
+    fun hiddenTextAt(context: Context): Long = prefs(context).getLong(KEY_HIDDEN_TEXT, 0L)
+
+    fun setHiddenTextAt(context: Context, at: Long) = prefs(context).edit { putLong(KEY_HIDDEN_TEXT, at) }
+
     fun enabled(context: Context): Boolean = prefs(context).getBoolean(KEY_ENABLED, false)
 
     fun setEnabled(context: Context, on: Boolean) = prefs(context).edit(commit = true) { putBoolean(KEY_ENABLED, on) }

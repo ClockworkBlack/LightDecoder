@@ -63,6 +63,7 @@ object IMessageLight {
             state?.phase == RelayState.Phase.ERROR && state.code == IMessageErrors.NOT_INSTALLED -> R.string.imessage_light_not_installed
             !MessengerNotificationListener.hasAccess(context) -> R.string.imessage_light_no_access
             !MessengerNotificationListener.isConnected() -> R.string.imessage_light_reader_stopped
+            IMessagePrefs.hiddenTextAt(context) != 0L -> R.string.imessage_light_hidden_text
             else -> null
         }
     }

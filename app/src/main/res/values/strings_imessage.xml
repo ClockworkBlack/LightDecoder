@@ -19,7 +19,7 @@
     <string name="blue_bubbles_need_access_body">LightDecoder reads the iMessages OpenBubbles shows in its notifications and replies through them. Turn on notification access for LightDecoder on the next screen.\n\nIf Android says the setting is restricted, open LightDecoder\'s App info, tap ⋮ and choose Allow restricted settings, then try again.</string>
     <string name="blue_bubbles_open_settings">Open settings</string>
     <string name="blue_bubbles_on_title">Blue Bubbles is on</string>
-    <string name="blue_bubbles_on_body">iMessage chats now show here in Messages, marked iMessage, as soon as a message arrives in OpenBubbles. Replies you send from them go out as iMessages.\n\n• Set OpenBubbles\' notifications to Silent (not off), or you will be alerted twice.\n• Earlier messages, and messages you send from OpenBubbles or other devices, do not show here.\n• Pictures, and chats nobody has written in since LightDecoder started, open in OpenBubbles for you to tap send.</string>
+    <string name="blue_bubbles_on_body">iMessage chats now show here in Messages, marked iMessage, as soon as a message arrives in OpenBubbles. Replies you send from them go out as iMessages.\n\n• Set OpenBubbles\' notifications to Silent (not off), or you will be alerted twice.\n• In OpenBubbles: Settings → Notifications, turn ON \u201cSend Notifications on Chat List\u201d and turn OFF \u201cHide Message Text\u201d, so every message reaches LightDecoder.\n• A message that arrives while its chat is open in OpenBubbles does not reach LightDecoder (OpenBubbles shows no notification then).\n• Earlier messages, and messages you send from OpenBubbles or other devices, do not show here.\n• Pictures, and chats nobody has written in since LightDecoder started, open in OpenBubbles for you to tap send.</string>
     <string name="blue_bubbles_off">Blue Bubbles is off. iMessage chats no longer show in Messages.</string>
 
     <!-- The conversation screens, for an iMessage chat. -->
@@ -44,7 +44,8 @@
     <string name="imessage_light_title_hand_off">iMessage, one tap in OpenBubbles</string>
     <string name="imessage_light_title_problem">iMessage needs attention</string>
     <string name="imessage_light_title_off">Not using iMessage</string>
-    <string name="imessage_light_on">Blue Bubbles is on and working: OpenBubbles is installed and LightDecoder is reading its notifications.</string>
+    <string name="imessage_light_on">Blue Bubbles is on and working: OpenBubbles is installed and LightDecoder is reading its notifications.\n\nSo that every message reaches LightDecoder: in OpenBubbles, Settings → Notifications, turn ON \u201cSend Notifications on Chat List\u201d and OFF \u201cHide Message Text\u201d. A message that arrives while its chat is open in OpenBubbles is not seen here.</string>
+    <string name="imessage_light_hidden_text">OpenBubbles is hiding message text in its notifications (they only say \u201ciMessage\u201d), so LightDecoder cannot show what was said. In OpenBubbles: Settings → Notifications, turn OFF \u201cHide Message Text\u201d.</string>
     <string name="imessage_light_off">Blue Bubbles is off: messages go as texts. Turn it on in this menu.</string>
     <string name="imessage_light_silent">This conversation sends as iMessage (blue), straight through OpenBubbles.</string>
     <string name="imessage_light_hand_off">This conversation sends as iMessage (blue), but OpenBubbles opens for you to tap send. It sends straight from here again after their next iMessage.</string>

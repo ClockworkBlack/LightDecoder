@@ -129,9 +129,15 @@ class IMessageManager private constructor(
             null to "could not be read (${e.javaClass.simpleName})"
         }
         if (chat == null) {
+            if (whyNot == IMessageCapture.HIDDEN_REASON && IMessagePrefs.hiddenTextAt(appContext) == 0L) {
+                IMessagePrefs.setHiddenTextAt(appContext, System.currentTimeMillis())
+                com.lightdecoder.messenger.MessengerEvents.notifyChanged()
+            }
             noteUnused(whyNot, IMessageCapture.shape(sbn.tag, sbn.id, notification), live)
             return
         }
+        // Readable again: OpenBubbles' Hide Message Text is off.
+        if (IMessagePrefs.hiddenTextAt(appContext) != 0L) IMessagePrefs.setHiddenTextAt(appContext, 0L)
         val reply = try { IMessageCapture.replyAction(notification) } catch (e: RuntimeException) { null }
         val markRead = try { IMessageCapture.markReadAction(notification) } catch (e: RuntimeException) { null }
         val hadReply = IMessageReplies.canReply(chat.chatGuid)
