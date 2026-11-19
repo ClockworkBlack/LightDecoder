@@ -147,9 +147,10 @@ object ReplyThreads {
     }
 
     /**
-     * The marks of [rows] (shown, oldest first) in the transcript: counts under roots and "Reply"
-     * under replies; with [inChat] ("Show reply threads in the chat") a faded copy and a line on
-     * replies instead, as [link] says. Only rows of a thread are in it.
+     * The marks of [rows] (shown, oldest first) in the transcript: counts under roots and a faded
+     * copy of the answered message above every reply; with [inChat] ("Show reply threads in the
+     * chat") lines too, as [link] says (a reply right under its message then gets the line only).
+     * Only rows of a thread are in it.
      */
     fun marks(rows: List<MessageRow>, threads: Threads, inChat: Boolean = false, timeBefore: (Int) -> Boolean = { false }): Map<String, Mark> {
         if (threads.rootOf.isEmpty()) return emptyMap()
@@ -162,9 +163,9 @@ object ReplyThreads {
             out[row.id] = Mark(
                 root = root ?: row.id,
                 replyCount = count,
-                fadedQuote = link == Link.NEAR || link == Link.FAR,
+                fadedQuote = if (inChat) link == Link.NEAR || link == Link.FAR else root != null,
                 connectTo = row.replyToId.takeIf { link == Link.ADJACENT || link == Link.NEAR },
-                marker = root != null && !inChat,
+                marker = false,
             )
         }
         return out
