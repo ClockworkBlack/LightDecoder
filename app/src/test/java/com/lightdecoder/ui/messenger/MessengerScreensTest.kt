@@ -157,7 +157,7 @@ class MessengerScreensTest {
                 activity.findViewById<View>(R.id.servicesMenu).performClick()
                 val popup = org.robolectric.shadows.ShadowPopupMenu.getLatestPopupMenu()!!
                 val items = (0 until popup.menu.size()).map { popup.menu.getItem(it) }
-                assertEquals(listOf("Messages", "Discord", "Messenger", "WhatsApp"), items.map { it.title.toString() })
+                assertEquals(listOf("Messages", "Discord", "Messenger", "WhatsApp", "iMessage"), items.map { it.title.toString() })
                 assertTrue("Messenger is ticked", items[2].isChecked)
                 // Another app's screen takes over: the conversation list, switched in place.
                 shadowOf(popup).onMenuItemClickListener.onMenuItemClick(items[3])
