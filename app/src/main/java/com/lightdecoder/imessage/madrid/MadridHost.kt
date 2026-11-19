@@ -361,6 +361,11 @@ class MadridHost private constructor(private val app: Context) : IMessageApps.Ho
     /**
      * The extension app's game picker (its own views, [RemoteViews]) in a sheet: replaced as the app
      * updates it; the app told when it is closed. A game picked there is offered to send.
+     *
+     * A spinner shows until the app's views do; when they do not (it does not connect, its
+     * keyboardOpened fails or gives nothing, its views cannot be drawn, or nothing shows in
+     * [LOAD_TIMEOUT_MS]), why not, with Try again. Every step and failure goes into the iMessage
+     * log ([IMessageLog]) that Report a problem sends, since logcat is out of reach on a phone.
      */
     private inner class Picker(
         private val activity: Activity,
@@ -373,8 +378,18 @@ class MadridHost private constructor(private val app: Context) : IMessageApps.Ho
 
         /** The "Send this game?" a game picked here led to. */
         private var confirm: android.app.Dialog? = null
-        private val container = FrameLayout(activity)
+        private val root: View = activity.layoutInflater.inflate(R.layout.sheet_madrid_picker, null)
+        private val stage: FrameLayout = root.findViewById(R.id.madridStage)
+        private val loading: View = root.findViewById(R.id.madridLoading)
+        private val error: View = root.findViewById(R.id.madridError)
         private var shown: View? = null
+
+        /** Logged once each: the first views given, the first drawn, an update from someone else. */
+        private var updateLogged = false
+        private var drawnLogged = false
+
+        @Volatile
+        private var refusedLogged = false
 
         @Volatile
         private var conn: MadridConnection? = null
@@ -385,9 +400,21 @@ class MadridHost private constructor(private val app: Context) : IMessageApps.Ho
         @Volatile
         private var api: IMadridExtension? = null
 
+        /** Nothing shown in time: why not, with Try again. */
+        private val timeout = Runnable {
+            if (closed || shown != null) return@Runnable
+            log("nothing shown in ${LOAD_TIMEOUT_MS / 1000} s")
+            showError()
+        }
+
         private val views = object : IViewUpdateCallback.Stub() {
             override fun updateView(views: RemoteViews?) {
-                if (views == null || !fromExtension(ext)) return
+                if (!fromExtension(ext)) {
+                    if (!refusedLogged) log("updateView from another app (uid ${Binder.getCallingUid()}): ignored")
+                    refusedLogged = true
+                    return
+                }
+                if (views == null) return log("updateView gave no views")
                 main.post { render(views) }
             }
         }
@@ -399,31 +426,75 @@ class MadridHost private constructor(private val app: Context) : IMessageApps.Ho
             }
         }
 
+        private fun log(step: String) {
+            IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: games picker (${ext.label}): $step")
+        }
+
+        private fun describe(e: Throwable) = "${e.javaClass.name}: ${e.message.orEmpty()}"
+
         fun show() {
             val height = (PICKER_HEIGHT_DP * activity.resources.displayMetrics.density).toInt()
-            container.layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, height)
-            container.minimumHeight = height
-            sheet.setContentView(container)
+            root.layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, height)
+            root.minimumHeight = height
+            root.findViewById<android.widget.TextView>(R.id.madridErrorText).text =
+                activity.getString(R.string.imessage_app_games_not_loaded, ext.label)
+            root.findViewById<View>(R.id.madridRetry).setOnClickListener { retry() }
+            sheet.setContentView(root)
+            // All of it at once: never collapsed to a sliver that shows nothing.
+            sheet.behavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED
+            sheet.behavior.skipCollapsed = true
             sheet.setOnDismissListener { close() }
             sheet.show()
+            log("opened, ${PICKER_HEIGHT_DP}dp high")
+            showLoading()
+            connect()
+        }
+
+        /** Binds the app and listens: every connection (again, after it was restarted) opens the picker anew. */
+        private fun connect() {
             scope.launch {
                 val c = connection(ext)
                 val got = c.acquire()
                 if (got == null) {
-                    toast(app.getString(R.string.imessage_app_no_answer, ext.label))
-                    main.post { sheet.dismiss() }
+                    log("not connected: ${c.lastProblem ?: "no answer"}")
+                    main.post { showError() }
                     return@launch
                 }
-                // Closed meanwhile: what was acquired goes at once. Else close() lets it go.
+                // Closed meanwhile, or already held (Try again while the first was connecting): this one goes at once.
                 val kept = synchronized(lock) {
-                    if (!closed) conn = c
-                    !closed
+                    val keep = !closed && conn == null
+                    if (keep) conn = c
+                    keep
                 }
-                if (!kept) return@launch c.release()
-                // Every connection (again, after the app was restarted) opens the picker anew.
+                if (!kept) {
+                    c.release()
+                    if (!closed) connected(got)
+                    return@launch
+                }
+                log("bound")
+                // Calls connected() at once: it is connected.
                 c.listen(this@Picker)
                 // Closed while it started listening: close() may have missed the listener.
                 if (closed) c.unlisten(this@Picker)
+            }
+        }
+
+        /** Try again: connected anew if it was not, else the picker asked for again. */
+        private fun retry() {
+            if (closed) return
+            log("Try again")
+            showLoading()
+            val c = conn ?: return connect()
+            scope.launch {
+                val got = c.acquire()
+                if (got == null) {
+                    log("not connected: ${c.lastProblem ?: "no answer"}")
+                    main.post { showError() }
+                    return@launch
+                }
+                // The hold from connect() keeps it bound.
+                c.release()
+                connected(got)
             }
         }
 
@@ -446,45 +517,111 @@ class MadridHost private constructor(private val app: Context) : IMessageApps.Ho
         override fun connected(api: IMadridExtension) {
             if (closed) return
             this.api = api
+            log("connected")
+            // Never on the main thread: the app composes its views in keyboardOpened, and may block.
             scope.launch {
                 val first = try {
                     api.keyboardOpened(views, keyboard, userCount(conversationId))
-                } catch (e: RemoteException) {
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
                     Log.w(TAG, "${ext.label} did not open its picker", e)
-                    null
-                } catch (e: RuntimeException) {
-                    Log.w(TAG, "${ext.label} did not open its picker", e)
-                    null
+                    log("keyboardOpened failed: ${describe(e)}")
+                    main.post { showError() }
+                    return@launch
                 }
-                if (first != null) main.post { render(first, fresh = true) }
+                if (first == null) {
+                    log("keyboardOpened gave no views")
+                    // Its updateView may still bring some: they replace the message.
+                    main.post { showError() }
+                    return@launch
+                }
+                log("keyboardOpened gave views (${first.`package`})")
+                main.post { render(first, fresh = true) }
             }
         }
 
         /** Shows [views]: over what is shown when it can, else in its place. On the main thread. */
         private fun render(views: RemoteViews, fresh: Boolean = false) {
             if (closed) return
-            try {
-                val current = shown
-                if (current != null && !fresh) {
-                    try {
-                        views.reapply(activity, current)
-                        return
-                    } catch (e: RuntimeException) {
-                        // Another layout: drawn anew below.
-                    }
-                }
-                container.removeAllViews()
-                shown = views.apply(activity, container).also(container::addView)
-            } catch (e: RuntimeException) {
-                Log.w(TAG, "${ext.label}'s picker not shown", e)
+            if (!fresh && !updateLogged) {
+                updateLogged = true
+                log("updateView gave views")
             }
+            val current = shown
+            if (current != null && !fresh) {
+                try {
+                    views.reapply(activity, current)
+                    return showLoaded()
+                } catch (e: Exception) {
+                    // Another layout: drawn anew below.
+                    log("reapply failed (${describe(e)}): drawn anew")
+                }
+            }
+            val applied = applied(views)
+            stage.removeAllViews()
+            shown = null
+            if (applied == null) return showError()
+            stage.addView(applied, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            shown = applied
+            showLoaded()
+            if (!drawnLogged) {
+                drawnLogged = true
+                log("shown (${applied.javaClass.simpleName})")
+                applied.post { if (!closed) log("laid out ${applied.width}x${applied.height} px in ${stage.width}x${stage.height} px") }
+            }
+        }
+
+        /**
+         * [views] drawn: with the screen's context; when that fails, with the app's, then the app's
+         * with its theme. Null (each failure logged) when none could.
+         */
+        private fun applied(views: RemoteViews): View? {
+            val contexts = listOf(
+                "screen" to activity,
+                "application" to activity.applicationContext,
+                "themed application" to android.view.ContextThemeWrapper(activity.applicationContext, R.style.Theme_LightDecoder),
+            )
+            for ((name, context) in contexts) {
+                try {
+                    return views.apply(context, stage)
+                } catch (e: Exception) {
+                    Log.w(TAG, "${ext.label}'s picker not drawn with the $name context", e)
+                    log("apply with the $name context failed: ${describe(e)}")
+                }
+            }
+            return null
+        }
+
+        private fun showLoading() {
+            if (closed) return
+            error.visibility = View.GONE
+            loading.visibility = View.VISIBLE
+            main.removeCallbacks(timeout)
+            main.postDelayed(timeout, LOAD_TIMEOUT_MS)
+        }
+
+        private fun showLoaded() {
+            main.removeCallbacks(timeout)
+            loading.visibility = View.GONE
+            error.visibility = View.GONE
+        }
+
+        /** Why nothing shows, with Try again; nothing when the app's views do show. */
+        private fun showError() {
+            if (closed || shown != null) return
+            main.removeCallbacks(timeout)
+            loading.visibility = View.GONE
+            error.visibility = View.VISIBLE
         }
 
         /** A game picked in the picker: the sheet closes and the new card is offered to send. */
         private fun picked(m: MadridMessage) {
             if (closed) return
+            log("a game picked")
             sheet.dismiss()
             if (MadridMessages.problemWithCard(m) != null) {
+                log("the game picked cannot be sent")
                 toast(activity.getString(R.string.imessage_app_card_invalid, ext.label))
                 return
             }
@@ -495,6 +632,7 @@ class MadridHost private constructor(private val app: Context) : IMessageApps.Ho
 
         /** Once: the extension is told its picker closed, and let go. */
         private fun close() {
+            main.removeCallbacks(timeout)
             val c = synchronized(lock) {
                 if (closed) return
                 closed = true
@@ -554,6 +692,9 @@ class MadridHost private constructor(private val app: Context) : IMessageApps.Ho
 
         /** The picker's height, as OpenPigeon draws it for a host like this one. */
         private const val PICKER_HEIGHT_DP = 300
+
+        /** How long the picker waits for the extension app's views before it says they did not load. */
+        internal const val LOAD_TIMEOUT_MS = 8_000L
 
         /** How often an engaged session is checked for having ended. */
         private const val ENGAGED_CHECK_MS = 10_000L

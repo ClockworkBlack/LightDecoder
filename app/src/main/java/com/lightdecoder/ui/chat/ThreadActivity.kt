@@ -1551,16 +1551,22 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
     }
 
-    /** The send button held down: Apple's effects to send it with ("Sent with Slam"), as on an iPhone. False when it offers none. */
+    /**
+     * The send button held down: "Send with effect" (Bubble or Screen, "Sent with Slam"), as on an
+     * iPhone. In a chat that cannot send effects, a word that they are for iMessage chats. False
+     * (nothing) when there is nothing to send.
+     */
     private fun offerEffects(): Boolean {
-        if (!binding.send.isEnabled || !sendsWithEffects()) return false
-        val effects = com.lightdecoder.imessage.direct.IMessageExtra.EFFECTS
+        val text = binding.input.text?.toString()?.trim().orEmpty()
+        val files = attachments
+        if (!binding.send.isEnabled || (text.isEmpty() && files.isEmpty())) return false
+        if (!sendsWithEffects()) {
+            toast(getString(R.string.imessage_effect_not_imessage))
+            return true
+        }
+        val preview = text.ifEmpty { resources.getQuantityString(R.plurals.chat_attachments, files.size, files.size) }
         confirmDialog?.dismiss()
-        confirmDialog = MaterialAlertDialogBuilder(this)
-            .setTitle(R.string.imessage_effect_pick_title)
-            .setItems(effects.map { getString(it.second) }.toTypedArray()) { _, which -> send(effect = effects[which].first) }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
+        confirmDialog = EffectSheet.show(this, preview) { effect -> send(effect = effect) }
         return true
     }
 

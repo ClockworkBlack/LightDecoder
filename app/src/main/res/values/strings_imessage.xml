@@ -213,6 +213,12 @@
     <!-- Under a message sent with an effect. %1$s: the effect (imessage_effect_*). -->
     <string name="imessage_sent_with">Sent with %1$s</string>
     <string name="imessage_effect_pick_title">Send with effect</string>
+    <!-- "Send with effect"'s two kinds, as on an iPhone: the bubble moves, or the whole screen. -->
+    <string name="imessage_effect_tab_bubble">Bubble</string>
+    <string name="imessage_effect_tab_screen">Screen</string>
+    <string name="imessage_effect_pick_hint">Pick an effect, then tap the arrow to send.</string>
+    <!-- The send button held down in a chat that cannot send effects. -->
+    <string name="imessage_effect_not_imessage">Effects are for iMessage chats.</string>
     <string name="imessage_invisible_ink_hidden">Invisible Ink: tap to reveal</string>
     <!-- %1$s: the iMessage app's name, or imessage_app_unnamed. -->
     <string name="imessage_app_only_on_apple">%1$s can only be opened on an iPhone, iPad or Mac.</string>
@@ -228,6 +234,10 @@
     <string name="imessage_app_unverified">This copy of %1$s could not be verified, so games are not opened with it.</string>
     <!-- %1$s: the extension app (OpenPigeon). -->
     <string name="imessage_app_no_answer">%1$s did not respond. Try again.</string>
+    <!-- The games picker, when the extension app's games did not show. %1$s: the extension app (OpenPigeon). -->
+    <string name="imessage_app_games_not_loaded">%1$s\'s games did not load. Try again.</string>
+    <string name="imessage_app_games_loading">Loading games…</string>
+    <string name="imessage_app_try_again">Try again</string>
     <!-- %1$s: why, in words. -->
     <string name="imessage_app_move_failed">The move was not sent: %1$s</string>
     <!-- %1$s: why, in words. -->

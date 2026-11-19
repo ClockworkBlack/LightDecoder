@@ -169,6 +169,14 @@ data class IMessageExtra(
         fun isWebAddress(url: String): Boolean =
             url.startsWith("https://", ignoreCase = true) || url.startsWith("http://", ignoreCase = true)
 
+        /**
+         * Whether [id] is one of Apple's bubble effects (Slam, Loud, Gentle, Invisible Ink: the
+         * bubble itself moves), not a screen effect (Echo, Balloons, ...: the whole screen).
+         */
+        fun isBubbleEffect(id: String): Boolean = id.startsWith(BUBBLE_EFFECT_PREFIX)
+
+        private const val BUBBLE_EFFECT_PREFIX = "com.apple.MobileSMS.expressivesend."
+
         /** Whether [id] is the invisible ink effect. */
         fun isInvisibleInk(id: String?): Boolean = id == INVISIBLE_INK
 

@@ -86,7 +86,17 @@ class MadridHostTest {
         @Volatile var users = 0
         val updated = Collections.synchronizedList(ArrayList<MadridMessage>())
 
-        override fun keyboardOpened(callback: IViewUpdateCallback?, handle: IKeyboardHandle?, userCount: Int): RemoteViews? = null
+        /** What keyboardOpened does: gives views, none, or throws. */
+        @Volatile var opens: () -> RemoteViews? = { null }
+
+        @Volatile var viewsCallback: IViewUpdateCallback? = null
+        val openedOn = Collections.synchronizedList(ArrayList<Thread>())
+
+        override fun keyboardOpened(callback: IViewUpdateCallback?, handle: IKeyboardHandle?, userCount: Int): RemoteViews? {
+            openedOn += Thread.currentThread()
+            viewsCallback = callback
+            return opens()
+        }
         override fun keyboardClosed() {}
         override fun didTapTemplate(message: MadridMessage?, handle: IMessageViewHandle?, userCount: Int) {
             this.handle = handle
@@ -328,6 +338,124 @@ class MadridHostTest {
         link.apply(fromBob("M3", move("C1", session, "third"), 4))
         waitFor("the move") { fake.updated.isNotEmpty() }
         assertEquals(listOf("M3"), fake.updated.map { it.messageGuid })
+    }
+
+    // --- "Games": the picker sheet ----------------------------------------------------------------
+
+    private fun pickerScreen(): androidx.appcompat.app.AppCompatActivity {
+        val controller = org.robolectric.Robolectric.buildActivity(androidx.appcompat.app.AppCompatActivity::class.java)
+        controller.get().setTheme(R.style.Theme_LightDecoder)
+        return controller.setup().get()
+    }
+
+    private fun gamesSheet(): android.app.Dialog {
+        val dialog = org.robolectric.shadows.ShadowDialog.getLatestDialog()
+        assertTrue("no games sheet: $dialog", dialog is com.google.android.material.bottomsheet.BottomSheetDialog)
+        return dialog
+    }
+
+    private fun shows(sheet: android.app.Dialog, id: Int) = sheet.findViewById<android.view.View>(id)?.visibility == android.view.View.VISIBLE
+
+    private fun pickerLog(): List<String> = com.lightdecoder.imessage.IMessageLog.read(context).filter { it.contains("games picker") }
+
+    private fun gameViews() = RemoteViews(context.packageName, android.R.layout.simple_list_item_1).apply {
+        setTextViewText(android.R.id.text1, "8 Ball")
+    }
+
+    @Test
+    fun aPickerThatGivesNoViewsSaysSoAndTryAgainShowsThemWhenTheyCome() {
+        com.lightdecoder.imessage.IMessageLog.clear(context)
+        val picker = MadridHost.get(context).openPicker(pickerScreen(), chat)
+        assertNotNull(picker)
+        val sheet = gamesSheet()
+        assertTrue("a spinner first", shows(sheet, R.id.madridLoading))
+        waitFor("the message") { shows(sheet, R.id.madridError) }
+        assertTrue(!shows(sheet, R.id.madridLoading))
+        assertEquals(
+            context.getString(R.string.imessage_app_games_not_loaded, ext.label),
+            sheet.findViewById<android.widget.TextView>(R.id.madridErrorText)!!.text.toString(),
+        )
+        assertTrue(shows(sheet, R.id.madridRetry))
+        assertTrue(pickerLog().toString(), pickerLog().any { it.contains("keyboardOpened gave no views") })
+        assertTrue("never on the main thread", fake.openedOn.none { it == Looper.getMainLooper().thread })
+
+        // Try again, and now the app gives its views: they show, filling the sheet.
+        fake.opens = { gameViews() }
+        sheet.findViewById<android.view.View>(R.id.madridRetry)!!.performClick()
+        assertTrue("a spinner again", shows(sheet, R.id.madridLoading))
+        val stage = sheet.findViewById<android.widget.FrameLayout>(R.id.madridStage)!!
+        waitFor("the views") { stage.childCount == 1 }
+        assertTrue("spinner gone", !shows(sheet, R.id.madridLoading))
+        assertTrue(!shows(sheet, R.id.madridError))
+        assertEquals("8 Ball", (stage.getChildAt(0) as android.widget.TextView).text.toString())
+        assertEquals(android.view.ViewGroup.LayoutParams.MATCH_PARENT, stage.getChildAt(0).layoutParams.height)
+        assertEquals(2, fake.openedOn.size)
+        assertTrue(pickerLog().any { it.contains("Try again") })
+        assertTrue(pickerLog().any { it.contains("shown") })
+        picker!!.dismiss()
+    }
+
+    @Test
+    fun aPickerWhoseKeyboardOpenedThrowsSaysSoAndLogsWhy() {
+        com.lightdecoder.imessage.IMessageLog.clear(context)
+        fake.opens = { throw IllegalStateException("Glance broke") }
+        val picker = MadridHost.get(context).openPicker(pickerScreen(), chat)!!
+        val sheet = gamesSheet()
+        waitFor("the message") { shows(sheet, R.id.madridError) }
+        assertTrue(shows(sheet, R.id.madridRetry))
+        assertTrue(
+            pickerLog().toString(),
+            pickerLog().any { it.contains("keyboardOpened failed: java.lang.IllegalStateException: Glance broke") },
+        )
+        picker.dismiss()
+    }
+
+    @Test
+    fun aPickersViewsShowAndItsUpdatesReplaceThem() {
+        com.lightdecoder.imessage.IMessageLog.clear(context)
+        fake.opens = { gameViews() }
+        val picker = MadridHost.get(context).openPicker(pickerScreen(), chat)!!
+        val sheet = gamesSheet()
+        val stage = sheet.findViewById<android.widget.FrameLayout>(R.id.madridStage)!!
+        waitFor("the views") { stage.childCount == 1 }
+        assertTrue("spinner gone", !shows(sheet, R.id.madridLoading))
+        assertTrue(!shows(sheet, R.id.madridError))
+        assertEquals(
+            com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED,
+            (sheet as com.google.android.material.bottomsheet.BottomSheetDialog).behavior.state,
+        )
+        // The app's update: drawn over what is shown.
+        fake.viewsCallback!!.updateView(RemoteViews(context.packageName, android.R.layout.simple_list_item_1).apply { setTextViewText(android.R.id.text1, "Darts") })
+        waitFor("the update") { (stage.getChildAt(0) as android.widget.TextView).text.toString() == "Darts" }
+        assertEquals(1, stage.childCount)
+        // Nothing said to have failed, even after the wait.
+        shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(MadridHost.LOAD_TIMEOUT_MS + 1_000))
+        assertTrue(!shows(sheet, R.id.madridError))
+        assertTrue(pickerLog().toString(), pickerLog().any { it.contains("connected") })
+        picker.dismiss()
+    }
+
+    @Test
+    fun aPickerThatShowsNothingInTimeSaysSo() {
+        com.lightdecoder.imessage.IMessageLog.clear(context)
+        val stuck = java.util.concurrent.CountDownLatch(1)
+        fake.opens = {
+            stuck.await(20, java.util.concurrent.TimeUnit.SECONDS)
+            null
+        }
+        try {
+            val picker = MadridHost.get(context).openPicker(pickerScreen(), chat)!!
+            val sheet = gamesSheet()
+            waitFor("keyboardOpened") { fake.openedOn.isNotEmpty() }
+            assertTrue(shows(sheet, R.id.madridLoading))
+            shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(MadridHost.LOAD_TIMEOUT_MS + 100))
+            assertTrue(shows(sheet, R.id.madridError))
+            assertTrue(!shows(sheet, R.id.madridLoading))
+            assertTrue(pickerLog().toString(), pickerLog().any { it.contains("nothing shown in 8 s") })
+            picker.dismiss()
+        } finally {
+            stuck.countDown()
+        }
     }
 
     private companion object {

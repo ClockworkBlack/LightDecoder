@@ -2333,19 +2333,31 @@ class BlueBubblesScreenTest {
                 inked.findViewById<View>(R.id.bubble).performClick()
             }
             scenario.waitFor("the ink tapped away") { bubbleOf(it, "the secret") != null }
-            // Send held down: Apple's twelve effects; one picked goes with the message.
+            // Send held down: "Send with effect", Bubble first; Slam picked and sent with the arrow.
             scenario.onActivity { activity ->
                 activity.findViewById<EditText>(R.id.input).setText("Kaboom")
                 assertTrue(activity.findViewById<View>(R.id.send).performLongClick())
             }
             org.robolectric.shadows.ShadowLooper.idleMainLooper()
-            val picker = latestDialog()
-            assertEquals(two.app.getString(R.string.imessage_effect_pick_title), picker.findViewById<android.widget.TextView>(androidx.appcompat.R.id.alertTitle)?.text?.toString())
-            val list = picker.listView
-            assertEquals(12, list.adapter.count)
-            assertEquals("Slam", list.adapter.getItem(0).toString())
-            assertEquals("Celebration", list.adapter.getItem(11).toString())
-            list.performItemClick(null, 0, 0)
+            val picker = effectSheet()
+            assertEquals(two.app.getString(R.string.imessage_effect_pick_title), picker.findViewById<android.widget.TextView>(R.id.effectTitle)!!.text.toString())
+            assertEquals("Kaboom", picker.findViewById<android.widget.TextView>(R.id.effectPreview)!!.text.toString())
+            val bubbles = picker.findViewById<android.widget.RadioGroup>(R.id.effectBubbleList)!!
+            val screens = picker.findViewById<android.widget.RadioGroup>(R.id.effectScreenList)!!
+            assertEquals(View.VISIBLE, bubbles.visibility)
+            assertEquals(View.GONE, screens.visibility)
+            assertEquals(listOf("Slam", "Loud", "Gentle", "Invisible Ink"), effectNames(bubbles))
+            assertEquals(
+                listOf("Echo", "Spotlight", "Balloons", "Confetti", "Love", "Lasers", "Fireworks", "Celebration"),
+                effectNames(screens),
+            )
+            val arrow = picker.findViewById<View>(R.id.effectSend)!!
+            assertFalse("nothing picked yet", arrow.isEnabled)
+            bubbles.getChildAt(0).performClick()
+            assertTrue(arrow.isEnabled)
+            arrow.performClick()
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            assertFalse("closed once sent", picker.isShowing)
             two.waitUntil("sent with the effect") { asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).isNotEmpty() }
             val sent = com.lightdecoder.imessage.direct.DirectWire.SendRequest.fromJson(asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).single())
             assertEquals("Kaboom", sent.text)
@@ -2358,17 +2370,79 @@ class BlueBubblesScreenTest {
     }
 
     @Test
-    fun withoutAnIMessageChatSendOffersNoEffects() {
+    fun withTheLibraryAScreenEffectPickedGoesWithTheMessageAndCloseSendsNothing() {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        val answer = appleSends()
+        directMode(asked)
+        com.lightdecoder.imessage.direct.DirectLink.installForTesting(two.app) { what, request, _ ->
+            if (what == com.lightdecoder.imessage.direct.DirectWire.SEND) asked += what to request
+            answer(what, request)
+        }
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        directMessageWith("E1", "Hello", System.currentTimeMillis() - 60_000, com.lightdecoder.imessage.direct.IMessageExtra())
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("her iMessage") { shownTexts(it).contains("Hello") }
+            // Closed with the X: nothing goes, the text stays.
+            scenario.onActivity { activity ->
+                activity.findViewById<EditText>(R.id.input).setText("Party")
+                assertTrue(activity.findViewById<View>(R.id.send).performLongClick())
+            }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val first = effectSheet()
+            first.findViewById<View>(R.id.effectClose)!!.performClick()
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            assertFalse(first.isShowing)
+            scenario.onActivity { activity -> assertEquals("Party", activity.findViewById<EditText>(R.id.input).text.toString()) }
+
+            // Screen: Confetti picked, sent with the arrow.
+            scenario.onActivity { activity -> assertTrue(activity.findViewById<View>(R.id.send).performLongClick()) }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val picker = effectSheet()
+            picker.findViewById<View>(R.id.effectTabScreen)!!.performClick()
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val screens = picker.findViewById<android.widget.RadioGroup>(R.id.effectScreenList)!!
+            assertEquals(View.VISIBLE, screens.visibility)
+            assertEquals(View.GONE, picker.findViewById<View>(R.id.effectBubbleList)!!.visibility)
+            screens.getChildAt(effectNames(screens).indexOf("Confetti")).performClick()
+            picker.findViewById<View>(R.id.effectSend)!!.performClick()
+            two.waitUntil("sent with the effect") { asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).isNotEmpty() }
+            val sent = com.lightdecoder.imessage.direct.DirectWire.SendRequest.fromJson(asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).single())
+            assertEquals("Party", sent.text)
+            assertEquals("com.apple.messages.effect.CKConfettiEffect", sent.effect)
+        }
+    }
+
+    @Test
+    fun withoutAnIMessageChatSendHeldDownSaysEffectsAreForIMessageAndSendsNothing() {
         two.env.pairedManager()
         two.seedConversation(ChatService.MESSAGES, "c1", "Bob", lastTs = 1_000)
         ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
             scenario.waitFor("the composer") { it.findViewById<View>(R.id.input).isEnabled }
             scenario.onActivity { activity ->
-                activity.findViewById<EditText>(R.id.input).setText("Green one")
+                // Nothing typed: nothing offered.
                 assertFalse(activity.findViewById<View>(R.id.send).performLongClick())
+                activity.findViewById<EditText>(R.id.input).setText("Green one")
+                assertTrue(activity.findViewById<View>(R.id.send).performLongClick())
             }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            assertEquals(two.app.getString(R.string.imessage_effect_not_imessage), org.robolectric.shadows.ShadowToast.getTextOfLatestToast())
+            assertFalse("no sheet", ShadowDialog.getLatestDialog() is com.google.android.material.bottomsheet.BottomSheetDialog)
+            scenario.onActivity { activity -> assertEquals("Green one", activity.findViewById<EditText>(R.id.input).text.toString()) }
         }
     }
+
+    /** The "Send with effect" sheet shown last. */
+    private fun effectSheet(): com.google.android.material.bottomsheet.BottomSheetDialog {
+        val dialog = ShadowDialog.getLatestDialog()
+        assertTrue("no effect sheet: $dialog", dialog is com.google.android.material.bottomsheet.BottomSheetDialog)
+        assertTrue(dialog.isShowing)
+        return dialog as com.google.android.material.bottomsheet.BottomSheetDialog
+    }
+
+    private fun effectNames(group: android.widget.RadioGroup): List<String> =
+        (0 until group.childCount).map { (group.getChildAt(it) as android.widget.TextView).text.toString() }
 
     @Test
     fun withTheLibraryALinksPreviewAndAnAppsCardShowAndOpen() {

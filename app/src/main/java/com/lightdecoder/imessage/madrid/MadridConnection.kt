@@ -30,7 +30,10 @@ internal class MadridConnection(
     private val verified: () -> Boolean = { MadridApps.status(context.packageManager, ext) == MadridApps.Status.VERIFIED },
     private val onDied: () -> Unit,
 ) {
-    /** Told each time the extension connects (again, after it died), on the main thread: it only starts work. */
+    /**
+     * Told each time the extension connects (again, after it died): on the main thread when it
+     * connects, or on the caller's thread when [listen] finds it connected already. It only starts work.
+     */
     fun interface Listener {
         fun connected(api: IMadridExtension)
     }
@@ -42,6 +45,14 @@ internal class MadridConnection(
     private var api: IMadridExtension? = null
     private var waiting = CompletableDeferred<IMadridExtension>()
     private val listeners = LinkedHashSet<Listener>()
+    /**
+     * Why the last [acquire] gave nothing ("could not be bound", "did not connect in 10 s"), for
+     * the iMessage log; null after one that worked.
+     */
+    @Volatile
+    var lastProblem: String? = null
+        private set
+
     private val unbindLater = Runnable { synchronized(lock) { if (refs == 0) unbind() } }
 
     private val death = IBinder.DeathRecipient { died() }
@@ -91,7 +102,10 @@ internal class MadridConnection(
         val wait = synchronized(lock) {
             refs++
             main.removeCallbacks(unbindLater)
-            api?.let { return it }
+            api?.let {
+                lastProblem = null
+                return it
+            }
             if (!bound && !bind()) {
                 refs--
                 return null
@@ -101,7 +115,10 @@ internal class MadridConnection(
         val ext = withTimeoutOrNull(BIND_TIMEOUT_MS) { wait.await() }
         if (ext == null) {
             Log.w(TAG, "${ext()} did not connect")
+            lastProblem = "bound, but it did not connect in ${BIND_TIMEOUT_MS / 1000} s"
             release()
+        } else {
+            lastProblem = null
         }
         return ext
     }
@@ -135,8 +152,10 @@ internal class MadridConnection(
         // Before every bind, a rebind after an update included: the app now there may be another.
         if (!verified()) {
             Log.w(TAG, "${ext()} is not the verified app: not bound")
+            lastProblem = "not the verified app: not bound"
             return false
         }
+        lastProblem = null
         val intent = Intent(MadridApps.ACTION).setComponent(ComponentName(ext.pkg, ext.service))
         var flags = Context.BIND_AUTO_CREATE
         // So that the game it opens on a tap may start its screen (Android 14 and later).
@@ -145,10 +164,12 @@ internal class MadridConnection(
             context.bindService(intent, connection, flags)
         } catch (e: SecurityException) {
             Log.w(TAG, "${ext()} refused the binding", e)
+            lastProblem = "refused the binding (${e.javaClass.simpleName})"
             false
         }
         if (!bound) {
             Log.w(TAG, "${ext()} could not be bound")
+            if (lastProblem == null) lastProblem = "could not be bound (bindService said no)"
             // A failed bindService still has to be unbound.
             runCatching { context.unbindService(connection) }
         }
