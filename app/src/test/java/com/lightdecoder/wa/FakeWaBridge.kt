@@ -103,6 +103,7 @@ class FakeWaBridge(val dataDir: File, private val sink: WaBridge.Sink) : WaBridg
 
     /** conversation id, message id, for everyone. */
     val deletions = CopyOnWriteArrayList<Triple<String, String, Boolean>>()
+    val edits = CopyOnWriteArrayList<Triple<String, String, String>>()
     val archived = CopyOnWriteArrayList<Pair<String, Boolean>>()
     val muted = CopyOnWriteArrayList<Pair<String, Boolean>>()
 
@@ -233,6 +234,12 @@ class FakeWaBridge(val dataDir: File, private val sink: WaBridge.Sink) : WaBridg
         call("setOnline")
         requireConnected()
         onlineStates += online
+    }
+
+    override fun editText(conversationId: String, messageId: String, text: String) {
+        call("editText")
+        requireConnected()
+        edits += Triple(conversationId, messageId, text)
     }
 
     override fun deleteMessage(conversationId: String, messageId: String, forEveryone: Boolean) {

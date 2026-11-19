@@ -4,4 +4,29 @@
         <item name="colorPrimaryDark">@color/brand_dark</item>
         <item name="android:windowBackground">?attr/colorSurface</item>
     </style>
+
+    <!--
+        The top bar's overflow menu: its checkboxes (Blue Bubbles) are drawn in the text colour,
+        white on the dark theme, instead of the accent colour.
+    -->
+    <!-- The video player: black, edge to edge, no title bar. -->
+    <style name="Theme.LightDecoder.Video" parent="Theme.LightDecoder">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:statusBarColor">@android:color/black</item>
+        <item name="android:navigationBarColor">@android:color/black</item>
+    </style>
+
+    <style name="ThemeOverlay.LightDecoder.MenuPopup" parent="ThemeOverlay.Material3">
+        <item name="colorControlNormal">?attr/colorOnSurface</item>
+        <item name="colorControlActivated">?attr/colorOnSurface</item>
+        <!-- Material 3's checkbox takes its colour from its own tint, not colorControlActivated. -->
+        <item name="checkboxStyle">@style/Widget.LightDecoder.MenuCheckBox</item>
+    </style>
+
+    <style name="Widget.LightDecoder.MenuCheckBox" parent="Widget.Material3.CompoundButton.CheckBox">
+        <item name="buttonTint">@color/menu_checkbox_tint</item>
+        <item name="android:buttonTint">@color/menu_checkbox_tint</item>
+        <!-- The tick itself: the menu's own dark colour, or it is white on the white box and the box looks empty. -->
+        <item name="buttonIconTint">@color/menu_checkbox_icon_tint</item>
+    </style>
 </resources>

@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        "Blue Bubbles": iMessage in the Messages tab, through the OpenBubbles app (imessage.IMessageManager).
+        OpenBubbles is a separate app; LightDecoder reads its notifications and answers through them.
+    -->
+    <string name="chat_service_imessage">iMessage</string>
+    <string name="blue_bubbles">Blue Bubbles</string>
+    <string name="imessage_badge">iMessage</string>
+
+    <string name="imessage_channel_messages">iMessages (Blue Bubbles)</string>
+    <string name="imessage_channel_messages_description">New iMessages that arrive through OpenBubbles, with Reply.</string>
+
+    <!-- Turning Blue Bubbles on. -->
+    <string name="blue_bubbles_need_app_title">Blue Bubbles needs OpenBubbles</string>
+    <string name="blue_bubbles_need_app_body">Blue Bubbles sends and receives iMessages through the OpenBubbles app, which connects to iMessage with the help of your iPhone. Install OpenBubbles and finish its setup first, then come back and tick Blue Bubbles.</string>
+    <string name="blue_bubbles_get_app">Get OpenBubbles</string>
+    <string name="blue_bubbles_need_access_title">Allow notification access</string>
+    <string name="blue_bubbles_need_access_body">LightDecoder reads the iMessages OpenBubbles shows in its notifications and replies through them. Turn on notification access for LightDecoder on the next screen.\n\nIf Android says the setting is restricted, open LightDecoder\'s App info, tap ⋮ and choose Allow restricted settings, then try again.</string>
+    <string name="blue_bubbles_open_settings">Open settings</string>
+    <string name="blue_bubbles_on_title">Blue Bubbles is on</string>
+    <string name="blue_bubbles_on_body">iMessage chats now show here in Messages, marked iMessage, as soon as a message arrives in OpenBubbles. Replies you send from them go out as iMessages.\n\n• Set OpenBubbles\' notifications to Silent (not off), or you will be alerted twice.\n• In OpenBubbles: Settings → Notifications, turn ON \u201cSend Notifications on Chat List\u201d and turn OFF \u201cHide Message Text\u201d, so every message reaches LightDecoder.\n• A message that arrives while its chat is open in OpenBubbles does not reach LightDecoder (OpenBubbles shows no notification then).\n• Earlier messages, and messages you send from OpenBubbles or other devices, do not show here.\n• Pictures, and chats nobody has written in since LightDecoder started, open in OpenBubbles for you to tap send.</string>
+    <string name="blue_bubbles_off">Blue Bubbles is off. iMessage chats no longer show in Messages.</string>
+
+    <!-- The conversation screens, for an iMessage chat. -->
+    <string name="imessage_link_title">Blue Bubbles is off</string>
+    <string name="imessage_link_body">Tick Blue Bubbles in the Messages menu to show iMessages here.</string>
+    <string name="imessage_empty_inbox">No iMessage chats yet. They show up as messages arrive in OpenBubbles.</string>
+    <string name="imessage_compose_hint">iMessage</string>
+    <string name="imessage_failed_detail">This could not be sent from here. Tap it to finish sending it in OpenBubbles.</string>
+    <string name="imessage_resend_body">Try sending this again through OpenBubbles?</string>
+    <string name="imessage_media_needs_connection">Pictures in iMessages can be seen in OpenBubbles.</string>
+    <string name="imessage_contacts_no_match">New iMessage chats start in OpenBubbles.</string>
+    <string name="imessage_delete_conversation_body">Remove this chat from LightDecoder? It stays in OpenBubbles, and comes back here if someone writes in it.</string>
+    <string name="imessage_notifications_needed_body">LightDecoder needs notifications to tell you about new iMessages.</string>
+    <string name="imessage_open_in_openbubbles">Open in OpenBubbles</string>
+
+    <!-- Check iMessage: is it blue on their iPhone? -->
+    <string name="imessage_check">Check iMessage (blue on their iPhone?)</string>
+    <string name="imessage_check_explain">LightDecoder will send this to %1$s as an iMessage:\n\n\u201c%2$s\u201d\n\nAsk them to reply. An iPhone replies the way the conversation shows on it: by iMessage when it is blue, by text when it is green. So their reply tells you which colour they see.</string>
+    <string name="imessage_check_send">Send check</string>
+    <string name="imessage_light">iMessage light</string>
+    <string name="imessage_light_title_active">Using iMessage</string>
+    <string name="imessage_light_title_hand_off">iMessage, one tap in OpenBubbles</string>
+    <string name="imessage_light_title_problem">iMessage needs attention</string>
+    <string name="imessage_light_title_off">Not using iMessage</string>
+    <string name="imessage_light_direct">iMessage is on, through the iMessage library built into LightDecoder: messages go straight to Apple, and arrive whether LightDecoder is open or not. The OpenBubbles app is not needed for it.</string>
+    <string name="imessage_light_on">Blue Bubbles is on and working: OpenBubbles is installed and LightDecoder is reading its notifications.\n\nSo that every message reaches LightDecoder: in OpenBubbles, Settings → Notifications, turn ON \u201cSend Notifications on Chat List\u201d and OFF \u201cHide Message Text\u201d. A message that arrives while its chat is open in OpenBubbles is not seen here.</string>
+    <string name="imessage_light_hidden_text">OpenBubbles is hiding message text in its notifications (they only say \u201ciMessage\u201d), so LightDecoder cannot show what was said. In OpenBubbles: Settings → Notifications, turn OFF \u201cHide Message Text\u201d.</string>
+    <string name="imessage_light_off">Blue Bubbles is off: messages go as texts. Turn it on in this menu.</string>
+    <string name="imessage_light_silent">This conversation sends as iMessage (blue), straight through OpenBubbles.</string>
+    <string name="imessage_light_hand_off">This conversation sends as iMessage (blue), but OpenBubbles opens for you to tap send. It sends straight from here again after their next iMessage.</string>
+    <string name="imessage_light_no_chat">This conversation sends as texts (green): there is no iMessage chat with this person yet. Use Send iMessage or Check iMessage in this menu to start one.</string>
+    <string name="imessage_light_group">Group conversations here send as texts (green). Use OpenBubbles for iMessage groups.</string>
+    <string name="imessage_light_not_installed">OpenBubbles is not installed, so nothing can go as iMessage.</string>
+    <string name="imessage_light_no_access">LightDecoder is not allowed to read notifications, so it cannot see or answer iMessages. Allow it in Android settings (Notification access).</string>
+    <string name="imessage_light_reader_stopped">Android has stopped LightDecoder\u2019s notification reader, so new iMessages are missed until it starts again. Turning notification access off and on for LightDecoder restarts it.</string>
+    <string name="imessage_unsend">Unsend (in OpenBubbles)</string>
+    <string name="imessage_media_waiting">Picture from OpenBubbles · tap</string>
+    <string name="imessage_media_title">Pictures from iMessage</string>
+    <string name="imessage_media_how">OpenBubbles\u2019 notifications only say \u201cImage\u201d, so LightDecoder shows the picture from the copy OpenBubbles saves in your gallery, at full quality.\n\nIn OpenBubbles: Settings → Attachments, turn ON \u201cAuto-save Attachments\u201d (and keep Auto-download on).\n\nPictures that came before that show once you open them in OpenBubbles, if Auto-save is on then.</string>
+    <string name="imessage_media_allow">LightDecoder needs to see your photos and videos to show iMessage pictures. It only looks at the ones OpenBubbles saved.</string>
+    <string name="imessage_media_allow_button">Allow</string>
+    <string name="imessage_media_partial">LightDecoder can only see the photos you picked, so new iMessage pictures cannot show. In Android settings, allow LightDecoder all photos and videos.</string>
+    <string name="imessage_media_open">Open in OpenBubbles</string>
+    <string name="imessage_edit">Edit (in OpenBubbles)</string>
+    <string name="imessage_edit_how">In OpenBubbles, long-press the message and tap Edit (Apple allows it for 15 minutes).</string>
+    <string name="imessage_react_how">In OpenBubbles, double-tap the message and pick %1$s.</string>
+    <string name="imessage_replying_to">Replying to %1$s (sent as an iMessage of its own)</string>
+    <string name="imessage_unsend_how">In OpenBubbles, long-press the message and tap Undo Send. Then delete it here too.</string>
+    <string name="imessage_unsend_too_late">Apple only lets an iMessage be unsent within 2 minutes of sending, so it stays on their iPhone. You can still delete it here, on this phone only.</string>
+    <string name="imessage_delete_here">Delete here</string>
+    <string name="imessage_link">Link an iMessage chat\u2026</string>
+    <string name="imessage_link_pick_title">Show which iMessage chat here?</string>
+    <string name="imessage_link_none">Every iMessage chat is already inside a conversation. A chat shows up here once OpenBubbles has notified about a message in it.</string>
+    <string name="imessage_linked">Linked: its iMessages show in this conversation</string>
+    <string name="imessage_unlink">Unlink iMessage chat</string>
+    <string name="imessage_unlink_body">Its iMessages will show as a conversation of their own instead of here. Messages to this person go as texts (green) until you link it again.</string>
+    <string name="imessage_unlink_confirm">Unlink</string>
+    <string name="imessage_check_new_chat">There is no iMessage chat with them in LightDecoder yet: OpenBubbles opens a new one with the check filled in. Tap send there.</string>
+    <string name="imessage_pick_chat_in_share">OpenBubbles opened its share screen with the message. Pick or start the chat with them there (their number is copied).</string>
+    <string name="imessage_start_chat_in_app">OpenBubbles opened. Start a chat with them there: their number is copied, paste it as the recipient.</string>
+    <string name="imessage_would_not_open">OpenBubbles is installed but would not open. Open it once by itself, then try again.</string>
+    <string name="imessage_address_label">Number for iMessage</string>
+    <string name="imessage_check_close">Close</string>
+    <string name="imessage_check_hide">Close (keeps checking)</string>
+    <string name="imessage_check_stop">Stop check</string>
+    <string name="imessage_check_running">Check iMessage (checking\u2026)</string>
+    <string name="imessage_check_done_title">iMessage check for %1$s</string>
+    <string name="imessage_check_ended">No reply from %1$s. The check has ended; a reply that comes later still shows in the conversation (a blue bubble from them means iMessage).</string>
+    <string name="imessage_check_step_handed">Handed to OpenBubbles</string>
+    <string name="imessage_check_step_tap_send">Sent from OpenBubbles (you tap send there)</string>
+    <string name="imessage_check_come_back">After tapping send in OpenBubbles, come straight back here, and do not keep that chat open in OpenBubbles: OpenBubbles shows no notification for a reply in a chat that is open on its screen, so LightDecoder would not see it.</string>
+    <string name="imessage_light_log">iMessage log</string>
+    <string name="imessage_log_title">iMessage log</string>
+    <string name="imessage_log_empty">Nothing logged yet.</string>
+    <string name="imessage_log_clear">Clear log</string>
+    <string name="imessage_check_step_openbubbles">In OpenBubbles\u2019 iMessage chat (sent to Apple)</string>
+    <string name="imessage_check_step_reply">%1$s replied</string>
+    <string name="imessage_check_waiting">Waiting for %1$s to reply\u2026</string>
+    <string name="imessage_check_still_waiting">Still waiting for %1$s to reply. You can close this: it keeps checking, and you get a notification when they reply.</string>
+    <string name="imessage_check_blue">Blue. %1$s replied by iMessage, so your messages show blue on their iPhone.</string>
+    <string name="imessage_check_green">Green. %1$s replied by text, so on their iPhone this conversation is green (or they replied from a phone that is not an iPhone). On the iPhone: delete the conversation with you, or turn iMessage off and on in Settings &gt; Messages, then check again.</string>
+    <string name="imessage_check_went_as_text">The check also went out as a text through Google Messages. That should not happen: please send a problem report.</string>
+    <string name="imessage_check_not_in_openbubbles">OpenBubbles has not shown it yet. Open OpenBubbles: if it says Not Delivered, Apple refused it. Check that the relay iPhone is on and connected.</string>
+    <string name="imessage_finish_in_openbubbles">Finish sending in OpenBubbles.</string>
+    <string name="imessage_send_imessage">Send iMessage</string>
+    <string name="imessage_no_address">This conversation has no phone number or email address to send an iMessage to.</string>
+    <string name="imessage_delete_message_question">Remove this message from LightDecoder? It stays in OpenBubbles and on the other person\'s phone.</string>
+
+    <!-- Errors. -->
+    <string name="imessage_error_not_enabled">Blue Bubbles is off. Tick it in the Messages menu.</string>
+    <string name="imessage_error_not_installed">OpenBubbles is not installed.</string>
+    <string name="imessage_error_no_access">LightDecoder is not allowed to read notifications, so it cannot see or answer iMessages.</string>
+    <string name="imessage_error_no_reply">This chat can only be answered in OpenBubbles until a new message arrives in it.</string>
+    <string name="imessage_error_hand_off">That is done in OpenBubbles.</string>
+    <string name="imessage_error_unsupported">iMessages here cannot do that.</string>
+    <string name="imessage_error_internal">Something went wrong with Blue Bubbles.</string>
+</resources>

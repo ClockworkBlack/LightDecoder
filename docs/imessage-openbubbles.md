@@ -3,6 +3,16 @@
 Status: **built in 0.5.28 (see "What is built"); not yet tried on a phone.** The older
 Flutter-based analysis further down applies to OpenBubbles 1.15.x only and is kept as history.
 
+## Current design (0.5.54): the library powers Blue Bubbles
+LightDecoder 0.5.53 already had iMessage in the Messages tab ("Blue Bubbles": an iMessage archive
+filled from OpenBubbles' notifications, sent through their Reply button, merged in blue into the
+Messages conversation with the same person). 0.5.54 keeps all of that and, once the library is
+registered, uses it underneath: `imessage/direct/DirectLink` writes the library's messages into the
+same archive (reusing a person's chat; `me`, addresses without scheme), and `IMessageManager` sends,
+retries and unsends through it. Without the library everything works as in 0.5.53. The sections
+below describe the library parts (engine, bridge, keystore, registration); where they say "Messages
+archive" or "imsg: in RelayManager", that was the 0.5.28 design and is replaced by this.
+
 ## What is built (0.5.28): iMessage inside the Messages tab
 Owner's direction (2026-11-19): no separate tab; iMessage fully in the Messages tab, messages
 arriving whether LightDecoder is open or not, in sync with OpenBubbles, and unsend working after a

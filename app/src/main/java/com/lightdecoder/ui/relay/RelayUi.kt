@@ -253,6 +253,7 @@ class NotificationPermission(
                     ChatService.MESSAGES -> R.string.link_notifications_needed_body
                     ChatService.WHATSAPP -> R.string.link_notifications_needed_body_whatsapp
                     ChatService.GMAIL -> R.string.mail_notifications_needed_body
+                    ChatService.IMESSAGE -> R.string.imessage_notifications_needed_body
                 }
             )
             .setPositiveButton(R.string.link_notifications_open_settings) { _, _ -> openSettings(action) }

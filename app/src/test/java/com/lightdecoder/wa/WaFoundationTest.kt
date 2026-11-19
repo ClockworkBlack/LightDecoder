@@ -194,7 +194,7 @@ class WaFoundationTest {
         assertSame(manager, WaManager.get(context))
         assertEquals(ChatService.WHATSAPP, manager.service)
         assertSame(repo, manager.repo)
-        assertEquals(setOf(Capability.PRESENCE, Capability.DELETE_FOR_EVERYONE), manager.capabilities)
+        assertEquals(setOf(Capability.PRESENCE, Capability.DELETE_FOR_EVERYONE, Capability.EDIT), manager.capabilities)
 
         assertFalse(manager.isPaired())
         assertEquals(RelayState.Phase.UNPAIRED, manager.state.value.phase)

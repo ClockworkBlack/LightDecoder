@@ -39,8 +39,11 @@ android {
         applicationId = "com.lightdecoder"
         minSdk = 26
         targetSdk = 36
-        versionCode = 37
-        versionName = "0.5.29"
+        versionCode = 64
+        versionName = "0.5.54"
+        // On-device tests (app/src/androidTest): the Blue Bubbles round trip against the
+        // stand-in OpenBubbles app (:fakebubbles), run on an emulator by .github/workflows/device-test.yml.
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // The decoder is plain software, so it runs on every ABI. These cover
         // phones (64- and 32-bit ARM) and the emulator.
@@ -334,7 +337,7 @@ val bundleLicenses by tasks.registering {
     val apacheLibrary = Regex(
         "(androidx\\.[^:]+|com\\.google\\.android\\.material|org\\.jetbrains\\.kotlinx?):[^:]+" +
             "|org\\.jetbrains:annotations|org\\.jspecify:jspecify" +
-            "|com\\.google\\.guava:listenablefuture|com\\.google\\.errorprone:error_prone_annotations" +
+            "|com\\.google\\.guava:(listenablefuture|guava|failureaccess)|com\\.google\\.errorprone:error_prone_annotations" +
             "|com\\.google\\.zxing:core",
     )
     val androidLibraries = provider { configurations.getByName("releaseRuntimeClasspath") }.map { classpath ->
@@ -414,7 +417,7 @@ val bundleLicenses by tasks.registering {
             )
             File(licenses, "43-u2net-model.txt").writeText(
                 licenceText(
-                    "U-2-Net (the subject-finding model, assets/models/u2netp.onnx): Apache-2.0",
+                    "U-2-Net (the subject-finding models, assets/models/u2net.onnx.* and u2netp.onnx): Apache-2.0",
                     listOf(apacheLicense),
                     intro = "Copyright (c) Xuebin Qin and the U-2-Net authors. https://github.com/xuebinqin/U-2-Net\n" +
                         "The model file is unmodified, in ONNX form as published with rembg (github.com/danielgatis/rembg).",
@@ -675,6 +678,16 @@ dependencies {
     implementation("androidx.recyclerview:recyclerview:1.3.2")
     implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
     implementation("androidx.viewpager2:viewpager2:1.1.0")
+    // The full emoji picker for reactions (every Unicode emoji, categories, recents, skin tones).
+    // In-app video player (iPhone .mov/HEVC, MP4): Media3 ExoPlayer and its player view.
+    implementation("androidx.media3:media3-exoplayer:1.5.1")
+    implementation("androidx.media3:media3-ui:1.5.1")
+    implementation("androidx.emoji2:emoji2-emojipicker:1.5.0") {
+        // Annotations only (nothing reads them at run time): not shipped.
+        exclude(group = "com.google.code.findbugs", module = "jsr305")
+        exclude(group = "org.checkerframework", module = "checker-qual")
+        exclude(group = "com.google.j2objc", module = "j2objc-annotations")
+    }
     // The Messenger tab's web page: tells Facebook "computer layout" in the client hints too (Apache-2.0).
     implementation("androidx.webkit:webkit:1.12.1")
     // Reads a photo's EXIF orientation, so camera pictures are not shown sideways (Apache-2.0).
@@ -701,6 +714,9 @@ dependencies {
     testImplementation("androidx.test:core:1.6.1")
     testImplementation("androidx.test.ext:junit:1.2.1")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:core:1.6.1")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }
 
 // --- unit tests run the real decoder ----------------------------------------

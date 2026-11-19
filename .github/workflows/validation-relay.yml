@@ -1,0 +1,54 @@
+name: Build patched ValidationRelay
+
+# The iPhone relay app that OpenBubbles uses for Blue Bubbles (JJTech0130/ValidationRelay),
+# with tools/validation-relay/lightdecoder.patch applied: validation data is made off the
+# main thread, a failure is logged in its Event Log instead of crashing the app, and plain-
+# HTTP access to Apple's certificate is allowed. Its Event Log also goes to a file that survives
+# crashes and restarts (crashes are caught into it), and the share button shares that file.
+# The .tipa is for installing with TrollStore on the owner's own iPhone; it is kept for 3 days
+# and never released.
+
+# By hand only: GitHub's macOS runners have not picked up this account's jobs (2026-11-17/18).
+# codemagic.yaml builds the same thing on Codemagic.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tipa:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch ValidationRelay at the patched commit
+        run: |
+          git clone https://github.com/JJTech0130/ValidationRelay vr
+          cd vr
+          git checkout e1b74fbc92a1664dd4fafec526f59acd8f5e6425
+          git apply ../tools/validation-relay/lightdecoder.patch
+
+      - name: Install ldid
+        run: brew install ldid
+
+      - name: Build
+        working-directory: vr
+        run: |
+          xcodebuild -configuration Release -derivedDataPath DerivedData \
+            -destination 'generic/platform=iOS' -scheme ValidationRelay \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            -skipPackagePluginValidation
+          APP=DerivedData/Build/Products/Release-iphoneos/ValidationRelay.app
+          # The entitlements it needs to read the iPhone's serial number; TrollStore keeps them.
+          ldid -SValidationRelay/ValidationRelay.entitlements -Idev.jjtech.experiments.ValidationRelay "$APP/ValidationRelay"
+          mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry ../ValidationRelay-LightDecoder.tipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ValidationRelay-LightDecoder
+          path: ValidationRelay-LightDecoder.tipa
+          retention-days: 3

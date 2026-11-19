@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application android:label="FakeBubbles (test)">
+        <!-- The test asks for a message notification ("someone wrote"). -->
+        <receiver
+            android:name=".PostReceiver"
+            android:exported="true" />
+        <!-- The notification's Reply and Mark As Read buttons, as OpenBubbles' InternalIntentReceiver. -->
+        <receiver
+            android:name=".InternalIntentReceiver"
+            android:exported="false" />
+    </application>
+</manifest>

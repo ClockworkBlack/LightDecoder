@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"go.mau.fi/whatsmeow"
 	"strings"
 	"testing"
 	"time"
@@ -300,6 +301,28 @@ func TestConversationOf(t *testing.T) {
 	for _, k := range []string{"id", "name", "isGroup", "type", "folder", "unread", "pinned", "muted", "lastMessageTs", "participants", "otherParticipantIds"} {
 		if _, ok := back[k]; !ok {
 			t.Errorf("conversation JSON lacks %q", k)
+		}
+	}
+}
+
+func TestOnlyOwnRecentTextCanBeEdited(t *testing.T) {
+	now := time.UnixMilli(1_700_000_000_000)
+	text := []partDTO{{PartID: partText, Kind: partText, Text: "hi"}}
+	fresh := now.Add(-time.Minute).UnixMilli()
+	cases := []struct {
+		name string
+		m    messageDTO
+		want bool
+	}{
+		{"own recent text", messageDTO{FromMe: true, Text: "hi", Parts: text, TimestampMs: fresh}, true},
+		{"someone else's", messageDTO{Text: "hi", Parts: text, TimestampMs: fresh}, false},
+		{"too old", messageDTO{FromMe: true, Text: "hi", Parts: text, TimestampMs: now.Add(-whatsmeow.EditWindow).UnixMilli()}, false},
+		{"with a picture", messageDTO{FromMe: true, Text: "hi", Parts: append([]partDTO{{PartID: "m", Kind: partMedia}}, text...), TimestampMs: fresh}, false},
+		{"no text", messageDTO{FromMe: true, TimestampMs: fresh}, false},
+	}
+	for _, c := range cases {
+		if got := editable(c.m, now); got != c.want {
+			t.Errorf("%s: editable = %v, want %v", c.name, got, c.want)
 		}
 	}
 }

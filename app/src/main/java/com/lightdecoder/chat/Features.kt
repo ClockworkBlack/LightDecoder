@@ -23,12 +23,9 @@ object Features {
     const val MESSENGER = true
 
     /**
-     * iMessage inside the Messages tab, through OpenBubbles' library that the user imports
-     * (docs/imessage-openbubbles.md). Set up from the Messages tab's menu; nothing loads or
-     * connects until the user imports the files and registers.
+     * The services shown as tabs (and set up from the home screen). iMessage
+     * is never one: with "Blue Bubbles" on, its chats show in the Messages tab.
      */
-    const val IMESSAGE = true
-
-    /** The services shown as tabs (and set up from the home screen). */
-    fun shownServices(): List<ChatService> = ChatService.entries.filter { it != ChatService.GMAIL || GMAIL }
+    fun shownServices(): List<ChatService> =
+        ChatService.entries.filter { (it != ChatService.GMAIL || GMAIL) && it != ChatService.IMESSAGE }
 }

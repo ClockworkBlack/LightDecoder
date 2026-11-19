@@ -47,6 +47,7 @@ class ArchiveDb(context: Context, name: String? = NAME) :
         /** The WhatsApp archive. */
         const val NAME_WHATSAPP = "whatsapp-archive.db"
         const val NAME_GMAIL = "gmail-archive.db"
+        const val NAME_IMESSAGE = "imessage-archive.db"
         const val VERSION = 2
 
         /** The database file of [service]'s archive. */
@@ -54,6 +55,7 @@ class ArchiveDb(context: Context, name: String? = NAME) :
             ChatService.MESSAGES -> NAME
             ChatService.WHATSAPP -> NAME_WHATSAPP
             ChatService.GMAIL -> NAME_GMAIL
+            ChatService.IMESSAGE -> NAME_IMESSAGE
         }
 
         /**

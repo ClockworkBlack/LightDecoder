@@ -35,11 +35,27 @@ class MessagesAdapter(
     private val callbacks: Callbacks,
 ) : ListAdapter<ThreadItem, RecyclerView.ViewHolder>(DIFF) {
 
+    /**
+     * The user's own messages in iMessage's blue with white text, as on an
+     * iPhone: set for iMessage chats (Blue Bubbles). Set it before the first
+     * rows are submitted.
+     */
+    var blueOutgoing = false
+
+    /** Which of the user's own messages are iMessages, in a conversation that shows both kinds (Blue Bubbles). */
+    var blueFor: (MessageRow) -> Boolean = { false }
+
     interface Callbacks {
         fun onMessageLongPress(row: MessageRow)
         fun onFailedTap(row: MessageRow)
         fun onMediaTap(row: MessageRow, part: MediaRow)
         fun onLoadFullSize(row: MessageRow, part: MediaRow)
+
+        /** Play or pause a voice message (or other audio) in its bubble. */
+        fun onAudioTap(row: MessageRow, part: MediaRow) = onMediaTap(row, part)
+
+        /** The user moved a playing voice message's bar to [positionMs]. */
+        fun onAudioSeek(row: MessageRow, part: MediaRow, positionMs: Int) = Unit
         fun onQuoteTap(messageId: String)
         fun onReactionTap(row: MessageRow, reaction: ReactionDto)
 
@@ -77,6 +93,8 @@ class MessagesAdapter(
         val readTint = MaterialColors.getColor(view, androidx.appcompat.R.attr.colorPrimary)
         val errorTint = MaterialColors.getColor(view, androidx.appcompat.R.attr.colorError)
         val highlight = MaterialColors.getColor(view, com.google.android.material.R.attr.colorSecondaryContainer)
+        val blueBubble = androidx.core.content.ContextCompat.getColor(view.context, R.color.imessage_blue)
+        val onBlue = androidx.core.content.ContextCompat.getColor(view.context, R.color.on_imessage_blue)
 
         /** The "Reply" accessibility action added at the last bind, removed before the next. */
         var replyActionId = View.NO_ID
@@ -133,12 +151,18 @@ class MessagesAdapter(
         // Side and colours.
         (b.column.layoutParams as FrameLayout.LayoutParams).gravity = if (outgoing) Gravity.END else Gravity.START
         b.column.gravity = if (outgoing) Gravity.END else Gravity.START
-        val bubbleColor = if (outgoing) holder.outgoingBubble else holder.incomingBubble
-        val textColor = if (outgoing) holder.onOutgoing else holder.onIncoming
+        val blue = outgoing && (blueOutgoing || blueFor(row))
+        val bubbleColor = when {
+            blue -> holder.blueBubble
+            outgoing -> holder.outgoingBubble
+            else -> holder.incomingBubble
+        }
+        val onOwn = if (blue) holder.onBlue else holder.onOutgoing
+        val textColor = if (outgoing) onOwn else holder.onIncoming
         // A picture or sticker on its own has no bubble: it sits on the conversation itself
         // (as on an iPhone), with its time under it in the conversation's own colours.
         val bare = isBare(item)
-        val metaColor = if (outgoing && !bare) holder.onOutgoing else holder.incomingMeta
+        val metaColor = if (outgoing && !bare) onOwn else holder.incomingMeta
         bindBubbleShape(holder, bare, outgoing)
         b.bubble.backgroundTintList = ColorStateList.valueOf(bubbleColor)
         b.body.setTextColor(textColor)
@@ -173,7 +197,7 @@ class MessagesAdapter(
         b.subject.visibility = if (row.subject.isNotBlank()) View.VISIBLE else View.GONE
         b.subject.text = row.subject
 
-        bindMedia(holder, row)
+        bindMedia(holder, row, textColor)
 
         b.body.visibility = if (row.text.isNotEmpty()) View.VISIBLE else View.GONE
         b.body.text = row.text
@@ -184,6 +208,8 @@ class MessagesAdapter(
         // A send that may have gone out all the same has its own words: "Not sent" would invite a resend.
         val unconfirmed = MessageStatus.outcomeUnknown(row)
         bindTick(holder, tick, metaColor, unconfirmed)
+        // Pictures sent together: one time line, under the last of them (a failed one keeps its own).
+        b.meta.visibility = if (item.stackedWithNext && tick != Tick.FAILED) View.GONE else View.VISIBLE
 
         // Failure notice under the bubble.
         val retryable = MessageStatus.canRetryLocally(row)
@@ -300,7 +326,13 @@ class MessagesAdapter(
         )
     }
 
-    private fun bindMedia(holder: MessageHolder, row: MessageRow) {
+    /** What is playing in the conversation's voice player; the bubbles follow it ([updateVoiceViews]). */
+    var voiceState: VoicePlayer.State = VoicePlayer.State()
+
+    /** A voice message's length once known (it has been played), else 0. */
+    var voiceDuration: (String) -> Int = { 0 }
+
+    private fun bindMedia(holder: MessageHolder, row: MessageRow, contentColor: Int) {
         val container = holder.binding.mediaContainer
         // The old part views go: stop their loads first, or every rebind (a status
         // or reaction change) would leave a download running for a detached view.
@@ -318,9 +350,13 @@ class MessagesAdapter(
         for (part in row.media) {
             val pb = ItemMediaPartBinding.inflate(inflater, container, false)
             val visual = isVisual(part)
+            val audio = !visual && part.mime.startsWith("audio/")
             pb.mediaFrame.visibility = if (visual) View.VISIBLE else View.GONE
-            pb.mediaFile.visibility = if (visual) View.GONE else View.VISIBLE
-            if (visual) {
+            pb.mediaFile.visibility = if (visual || audio) View.GONE else View.VISIBLE
+            pb.mediaAudio.visibility = if (audio) View.VISIBLE else View.GONE
+            if (audio) {
+                bindAudio(pb, row, part, contentColor)
+            } else if (visual) {
                 media.bind(pb.mediaImage, row.id, part, maxSide, pb.mediaStatus)
                 pb.mediaPlay.visibility = if (part.mime.startsWith("video/")) View.VISIBLE else View.GONE
                 pb.mediaImage.contentDescription = container.context.getString(
@@ -340,6 +376,66 @@ class MessagesAdapter(
             pb.mediaFullSize.visibility = View.GONE
             if (canAskFullSize && visual) callbacks.onLoadFullSize(row, part)
             container.addView(pb.root)
+        }
+    }
+
+    /** A voice message's row: play/pause, its bar (which can be moved while it plays) and its time. */
+    private fun bindAudio(pb: ItemMediaPartBinding, row: MessageRow, part: MediaRow, contentColor: Int) {
+        val key = VoicePlayer.keyOf(row.id, part.partId)
+        pb.mediaAudio.tag = key
+        pb.audioPlay.imageTintList = ColorStateList.valueOf(contentColor)
+        pb.audioTime.setTextColor(contentColor)
+        pb.audioProgress.progressTintList = ColorStateList.valueOf(contentColor)
+        pb.audioProgress.thumbTintList = ColorStateList.valueOf(contentColor)
+        pb.audioPlay.setOnClickListener { callbacks.onAudioTap(row, part) }
+        pb.mediaAudio.setOnLongClickListener {
+            callbacks.onMessageLongPress(row)
+            true
+        }
+        pb.audioProgress.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: android.widget.SeekBar, progress: Int, fromUser: Boolean) {
+                if (!fromUser) return
+                val state = voiceState
+                if (state.key != key || state.durationMs <= 0) return
+                callbacks.onAudioSeek(row, part, (state.durationMs.toLong() * progress / bar.max).toInt())
+            }
+            override fun onStartTrackingTouch(bar: android.widget.SeekBar) = Unit
+            override fun onStopTrackingTouch(bar: android.widget.SeekBar) = Unit
+        })
+        applyVoiceState(pb.mediaAudio)
+    }
+
+    /** Shows [voiceState] on one voice message's row (found by its tag). */
+    private fun applyVoiceState(audioRow: View) {
+        val key = audioRow.tag as? String ?: return
+        val play = audioRow.findViewById<ImageView>(R.id.audioPlay)
+        val bar = audioRow.findViewById<android.widget.SeekBar>(R.id.audioProgress)
+        val time = audioRow.findViewById<android.widget.TextView>(R.id.audioTime)
+        val state = voiceState
+        val mine = state.key == key
+        val playing = mine && state.playing
+        play.setImageResource(if (playing) R.drawable.ic_pause else R.drawable.ic_play)
+        play.contentDescription = audioRow.context.getString(if (playing) R.string.chat_voice_pause else R.string.chat_voice_play)
+        val duration = if (mine) state.durationMs else voiceDuration(key)
+        // Only the one loaded can be moved; the others start from the beginning.
+        bar.isEnabled = mine && duration > 0
+        bar.progress = if (mine && duration > 0) (state.positionMs.toLong() * bar.max / duration).toInt() else 0
+        time.text = when {
+            mine && state.positionMs > 0 -> VoicePlayer.clock(state.positionMs)
+            duration > 0 -> VoicePlayer.clock(duration)
+            else -> ""
+        }
+    }
+
+    /** The voice player changed: every voice message row on screen shows it, without rebinding. */
+    fun updateVoiceViews(list: RecyclerView, state: VoicePlayer.State) {
+        voiceState = state
+        for (i in 0 until list.childCount) {
+            val holder = list.getChildViewHolder(list.getChildAt(i)) as? MessageHolder ?: continue
+            val container = holder.binding.mediaContainer
+            for (j in 0 until container.childCount) {
+                container.getChildAt(j).findViewById<View>(R.id.mediaAudio)?.takeIf { it.visibility == View.VISIBLE }?.let(::applyVoiceState)
+            }
         }
     }
 
@@ -417,9 +513,7 @@ class MessagesAdapter(
         return parts.joinToString(", ")
     }
 
-    private fun isVisual(part: MediaRow): Boolean =
-        part.mime.startsWith("image/") || part.mime.startsWith("video/") ||
-            (part.mime.isEmpty() && (part.thumbMediaId.isNotEmpty() || part.width > 0 || part.inlineData.isNotEmpty()))
+    private fun isVisual(part: MediaRow): Boolean = isVisualPart(part)
 
     private companion object {
         const val TYPE_HEADER = 0

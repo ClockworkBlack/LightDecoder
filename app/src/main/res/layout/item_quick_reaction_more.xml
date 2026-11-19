@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- After the five quick reactions: a white "+" that opens the full emoji picker. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="0dp"
+    android:layout_height="56dp"
+    android:layout_weight="1">
+
+    <ImageView
+        android:id="@+id/reactionMore"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:layout_gravity="center"
+        android:background="@drawable/bg_reaction_more"
+        android:clickable="true"
+        android:contentDescription="@string/chat_react_more"
+        android:focusable="true"
+        android:foreground="?attr/selectableItemBackgroundBorderless"
+        android:padding="8dp"
+        android:src="@drawable/ic_add_reaction" />
+</FrameLayout>

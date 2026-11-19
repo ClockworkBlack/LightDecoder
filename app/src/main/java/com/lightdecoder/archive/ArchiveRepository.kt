@@ -472,6 +472,29 @@ class ArchiveRepository private constructor(
     fun setMediaLocalPath(messageId: String, partId: String, path: String, thumbnail: Boolean): Boolean =
         recordMediaPath(messageId, partId, path, thumbnail, "", emptyArray())
 
+    /** A media part with no file and nothing to download it from (an iMessage picture waiting for OpenBubbles' copy). */
+    data class AwaitingMedia(val messageId: String, val partId: String, val mime: String, val timestampMs: Long, val conversationId: String)
+
+    /** [AwaitingMedia] of messages since [sinceMs], oldest first. */
+    fun mediaAwaitingFiles(sinceMs: Long): List<AwaitingMedia> = query(
+        "SELECT m.message_id, m.part_id, m.mime, msg.timestamp_ms, msg.conversation_id FROM media m " +
+            "JOIN messages msg ON msg.message_id = m.message_id " +
+            "WHERE m.local_path = '' AND m.media_id = '' AND m.thumb_media_id = '' AND (m.inline_data IS NULL OR length(m.inline_data) = 0) " +
+            "AND msg.timestamp_ms >= ? ORDER BY msg.timestamp_ms, m.part_id",
+        arrayOf(sinceMs.toString()),
+    ) { AwaitingMedia(it.getString(0) ?: "", it.getString(1) ?: "", it.getString(2) ?: "", it.getLong(3), it.getString(4) ?: "") }
+
+    /** The real type, size and dimensions of a media part, once its file is known. */
+    fun setMediaDetails(messageId: String, partId: String, mime: String, size: Long, width: Int, height: Int) =
+        updateMedia(messageId, partId, ContentValues().apply {
+            if (mime.isNotEmpty()) put("mime", mime)
+            if (size > 0) put("size", size)
+            if (width > 0 && height > 0) {
+                put("width", width)
+                put("height", height)
+            }
+        })
+
     fun markFullSizeRequested(messageId: String, partId: String) =
         updateMedia(messageId, partId, ContentValues().apply { put("full_size_requested", 1) })
 

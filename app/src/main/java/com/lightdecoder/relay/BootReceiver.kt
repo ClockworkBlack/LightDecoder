@@ -21,8 +21,8 @@ class BootReceiver : BroadcastReceiver() {
         if (intent.action !in ACTIONS) return
         startMessages(context)
         startWhatsApp(context)
-        // iMessage, once set up, reconnects after a reboot or an update too.
-        if (com.lightdecoder.chat.Features.IMESSAGE) com.lightdecoder.imessage.ImessageService.start(context)
+        // The iMessage library, once registered, reconnects after a reboot or an update too.
+        com.lightdecoder.imessage.direct.DirectService.start(context)
     }
 
     private fun startMessages(context: Context) {

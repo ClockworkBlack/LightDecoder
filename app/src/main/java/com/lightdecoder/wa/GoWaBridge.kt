@@ -100,6 +100,9 @@ class GoWaBridge(dataDir: File, private val sink: WaBridge.Sink) : WaBridge {
 
     override fun setOnline(online: Boolean) = call { go.setOnline(online) }
 
+    override fun editText(conversationId: String, messageId: String, text: String) =
+        call { go.editText(conversationId, messageId, text) }
+
     override fun deleteMessage(conversationId: String, messageId: String, forEveryone: Boolean) =
         call { go.deleteMessage(conversationId, messageId, forEveryone) }
 

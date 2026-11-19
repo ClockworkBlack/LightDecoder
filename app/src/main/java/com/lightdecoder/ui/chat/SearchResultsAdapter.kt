@@ -22,7 +22,7 @@ class SearchResultsAdapter(
 
     class Holder(val binding: ItemSearchHitBinding) : RecyclerView.ViewHolder(binding.root)
 
-    override fun getItemId(position: Int): Long = ids.of(getItem(position).messageId)
+    override fun getItemId(position: Int): Long = getItem(position).let { ids.of(it.service.key + ":" + it.messageId) }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
         Holder(ItemSearchHitBinding.inflate(LayoutInflater.from(parent.context), parent, false))
@@ -42,7 +42,7 @@ class SearchResultsAdapter(
 
     private companion object {
         val DIFF = object : DiffUtil.ItemCallback<SearchHit>() {
-            override fun areItemsTheSame(a: SearchHit, b: SearchHit) = a.messageId == b.messageId
+            override fun areItemsTheSame(a: SearchHit, b: SearchHit) = a.service == b.service && a.messageId == b.messageId
             override fun areContentsTheSame(a: SearchHit, b: SearchHit) = a == b
         }
     }

@@ -178,6 +178,8 @@ data class SearchHit(
     val conversationName: String,
     val snippet: String,
     val timestampMs: Long,
+    /** The archive it was found in (the Messages tab also searches iMessage's, with Blue Bubbles on). */
+    val service: com.lightdecoder.chat.ChatService = com.lightdecoder.chat.ChatService.MESSAGES,
 )
 
 /**

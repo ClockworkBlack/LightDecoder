@@ -17,7 +17,16 @@ enum class ChatService(val key: String) {
     WHATSAPP("whatsapp"),
 
     /** Gmail, over IMAP and SMTP with the user's app password. */
-    GMAIL("gmail");
+    GMAIL("gmail"),
+
+    /**
+     * iMessage, through the OpenBubbles app ("Blue Bubbles" in the Messages
+     * tab's menu): OpenBubbles is the iMessage client, and LightDecoder
+     * reads its message notifications and answers through their reply
+     * button ([com.lightdecoder.imessage.IMessageManager]). It has no tab of
+     * its own: its conversations show in the Messages tab.
+     */
+    IMESSAGE("imessage");
 
     companion object {
         /** The service for [key]; anything unknown (or missing) is [MESSAGES], which is all there was before. */
@@ -53,6 +62,9 @@ enum class Capability {
 
     /** A message can be deleted for everyone in the conversation, not only here. */
     DELETE_FOR_EVERYONE,
+
+    /** The text of one's own message can be changed after it was sent, for everyone. */
+    EDIT,
 }
 
 /** Whether someone is online now; [lastSeenMs] (epoch ms) is 0 when it is not known. */

@@ -1,11 +1,8 @@
 package com.lightdecoder.ui.messenger
 
-import android.content.ActivityNotFoundException
-import android.content.ComponentName
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
-import android.provider.Settings
 import android.view.LayoutInflater
 import android.view.Menu
 import android.view.MenuItem
@@ -170,24 +167,9 @@ class MessengerActivity : AppCompatActivity() {
 
     /** Android's own notification access screen: only the user can turn it on, and only there. */
     private fun openAccessSettings() {
-        val component = ComponentName(this, MessengerNotificationListener::class.java)
-        val detail = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            Intent(Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS)
-                .putExtra(Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME, component.flattenToString())
-        } else {
-            null
+        if (!MessengerNotificationListener.openAccessSettings(this)) {
+            Toast.makeText(this, R.string.messenger_setup_failed, Toast.LENGTH_LONG).show()
         }
-        for (intent in listOfNotNull(detail, Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))) {
-            try {
-                startActivity(intent)
-                return
-            } catch (e: ActivityNotFoundException) {
-                // Try the next one.
-            } catch (e: SecurityException) {
-                // Some phones guard the per-app screen; the list of all listeners is open.
-            }
-        }
-        Toast.makeText(this, R.string.messenger_setup_failed, Toast.LENGTH_LONG).show()
     }
 
     // --- menu ----------------------------------------------------------------

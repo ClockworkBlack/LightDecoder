@@ -140,6 +140,52 @@
             android:src="@drawable/ic_close" />
     </LinearLayout>
 
+    <!-- Recording a voice message: in place of the composer until it is sent or thrown away. -->
+    <LinearLayout
+        android:id="@+id/recordingBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingHorizontal="4dp"
+        android:paddingVertical="6dp"
+        android:visibility="gone">
+
+        <ImageButton
+            android:id="@+id/recordingCancel"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/chat_voice_cancel"
+            android:src="@drawable/ic_delete" />
+
+        <View
+            android:id="@+id/recordingDot"
+            android:layout_width="12dp"
+            android:layout_height="12dp"
+            android:layout_marginStart="8dp"
+            android:background="@drawable/bg_recording_dot"
+            android:importantForAccessibility="no" />
+
+        <TextView
+            android:id="@+id/recordingTime"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="12dp"
+            android:layout_weight="1"
+            android:accessibilityLiveRegion="polite"
+            android:textAppearance="?attr/textAppearanceBodyLarge" />
+
+        <ImageButton
+            android:id="@+id/recordingSend"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/chat_voice_send"
+            android:src="@drawable/ic_send"
+            app:tint="?attr/colorPrimary" />
+    </LinearLayout>
+
     <TextView
         android:id="@+id/readOnlyText"
         android:layout_width="match_parent"
@@ -204,6 +250,16 @@
             android:background="?attr/selectableItemBackgroundBorderless"
             android:contentDescription="@string/chat_voice_input"
             android:src="@drawable/ic_mic"
+            android:visibility="gone" />
+
+        <!-- Records a voice message (Google Messages only). -->
+        <ImageButton
+            android:id="@+id/voiceMessage"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/chat_voice_record"
+            android:src="@drawable/ic_voice_message"
             android:visibility="gone" />
 
         <ImageButton

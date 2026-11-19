@@ -344,8 +344,12 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
         return answer(what.tmpId)
     }
 
+    /** Every reaction sent: message id, emoji, action. */
+    val reactionsSent = CopyOnWriteArrayList<Triple<String, String, String>>()
+
     override fun sendReaction(messageId: String, emoji: String, action: String) {
         calls += "sendReaction:$action"
+        reactionsSent += Triple(messageId, emoji, action)
     }
 
     override fun markRead(conversationId: String, messageId: String) {

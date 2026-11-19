@@ -52,11 +52,13 @@ object MessageNotifier {
     private const val NOTIFICATION_ID = 0x5245_4c10
     private const val NOTIFICATION_ID_WHATSAPP = 0x5245_4c11
     private const val NOTIFICATION_ID_GMAIL = 0x5245_4c12
+    private const val NOTIFICATION_ID_IMESSAGE = 0x5245_4c13
     private const val MAX_LINES = 6
 
     /** Tags of WhatsApp's notifications start with this; Google Messages' are the bare conversation id, as before. */
     private const val WHATSAPP_TAG_PREFIX = "wa:"
     private const val GMAIL_TAG_PREFIX = "gm:"
+    private const val IMESSAGE_TAG_PREFIX = "im:"
 
     /** What makes each conversation's Reply, Mark as read and dismissal intents distinct ([receiverIntent]). */
     private const val INTENT_SCHEME = "lightdecoder-notify"
@@ -88,6 +90,8 @@ object MessageNotifier {
         ChatService.MESSAGES -> RelayPrefs.notifyMessages(context)
         ChatService.WHATSAPP -> WaPrefs.notifyMessages(context)
         ChatService.GMAIL -> com.lightdecoder.mail.MailPrefs.notifyMessages(context)
+        ChatService.IMESSAGE -> com.lightdecoder.imessage.IMessagePrefs.notifyMessages(context) &&
+            com.lightdecoder.imessage.IMessagePrefs.enabled(context)
     }
 
     private class Line(val sender: String, val text: CharSequence, val timestampMs: Long, val fromMe: Boolean)
@@ -162,6 +166,7 @@ object MessageNotifier {
         ChatService.MESSAGES -> NOTIFICATION_ID
         ChatService.WHATSAPP -> NOTIFICATION_ID_WHATSAPP
         ChatService.GMAIL -> NOTIFICATION_ID_GMAIL
+        ChatService.IMESSAGE -> NOTIFICATION_ID_IMESSAGE
     }
 
     /**
@@ -173,6 +178,8 @@ object MessageNotifier {
         ChatService.WHATSAPP -> WHATSAPP_TAG_PREFIX + WaIds.opaque(context, conversationId)
         // A mail conversation id is a hash of a Message-ID: it names no one.
         ChatService.GMAIL -> GMAIL_TAG_PREFIX + conversationId
+        // iMessage chat ids carry phone numbers and email addresses.
+        ChatService.IMESSAGE -> IMESSAGE_TAG_PREFIX + com.lightdecoder.imessage.IMessagePrefs.opaque(context, conversationId)
     }
 
     private fun add(key: Key, line: Line): List<Line> = synchronized(this) {

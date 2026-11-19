@@ -1,6 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <menu xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto">
+    <!-- Messages tab with Blue Bubbles on: the iMessage light (ui.chat.IMessageLight). -->
+    <item
+        android:id="@+id/action_imessage_light"
+        android:title="@string/imessage_light"
+        android:visible="false"
+        app:actionLayout="@layout/action_imessage_light"
+        app:showAsAction="always" />
     <!-- One-to-one conversations with a phone number: opens the phone's dialer with it. -->
     <item
         android:id="@+id/action_call"
@@ -15,6 +22,35 @@
         android:title="@string/chat_stop_reading"
         android:visible="false"
         app:showAsAction="ifRoom" />
+    <!-- A Messages conversation with Blue Bubbles on: its person's iMessage chat (here, or new in OpenBubbles). -->
+    <item
+        android:id="@+id/action_send_imessage"
+        android:title="@string/imessage_send_imessage"
+        android:visible="false"
+        app:showAsAction="never" />
+    <!-- A Messages conversation with the person's iMessages in it: is it blue on their iPhone? -->
+    <item
+        android:id="@+id/action_check_imessage"
+        android:title="@string/imessage_check"
+        android:visible="false"
+        app:showAsAction="never" />
+    <!-- Blue Bubbles: put an iMessage chat inside this conversation by hand, or take it out. -->
+    <item
+        android:id="@+id/action_link_imessage"
+        android:title="@string/imessage_link"
+        android:visible="false"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_unlink_imessage"
+        android:title="@string/imessage_unlink"
+        android:visible="false"
+        app:showAsAction="never" />
+    <!-- An iMessage chat: the same chat in OpenBubbles. -->
+    <item
+        android:id="@+id/action_open_openbubbles"
+        android:title="@string/imessage_open_in_openbubbles"
+        android:visible="false"
+        app:showAsAction="never" />
     <item
         android:id="@+id/action_archive"
         android:title="@string/chat_action_archive"

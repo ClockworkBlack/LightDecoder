@@ -8,31 +8,29 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
    had earlier chosen "build with a warning", then "pause on Discord", and has now asked for
    the web-view tab only, with no bridge). **Instagram: skipped** (ban risk, like Messenger).
 
-## 0.5.29 (versionCode 37) - OpenBubbles' libraries built into the APK on the build machine
-- `bundleImessageLibs` (app/build.gradle.kts) packs `~/.lightdecoder/imessage-libs/<abi>/*.so`
-  into the APK after checking them against `app/imessage-pins.txt`; nothing to import then.
-  Never commit them (public repo) and never publish an APK built with them.
-- 0.5.28's "Package appears to be invalid" on the isolated APK: the file verified fine here
-  (signature, alignment, manifest); most likely an incomplete 155 MB download.
-- Next version: 0.5.30 / 38.
-
-## 0.5.28 (versionCode 36) - iMessage inside the Messages tab (OpenBubbles 2.0.0's library, user-imported)
-- Everything: `docs/imessage-openbubbles.md` ("What is built"). Code: `imessage/`,
-  `ui/imessage/ImessageActivity` (setup, Messages menu > "iMessage..."), routing in
-  `relay/RelayManager` (ids starting `imsg:`), Unsend in `ui/chat/ThreadActivity`, generated
-  bindings `app/src/main/java/uniffi/rust_bridge/` (regenerate with `tools/uniffi-bindgen/gen.sh`).
-- No separate tab (owner's call). iMessage conversations live in the Messages archive; a
-  foreground service (`imessage/ImessageService`) keeps iMessage connected in the background.
-- Library (`librust_bridge.so` + `libheifdec.so`, OpenBubbles 2.0.0 arm64, pinned by SHA-256) is
-  imported by the user and never committed. **On this branch (`-isolated`) it loads only in
-  the ":imessage" process** (service + setup screen); the main process keeps the archive and
-  talks to it over bound services (`imessage/ImessageIpc`, `ImessageWire`, `ImessageLink`,
-  `ImessageSinkService`). Branch `ccr-ffe9dbd4-xu00fq` has the single-process version.
-- Unsend works after a restart (recipients come from the archive). Not built yet: iMessage
-  pictures/attachments, reactions, history from before registration (needs Apple Account/iCloud).
-- **Not tried on a phone.** The owner's pass: registration completes and the status turns green.
-- The release keystore (.p12) the owner sent is kept outside the repo (`*.p12` is ignored);
-  its password is in the build machine only (never in the repo).
+## 0.5.54 (versionCode 64) - iMessage through OpenBubbles' library, powering Blue Bubbles
+Branch `ccr-ffe9dbd4-xu00fq-isolated` = 0.5.53 (`ccr-4fee5e9f-jrrlhu`) + the direct library work.
+The owner chose: the library powers Blue Bubbles; the OpenBubbles-app route stays as the fallback;
+the library runs in its own ":imessage" process. Everything: `docs/imessage-openbubbles.md`.
+- `imessage/direct/`: `DirectEngine` (OpenBubbles 2.0.0's `librust_bridge.so` through uniffi/JNA
+  bindings, in ":imessage" only), `DirectService` (foreground, keeps it connected), `DirectIpc` +
+  `DirectWire` (the bridge), `DirectLink` + `DirectSinkService` (main process, Blue Bubbles' iMessage
+  archive), `DirectKeystore`, `DirectLibrary` (pins; built-in or imported files), `SmsPhoneVerifier`
+  + `PhoneRegSms` (phone number by SMS, text or data SMS, or pasted), `ui/imessage/DirectSetupActivity`
+  (Messages menu > "iMessage..."). Names differ from Blue Bubbles' `IMessage*` (case-insensitive file systems).
+- Once registered (`DirectEngine.isSetUp`): Blue Bubbles is turned on once; `IMessageManager` sends,
+  retries and "can reply" through `DirectLink` (`canSend`: one-to-one chats, and groups the library
+  made); OpenBubbles' notifications are ignored (no doubles); the light says "direct"; Unsend in a
+  thread retracts directly with Apple's answer (`ThreadActivity.unsendDirectly`), older Blue Bubbles
+  messages keep the OpenBubbles route; a new iMessage chat is made here (`DirectLink.conversationFor`).
+- A person's existing Blue Bubbles chat is reused (`IMessageManager.conversationWith`), so history and
+  new messages stay together; new chats are `imsg:<address>`, messages `imsg:<GUID>`.
+- Built in: `bundleImessageLibs` packs `~/.lightdecoder/imessage-libs/<abi>/*.so` (pinned in
+  `app/imessage-pins.txt`) into the APK. Never commit them (public repo); never publish such an APK.
+- Not built: iMessage attachments and tapbacks/edits through the library (Blue Bubbles' ways stay),
+  history from before registering. **Not yet tried on a phone end to end.**
+- Earlier on this branch (0.5.28/0.5.29, based on the old main 0.5.27): superseded by this; their
+  APKs were refused by the phone as a downgrade from 0.5.53.
 
 ## Releases and signing
 - Latest: **0.4.2** (versionCode 6), signed with the permanent release key (CN=LightDecoder,
@@ -49,6 +47,381 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - **Sticker maker Fine-tune:** Erase / Keep brushes with adjustable size, two-finger zoom and pan,
   undo per stroke (`ui/sticker/RefineView`, `StickerMaker.Stroke/Edits/cutOut`).
 
+## 0.5.53 (versionCode 63) - back on main: the wrapper is set aside
+- The user found the OpenBubbles accessibility wrapper (branch ccr-4fee5e9f-jrrlhu-wrapper, last 0.5.52-wrapper,
+  versionCode 62) not working well and asked to go back to main. 0.5.53 is 0.5.49 with only the version raised,
+  so it installs over the wrapper builds (Android refuses a lower versionCode without an uninstall, which would
+  wipe the archives). The wrapper's accessibility service goes away with it; its rows in the iMessage archive
+  (sent "ld:wrap-" rows, "You unsent a message" lines) are ordinary rows and stay readable.
+- Unsend, Edit and reactions on iMessages are back to opening OpenBubbles on the chat. The wrapper branch is
+  kept as it was, with its notes (0.5.46-wrapper to 0.5.52-wrapper), in case it is picked up again.
+
+## 0.5.49 (versionCode 58) - videos play in LightDecoder
+- `ui/chat/VideoPlayerActivity`: a conversation's video plays here, full screen, from its own file as it came
+  (iPhone .mov in HEVC or H.264, MP4), with Media3 ExoPlayer + PlayerView (androidx.media3 1.5.1,
+  Apache-2.0, covered by the androidx licence rule). Position is kept through rotation (configChanges)
+  and a restart (saved state). Only files in the app's own storage are played. `ThreadActivity.onMediaTap`
+  sends `video/*` there instead of to another app, for every service.
+- iMessage videos get a still for their bubble: Android's thumbnail, else a frame from the file itself
+  (`MediaMetadataRetriever`, `IMessageMedia.frameOf`).
+- Pictures were already shown from the original file, decoded at the bubble's size, and full resolution and
+  zoomable in the gallery (HEIC included).
+- versionCode 55–57 were wrapper-branch builds, so main jumps to 58 to install over them.
+
+## 0.5.46 (versionCode 54) - every emoji as a reaction
+- Long-press sheet: five quick reactions (👍 ❤️ 😂 😮 😢; the user's own reaction takes the last place
+  when it is another emoji), then a white round "+" (`item_quick_reaction_more`). It opens
+  `sheet_emoji_picker`: AndroidX `EmojiPickerView` (androidx.emoji2:emoji2-emojipicker 1.5.0), with every
+  emoji, categories, recently used and skin tones (long press). Any emoji goes as a reaction to Google
+  Messages and WhatsApp (`ThreadActivity.reactionPicked`), and to iMessage through OpenBubbles (the
+  wrapper branch does the tapback itself).
+- The picker brings Guava (Apache-2.0, added to `bundleLicenses`' Apache list and NOTICE). Its
+  annotation-only dependencies (jsr305, checker-qual, j2objc-annotations) are excluded, not shipped.
+- versionCode 53 was the wrapper branch's 0.5.45-wrapper. Main continues at 54, so it installs over it.
+
+## 0.5.44 (versionCode 52) - received iMessage pictures in their bubbles
+- OpenBubbles' notification carries only a description ("Image", "Attachments: 2 images, 1 movie"), never
+  the picture (its payload is title, text, time, guid). `IMessageCapture.attachmentKinds` turns such a line
+  into picture or video slots (parts with mime `image/*` / `video/*`, no file).
+- `imessage/IMessageMedia` fills them. With OpenBubbles' Settings → Attachments → "Auto-save Attachments" on,
+  OpenBubbles saves each received picture and video, as it came (`SaverGallery quality: 100`), to Pictures
+  through MediaStore. LightDecoder queries `MediaStore.Files` for `OWNER_PACKAGE_NAME` = OpenBubbles, images
+  or videos, `DATE_ADDED` from 2 min before to 15 min after each waiting message. It takes the first unused
+  file of the right kind (used ids in `IMessagePrefs.usedMedia`) and copies it to the iMessage media folder
+  (HEIC kept; videos get a still from `loadThumbnail`). It then records the path and the real mime, size and
+  dimensions (`ArchiveRepository.mediaAwaitingFiles` / `setMediaDetails`).
+- When it looks: 1 s, 5 s, 15 s, 45 s, 2 min and 5 min after a placeholder arrives; when the gallery changes
+  (ContentObserver); and when a thread comes to the front. It needs Android 10+ (owner column) and
+  READ_MEDIA_IMAGES / READ_MEDIA_VIDEO (READ_EXTERNAL_STORAGE ≤ 12), asked when a waiting slot is tapped.
+  The slot reads "Picture from OpenBubbles · tap", and a tap explains Auto-save, offering Allow or Open in
+  OpenBubbles.
+- Logged: each match (mime, KB, seconds after the message), missing access, and a slot still empty after 6 min
+  ("is Auto-save on?").
+- Extensions / a wrapper for inline replies, checked: OpenBubbles' `IMadridExtension` is for iMessage apps
+  (GamePigeon-style balloons). A dev extension can be registered (developer mode), but it can only add its
+  own app balloons and update them. It never sees normal messages and cannot reply inline, unsend or send
+  text. An accessibility wrapper driving OpenBubbles' screen would be fragile and visible. Inline replies
+  stay with the link plan.
+- Activity log work paused at the user's request.
+
+## 0.5.43 (versionCode 51) - LightDecoder's features with iMessages
+- **Reply to a message:** now offered on iMessages too (`canReplyTo` no longer excludes them). It goes as an
+  iMessage of its own: OpenBubbles' Reply button cannot make an inline thread reply. The reply bar says
+  "(sent as an iMessage of its own)".
+- **Stickers** in a Messages conversation with an iMessage chat go through OpenBubbles as iMessage. Before,
+  they went through Google Messages, green.
+- **Edit** on one's own iMessage (15 minutes): "Edit (in OpenBubbles)" opens OpenBubbles on the chat.
+  **Reactions** on iMessages: the quick-reaction row shows, and a tap opens OpenBubbles to add the tapback
+  (`openInOpenBubblesFor`, logged).
+- **Reply from LightDecoder's own notification** in a Messages conversation with an iMessage chat goes as
+  iMessage (`ReplyReceiver`). Without a Reply button it waits, failed, in the conversation (a tap hands it to
+  OpenBubbles). Never as a text.
+- Already working with iMessages: sending and receiving text, pictures, several pictures and voice messages
+  (one tap in OpenBubbles), stickers, read aloud, copy, delete here, search, mute, archive, mark read
+  (OpenBubbles told), Unsend, Check iMessage, notifications.
+- Still only with the OpenBubbles link (plan on hold): inline thread replies, silent edits, unsends and
+  tapbacks, delivered/read ticks, pictures received inline (next: Auto-save + MediaStore, see 0.5.42).
+
+## 0.5.42 (versionCode 50) - iMessage history back in every conversation
+- User report after updating: "removed history of already linked and working" chats. Nothing was deleted (no
+  schema change since v2), but 0.5.38's one-to-one pairing hid iMessages in two ways. Both fixed:
+  1. **Two conversations with one number:** an iMessage chat showed in only one Messages conversation per
+     number. Before 0.5.38, every conversation with the person's number showed it. `iMessageFor` now falls
+     back to the number lookup, except for a chat unlinked by hand.
+  2. **A person with several iMessage chats** (OpenBubbles set up again gives new chat ids; or a phone and an
+     email chat): only one was paired, and the older history sat in a row of its own. New pairing step 4,
+     `How.SAME_PERSON`: the person's other chats with the same number or email show in the same conversation.
+     The thread merges their rows (replies still go through the first chat), and the list folds them all into
+     one row with the newest preview.
+- Logged: "Links: ... person(s) with more than one iMessage chat; ... number(s) with more than one Messages
+  conversation", and when a chat is also shown in a second conversation.
+- Pictures over iMessage (user's next request, not built yet): OpenBubbles' notification carries only text
+  ("Image" / "Attachment: 1 image"), no picture. Plan: with OpenBubbles' Settings → Attachments →
+  "Auto-save Attachments" on, it saves received media at full quality to Pictures through MediaStore. Find
+  it there by `OWNER_PACKAGE_NAME` = OpenBubbles and the time (READ_MEDIA_IMAGES/VIDEO), copy it into the
+  iMessage media folder, and attach it to the placeholder message.
+
+## 0.5.41 (versionCode 49) - Check iMessage sees the reply
+- The user saw a check not update when the person replied in iMessage. Three causes, fixed:
+  1. **Finding the chat:** a check started before the person had an iMessage chat in LightDecoder
+     looked for the new chat by number only (`conversationWith`). A notification with only a name
+     was never found. Now `IMessageChecks.watch` takes `findChat`, the same pairing as the screens
+     (`BlueBubblesLinks.iMessageFor`: by hand, number, name), with the number lookup as a fallback,
+     and logs when it finds the chat.
+  2. **Steps that never tick:** a check sent from OpenBubbles' own screen (no Reply button, or a
+     new chat) can never tick "handed to OpenBubbles" or "shown back", since nothing of it is
+     visible here. Those steps are now replaced by "Sent from OpenBubbles (you tap send there)".
+  3. **The reply was never notified:** OpenBubbles posts no notification for a reply in a chat that
+     is open on its screen. The dialog now says to come straight back after tapping send, and the
+     60 s log line says so too.
+- The iMessage light's dialog has an "iMessage log" button: the log, newest first, selectable, with
+  Clear. The screenshots the user sent were the Google Messages and sticker logs, which hold no
+  iMessage lines.
+
+## 0.5.40 (versionCode 48) - catching every message the notifications allow
+- From OpenBubbles' source (`lib/helpers/types/helpers/message_helper.dart`, `handleNotification`):
+  it posts no notification
+  - for a chat that is open on its screen;
+  - on its chat list, unless its setting "Send Notifications on Chat List" is on;
+  - for muted chats;
+  - for its own sent messages.
+
+  With "Hide Message Text" on, each line just reads "iMessage".
+- Now: such hidden-text notifications are not stored (`IMessageCapture.HIDDEN_REASON`), and
+  `IMessagePrefs.hiddenTextAt` makes the iMessage light red, naming the setting; it clears with the
+  next readable notification. The Blue Bubbles switch-on message and the light's explanation say to
+  turn ON "Send Notifications on Chat List" and OFF "Hide Message Text" (OpenBubbles: Settings →
+  Notifications), and that a chat open in OpenBubbles is not seen.
+- Full sync, which the user wants, is only possible with the link: see "Goal: full sync" in
+  `docs/openbubbles-link-plan.md` (on hold).
+
+## 0.5.39 (versionCode 47) - the iMessage light
+- `ui/chat/IMessageLight`: a dot in the top bar (menu item with `action_imessage_light` layout), Messages tab
+  only, hidden while Blue Bubbles is off. List: blue = working, red = OpenBubbles missing / no notification
+  access / notification reader stopped by Android (`MessengerNotificationListener.isConnected`). Conversation:
+  blue = sends as iMessage straight through OpenBubbles' Reply button, amber = iMessage through OpenBubbles'
+  screen (no Reply button held yet), grey = texts (no iMessage chat, or a group), red = as above. Tap: what
+  it means, in words.
+- **Unsend from LightDecoder without opening OpenBubbles is not possible with the Play Store OpenBubbles.**
+  Checked its source (OpenBubbles/openbubbles-app 1.15.0): nothing exported takes commands. The only outside
+  interface, `IMadridExtension` (AIDL, `com.openbubbles.messaging.MadridExtensionService`), is for iMessage
+  app extensions (GamePigeon): OpenBubbles binds to them, and they can only update their own messages.
+  Unsend/edit/send live in Dart (`rustpush_service.dart`) behind its own UI. A real link needs a modified
+  OpenBubbles (an exported service guarded by LightDecoder's signature, calling into Dart over a
+  MethodChannel), built with Flutter + Rust/NDK, replacing the user's install (uninstall, re-register with the
+  relay). Offered to the user, who put it on hold: the full plan is `docs/openbubbles-link-plan.md`
+  (gates first: whether a source build with placeholder FairPlay certificates can register at all).
+
+## 0.5.38 (versionCode 46) - iMessages in the right conversation; Unsend
+- **Linking** (`imessage/IMessageLinks.pair`, pure; `BlueBubblesLinks.pairs` builds it from both archives,
+  cached and dropped on any conversation change of either archive). Order: by hand (thread menu "Link an
+  iMessage chat..." / "Unlink iMessage chat"; an unlink is kept as "" and blocks automatic linking), same
+  number/email key, then same name when unambiguous (one conversation and one chat with that name, and the
+  chat has no phone number of its own that no conversation has). The conversation list (`foldIn`), the thread's
+  companion, the redirect of a standalone iMessage chat and notification taps all use it. Capture now takes a
+  chat title that is itself a number or email (unknown sender) as the address. Logged: link counts (by name,
+  left on their own) and every link or unlink by hand.
+- **Unsend** (long press on one's own iMessage): OpenBubbles' notification has no unsend button, so OpenBubbles
+  opens on the chat (its own notification intent, else the share screen, else its main screen) with "long-press
+  it and tap Undo Send". After 2 minutes (Apple's limit) it says so and offers Delete here.
+
+## 0.5.37 (versionCode 45) - Check iMessage wording
+- The check message is now exactly `Reply "OK" (without quotes) to this to start chatting in iMessage`
+  (`IMessageCheck.TEXT`, user's wording). No code in it any more: a check is told apart from an earlier one
+  by its send time. Sent twice in a row with nothing from them in between, OpenBubbles would drop the second
+  as a repeat reply, so that one goes through OpenBubbles' screen (user taps send).
+
+## 0.5.36 (versionCode 44) - Check iMessage keeps running when closed
+- The running check lives in `imessage/IMessageChecks` (app-wide, one at a time), not in its dialog. "Close
+  (keeps checking)" hides it; "Stop check" ends it; the thread menu reads "Check iMessage (checking...)" and
+  reopens it. It polls every 1 s for 10 min, then every 5 s, and gives up after 2 h (logged). A verdict
+  while the dialog is closed comes as a notification (alerts channel) that opens the conversation; the log
+  marks it "(seen in the background)". Lost if Android kills the app's process.
+
+## 0.5.35 (versionCode 43) - OpenBubbles fixes from the first real-phone try
+- **"OpenBubbles is not installed" when it is** (Send iMessage): the new-chat screen was opened only with an
+  `imessage://` link, and a failed start was reported as not installed. `OpenBubbles.openNewChat` now tries
+  imessage:, smsto:, sms: links, then its share screen (text), then its main screen (number copied to the
+  clipboard, with a notice); NOT_INSTALLED only when no package is found. Each try is logged. The user's
+  OpenBubbles is `com.openbubbles.messaging` with activities under `com.localob.messaging.app` (logcat).
+- **Blue Bubbles checkbox looked unticked when on**: white tick on the white box; `buttonIconTint` is now the
+  surface colour (`MenuCheckBoxTest`).
+- **An iMessage in OpenBubbles not in LightDecoder**: capture is more tolerant (any tag; chat id from the
+  conversation shortcut when there is no `chatGuid` extra), and every OpenBubbles notification not used is
+  logged once per 10 min with the reason and its shape (tag kind, channel, or "(per-chat)", category, style,
+  message count, buttons, extras key names; no content). Listener connect/disconnect is logged with how many
+  OpenBubbles notifications are up. LightDecoder only sees iMessages OpenBubbles notifies about (none while
+  OpenBubbles is open on screen, none from before Blue Bubbles was on).
+- **Check iMessage without an iMessage chat yet**: offered in a one-to-one Messages conversation with a number
+  when Blue Bubbles is on; it opens a new OpenBubbles chat with the check filled in and finds the chat by
+  number once OpenBubbles notifies about it.
+
+## 0.5.34 (versionCode 42) - iMessage log
+- `imessage/IMessageLog`: Blue Bubbles step by step, in app storage (200 lines, problem report section
+  "== iMessage (Blue Bubbles) ==" with setup summary, chats stored, Reply buttons held) and in logcat,
+  tag `LDiMessage` (`adb logcat -s LDiMessage` on a real phone; the device test's "Show the result" step
+  prints it). Logged: Blue Bubbles on/off and state changes (OpenBubbles package + version, notification
+  access); each OpenBubbles notification with new lines (from them / from me in OpenBubbles, Reply button
+  yes/NO, new chat), unreadable message notifications, a Reply button going away; each send's route from a
+  Messages conversation (silently through the Reply button, OpenBubbles' screen and why, or TEXT/green and
+  why); the Reply button result; how long OpenBubbles took to show a sent message back; hand-offs (text,
+  file types); Mark As Read missing; every Check iMessage step with seconds, the verdict BLUE/GREEN, a
+  stall after 60 s, closing early. Content-free: chats are `chat#xxxx` (SHA-256 of the chat id, 4 hex);
+  no text, names, numbers, emails or chat ids (tested in BlueBubblesScreenTest and on the emulator).
+
+## 0.5.33 (versionCode 41) - several pictures at once, voice messages, Check iMessage
+- **Several pictures in one go** (thread composer): the picker takes up to 10 pictures/videos
+  (`PickMultipleVisualMedia`); the attachment bar reads "3 attachments". Each picture goes out as a
+  message of its own, in the order picked, the text after the last, the reply on the first. Not one
+  multi-part request on purpose: in 0.5.1 the phone kept only one part of a picture+caption send, so a
+  message with several media parts would most likely arrive as one picture. That is also how Google
+  Messages itself sends several photos over RCS. In the thread, picture-only messages from the same
+  person within 3 minutes are drawn as one stack with one time line (`ThreadItem.Message.stackedWithNext`,
+  `ThreadItems.stacks`). Received messages that do carry several pictures already showed them all.
+  WhatsApp sends each picked file as its own message too; iMessage hand-off passes them all to OpenBubbles.
+- **Voice messages** (Google Messages conversations, and iMessage chats inside them via OpenBubbles):
+  the waveform button next to dictation records (RECORD_AUDIO, asked on first tap; `uses-feature`
+  microphone not required). `VoiceRecorder` = MediaRecorder AAC mono 44.1 kHz 32 kbps in .m4a, sent as
+  `audio/mp4` (Outbox maps .m4a to audio/mp4: some Android versions say audio/mpeg). Recording bar:
+  delete, red dot, timer, send. Under 1 s is not sent; max 10 min in RCS chats, 3 min otherwise (MMS);
+  leaving the screen throws a recording away. Files in `cache/voice`, purged after a day.
+- **Playing audio in the bubble**: any `audio/*` part (received or sent) shows play/pause, a bar that
+  can be moved while it plays, and the time (`VoicePlayer`, one at a time, pauses on onStop). Missing
+  files are downloaded through the link first (`audioFileFor`).
+- **Check iMessage** (thread menu of a Messages conversation with the person's iMessages in it):
+  no test machine can sign into iMessage, so it uses the person's iPhone. It sends "LightDecoder
+  iMessage check NNNN. Please reply OK." as an iMessage (shown before sending) and ticks off live:
+  handed to OpenBubbles, shown back by OpenBubbles (sent to Apple), their reply. An iPhone replies
+  the way the thread shows on it, so a reply through OpenBubbles = blue, a reply through Google
+  Messages = green (with what to do). Logic in `imessage/IMessageCheck` (pure, over both archives).
+  Also runs on the emulator (`BlueBubblesDeviceTest.checkIMessageReadsTheColourFromHowTheIPhoneReplies`,
+  stand-in plays the iPhone). OpenBubbles needs no Apple ID for this: the phone number registration
+  through the relay is what makes it blue; keep "Start new conversations from" on the number.
+- Tests: `ui/VoiceAndPicturesTest` (7), `imessage/IMessageCheckTest` (7), 2 more in `BlueBubblesScreenTest`. On-device Blue Bubbles test (`device-test.yml`) passed on an
+  Android 14 emulator (run 44414229977).
+- Not verified on a real phone yet: how Google's phone app labels an m4a sent from the web link
+  (expected: its own audio player), and the stack look with real pictures.
+
+## 0.5.32 (versionCode 40) - texts to iPhones never go green
+- Owner's ask: texts to iPhone users must show blue on their iPhone. In a Messages conversation that has a
+  companion iMessage chat (Blue Bubbles), send() never sends SMS/RCS any more: silently through
+  OpenBubbles' Reply button when `sendsAsIMessage(text)`, else (no Reply button since the app started, a
+  repeat text, or a picture) `handOffToOpenBubbles` opens OpenBubbles on that chat with the text/picture
+  filled in for one tap. The hint always says "iMessage" there. Fixed on the way: the hand-off's
+  "still on screen" check now accepts the companion chat. Test: BlueBubblesScreenTest
+  `toSomeoneWithAnIMessageChatATextNeverGoesGreen`. 666 tests pass. Next version: 0.5.33 / 41.
+- A person with no iMessage chat stored yet still gets SMS/RCS: LightDecoder cannot know they have an
+  iPhone until an iMessage from them arrives through OpenBubbles ("Send iMessage" in the menu starts one).
+  Sending silently to anyone would need an API in OpenBubbles (or a fork); proposed, not built.
+
+## Blue Bubbles setup that works (2026-11-18)
+- The owner's OpenBubbles failed with "Token not found": adb logcat showed rustpush's activation at
+  albert.apple.com answered without a DeviceCertificate (`failed to connect Failed to parse Albert Cert!`).
+  Since Oct 2026 Apple refuses activations that look like an iPhone. Fixed by replacing JJTech's
+  ValidationRelay with **Validation Relay+** (github.com/mkitchingh/ValidationRelay-plus, TrollStore .tipa
+  from its releases, built by its own CI; source checked: talks only to Apple and the chosen relay) with
+  **Report as Mac** on, then a fresh OpenBubbles setup. OpenBubbles then registered.
+- `tools/validation-relay/` (our patch of the old relay, with a JSON event log) and `codemagic.yaml` are
+  superseded by that; kept only for reference. GitHub's macOS runners did not start because the account's
+  Actions budget was at $0 (owner raised it).
+- iPhone 7 relay: iOS 15.x, TrollStore, signed out of Apple ID, iMessage/FaceTime off, plugged in,
+  Validation Relay+ open with Keep Awake. Keep its "Copy Identity" backup: Apple activates a serial once.
+
+## 0.5.31 (versionCode 39) - Blue Bubbles: one conversation per person, iPhone-style
+- Owner's ask: iMessages in the SAME chats as texts, shown blue, not separate chats.
+- `ui/chat/BlueBubblesLinks` matches an iMessage chat to a Messages 1:1 conversation by the other
+  person's address (`IMessageAddress.key`: email lower-case, phone = last 10 digits). The archives stay
+  separate; only the screens merge.
+- ThreadActivity (Messages conversation): `companionId` = the matching iMessage chat; loadNow also reads
+  its rows (from as far back as the texts shown, when the window is full) and interleaves them by time;
+  `iMessageIds` + `MessagesAdapter.blueFor` colour the user's iMessages blue; per-message actions go to
+  `backendFor(row)`; a text goes as an iMessage when `sendsAsIMessage(text)` (the companion has a Reply
+  button and it is not a repeat), else as a normal text; the hint says "iMessage" then. The companion is
+  marked read with the conversation and counts as on screen for notifications. An iMessage thread opened
+  by itself (a notification) moves to the matching Messages conversation (SINGLE_TOP intent).
+- ConversationsActivity.foldIn: a matched iMessage chat is not its own row; its newest message, time and
+  unread fold into the Messages row. Unmatched iMessage chats (and groups) stay rows marked iMessage.
+- Pictures still hand off to OpenBubbles only from an iMessage-only chat; in a merged conversation a
+  picture goes as MMS/RCS. Next version: 0.5.32 / 40.
+
+## 0.5.30 (versionCode 38) - Blue Bubbles (iMessage inside the Messages tab)
+Owner's ask (2026-11-18): a white checkbox "Blue Bubbles" in the Messages tab's overflow menu (between
+"Refresh from phone" and "Link settings") so the Messages tab itself sends and receives iMessages; NOT a
+separate tab. The owner sets up an iPhone 7 (iOS 15.x, TrollStore + JJTech's ValidationRelay) and the
+OpenBubbles Android app (package com.openbubbles.messaging) themselves.
+- **Design chosen: OpenBubbles is the iMessage client; LightDecoder mirrors it.** The listener
+  (`messenger/MessengerNotificationListener`, one listener for both) reads OpenBubbles' MessagingStyle
+  notifications (extras `chatGuid` = the chat's UUID, `messageGuid` = newest message; the sender's
+  Person uri is tel:/mailto: in 1:1; groups by MessagingStyle.isGroupConversation) into a hidden
+  `ChatService.IMESSAGE` with its own
+  archive. Replies go through the notification's Reply action (RemoteInput key `text_reply`, OpenBubbles
+  sends in the background); Mark As Read through its SEMANTIC_ACTION_MARK_AS_READ action. New chats and
+  attachments hand off to OpenBubbles (`imessage://<addr>?body=`, or ACTION_SEND with
+  EXTRA_SHORTCUT_ID=chatGuid); the user taps send there. Research (7 readers over the OpenBubbles,
+  rustpush and ValidationRelay sources) is summarised in this entry; file:line evidence was in the session.
+- **What was built** (commits 511027b..d600249): `imessage/` (IMessagePrefs file "imessage" with the
+  checkbox, notify switch and a salt for opaque notification tags; OpenBubbles = package names, intents,
+  chat-id parsing; IMessageCapture; IMessageReplies = in-memory Reply/Mark As Read/open buttons per
+  chatGuid; IMessageManager = the ChatBackend, archive `imessage-archive.db`, capabilities none).
+  Message ids are `ob:`+hash(chat, time, sender, me/them, text); a reply sent from here is stored as
+  `ld:<tmpId>` when handed over, and OpenBubbles' echo of it (own line, same text, within 3 min) is
+  dropped. Mark As Read is pressed only after something new arrived. `ui/chat/BlueBubblesSetup` runs the
+  checkbox (needs OpenBubbles installed, then notification access; comes on when the user returns with
+  access). ConversationsActivity merges iMessage rows into Messages' Inbox/Archived (pinned, then
+  newest), ConversationItem carries its service (adapter ids keyed by service+id), badges add iMessage
+  unread to Messages, `tabServiceOf` maps IMESSAGE to the Messages tab. ThreadActivity: outgoing bubbles
+  in iMessage blue (#0A84FF, `MessagesAdapter.blueOutgoing`), send() hands off to OpenBubbles for
+  pictures/stickers or chats without a Reply button (copy in cache/shared via FileProvider, ACTION_SEND
+  with EXTRA_SHORTCUT_ID=chatGuid), failed iMessages hand off on tap, no reactions/quotes/read-notify for
+  iMessage, menu "Open in OpenBubbles", and "Send iMessage" in a Messages 1:1 chat (opens the stored
+  iMessage chat with the same number, matched on the last 10 digits, else OpenBubbles' new-chat screen).
+  The overflow menu's checkbox uses `ThemeOverlay.LightDecoder.MenuPopup` (colorOnSurface = white on dark).
+- **Review fixes** (an 8-agent review against OpenBubbles' source): chat ids are UUIDs, so nothing is
+  parsed out of them (address only from the sender's handle, kept from before when a post has none);
+  OpenBubbles drops a reply equal to the last one for the same messageGuid, so that is refused here
+  (`IMessageReplies.REPEAT`, hand-off instead); Mark As Read is still pressed after a restart (a showing
+  notification with their lines = unread in OpenBubbles); only messages sent from here (`ld:`) match
+  OpenBubbles' line for them, each once, and are replaced by it; deleted messages (ids) and chats
+  (time) are remembered in IMessagePrefs so the notification does not bring them back; sendText throws
+  NO_REPLY_BUTTON (after storing the failed row) so a notification reply is not shown as sent; no share
+  shortcuts for iMessage (they would expose the chat and cannot be opened); stickers hand off all of them
+  without clearing the draft; long-press Retry hands off like a tap; Messages search includes iMessage;
+  checkSetUp/empty card count iMessage, Delete archive only the Messages archive; hand-off copies live in
+  cache/shared/imessage/ and go after a day; the checkbox colour is set through checkboxStyle.
+- Tests: imessage/IMessageCaptureTest, IMessageManagerTest, ui/BlueBubblesScreenTest. Not tried on a
+  phone with OpenBubbles: the notification format is from OpenBubbles' source (commit eed1b63, Apr 2026).
+- **Limits of that design** (tell the owner): no history; nothing for chats open in OpenBubbles, muted
+  there, or sent from other devices; attachments arrive as text ("Attachment: …"); tapbacks arrive as
+  text; a reply needs a live notification for that chat (else hand-off); OpenBubbles' notifications must
+  stay on (set them Silent to avoid double alerts).
+- **Why not embed OpenBubbles' library (rustpush) so LightDecoder is the iMessage client:** (1) its
+  public FairPlay activation certificate expired 2024-10-11 and a source build was reported refused by
+  albert.apple.com (rustpush issue #18, Jan 2026); OpenBubbles' working keys are private; (2) Beeper's
+  hosted relay (registration-relay.beeper.com) needs an X-Beeper-Access-Token (OpenBubbles ships a shared
+  "burner" token; not ours to reuse), so the owner would need a self-hosted relay; (3) rustpush is SSPL-1.0
+  (exception for OpenBubbles only): an APK combining it with LightDecoder's AGPL code could never be given
+  to anyone; (4) every Apple and Beeper host is blocked from the cloud build container, so nothing could be
+  tested. Do not run OpenBubbles and an embedded client on the same number (they would knock each other off).
+- Next version: 0.5.31 / 39.
+
+## 0.5.29 (versionCode 37) - share to LightDecoder, edit a WhatsApp message
+- **Share target.** `ui/share/ShareActivity` (exported) takes ACTION_SEND (text, image, video,
+  audio) and SEND_MULTIPLE (image, video): pick a linked service and a conversation. One file
+  (and any text) opens the thread with it in the composer (`RelayIntents.threadWithShared`,
+  `ThreadActivity.takeShared`); several files are sent after one question. Shared files are copied
+  to `cache/shared-in/` first (`SharedContent.copyIn`, kept a day), because the sharing app's
+  grant ends with the share screen. Only other apps' `content:` uris are taken: a `file:` path or
+  a uri of the app's own provider could name private files. `ViewerActivity`'s older "Open with
+  LightDecoder" entry for pictures is still there, so pictures show two entries.
+- **Direct share.** `chat/ShareShortcuts` pushes a long-lived shortcut for a conversation when the
+  user sends to it from the thread or the share screen (`res/xml/shortcuts.xml`, meta-data on
+  InboxActivity); Android puts them in the share sheet's top row and under the launcher icon.
+  Removed on deleteConversation and wipeArchive. Messenger and Discord cannot be targets (no
+  backend to send through).
+- **Edit (WhatsApp only).** `WABridge.EditText` (whatsmeow `BuildEdit`) -> `WaBridge.editText` ->
+  `WaManager.editMessage`; `Capability.EDIT`; "Edit" in the message sheet when `EditRule.canEdit`
+  (own, text only, under 15 minutes; the bridge allows whatsmeow's 20). The archive has no
+  "edited" mark yet. **Unsend already existed** for WhatsApp: Delete -> "Delete for everyone".
+- **Google Messages cannot edit or unsend**: libgm v0.2610.0 has no such action in its protocol
+  (ActionType has DELETE_MESSAGE only, which deletes on the user's own phone). Not something to
+  add without the protocol.
+- **Swipe between apps.** A sideways swipe along the top bar (the switcher or the empty bar beside
+  it) selects the next app's tab, leftwards for the next, going round at the ends
+  (`ServiceTabStrip.swipeListener`); it works on every screen that has the switcher.
+- None of this was tried on a phone. Next version: 0.5.30 / 38.
+
+## 0.5.28 (versionCode 36) - Smart cut: the full U-2-Net
+- The owner chose "Model B": the full U-2-Net (Apache-2.0, 168 MB, sha256 8d10d2f3...2b491, from
+  rembg's release assets) now finds objects instead of U-2-Net-p. It is over GitHub's 100 MB file
+  limit, so it ships as `assets/models/u2net.onnx.0` + `.1`; `SubjectCutter.fullObjectsModel` joins
+  them once into `noBackupFilesDir/models/u2net.onnx` and the runtime loads it from that file
+  (mapped, not held in the Java heap). U-2-Net-p stays as the fallback. APK about 320 MB.
+- **AUTO still picks the people model when people cover 2% of the picture**, so photos of people
+  (and statues of them) are cut by RVM as before; the new model changes Objects / Both and what
+  people hold. Changing that rule is the next thing to try if cuts of people still look ragged.
+- BiRefNet-lite ("Model A") was cleaner but needs about 7 GB of memory at 1024 px: not for a phone.
+- Not trained here: no GPU or dataset in this environment. Next version: 0.5.29 / 37.
+
 ## 0.5.27 (versionCode 35) - when a message was read
 - Holding one of the user's own messages that shows the read tick now says when it was read, at
   the top of the actions sheet (`sheet_message_actions.readInfo`, `ui/chat/ReadInfo`).
@@ -56,7 +429,7 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
   the archive, not created until needed) notes when the link sees a message turn to read:
   `RelayManager.onMessage` (where `wasUnread` is worked out) and `WaManager.onReceipt`. Same
   three wordings as reaction times: seen live, "at or before" when caught up, not known when it
-  was already read on first load. Test: `ReadTimesTest`. Next version: 0.5.28 / 36.
+  was already read on first load. Test: `ReadTimesTest`.
 
 ## 0.5.26 (versionCode 34) - Turn button; a calmer archive wipe
 - **Sticker maker "Turn"** (beside "Back to original picture"): the picture a quarter turn

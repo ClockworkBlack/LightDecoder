@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Sharing to a conversation from another app (Android's share sheet). -->
+    <string name="share_title">Send to…</string>
+    <string name="share_search_hint">Search conversations</string>
+    <plurals name="share_what_files">
+        <item quantity="one">%d file</item>
+        <item quantity="other">%d files</item>
+    </plurals>
+    <string name="share_what_files_and_text">%1$s and text: %2$s</string>
+    <string name="share_nothing">There was nothing LightDecoder can send in what was shared.</string>
+    <string name="share_not_linked">Link Messages or WhatsApp in LightDecoder first; then you can share to your conversations there.</string>
+    <string name="share_no_conversations">No conversations here yet.</string>
+    <string name="share_no_match">No conversation matches.</string>
+    <string name="share_could_not_read">The shared file could not be read.</string>
+    <string name="share_some_not_read">Some of the files could not be read and were left out.</string>
+    <string name="share_send_many_question">Send %1$s to %2$s?</string>
+    <string name="share_send">Send</string>
+</resources>

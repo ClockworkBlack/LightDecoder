@@ -140,6 +140,14 @@ interface WaBridge : java.io.Closeable {
     fun setOnline(online: Boolean)
 
     /**
+     * Replaces the text of one of this account's own text messages for
+     * everyone. WhatsApp only takes it for a while after the message was sent
+     * (the bridge refuses later ones with invalid_argument). A [KIND_MESSAGE]
+     * event with the new text follows.
+     */
+    fun editText(conversationId: String, messageId: String, text: String)
+
+    /**
      * Deletes a message for everyone (one's own messages, or any as a group
      * admin) or only on this account's devices. A [KIND_MESSAGE] event with
      * direction "deleted" follows.

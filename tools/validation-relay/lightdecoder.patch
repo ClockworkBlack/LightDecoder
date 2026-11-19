@@ -1,0 +1,641 @@
+diff --git a/ValidationRelay/Info.plist b/ValidationRelay/Info.plist
+index 28094e2..a873fc3 100644
+--- a/ValidationRelay/Info.plist
++++ b/ValidationRelay/Info.plist
+@@ -2,6 +2,17 @@
+ <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+ <plist version="1.0">
+ <dict>
++	<key>NSAppTransportSecurity</key>
++	<dict>
++		<key>NSExceptionDomains</key>
++		<dict>
++			<key>static.ess.apple.com</key>
++			<dict>
++				<key>NSExceptionAllowsInsecureHTTPLoads</key>
++				<true/>
++			</dict>
++		</dict>
++	</dict>
+ 	<key>UIBackgroundModes</key>
+ 	<array>
+ 		<string>processing</string>
+diff --git a/ValidationRelay/LogView.swift b/ValidationRelay/LogView.swift
+index 04234e8..ed3228f 100644
+--- a/ValidationRelay/LogView.swift
++++ b/ValidationRelay/LogView.swift
+@@ -6,6 +6,7 @@
+ //
+ 
+ import SwiftUI
++import Network
+ 
+ struct LogItem: Identifiable, Hashable {
+     var id = UUID()
+@@ -14,13 +15,261 @@ struct LogItem: Identifiable, Hashable {
+     var date: Date
+ }
+ 
++/// The Event Log. Patched for LightDecoder: every event is also written, as
++/// one JSON object per line, to Documents/relay-log.jsonl, which outlives the
++/// app, so crashes and runs iOS ended can be seen afterwards. The share button
++/// shares a report made for reading by a person or an AI: a summary (device,
++/// counts, failures by reason, crashes), then every event.
++///
++/// Each line: {"t": ISO time, "ms": ms since app start, "lvl": "I"/"W"/"E",
++/// "ev": event name, "msg": text, ...fields}. Events: app.start, app.active,
++/// app.background, app.foreground, app.terminate, app.unclean_exit, net.path,
++/// ws.connecting, ws.connected, ws.error, ws.disconnected, ws.reconnect,
++/// relay.registered, relay.version_info, val.requested, val.step, val.sent,
++/// val.failed, crash.signal, crash.exception, note.
+ class LogItems: ObservableObject {
+     @Published var items: [LogItem] = []
+-    
+-    func log(_ message: String, isError: Bool = false) {
++
++    init() {
++        RelayLogFile.shared.start()
++        for line in RelayLogFile.shared.previousRunNotes() {
++            items.append(LogItem(message: line, isError: true, date: Date()))
++        }
++        log("App started: \(RelayLogFile.deviceSummary())", event: "app.start", fields: RelayLogFile.deviceFields())
++    }
++
++    func log(_ message: String, isError: Bool = false, event: String = "note", fields: [String: Any] = [:]) {
+         let item = LogItem(message: message, isError: isError, date: Date())
+         items.append(item)
++        if items.count > 1000 { items.removeFirst(items.count - 1000) }
++        RelayLogFile.shared.record(event, message, level: isError ? "E" : "I", fields: fields)
++    }
++}
++
++/// The log file, the report shared from it, and catching crashes into it.
++final class RelayLogFile {
++    static let shared = RelayLogFile()
++
++    let url: URL
++    let reportURL: URL
++    private let markerURL: URL
++    private let queue = DispatchQueue(label: "relay-log")
++    private var started = false
++    private var notes: [String] = []
++    private let startTime = Date()
++    private var pathMonitor: NWPathMonitor?
++    private static let maxBytes = 1024 * 1024
++
++    private init() {
++        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
++        url = docs.appendingPathComponent("relay-log.jsonl")
++        reportURL = docs.appendingPathComponent("relay-report.txt")
++        markerURL = docs.appendingPathComponent("relay-running")
++    }
++
++    func start() {
++        if started { return }
++        started = true
++        trim()
++        if FileManager.default.fileExists(atPath: markerURL.path) {
++            notes.append("The last run ended unexpectedly (a crash, or iOS closed the app).")
++            record("app.unclean_exit", "The last run did not end cleanly", level: "E")
++        }
++        FileManager.default.createFile(atPath: markerURL.path, contents: Data())
++        installCrashHandlers(path: url.path)
++        let center = NotificationCenter.default
++        center.addObserver(forName: UIApplication.willTerminateNotification, object: nil, queue: nil) { [weak self] _ in
++            self?.record("app.terminate", "App closing normally")
++            self?.cleanExit()
++        }
++        // The relay has to stay in front: going to the background is the usual reason it drops.
++        center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: nil) { [weak self] _ in
++            self?.record("app.background", "App went to the background: the relay stops answering while it is there", level: "W")
++        }
++        center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: nil) { [weak self] _ in
++            self?.record("app.foreground", "App came back to the front")
++        }
++        center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: nil) { [weak self] _ in
++            self?.record("app.active", "App active", fields: ["idle_timer_disabled": UIApplication.shared.isIdleTimerDisabled])
++        }
++        let monitor = NWPathMonitor()
++        monitor.pathUpdateHandler = { [weak self] path in
++            var kinds: [String] = []
++            if path.usesInterfaceType(.wifi) { kinds.append("wifi") }
++            if path.usesInterfaceType(.cellular) { kinds.append("cellular") }
++            if path.usesInterfaceType(.wiredEthernet) { kinds.append("wired") }
++            let status: String
++            switch path.status {
++            case .satisfied: status = "online"
++            case .unsatisfied: status = "offline"
++            case .requiresConnection: status = "requires_connection"
++            @unknown default: status = "unknown"
++            }
++            self?.record("net.path", "Network \(status) \(kinds.joined(separator: "+"))", level: path.status == .satisfied ? "I" : "W",
++                         fields: ["status": status, "interfaces": kinds.joined(separator: "+"), "expensive": path.isExpensive, "constrained": path.isConstrained])
++        }
++        monitor.start(queue: queue)
++        pathMonitor = monitor
++    }
++
++    func previousRunNotes() -> [String] { notes }
++
++    func cleanExit() {
++        try? FileManager.default.removeItem(at: markerURL)
++    }
++
++    /// Milliseconds since the app started: the gaps between events show what took long.
++    private func elapsedMs() -> Int { Int(Date().timeIntervalSince(startTime) * 1000) }
++
++    func record(_ event: String, _ message: String, level: String = "I", fields: [String: Any] = [:]) {
++        var object: [String: Any] = fields.mapValues { value -> Any in
++            if value is String || value is Int || value is Double || value is Bool { return value }
++            return String(describing: value)
++        }
++        object["t"] = ISO8601DateFormatter().string(from: Date())
++        object["ms"] = elapsedMs()
++        object["lvl"] = level
++        object["ev"] = event
++        object["msg"] = message
++        guard let json = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else { return }
++        var line = json
++        line.append(0x0A)
++        queue.async { [url] in
++            if let handle = try? FileHandle(forWritingTo: url) {
++                handle.seekToEndOfFile()
++                handle.write(line)
++                try? handle.close()
++            } else {
++                try? line.write(to: url)
++            }
++        }
++    }
++
++    private func trim() {
++        guard let data = try? Data(contentsOf: url), data.count > RelayLogFile.maxBytes else { return }
++        var tail = Data(data.suffix(RelayLogFile.maxBytes / 2))
++        if let newline = tail.firstIndex(of: 0x0A) { tail = Data(tail[(newline + 1)...]) }
++        try? tail.write(to: url)
++    }
++
++    func clear() {
++        queue.async { [url] in try? Data().write(to: url) }
++    }
++
++    /// The file to share: a summary for a quick diagnosis, then every event, oldest first.
++    func makeReport() -> URL {
++        queue.sync {}
++        let raw = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
++        let lines = raw.split(separator: "\n").map(String.init)
++        var counts: [String: Int] = [:]
++        var failures: [String: Int] = [:]
++        var wsErrors: [String: Int] = [:]
++        var lastValidation = "never"
++        for line in lines {
++            guard let data = line.data(using: .utf8),
++                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
++                  let event = object["ev"] as? String else {
++                if line.contains("CRASH") { counts["crash.signal", default: 0] += 1 }
++                continue
++            }
++            counts[event, default: 0] += 1
++            if event == "val.failed" { failures[(object["reason"] as? String) ?? "?", default: 0] += 1 }
++            if event == "ws.error" { wsErrors[(object["error"] as? String) ?? "?", default: 0] += 1 }
++            if event == "val.sent" || event == "val.failed" { lastValidation = "\(event) at \(object["t"] ?? "?")" }
++        }
++        func listed(_ map: [String: Int]) -> String {
++            map.isEmpty ? "none" : map.sorted { $0.value > $1.value }.map { "\($0.value)x \($0.key)" }.joined(separator: "; ")
++        }
++        var report = """
++        # ValidationRelay report (LightDecoder patch)
++        # Generated: \(ISO8601DateFormatter().string(from: Date()))
++        # Device: \(RelayLogFile.deviceSummary())
++        # Relay server: \(UserDefaults.standard.string(forKey: "savedRegistrationURL").flatMap { URL(string: $0)?.host } ?? "?")
++        # Events in log: \(lines.count)
++        #
++        # Summary
++        #   websocket connected: \(counts["ws.connected"] ?? 0), errors: \(counts["ws.error"] ?? 0), disconnects: \(counts["ws.disconnected"] ?? 0), reconnects: \(counts["ws.reconnect"] ?? 0)
++        #   websocket errors by kind: \(listed(wsErrors))
++        #   validation requested: \(counts["val.requested"] ?? 0), sent: \(counts["val.sent"] ?? 0), failed: \(counts["val.failed"] ?? 0)
++        #   validation failures by reason: \(listed(failures))
++        #   last validation: \(lastValidation)
++        #   version info asked: \(counts["relay.version_info"] ?? 0)
++        #   app to background: \(counts["app.background"] ?? 0), unclean exits: \(counts["app.unclean_exit"] ?? 0), crashes: \((counts["crash.signal"] ?? 0) + (counts["crash.exception"] ?? 0))
++        #   network changes: \(counts["net.path"] ?? 0)
++        #
++        # Format: one JSON object per line (t = time, ms = ms since that run's start, lvl = I/W/E, ev = event).
++        # Lines starting CRASH were written from a crash handler.
++
++        """
++        report += raw
++        try? report.write(to: reportURL, atomically: true, encoding: .utf8)
++        return reportURL
++    }
++
++    static func deviceFields() -> [String: Any] {
++        var info = utsname()
++        uname(&info)
++        let machine = withUnsafePointer(to: &info.machine) {
++            $0.withMemoryRebound(to: CChar.self, capacity: 256) { String(cString: $0) }
++        }
++        return [
++            "model": machine,
++            "ios": UIDevice.current.systemVersion,
++            // Not the bridging header's buildNumber(): a C function defined in a header gets a copy
++            // in every Swift file that calls it, and two copies do not link.
++            "build": osBuild(),
++            "app_version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?",
++            "low_power": ProcessInfo.processInfo.isLowPowerModeEnabled,
++            "battery_state": UIDevice.current.batteryState.rawValue,
++        ]
++    }
++
++    private static func osBuild() -> String {
++        var size = 0
++        sysctlbyname("kern.osversion", nil, &size, nil, 0)
++        guard size > 0 else { return "?" }
++        var buffer = [CChar](repeating: 0, count: size)
++        sysctlbyname("kern.osversion", &buffer, &size, nil, 0)
++        return String(cString: buffer)
++    }
++
++    static func deviceSummary() -> String {
++        let f = deviceFields()
++        return "\(f["model"] ?? "?"), iOS \(f["ios"] ?? "?") (\(f["build"] ?? "?")), Relay \(f["app_version"] ?? "?") (LightDecoder patch)"
++    }
++}
++
++// --- crash catching -------------------------------------------------------------------------
++// A crash is written to the log file from the signal handler with write(2) only, the one thing
++// safe to do there. These lines are not JSON; the report counts them.
++
++private var crashFD: Int32 = -1
++
++private func writeCrash(_ text: StaticString) {
++    guard crashFD >= 0 else { return }
++    _ = text.withUTF8Buffer { write(crashFD, $0.baseAddress, $0.count) }
++}
++
++private func installCrashHandlers(path: String) {
++    crashFD = open(path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
++    NSSetUncaughtExceptionHandler { exception in
++        RelayLogFile.shared.record("crash.exception", "Uncaught exception \(exception.name.rawValue): \(exception.reason ?? "")", level: "E",
++                                   fields: ["stack": exception.callStackSymbols.prefix(15).joined(separator: " | ")])
++        Thread.sleep(forTimeInterval: 0.3)
++    }
++    let handler: @convention(c) (Int32) -> Void = { sig in
++        switch sig {
++        case SIGTRAP: writeCrash("\nCRASH SIGTRAP: a Swift error (a failed try!, a nil unwrap or an assert)\n")
++        case SIGABRT: writeCrash("\nCRASH SIGABRT: the app aborted\n")
++        case SIGSEGV: writeCrash("\nCRASH SIGSEGV: bad memory access\n")
++        case SIGBUS: writeCrash("\nCRASH SIGBUS: bad memory access\n")
++        case SIGILL: writeCrash("\nCRASH SIGILL: illegal instruction\n")
++        default: writeCrash("\nCRASH: signal\n")
++        }
++        signal(sig, SIG_DFL)
++        raise(sig)
+     }
++    for sig in [SIGTRAP, SIGABRT, SIGSEGV, SIGBUS, SIGILL] { signal(sig, handler) }
+ }
+ 
+ struct LogView: View {
+@@ -46,17 +295,16 @@ struct LogView: View {
+                 ToolbarItem(placement: .navigationBarTrailing) {
+                     Button("Clear") {
+                         logItems.items = []
++                        RelayLogFile.shared.clear()
+                     }
+                 }
+                 // Export log button
+                 ToolbarItem(placement: .navigationBarTrailing) {
+                     // Pop up a share sheet, use share sheet icon for button
+                     Button(action: {
+-                        // Create a string of the log items
+-                        let logString = logItems.items.map { item in
+-                            "\(item.date): \(item.message)"
+-                        }.joined(separator: "\n")
+-                        let av = UIActivityViewController(activityItems: [logString], applicationActivities: nil)
++                        // The report: a summary, then every event of this run and earlier ones.
++                        let items: [Any] = [RelayLogFile.shared.makeReport()]
++                        let av = UIActivityViewController(activityItems: items, applicationActivities: nil)
+                         UIApplication.shared.windows.first?.rootViewController?.present(av, animated: true, completion: nil)
+                     }) {
+                         Image(systemName: "square.and.arrow.up")
+diff --git a/ValidationRelay/Relay.swift b/ValidationRelay/Relay.swift
+index fd5922c..750445a 100644
+--- a/ValidationRelay/Relay.swift
++++ b/ValidationRelay/Relay.swift
+@@ -52,7 +52,7 @@ class RelayConnectionManager: ObservableObject {
+     let maxBackoff: Int = 64
+ 
+     func connect(_ url: URL) {
+-        logItems.log("Connecting to \(url)")
++        logItems.log("Connecting to \(url)", event: "ws.connecting", fields: ["host": url.host ?? "?"])
+         connectionStatusMessage = "Connecting..."
+         currentURL = url
+         
+@@ -77,7 +77,7 @@ class RelayConnectionManager: ObservableObject {
+     }
+ 
+     func triggerReconnect() {
+-        logItems.log("Triggering reconnect")
++        logItems.log("Triggering reconnect in \(backoff) s", event: "ws.reconnect", fields: ["backoff_s": backoff])
+         connectionStatusMessage = "Reconnecting..."
+         // Delete the delegate so that more errors don't come in
+         connectionDelegate?.disconnect()
+@@ -116,13 +116,13 @@ class RelayConnectionDelegate: WebSocketConnectionDelegate, ObservableObject {
+     }
+     
+     func webSocketDidConnect(connection: WebSocketConnection) {
+-        manager.logItems.log("Websocket did connect")
++        manager.logItems.log("Websocket did connect", event: "ws.connected")
+         manager.connectionStatusMessage = "Connected"
+         var registerCommand = ["command": "register", "data": ["": ""]] as [String : Any]
+         if manager.currentURL?.absoluteString == manager.savedRegistrationURL {
+             print("Using saved registration code")
+-            manager.logItems.log("Using saved registration code \(manager.savedRegistrationCode)")
+-            manager.logItems.log("Using saved registration secret \(manager.savedRegistrationSecret)")
++            manager.logItems.log("Using saved registration code \(manager.savedRegistrationCode)", event: "relay.registered", fields: ["saved": true])
++            manager.logItems.log("Using saved registration secret (hidden)")
+             registerCommand["data"] = ["code": manager.savedRegistrationCode, "secret": manager.savedRegistrationSecret]
+         }
+         let data = try! JSONSerialization.data(withJSONObject: registerCommand)
+@@ -131,7 +131,8 @@ class RelayConnectionDelegate: WebSocketConnectionDelegate, ObservableObject {
+     }
+     
+     func webSocketDidDisconnect(connection: WebSocketConnection, closeCode: NWProtocolWebSocket.CloseCode, reason: Data?) {
+-        manager.logItems.log("Websocket did disconnect", isError: true)
++        manager.logItems.log("Websocket did disconnect (close code \(closeCode), reason \(reason.flatMap { String(data: $0, encoding: .utf8) } ?? "none"))", isError: true,
++                             event: "ws.disconnected", fields: ["close_code": "\(closeCode)"])
+         print("Disconnected")
+     }
+     
+@@ -148,7 +149,14 @@ class RelayConnectionDelegate: WebSocketConnectionDelegate, ObservableObject {
+     
+     func webSocketDidReceiveError(connection: WebSocketConnection, error: NWError) {
+         print(error)
+-        manager.logItems.log("Websocket error: \(error)", isError: true)
++        let kind: String
++        switch error {
++        case .posix(let code): kind = "posix \(code.rawValue) \(code)"
++        case .dns(let code): kind = "dns \(code)"
++        case .tls(let status): kind = "tls \(status)"
++        default: kind = "\(error)"
++        }
++        manager.logItems.log("Websocket error: \(error)", isError: true, event: "ws.error", fields: ["error": kind])
+         self.manager.triggerReconnect()
+     }
+     
+@@ -160,7 +168,10 @@ class RelayConnectionDelegate: WebSocketConnectionDelegate, ObservableObject {
+     func webSocketDidReceiveMessage(connection: WebSocketConnection, string: String) {
+         print("Got string msg")
+         // Parse as JSON
+-        let json = try! JSONSerialization.jsonObject(with: string.data(using: .utf8)!, options: [])
++        guard let raw = string.data(using: .utf8), let json = try? JSONSerialization.jsonObject(with: raw, options: []) else {
++            manager.logItems.log("Unreadable message from the relay server", isError: true, event: "note", fields: ["bytes": string.count])
++            return
++        }
+         print(json)
+         
+         // Save registration code
+@@ -169,8 +180,8 @@ class RelayConnectionDelegate: WebSocketConnectionDelegate, ObservableObject {
+                 if let code = data["code"] as? String {
+                     manager.registrationCode = code
+                     if manager.savedRegistrationCode != code {
+-                        manager.logItems.log("New registration code \(code)")
+-                        manager.logItems.log("secret \(data["secret"] as? String ?? "")")
++                        manager.logItems.log("New registration code \(code)", event: "relay.registered", fields: ["saved": false])
++                        manager.logItems.log("secret (hidden)")
+                     }
+                     manager.savedRegistrationCode = code
+                     manager.savedRegistrationSecret = data["secret"] as? String ?? ""
+@@ -181,18 +192,39 @@ class RelayConnectionDelegate: WebSocketConnectionDelegate, ObservableObject {
+                 if command == "get-version-info" {
+                     let versionInfo = ["command": "response", "data": ["versions": getIdentifiers()], "id": jsonDict["id"]!] as [String : Any]
+                     print("Sending version info: \(versionInfo)")
+-                    manager.logItems.log("Sending version info: \(versionInfo)")
++                    manager.logItems.log("Sending version info (asked for by OpenBubbles)", event: "relay.version_info")
+                     let data = try! JSONSerialization.data(withJSONObject: versionInfo)
+                     connection.send(string: String(data: data, encoding: .utf8)!)
+                 }
+                 if command == "get-validation-data" {
+-                    print("Sending val data")
+-                    let v = generateValidationData()
+-                    print("Validation data: \(v.base64EncodedString())")
+-                    manager.logItems.log("Generated validation data: \(v.base64EncodedString())")
+-                    let validationData = ["command": "response", "data": ["data": v.base64EncodedString()], "id": jsonDict["id"]!] as [String : Any]
+-                    let data = try! JSONSerialization.data(withJSONObject: validationData)
+-                    connection.send(string: String(data: data, encoding: .utf8)!)
++                    // Patched for LightDecoder: made off the main thread, so the connection keeps
++                    // answering pings meanwhile, and a failure is logged instead of crashing the app.
++                    let id = jsonDict["id"]!
++                    manager.logItems.log("Validation data asked for", event: "val.requested")
++                    let log = manager.logItems
++                    let began = Date()
++                    DispatchQueue.global(qos: .userInitiated).async {
++                        do {
++                            let v = try generateValidationData { step, stepMs in
++                                DispatchQueue.main.async { log.log(step, event: "val.step", fields: ["step_ms": stepMs]) }
++                            }
++                            let totalMs = Int(Date().timeIntervalSince(began) * 1000)
++                            DispatchQueue.main.async {
++                                log.log("Sending validation data (\(v.count) bytes, \(totalMs) ms)", event: "val.sent", fields: ["bytes": v.count, "total_ms": totalMs])
++                                let response = ["command": "response", "data": ["data": v.base64EncodedString()], "id": id] as [String : Any]
++                                if let data = try? JSONSerialization.data(withJSONObject: response), let text = String(data: data, encoding: .utf8) {
++                                    connection.send(string: text)
++                                }
++                            }
++                        } catch {
++                            let totalMs = Int(Date().timeIntervalSince(began) * 1000)
++                            let reason = (error as? ValidationError)?.reason ?? "\(type(of: error))"
++                            DispatchQueue.main.async {
++                                log.log("Validation data failed: \(error)", isError: true, event: "val.failed",
++                                        fields: ["reason": reason, "detail": "\(error)", "total_ms": totalMs])
++                            }
++                        }
++                    }
+                 }
+             }
+         }
+diff --git a/ValidationRelay/ValidationData.swift b/ValidationRelay/ValidationData.swift
+index 283a4cb..2b35f0a 100644
+--- a/ValidationRelay/ValidationData.swift
++++ b/ValidationRelay/ValidationData.swift
+@@ -3,79 +3,118 @@
+ //  ValidationRelay
+ //
+ //  Created by James Gill on 3/24/24.
++//  Patched for LightDecoder: no crashes on a network or NAC failure, a time
++//  limit on each request, and every step reported so a failure can be seen.
+ //
+ 
+ import Foundation
+ 
+-//struct ValidationSession {
+-//    init() {
+-//        // Setup session, make request
+-//    }
+-//    
+-//    var expiry: Date {
+-//        get {
+-//            return Date()
+-//        }
+-//    }
+-//    
+-//    func sign(_ data: Data = Data()) -> Data {
+-//        return Data()
+-//    }
+-//}
++/// A failure, with a short [reason] code for counting (cert_fetch, nac_init, init_validation,
++/// nac_key, nac_sign, timeout, http, network) and a [description] for reading.
++struct ValidationError: Error, CustomStringConvertible {
++    let reason: String
++    let description: String
+ 
+-/// Makes an HTTP request to http://static.ess.apple.com/identity/validation/cert-1.0.plist
+-/// parses the plist and extracts the raw certificate data
+-func getCertificate() -> Data {
+-    let url = URL(string: "http://static.ess.apple.com/identity/validation/cert-1.0.plist")!
+-    let data = try! Data(contentsOf: url)
+-    let plist = try! PropertyListSerialization.propertyList(from: data, options: [], format: nil) as! [String: Any]
+-    let certData = plist["cert"] as! Data
+-    return certData
++    init(_ reason: String, _ description: String) {
++        self.reason = reason
++        self.description = description
++    }
+ }
+ 
+-/// Makes an HTTPS POST to https://identity.ess.apple.com/WebObjects/TDIdentityService.woa/wa/initializeValidation
+-/// with a plist containing the session-info-request and returns the session-info
+-func initializeValidation(_ request: Data) -> Data {
+-    // Encode body as session-info-request key in plist
+-    let requestB = try! PropertyListSerialization.data(fromPropertyList: ["session-info-request": request], format: .xml, options: 0)
+-    
+-    let url = URL(string: "https://identity.ess.apple.com/WebObjects/TDIdentityService.woa/wa/initializeValidation")!
+-    var req = URLRequest(url: url)
++private let validationSession: URLSession = {
++    let config = URLSessionConfiguration.ephemeral
++    config.timeoutIntervalForRequest = 20
++    config.timeoutIntervalForResource = 30
++    return URLSession(configuration: config)
++}()
++
++/// One HTTP request, waited for on the calling (background) thread.
++private func fetch(_ request: URLRequest) throws -> Data {
++    let done = DispatchSemaphore(value: 0)
++    var result: Result<Data, Error> = .failure(ValidationError("network", "no answer"))
++    validationSession.dataTask(with: request) { data, response, error in
++        if let error = error {
++            let ns = error as NSError
++            result = .failure(ValidationError(ns.code == NSURLErrorTimedOut ? "timeout" : "network",
++                                              "\(request.url?.host ?? "?"): \(ns.domain) \(ns.code) \(ns.localizedDescription)"))
++        } else if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
++            result = .failure(ValidationError("http", "HTTP \(http.statusCode) from \(request.url?.host ?? "?")"))
++        } else {
++            result = .success(data ?? Data())
++        }
++        done.signal()
++    }.resume()
++    if done.wait(timeout: .now() + 35) == .timedOut {
++        throw ValidationError("timeout", "timed out reaching \(request.url?.host ?? "?")")
++    }
++    return try result.get()
++}
++
++private func plistDict(_ data: Data, _ what: String) throws -> [String: Any] {
++    guard let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] else {
++        throw ValidationError("bad_answer", "\(what): not a plist (\(data.count) bytes)")
++    }
++    return plist
++}
++
++/// Apple's validation certificate, from static.ess.apple.com (plain HTTP first, as iOS
++/// itself fetches it; HTTPS if that is refused).
++func getCertificate() throws -> Data {
++    var lastError: Error = ValidationError("cert_fetch", "no certificate")
++    for address in ["http://static.ess.apple.com/identity/validation/cert-1.0.plist",
++                    "https://static.ess.apple.com/identity/validation/cert-1.0.plist"] {
++        do {
++            let plist = try plistDict(try fetch(URLRequest(url: URL(string: address)!)), "certificate")
++            guard let cert = plist["cert"] as? Data else { throw ValidationError("cert_fetch", "certificate plist has no cert") }
++            return cert
++        } catch {
++            lastError = error
++        }
++    }
++    throw lastError
++}
++
++/// POSTs the session-info-request to identity.ess.apple.com and returns the session-info.
++func initializeValidation(_ request: Data) throws -> Data {
++    let body = try PropertyListSerialization.data(fromPropertyList: ["session-info-request": request], format: .xml, options: 0)
++    var req = URLRequest(url: URL(string: "https://identity.ess.apple.com/WebObjects/TDIdentityService.woa/wa/initializeValidation")!)
+     req.httpMethod = "POST"
+-    req.httpBody = requestB
++    req.httpBody = body
+     req.setValue("application/x-apple-plist", forHTTPHeaderField: "Content-Type")
+-    NSLog("Making POST request to \(url) with body \(requestB)")
+-    let data = try! NSURLConnection.sendSynchronousRequest(req, returning: nil)
+-    // Parse the response
+-    NSLog("Got response \(data)")
+-    let plist = try! PropertyListSerialization.propertyList(from: data, options: [], format: nil) as! [String: Any]
+-    NSLog("Got plist \(plist)")
+-    let sessionInfo = plist["session-info"] as! Data
+-    NSLog("Got session info \(sessionInfo)")
++    let plist = try plistDict(try fetch(req), "initializeValidation")
++    guard let sessionInfo = plist["session-info"] as? Data else {
++        throw ValidationError("init_validation", "initializeValidation answered without session-info: \(plist.keys.sorted())")
++    }
+     return sessionInfo
+ }
+ 
+-func generateValidationData() -> Data {
+-    let cert: Data = getCertificate()
+-    var val_ctx: UInt64 = 0
+-    var session_req: NSData? = NSData()
+-    var ret = NACInit(cert, &val_ctx, &session_req)
+-    NSLog("NACInit returned \(ret)")
+-    assert(ret == 0)
+-    let sessionInfo = initializeValidation(session_req! as Data)
+-    NSLog("Got session info \(sessionInfo)")
+-    
+-    ret = NACKeyEstablishment(val_ctx, sessionInfo)
+-    NSLog("NACKeyEstablishment returned \(ret)")
+-    assert(ret == 0)
+-    
++/// Generates validation data. Run it off the main thread; [step] reports each step and
++/// how many milliseconds it took.
++func generateValidationData(step: (String, Int) -> Void) throws -> Data {
++    var mark = Date()
++    func done(_ text: String) {
++        step(text, Int(Date().timeIntervalSince(mark) * 1000))
++        mark = Date()
++    }
++    let cert: Data
++    do { cert = try getCertificate() } catch let e as ValidationError { throw ValidationError("cert_fetch", e.description) }
++    done("Got Apple's validation certificate (\(cert.count) bytes)")
++    var valCtx: UInt64 = 0
++    var sessionReq: NSData? = NSData()
++    var ret = NACInit(cert, &valCtx, &sessionReq)
++    done("NACInit returned \(ret)")
++    guard ret == 0, let request = sessionReq else { throw ValidationError("nac_init", "NACInit failed (\(ret))") }
++    let sessionInfo: Data
++    do { sessionInfo = try initializeValidation(request as Data) } catch let e as ValidationError {
++        throw ValidationError(e.reason == "timeout" ? "timeout" : "init_validation", e.description)
++    }
++    done("Apple started validation (\(sessionInfo.count) bytes)")
++    ret = NACKeyEstablishment(valCtx, sessionInfo)
++    done("NACKeyEstablishment returned \(ret)")
++    guard ret == 0 else { throw ValidationError("nac_key", "NACKeyEstablishment failed (\(ret))") }
+     var signature: NSData? = NSData()
+-    ret = NACSign(val_ctx, Data(), &signature)
+-    NSLog("NACSign returned \(ret)")
+-    assert(ret == 0)
+-    
+-    NSLog("VALIDATION DATA \(signature!.base64EncodedString())")
+-    
+-    return signature! as Data
++    ret = NACSign(valCtx, Data(), &signature)
++    done("NACSign returned \(ret)")
++    guard ret == 0, let sig = signature, sig.length > 0 else { throw ValidationError("nac_sign", "NACSign failed (\(ret))") }
++    return sig as Data
+ }
+-

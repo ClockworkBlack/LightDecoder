@@ -74,6 +74,41 @@
             android:textAppearance="?attr/textAppearanceBodyMedium" />
     </LinearLayout>
 
+    <!-- A voice message (or other audio): played here, in the bubble. -->
+    <LinearLayout
+        android:id="@+id/mediaAudio"
+        android:layout_width="240dp"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:minHeight="48dp"
+        android:orientation="horizontal"
+        android:visibility="gone">
+
+        <ImageButton
+            android:id="@+id/audioPlay"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/chat_voice_play"
+            android:src="@drawable/ic_play" />
+
+        <SeekBar
+            android:id="@+id/audioProgress"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:contentDescription="@string/chat_voice_position"
+            android:max="1000" />
+
+        <TextView
+            android:id="@+id/audioTime"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="4dp"
+            android:minWidth="36dp"
+            android:textAppearance="?attr/textAppearanceLabelMedium" />
+    </LinearLayout>
+
     <com.google.android.material.button.MaterialButton
         android:id="@+id/mediaFullSize"
         style="@style/Widget.Material3.Button.TextButton"

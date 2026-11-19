@@ -44,6 +44,22 @@
                 android:maxLines="1"
                 android:textAppearance="?attr/textAppearanceTitleMedium" />
 
+            <!-- An iMessage chat in the Messages list (Blue Bubbles). Said by the row's description. -->
+            <TextView
+                android:id="@+id/imessageBadge"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
+                android:background="@drawable/bg_imessage_badge"
+                android:importantForAccessibility="no"
+                android:paddingHorizontal="6dp"
+                android:paddingVertical="1dp"
+                android:text="@string/imessage_badge"
+                android:textColor="@color/on_imessage_blue"
+                android:textSize="11sp"
+                android:textStyle="bold"
+                android:visibility="gone" />
+
             <ImageView
                 android:id="@+id/muted"
                 android:layout_width="16dp"

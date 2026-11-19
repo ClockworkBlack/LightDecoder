@@ -65,6 +65,16 @@ object ProblemReport {
         val waLog = WaLog.read(app)
         if (waLog.isEmpty()) appendLine("(never used)") else waLog.take(LOG_LINES).forEach { appendLine(it) }
         appendLine()
+        appendLine("== iMessage (Blue Bubbles) ==")
+        val im = com.lightdecoder.imessage.IMessageManager.get(app)
+        val imState = im.state.value
+        appendLine("Blue Bubbles: ${if (com.lightdecoder.imessage.IMessagePrefs.enabled(app)) "on" else "off"}; state: ${imState.phase} ${imState.code}".trimEnd())
+        appendLine(im.setupSummary())
+        val chats = runCatching { im.repo.conversations(null).size }.getOrDefault(-1)
+        appendLine("iMessage chats stored: $chats; with a Reply button to send through now: ${com.lightdecoder.imessage.IMessageReplies.replyButtonsHeld()}")
+        val imLog = com.lightdecoder.imessage.IMessageLog.read(app)
+        if (imLog.isEmpty()) appendLine("(nothing logged yet)") else imLog.take(LOG_LINES).forEach { appendLine(it) }
+        appendLine()
         appendLine("Gmail tab: ${if (Features.GMAIL) "on" else "paused"}")
     }
 
@@ -112,5 +122,7 @@ object ProblemReport {
     }
 
     private const val LOG_LINES = 200
+
+
     private const val RECENT = 20
 }

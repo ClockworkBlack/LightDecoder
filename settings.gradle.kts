@@ -21,3 +21,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "LightDecoder"
 include(":app")
+// Test-only stand-in for the OpenBubbles app (on-device Blue Bubbles test); never shipped.
+include(":fakebubbles")

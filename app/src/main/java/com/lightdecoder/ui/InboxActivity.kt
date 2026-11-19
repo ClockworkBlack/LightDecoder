@@ -205,6 +205,7 @@ class InboxActivity : AppCompatActivity() {
             ChatService.MESSAGES -> R.string.link_card_open
             ChatService.WHATSAPP -> R.string.chat_wa_card_open
             ChatService.GMAIL -> R.string.mail_card_open
+            ChatService.IMESSAGE -> R.string.link_card_open
         }
 
         private fun act() {

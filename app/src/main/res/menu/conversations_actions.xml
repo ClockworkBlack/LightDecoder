@@ -1,6 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <menu xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto">
+    <!-- Messages tab with Blue Bubbles on: the iMessage light (ui.chat.IMessageLight). -->
+    <item
+        android:id="@+id/action_imessage_light"
+        android:title="@string/imessage_light"
+        android:visible="false"
+        app:actionLayout="@layout/action_imessage_light"
+        app:showAsAction="always" />
     <item
         android:id="@+id/action_search"
         android:icon="@drawable/ic_search"
@@ -11,15 +18,24 @@
         android:id="@+id/action_refresh"
         android:title="@string/chat_refresh"
         app:showAsAction="never" />
+    <!-- Messages tab only: iMessage chats from OpenBubbles shown and answered here (ui.chat.BlueBubblesSetup). -->
+    <item
+        android:id="@+id/action_blue_bubbles"
+        android:checkable="true"
+        android:title="@string/blue_bubbles"
+        android:visible="false"
+        app:showAsAction="never" />
+    <!-- Messages tab only: iMessage through the library built into LightDecoder (ui.imessage.DirectSetupActivity). -->
+    <item
+        android:id="@+id/action_imessage_direct"
+        android:title="@string/imessage_menu"
+        android:visible="false"
+        app:showAsAction="never" />
     <item
         android:id="@+id/action_link_status"
         android:title="@string/chat_link_status"
         app:showAsAction="never" />
     <!-- Only in the local Deleted folder, while it holds something. -->
-    <item
-        android:id="@+id/action_imessage"
-        android:title="@string/imessage_menu"
-        app:showAsAction="never" />
     <item
         android:id="@+id/action_empty_deleted"
         android:title="@string/chat_empty_deleted_folder"

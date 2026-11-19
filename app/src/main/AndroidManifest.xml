@@ -40,11 +40,33 @@
         tools:ignore="BatteryLife" />
 
     <!--
+        Voice messages in Google Messages conversations: asked for the first
+        time the user taps the record button, and used only while the
+        recording bar is on screen. Phones without a microphone still install.
+    -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!--
+        Blue Bubbles pictures: OpenBubbles' notification only says "Image"; with its
+        Auto-save Attachments on, the picture is in the gallery, saved by OpenBubbles.
+        LightDecoder reads only files OpenBubbles saved (MediaStore OWNER_PACKAGE_NAME),
+        asked for the first time an iMessage picture is tapped.
+    -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-feature
+        android:name="android.hardware.microphone"
+        android:required="false" />
+
+    <!--
         Voice: the system's speech recogniser (the composer's dictation
         button is shown only when there is one) and text-to-speech engines
         (for reading messages aloud). Android 11+ hides both from apps that
         do not declare them here. Recognition runs in the recogniser's own
-        app, so no microphone permission is needed here.
+        app, so dictation needs no microphone permission of its own.
     -->
     <queries>
         <intent>
@@ -59,6 +81,13 @@
         <package android:name="com.facebook.orca" />
         <!-- So a Facebook sign-in on the Messenger tab's page can be approved in the Facebook app. -->
         <package android:name="com.facebook.katana" />
+        <!--
+            Blue Bubbles: so the Messages tab can tell whether OpenBubbles (the iMessage app it
+            works through) is installed, and open its chats and new-chat screen.
+        -->
+        <package android:name="com.openbubbles.messaging" />
+        <package android:name="com.bluebubbles.messaging.alpha" />
+        <package android:name="com.bluebubbles.messaging.beta" />
     </queries>
 
     <!--
@@ -86,6 +115,41 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- The share target the conversations in Android's share sheet belong to (chat.ShareShortcuts). -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity>
+
+        <!--
+            "LightDecoder" in Android's share sheet: text, pictures, videos and
+            sound from other apps, sent to a conversation picked here. Exported
+            so other apps can share to it; it takes only the standard share
+            extras and other apps' content: uris, and sends nothing until the
+            user has picked a conversation. Out of recents: it belongs to the
+            share, not to the app's own task.
+        -->
+        <activity
+            android:name=".ui.share.ShareActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:taskAffinity=""
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="video/*" />
+                <data android:mimeType="audio/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="video/*" />
             </intent-filter>
         </activity>
 
@@ -201,25 +265,25 @@
         -->
         <!--
             iMessage (docs/imessage-openbubbles.md). OpenBubbles' library runs
-            only in the ":imessage" process (imessage/ImessageProcess): its
+            only in the ":imessage" process (imessage/direct/DirectProcess): its
             service keeps iMessage connected in the background, and the setup
             screen (from the Messages tab's menu) is there too. The Messages
             archive stays in the main process, which takes in what Apple sent
-            through ImessageSinkService. Nothing here is exported: only the
+            through DirectSinkService. Nothing here is exported: only the
             app's own two processes can bind to either service.
         -->
         <activity
-            android:name=".ui.imessage.ImessageActivity"
+            android:name=".ui.imessage.DirectSetupActivity"
             android:exported="false"
             android:process=":imessage"
             android:windowSoftInputMode="adjustResize" />
         <service
-            android:name=".imessage.ImessageService"
+            android:name=".imessage.direct.DirectService"
             android:exported="false"
             android:foregroundServiceType="remoteMessaging"
             android:process=":imessage" />
         <service
-            android:name=".imessage.ImessageSinkService"
+            android:name=".imessage.direct.DirectSinkService"
             android:exported="false" />
         <activity
             android:name=".ui.messenger.MessengerActivity"
@@ -288,6 +352,12 @@
         <activity
             android:name=".ui.chat.PictureGalleryActivity"
             android:exported="false" />
+        <!-- A conversation's video, played here (not handed to another app). -->
+        <activity
+            android:name=".ui.chat.VideoPlayerActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize"
+            android:exported="false"
+            android:theme="@style/Theme.LightDecoder.Video" />
         <activity
             android:name=".ui.sticker.StickerMakerActivity"
             android:exported="false" />

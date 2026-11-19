@@ -117,6 +117,26 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private var messages: List<MessageRow> = emptyList()
 
     /**
+     * Blue Bubbles: the iMessage chat with this conversation's person, whose
+     * messages are shown here among the texts (as on an iPhone), and the
+     * ids of the ones on screen. Null and empty otherwise.
+     */
+    private var companionId: String? = null
+    private var iMessageIds: Set<String> = emptySet()
+    private val iMessageLink: com.lightdecoder.imessage.IMessageManager
+        get() = ScreenBackends.get(this, ChatService.IMESSAGE) as com.lightdecoder.imessage.IMessageManager
+
+    /** The service [row] is from: the companion iMessage chat's, or this conversation's. */
+    private fun backendFor(row: MessageRow): ChatBackend =
+        if (companionId != null && row.conversationId == companionId) iMessageLink else manager
+
+    /** Whether a text typed now goes as an iMessage (the companion chat can take it). */
+    private fun sendsAsIMessage(text: String? = null): Boolean {
+        val companion = companionId ?: return false
+        return iMessageLink.canReply(companion, text)
+    }
+
+    /**
      * The conversation whose own rows [messages] holds: null from opening or a
      * thread switch until that conversation's first local read is in. Paging
      * from the phone waits for it: before then [messages] is the empty list a
@@ -135,7 +155,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private var highlightId: String? = null
 
     private var replyTarget: MessageRow? = null
-    private var attachment: Uri? = null
+    /** What the next message carries: pictures (several at once), a video or a voice message. */
+    private var attachments: List<Uri> = emptyList()
 
     /**
      * The long-press sheet and the open question (delete, or send again), if
@@ -154,8 +175,30 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private var remoteFailedAtMs = 0L
     private var scrollToBottomNext = false
 
-    private val pickMedia = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        if (uri != null) setAttachment(uri)
+    // Several pictures at once: they go out together, one after another, and show as one stack.
+    private val pickMedia = registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(MAX_ATTACHMENTS)) { uris ->
+        if (uris.isNotEmpty()) setAttachments((attachments + uris).distinct().take(MAX_ATTACHMENTS))
+    }
+
+    // --- voice messages ---
+
+    /** Plays voice messages inside their bubbles, one at a time. */
+    private val voicePlayer = VoicePlayer()
+
+    /** The recording under way, its file and when it started; null when not recording. */
+    private var recorder: VoiceRecorder? = null
+    private var recordingFile: File? = null
+    private var recordingStartedMs = 0L
+    private val recordingTick = object : Runnable {
+        override fun run() {
+            if (recorder == null) return
+            showRecordingTime()
+            binding.recordingTime.postDelayed(this, 500)
+        }
+    }
+
+    private val askMicrophone = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) startRecording() else toast(getString(R.string.chat_voice_permission_needed))
     }
 
     /** The conversation dictation was started in; a result for another one is dropped. */
@@ -193,7 +236,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         // The same id can be a conversation of the other service: only this one's archive counts.
         val mine = change.service == manager.service &&
             (change.conversationId == null || change.conversationId == conversationId)
-        if (mine && change.kind != ArchiveChange.Kind.HEALTH) scheduleReload()
+        // Blue Bubbles: the person's iMessages are shown here too (and one may have just appeared).
+        val companion = change.service == ChatService.IMESSAGE && manager.service == ChatService.MESSAGES &&
+            com.lightdecoder.imessage.IMessagePrefs.enabled(this) &&
+            (companionId == null || change.conversationId == null || change.conversationId == companionId)
+        if ((mine || companion) && change.kind != ArchiveChange.Kind.HEALTH) scheduleReload()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -219,13 +266,15 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             targetMessageId = intent.getStringExtra(RelayIntents.EXTRA_MESSAGE_ID)
         } else {
             windowSize = savedInstanceState.getInt(STATE_WINDOW, PAGE)
-            savedInstanceState.getString(STATE_ATTACHMENT)?.let { setAttachment(Uri.parse(it)) }
+            savedInstanceState.getStringArrayList(STATE_ATTACHMENTS)?.map(Uri::parse)?.takeIf { it.isNotEmpty() }?.let(::setAttachments)
         }
 
         setUpList()
         setUpComposer()
+        lifecycleScope.launch { voicePlayer.state.collect { adapter.updateVoiceViews(binding.messages, it) } }
         if (VoicePrefs.readNewAloud(this) && !reader.isAvailable) noteReaderUnavailable()
         savedInstanceState?.getString(STATE_REPLY_TO)?.let(::restoreReply)
+        if (savedInstanceState == null) takeShared(intent)
         // Opened from a message notification on a cold start, the thread is the
         // whole task: Back and Up lead to the conversation list, not out of the app.
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -267,7 +316,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         banner.bind(manager)
         // Pictures are fetched through the link, and the list draws them through the loader.
         media = MediaLoader(manager, lifecycleScope)
-        adapter = MessagesAdapter(media, this)
+        adapter = MessagesAdapter(media, this).also {
+            it.blueOutgoing = service == ChatService.IMESSAGE
+            it.blueFor = { row -> row.id in iMessageIds }
+            it.voiceDuration = voicePlayer::durationOf
+            it.voiceState = voicePlayer.state.value
+        }
         binding.messages.adapter = adapter
         // Until the new link's state is in: cheap to ask, and nothing is tried while "offline".
         paired = manager.isPaired()
@@ -309,6 +363,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             growWindow = false
             growPending = false
             messages = emptyList()
+            companionId?.let { if (MessageNotifier.visibleConversationId(ChatService.IMESSAGE) == it) MessageNotifier.setVisibleConversationId(ChatService.IMESSAGE, null) }
+            companionId = null
+            iMessageIds = emptySet()
             // Until the new conversation's own rows are read, nothing pages it from the phone.
             localRowsFor = null
             historyComplete = false
@@ -320,6 +377,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             binding.input.setText("")
             clearReply()
             clearAttachment()
+            cancelRecording(quietly = true)
+            voicePlayer.release()
             submitSeq++
             pendingScrollTo = null
             if (otherService) switchService(service) else adapter.submitList(emptyList())
@@ -336,7 +395,25 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             }
         }
         targetMessageId = intent.getStringExtra(RelayIntents.EXTRA_MESSAGE_ID)
+        takeShared(intent)
         reload()
+    }
+
+    /**
+     * What another app shared to this conversation (the share screen's
+     * intent) goes into the composer, for the user to send. Taken once: a
+     * rotation keeps the composer as it then is.
+     */
+    private fun takeShared(intent: Intent) {
+        val text = intent.getStringExtra(RelayIntents.EXTRA_SHARED_TEXT)
+        val stream = intent.getStringExtra(RelayIntents.EXTRA_SHARED_STREAM)
+        intent.removeExtra(RelayIntents.EXTRA_SHARED_TEXT)
+        intent.removeExtra(RelayIntents.EXTRA_SHARED_STREAM)
+        if (!text.isNullOrEmpty()) {
+            binding.input.setText(text)
+            binding.input.setSelection(binding.input.length())
+        }
+        if (!stream.isNullOrEmpty()) setAttachment(Uri.parse(stream))
     }
 
     override fun onStart() {
@@ -357,10 +434,13 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         ChatVisibility.leave(manager)
         ArchiveEvents.unregister(onArchiveChange)
         readerInstance?.stop()
+        voicePlayer.pause()
         super.onStop()
     }
 
     override fun onDestroy() {
+        cancelRecording(quietly = true)
+        voicePlayer.release()
         readerInstance?.shutdown()
         readerInstance = null
         super.onDestroy()
@@ -376,26 +456,47 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         MessageNotifier.setVisibleConversationId(manager.service, conversationId)
         MessageNotifier.cancel(this, conversationId, manager.service)
         com.lightdecoder.relay.ReadNotifier.cancel(this, manager.service, conversationId)
+        markCompanionVisible()
+        // iMessage pictures OpenBubbles has saved meanwhile.
+        if (com.lightdecoder.imessage.IMessagePrefs.enabled(this) &&
+            (manager.service == ChatService.MESSAGES || manager.service == ChatService.IMESSAGE)
+        ) com.lightdecoder.imessage.IMessageMedia.schedule(this)
     }
 
     override fun onPause() {
         if (MessageNotifier.visibleConversationId(manager.service) == conversationId) {
             MessageNotifier.setVisibleConversationId(manager.service, null)
         }
+        companionId?.let { if (MessageNotifier.visibleConversationId(ChatService.IMESSAGE) == it) MessageNotifier.setVisibleConversationId(ChatService.IMESSAGE, null) }
+        // Nothing is recorded while the screen is not in front: a half-made recording is thrown away.
+        if (recorder != null && !isChangingConfigurations) cancelRecording(quietly = false)
         super.onPause()
+    }
+
+    /** The person's iMessages shown here are being read too: they are not notified meanwhile. */
+    private fun markCompanionVisible() {
+        val companion = companionId ?: return
+        if (!lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return
+        MessageNotifier.setVisibleConversationId(ChatService.IMESSAGE, companion)
+        MessageNotifier.cancel(this, companion, ChatService.IMESSAGE)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putInt(STATE_WINDOW, windowSize)
-        attachment?.let { outState.putString(STATE_ATTACHMENT, it.toString()) }
+        if (attachments.isNotEmpty()) outState.putStringArrayList(STATE_ATTACHMENTS, ArrayList(attachments.map(Uri::toString)))
         replyTarget?.takeIf { it.conversationId == conversationId }?.let { outState.putString(STATE_REPLY_TO, it.id) }
     }
 
     // --- list ----------------------------------------------------------------
 
     private fun setUpList() {
-        adapter = MessagesAdapter(media, this)
+        adapter = MessagesAdapter(media, this).also {
+            it.blueOutgoing = manager.service == ChatService.IMESSAGE
+            it.blueFor = { row -> row.id in iMessageIds }
+            it.voiceDuration = voicePlayer::durationOf
+            it.voiceState = voicePlayer.state.value
+        }
         layoutManager = LinearLayoutManager(this).apply { stackFromEnd = true }
         binding.messages.layoutManager = layoutManager
         binding.messages.adapter = adapter
@@ -499,6 +600,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val rows: List<MessageRow>,
         val quotes: Map<String, Quote>,
         val historyComplete: Boolean,
+        /** Blue Bubbles: the companion iMessage chat, its messages in the window, and whether it is unread. */
+        val companion: String? = null,
+        val companionRows: List<MessageRow> = emptyList(),
+        val companionUnread: Boolean = false,
+        /** An iMessage chat opened by itself that belongs inside this Messages conversation. */
+        val moveTo: String? = null,
     )
 
     /**
@@ -536,25 +643,52 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 }
             }
             val conversation = repo.conversation(id)
+            val people = repo.participants(id)
+            // Blue Bubbles: the person's iMessages, from as far back as the texts shown go.
+            val companion = if (link.service == ChatService.MESSAGES) BlueBubblesLinks.iMessageFor(applicationContext, conversation, people) else null
+            val imRepo = companion?.let { iMessageLink.repo }
+            val ownFull = rows.size >= wanted
+            // With the person's other iMessage chats (from before OpenBubbles was set up again), so their history stays.
+            val chats = if (companion == null) emptyList() else listOf(companion) + BlueBubblesLinks.alsoShown(applicationContext, id)
+            val companionRows = if (imRepo == null) emptyList() else chats.flatMap { chat ->
+                runCatching { imRepo.messages(chat, limit = wanted) }.getOrDefault(emptyList())
+            }.distinctBy { it.id }
+                .let { im -> if (ownFull && rows.isNotEmpty()) im.filter { it.timestampMs >= rows.first().timestampMs } else im }
+            val moveTo = if (link.service == ChatService.IMESSAGE) BlueBubblesLinks.messagesFor(applicationContext, id) else null
             Snapshot(
                 conversation = conversation,
-                participants = repo.participants(id),
+                participants = people,
                 rows = rows,
                 quotes = quotesFor(repo, rows),
                 historyComplete = repo.syncState(id)?.historyComplete == true,
+                companion = companion,
+                companionRows = companionRows,
+                companionUnread = companion != null && runCatching { imRepo!!.conversation(companion)?.unread == true }.getOrDefault(false),
+                moveTo = moveTo,
             )
         }
         if (grow) growPending = false
         if (!isCurrent(link, id)) return@withLock
+        // An iMessage chat that is also a Messages conversation is shown inside it.
+        snapshot.moveTo?.let { messagesId ->
+            startActivity(
+                RelayIntents.thread(this@ThreadActivity, messagesId, service = ChatService.MESSAGES)
+                    .setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            )
+            return@withLock
+        }
+        companionId = snapshot.companion
+        iMessageIds = snapshot.companionRows.mapTo(HashSet()) { it.id }
+        markCompanionVisible()
         val localExhausted = snapshot.rows.size < wanted
         windowSize = maxOf(PAGE, snapshot.rows.size)
-        messages = snapshot.rows
+        messages = if (snapshot.companionRows.isEmpty()) snapshot.rows else (snapshot.rows + snapshot.companionRows).sortedBy { it.timestampMs }
         localRowsFor = id
         conversation = snapshot.conversation
         participants = snapshot.participants
         historyComplete = snapshot.historyComplete
         renderConversation()
-        readNewAloud(snapshot.rows)
+        readNewAloud(messages)
 
         val scrollTo = target?.takeIf { t -> snapshot.rows.any { it.id == t } }
         if (target != null) targetMessageId = null
@@ -566,6 +700,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         // supersedes it, and mark-read and auto-paging must still run then.)
         if (!isCurrent(link, id)) return@withLock
         markReadIfNeeded()
+        // The companion iMessage chat is read along with it (OpenBubbles is told, and tells the sender).
+        val companion = snapshot.companion
+        if (companion != null && snapshot.companionUnread && started) {
+            val im = iMessageLink
+            runInBackground { im.markRead(companion) }
+        }
         // The archive has no more: ask the phone (also fills a thread that was never imported).
         if ((grow && localExhausted) || snapshot.rows.size < PAGE) loadOlderFromPhone(auto = !grow)
     }
@@ -897,6 +1037,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
         binding.stickers.setOnClickListener { showStickers() }
         binding.voiceInput.setOnClickListener { startDictation() }
+        binding.voiceMessage.setOnClickListener { onRecordTapped() }
+        binding.recordingCancel.setOnClickListener { cancelRecording(quietly = true) }
+        binding.recordingSend.setOnClickListener { finishRecording() }
         binding.attachmentRemove.setOnClickListener { clearAttachment() }
         binding.replyClose.setOnClickListener { clearReply() }
         binding.input.addTextChangedListener(object : TextWatcher {
@@ -916,7 +1059,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val readOnly = conversation?.readOnly == true || deleted
         binding.readOnlyText.setText(if (deleted) R.string.chat_deleted_banner else R.string.chat_read_only)
         binding.readOnlyText.visibility = if (readOnly) View.VISIBLE else View.GONE
-        binding.composer.visibility = if (readOnly) View.GONE else View.VISIBLE
+        // While recording, the recording bar stands in for the composer.
+        binding.composer.visibility = if (readOnly || recorder != null) View.GONE else View.VISIBLE
         if (readOnly) {
             clearReply()
             clearAttachment()
@@ -925,12 +1069,21 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         binding.attach.isEnabled = paired
         binding.stickers.isEnabled = paired
         binding.voiceInput.isEnabled = paired
-        binding.input.hint = getString(if (paired) ServiceUi.composeHint(manager.service) else R.string.chat_compose_unpaired)
+        binding.voiceMessage.isEnabled = paired
+        updateVoiceMessageButton()
+        if (readOnly || !paired) cancelRecording(quietly = true)
+        binding.input.hint = getString(
+            when {
+                !paired -> R.string.chat_compose_unpaired
+                companionId != null -> R.string.imessage_compose_hint
+                else -> ServiceUi.composeHint(manager.service)
+            }
+        )
         updateSendEnabled()
     }
 
     private fun updateSendEnabled() {
-        val hasContent = !binding.input.text.isNullOrBlank() || attachment != null
+        val hasContent = !binding.input.text.isNullOrBlank() || attachments.isNotEmpty()
         binding.send.isEnabled = paired && hasContent
         // The tint has no disabled state: dim it the way Material dims disabled controls.
         binding.send.alpha = if (binding.send.isEnabled) 1f else DISABLED_ALPHA
@@ -941,7 +1094,154 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     /** The dictation button, only when some app can recognise speech. */
     private fun updateVoiceInput() {
         binding.voiceInput.visibility = if (Dictation.isAvailable(packageManager)) View.VISIBLE else View.GONE
+        updateVoiceMessageButton()
     }
+
+    // --- voice messages -------------------------------------------------------
+
+    /** Voice messages: in Google Messages conversations (and so to iMessage chats shown in them), on a phone with a mic. */
+    private fun updateVoiceMessageButton() {
+        val can = manager.service == ChatService.MESSAGES &&
+            packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_MICROPHONE)
+        binding.voiceMessage.visibility = if (can) View.VISIBLE else View.GONE
+    }
+
+    private fun onRecordTapped() {
+        if (!binding.voiceMessage.isEnabled || recorder != null) return
+        val granted = androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (granted) startRecording() else askMicrophone.launch(android.Manifest.permission.RECORD_AUDIO)
+    }
+
+    /** Where recordings are made; ones more than a day old (sent long ago, or left by a crash) are removed. */
+    private fun voiceDir(): File = File(cacheDir, "voice")
+
+    @androidx.annotation.VisibleForTesting
+    internal fun startRecording() {
+        if (recorder != null || !binding.voiceMessage.isEnabled) return
+        val now = System.currentTimeMillis()
+        voiceDir().listFiles()?.forEach { if (now - it.lastModified() > HAND_OFF_KEEP_MS) it.delete() }
+        val file = File(voiceDir(), "voice-${java.util.UUID.randomUUID()}.${VoiceRecorder.EXTENSION}")
+        val r = VoiceRecorder.factory(this)
+        // An MMS is small; an RCS chat takes much longer messages.
+        val maxMs = if (conversation?.isRcs == true) MAX_VOICE_RCS_MS else MAX_VOICE_MMS_MS
+        r.onMaxDuration = {
+            runOnUiThread {
+                if (recorder === r) {
+                    finishRecording()
+                    toast(getString(R.string.chat_voice_max_reached))
+                }
+            }
+        }
+        voicePlayer.pause()
+        if (!r.start(file, maxMs)) {
+            toast(getString(R.string.chat_voice_mic_busy))
+            return
+        }
+        recorder = r
+        recordingFile = file
+        recordingStartedMs = android.os.SystemClock.elapsedRealtime()
+        binding.composer.visibility = View.GONE
+        binding.recordingBar.visibility = View.VISIBLE
+        showRecordingTime()
+        binding.recordingTime.postDelayed(recordingTick, 500)
+    }
+
+    private fun showRecordingTime() {
+        val elapsed = (android.os.SystemClock.elapsedRealtime() - recordingStartedMs).toInt()
+        binding.recordingTime.text = getString(R.string.chat_voice_recording, VoicePlayer.clock(elapsed))
+    }
+
+    /** Stops recording and sends it (to this conversation), unless it is too short to be anything. */
+    @androidx.annotation.VisibleForTesting
+    internal fun finishRecording() {
+        val r = recorder ?: return
+        val file = recordingFile
+        val elapsed = android.os.SystemClock.elapsedRealtime() - recordingStartedMs
+        endRecordingUi()
+        if (elapsed < MIN_VOICE_MS) {
+            r.cancel()
+            toast(getString(R.string.chat_voice_too_short))
+            return
+        }
+        if (!r.stop() || file == null || !file.isFile) {
+            toast(getString(R.string.chat_voice_too_short))
+            return
+        }
+        sendVoice(file)
+    }
+
+    /** Stops recording and throws it away; [quietly] when the user asked for it (no notice needed). */
+    private fun cancelRecording(quietly: Boolean) {
+        val r = recorder ?: return
+        endRecordingUi()
+        r.cancel()
+        if (!quietly) toast(getString(R.string.chat_voice_discarded))
+    }
+
+    private fun endRecordingUi() {
+        recorder = null
+        recordingFile = null
+        binding.recordingTime.removeCallbacks(recordingTick)
+        binding.recordingBar.visibility = View.GONE
+        renderComposerState()
+    }
+
+    /** Sends a finished recording as a voice message: through OpenBubbles to an iMessage chat, else through Google Messages. */
+    private fun sendVoice(file: File) {
+        val id = conversationId
+        val uri = Uri.fromFile(file)
+        val companion = companionId
+        if (manager.service == ChatService.MESSAGES && companion != null) {
+            handOffToOpenBubbles(iMessageLink, companion, "", listOf(uri), clearComposer = false)
+            return
+        }
+        val replyTo = replyTarget?.takeIf { it.conversationId == id }?.id
+        clearReply()
+        scrollToBottomNext = true
+        val link = manager
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) { relayAttempt { link.sendMedia(id, uri, null, replyTo) } }
+                .onFailure { toast(errorText(link, it)) }
+        }
+    }
+
+    /** A voice message's file: the one already here, or downloaded now. Null (with a notice) if there is none. */
+    private suspend fun audioFileFor(row: MessageRow, part: MediaRow): File? {
+        val link = manager
+        listOf(part.localPath).firstOrNull { it.isNotEmpty() && File(it).isFile }?.let { return File(it) }
+        toast(getString(R.string.chat_media_downloading))
+        return relayAttempt { link.mediaFile(row.id, part.partId, thumbnail = false) }
+            .getOrElse {
+                val code = ChatErrors.codeOf(it)
+                toast(
+                    if (code == RelayException.NOT_CONNECTED) getString(ServiceUi.mediaNeedsConnection(link.service))
+                    else errorText(link, code)
+                )
+                return null
+            } ?: run {
+            toast(getString(R.string.chat_media_unavailable))
+            null
+        }
+    }
+
+    override fun onAudioTap(row: MessageRow, part: MediaRow) {
+        val key = VoicePlayer.keyOf(row.id, part.partId)
+        // Already loaded: play/pause at once, with no download.
+        if (voicePlayer.state.value.key == key) {
+            voicePlayer.toggle(key, File(part.localPath))
+            return
+        }
+        val forConversation = conversationId
+        lifecycleScope.launch {
+            val file = audioFileFor(row, part) ?: return@launch
+            if (conversationId != forConversation) return@launch
+            if (!voicePlayer.toggle(key, file)) toast(getString(R.string.chat_voice_cannot_play))
+        }
+    }
+
+    override fun onAudioSeek(row: MessageRow, part: MediaRow, positionMs: Int) =
+        voicePlayer.seekTo(VoicePlayer.keyOf(row.id, part.partId), positionMs)
 
     private fun startDictation() {
         if (!binding.input.isEnabled) return
@@ -1034,9 +1334,44 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     private fun send() {
         val text = binding.input.text?.toString()?.trim().orEmpty()
-        val file = attachment
-        if (text.isEmpty() && file == null) return
+        val files = attachments
+        if (text.isEmpty() && files.isEmpty()) return
         val id = conversationId
+        // Blue Bubbles: to someone with an iMessage chat, everything goes as an iMessage (blue on their
+        // iPhone), never as a green text: silently through OpenBubbles' Reply button when it has one,
+        // else OpenBubbles opens with the message filled in, for one tap on send.
+        val companion = companionId
+        if (manager.service == ChatService.MESSAGES && companion != null && (files.isNotEmpty() || !sendsAsIMessage(text))) {
+            logRoute(companion, if (files.isNotEmpty()) "${files.size} file(s): through OpenBubbles' screen" else "no usable Reply button: through OpenBubbles' screen")
+            handOffToOpenBubbles(iMessageLink, companion, text, files, clearComposer = true)
+            return
+        }
+        if (manager.service == ChatService.MESSAGES && companion != null && files.isEmpty() && sendsAsIMessage(text)) {
+            logRoute(companion, "silently through OpenBubbles' Reply button")
+            val im = iMessageLink
+            scrollToBottomNext = true
+            binding.input.setText("")
+            clearReply()
+            lifecycleScope.launch {
+                withContext(Dispatchers.IO) { relayAttempt { im.sendText(companion, text) } }
+                    .onFailure { toast(errorText(im, it)) }
+            }
+            return
+        }
+        val iMessage = manager as? com.lightdecoder.imessage.IMessageManager
+        // An iMessage with a picture, or to a chat with no Reply button to send through: OpenBubbles sends it.
+        if (iMessage != null && (files.isNotEmpty() || !iMessage.canReply(id, text))) {
+            handOffToOpenBubbles(iMessage, id, text, files, clearComposer = true)
+            return
+        }
+        if (manager.service == ChatService.MESSAGES && com.lightdecoder.imessage.IMessagePrefs.enabled(this) && conversation?.isGroup == false) {
+            // Blue Bubbles is on but this goes green: say why, so "it went green" can be traced.
+            com.lightdecoder.imessage.IMessageLog.add(
+                this,
+                "Messages conversation sent as a TEXT (green): no iMessage chat with this person in OpenBubbles yet" +
+                    if (otherAddress() == null) " (no phone number or email to match one by)" else " (use Send iMessage to start one)",
+            )
+        }
         // Only ever a message of this conversation (onReply checks too).
         val replyTo = replyTarget?.takeIf { it.conversationId == id }?.id
         scrollToBottomNext = true
@@ -1048,11 +1383,121 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             // The outbox writes to the archive (and copies an attachment), so not on the main thread.
             val result = withContext(Dispatchers.IO) {
                 relayAttempt {
-                    if (file != null) link.sendMedia(id, file, text.ifEmpty { null }, replyTo)
-                    else link.sendText(id, text, replyTo)
+                    if (files.isEmpty()) {
+                        link.sendText(id, text, replyTo)
+                    } else {
+                        // Each picture as a message of its own, in the order picked (queued in turn, they go
+                        // out in it): the phone keeps only one part of a message with several. The text goes
+                        // with the last, the reply with the first.
+                        files.forEachIndexed { i, file ->
+                            link.sendMedia(
+                                id, file,
+                                text.ifEmpty { null }.takeIf { i == files.lastIndex },
+                                replyTo.takeIf { i == 0 },
+                            )
+                        }
+                    }
                 }
             }
             result.onFailure { toast(errorText(link, it)) }
+            // Someone the user writes to from here: offered in Android's share sheet from now on.
+            // Not iMessage: the share screen cannot send through OpenBubbles, and its chat ids would be on show.
+            val row = conversation?.takeIf { it.id == id && result.isSuccess && link.service != ChatService.IMESSAGE }
+            val title = supportActionBar?.title?.toString().orEmpty()
+            if (row != null && title != getString(R.string.chat_untitled)) withContext(Dispatchers.IO) {
+                com.lightdecoder.chat.ShareShortcuts.push(applicationContext, link.service, id, title, row.avatarColor)
+            }
+        }
+    }
+
+    /** One line in the iMessage log: how a message from a Messages conversation is being sent. */
+    private fun logRoute(companion: String, how: String) =
+        com.lightdecoder.imessage.IMessageLog.add(
+            this, "Messages conversation with ${com.lightdecoder.imessage.IMessageLog.chatRef(companion)}: sent as iMessage, $how",
+        )
+
+    /**
+     * Opens OpenBubbles on this chat with [text] and [files] filled in
+     * (copies of the files this app can hand over), for the user to tap send
+     * there. With [clearComposer] (a send from the composer) the composer is
+     * emptied once OpenBubbles has it; a sticker leaves it as it is.
+     */
+    private fun handOffToOpenBubbles(
+        link: com.lightdecoder.imessage.IMessageManager,
+        id: String,
+        text: String,
+        files: List<Uri>,
+        clearComposer: Boolean,
+    ) {
+        lifecycleScope.launch {
+            val copies = withContext(Dispatchers.IO) {
+                purgeHandOffCopies()
+                files.map { shareableCopy(it) }
+            }
+            val shared = copies.filterNotNull()
+            fun dropCopies() = runInBackground { shared.forEach { (uri, _) -> handOffFileOf(uri)?.delete() } }
+            // The chat on screen, or the person's iMessage chat shown inside it (Blue Bubbles).
+            if (!isCurrent(link, id) && id != companionId) {
+                dropCopies()
+                return@launch
+            }
+            if (shared.size < files.size) {
+                dropCopies()
+                toast(getString(R.string.share_could_not_read))
+                return@launch
+            }
+            if (!link.handOff(this@ThreadActivity, id, text, shared)) {
+                dropCopies()
+                toast(errorText(link, com.lightdecoder.imessage.IMessageErrors.NOT_INSTALLED))
+                return@launch
+            }
+            if (clearComposer) {
+                binding.input.setText("")
+                clearReply()
+                clearAttachment()
+            }
+            toast(getString(R.string.imessage_finish_in_openbubbles))
+        }
+    }
+
+    /** Where copies handed to OpenBubbles are kept: under the cache folder this app shares files from. */
+    private fun handOffDir(): File = File(File(cacheDir, "shared"), "imessage")
+
+    private fun handOffFileOf(uri: Uri): File? =
+        uri.lastPathSegment?.substringAfterLast('/')?.let { File(handOffDir(), it) }?.takeIf { it.parentFile == handOffDir() }
+
+    /** Copies handed over more than a day ago: OpenBubbles has long since sent them, or never will. */
+    private fun purgeHandOffCopies() {
+        val now = System.currentTimeMillis()
+        handOffDir().listFiles()?.forEach { if (now - it.lastModified() > HAND_OFF_KEEP_MS) it.delete() }
+    }
+
+    /**
+     * A copy of [source] in [handOffDir], as a uri of this app's own provider
+     * (another app may read it while it is granted), with its type. Null if
+     * it cannot be read. Not on the main thread.
+     */
+    private fun shareableCopy(source: Uri): Pair<Uri, String>? {
+        val dir = handOffDir().apply { mkdirs() }
+        var target: File? = null
+        return try {
+            val mime = contentResolver.getType(source)
+                ?: android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(source.lastPathSegment.orEmpty().substringAfterLast('.', "").lowercase())
+                ?: "application/octet-stream"
+            val extension = android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)?.let { ".$it" }.orEmpty()
+            val file = File(dir, java.util.UUID.randomUUID().toString() + extension).also { target = it }
+            val read = (if (source.scheme == "file") java.io.FileInputStream(source.path!!) else contentResolver.openInputStream(source))?.use { input ->
+                file.outputStream().use { input.copyTo(it) }
+            }
+            if (read == null || file.length() == 0L) {
+                file.delete()
+                null
+            } else {
+                androidx.core.content.FileProvider.getUriForFile(this, "$packageName.fileprovider", file) to mime
+            }
+        } catch (e: Exception) {
+            target?.delete()
+            null
         }
     }
 
@@ -1234,10 +1679,23 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private fun sendSticker(file: File) = sendStickers(listOf(file))
 
     /** Sends [files] to this conversation one after the other, in order; stops at the first that fails. */
-    private fun sendStickers(files: List<File>) {
+    @androidx.annotation.VisibleForTesting
+    internal fun sendStickers(files: List<File>) {
         if (files.isEmpty()) return
         val id = conversationId
         val link = manager
+        // OpenBubbles sends them, from its own screen.
+        if (link is com.lightdecoder.imessage.IMessageManager) {
+            handOffToOpenBubbles(link, id, "", files.map { Uri.fromFile(it) }, clearComposer = false)
+            return
+        }
+        // Someone with an iMessage chat: as iMessage too, never as a green text.
+        val companion = companionId
+        if (link.service == ChatService.MESSAGES && companion != null) {
+            com.lightdecoder.imessage.IMessageLog.add(this, "Messages conversation with ${com.lightdecoder.imessage.IMessageLog.chatRef(companion)}: sticker sent as iMessage, through OpenBubbles' screen")
+            handOffToOpenBubbles(iMessageLink, companion, "", files.map { Uri.fromFile(it) }, clearComposer = false)
+            return
+        }
         scrollToBottomNext = true
         lifecycleScope.launch {
             for (file in files) {
@@ -1289,17 +1747,26 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     @androidx.annotation.VisibleForTesting
-    internal fun setAttachment(uri: Uri) {
-        attachment = uri
+    internal fun setAttachment(uri: Uri) = setAttachments(listOf(uri))
+
+    /** The composer's attachments: the first one's picture, and its name or how many there are. */
+    @androidx.annotation.VisibleForTesting
+    internal fun setAttachments(uris: List<Uri>) {
+        if (uris.isEmpty()) return clearAttachment()
+        attachments = uris
         binding.attachmentBar.visibility = View.VISIBLE
-        binding.attachmentName.text = getString(R.string.chat_attachment_ready)
+        val several = uris.size > 1
+        binding.attachmentName.text =
+            if (several) resources.getQuantityString(R.plurals.chat_attachments, uris.size, uris.size)
+            else getString(R.string.chat_attachment_ready)
         binding.attachmentThumb.setImageResource(R.drawable.ic_image_placeholder)
         updateSendEnabled()
         val side = (ATTACHMENT_THUMB_DP * resources.displayMetrics.density).toInt()
+        val first = uris.first()
         lifecycleScope.launch {
-            val (name, preview) = withContext(Dispatchers.IO) { describeAttachment(uri, side) }
-            if (attachment != uri) return@launch
-            name?.let { binding.attachmentName.text = it }
+            val (name, preview) = withContext(Dispatchers.IO) { describeAttachment(first, side) }
+            if (attachments != uris) return@launch
+            if (!several) name?.let { binding.attachmentName.text = it }
             preview?.let { binding.attachmentThumb.setImageBitmap(it) }
         }
     }
@@ -1334,7 +1801,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     private fun clearAttachment() {
-        attachment = null
+        attachments = emptyList()
         binding.attachmentBar.visibility = View.GONE
         binding.attachmentThumb.setImageDrawable(null)
         updateSendEnabled()
@@ -1362,12 +1829,14 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     // Email replies always go to the whole thread: no quoting one message.
     private fun canReplyTo(row: MessageRow) =
-        manager.service != ChatService.GMAIL && !row.isLocal && row.direction != "system" && conversation?.readOnly != true && conversation?.folderEnum != Folder.DELETED
+        manager.service != ChatService.GMAIL &&
+            !row.isLocal && row.direction != "system" && conversation?.readOnly != true && conversation?.folderEnum != Folder.DELETED
 
     // --- message callbacks ---------------------------------------------------
 
     /** Whether [row] belongs to the conversation on screen (a sheet may outlive a thread switch). */
-    private fun isShown(row: MessageRow) = row.conversationId == conversationId
+    private fun isShown(row: MessageRow) =
+        row.conversationId == conversationId || (companionId != null && row.conversationId == companionId)
 
     override fun onReply(row: MessageRow) {
         if (!isShown(row) || !canReplyTo(row)) return
@@ -1375,7 +1844,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         binding.replyBar.visibility = View.VISIBLE
         val who = if (row.isOutgoing) getString(R.string.chat_you)
         else row.senderName.ifBlank { getString(R.string.chat_unknown_sender) }
-        binding.replySender.text = getString(R.string.chat_replying_to, who)
+        // Through OpenBubbles' notification an iMessage goes as a message of its own: say so, rather than promise a thread.
+        val asIMessage = backendFor(row).service == ChatService.IMESSAGE || manager.service == ChatService.IMESSAGE ||
+            (manager.service == ChatService.MESSAGES && companionId != null)
+        binding.replySender.text = getString(if (asIMessage) R.string.imessage_replying_to else R.string.chat_replying_to, who)
         binding.replyText.text = ThreadItems.preview(row, getString(R.string.chat_media_picture))
         binding.input.requestFocus()
         // Ready to type the reply, with the message replied to still in its place above.
@@ -1392,20 +1864,29 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val mine = row.reactions.firstOrNull { it.fromMe }?.emoji
 
         // Email has no reactions.
+        // Email has no reactions, and iMessages here are answered through OpenBubbles' notifications, which take text only.
+        val isIMessage = backendFor(row).service == ChatService.IMESSAGE
         val reacts = real && manager.service != ChatService.GMAIL
         b.reactionRow.visibility = if (reacts) View.VISIBLE else View.GONE
         if (reacts) {
-            for (emoji in QUICK_REACTIONS) {
+            // Five quick ones (the user's own reaction in the last place if it is another emoji), then "+" for any emoji.
+            for (emoji in quickReactions(mine)) {
                 val view = layoutInflater.inflate(R.layout.item_quick_reaction, b.reactionRow, false) as TextView
                 view.text = emoji
                 view.isSelected = emoji == mine
                 view.contentDescription = getString(R.string.chat_react_with, emoji)
                 view.setOnClickListener {
                     sheet.dismiss()
-                    if (isShown(row)) react(row, emoji, remove = emoji == mine)
+                    reactionPicked(row, emoji, mine, isIMessage)
                 }
                 b.reactionRow.addView(view)
             }
+            val more = layoutInflater.inflate(R.layout.item_quick_reaction_more, b.reactionRow, false)
+            more.findViewById<View>(R.id.reactionMore).setOnClickListener {
+                sheet.dismiss()
+                showEmojiPicker(row, mine, isIMessage)
+            }
+            b.reactionRow.addView(more)
         }
         b.actionRemoveReaction.visibility = if (real && mine != null) View.VISIBLE else View.GONE
         b.actionRemoveReaction.setOnClickListener {
@@ -1413,7 +1894,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             if (mine != null && isShown(row)) react(row, mine, remove = true)
         }
         // One of the user's messages that was read: when, as far as the link saw it.
-        if (MessageStatus.tickFor(row) == Tick.READ && manager.service != ChatService.GMAIL) {
+        if (MessageStatus.tickFor(row) == Tick.READ && manager.service != ChatService.GMAIL && backendFor(row) === manager) {
             val service = manager.service
             lifecycleScope.launch {
                 val time = withContext(Dispatchers.IO) {
@@ -1440,6 +1921,22 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             sheet.dismiss()
             copy(row.text)
         }
+        val ownIMessage = backendFor(row).service == ChatService.IMESSAGE && (row.isOutgoing || row.direction == "out") &&
+            row.localState != LocalState.FAILED && !row.isLocal
+        // An iMessage of one's own: edited in OpenBubbles (Apple allows 15 minutes), as WhatsApp's edits are here.
+        val editIMessage = ownIMessage && row.text.isNotBlank() && System.currentTimeMillis() - row.timestampMs < EditRule.WINDOW_MS
+        b.actionEdit.visibility = if (editIMessage || (manager.isPaired() && EditRule.canEdit(row, backendFor(row).capabilities))) View.VISIBLE else View.GONE
+        if (editIMessage) b.actionEdit.setText(R.string.imessage_edit)
+        b.actionUnsend.visibility = if (ownIMessage) View.VISIBLE else View.GONE
+        b.actionUnsend.setOnClickListener {
+            sheet.dismiss()
+            if (isShown(row)) unsendIMessage(row)
+        }
+        b.actionEdit.setOnClickListener {
+            sheet.dismiss()
+            if (!isShown(row)) return@setOnClickListener
+            if (editIMessage) openInOpenBubblesFor(row, getString(R.string.imessage_edit_how), "edit") else askEdit(row)
+        }
         val sayable = reader.isAvailable && ReadAloudText.sentence(this, row) != null
         b.actionReadAloud.visibility = if (sayable) View.VISIBLE else View.GONE
         b.actionReadAloud.setOnClickListener {
@@ -1449,7 +1946,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         b.actionRetry.visibility = if (MessageStatus.canRetryLocally(row)) View.VISIBLE else View.GONE
         b.actionRetry.setOnClickListener {
             sheet.dismiss()
-            if (isShown(row)) retryOrAsk(row)
+            // An iMessage that could not go through OpenBubbles' Reply button goes the way a tap on it does.
+            if (backendFor(row) is com.lightdecoder.imessage.IMessageManager) onFailedTap(row) else if (isShown(row)) retryOrAsk(row)
         }
         val discardable = row.isLocal && row.localState == LocalState.FAILED
         b.actionDiscard.visibility = if (discardable) View.VISIBLE else View.GONE
@@ -1457,7 +1955,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             sheet.dismiss()
             if (!isShown(row)) return@setOnClickListener
             val tmpId = row.tmpId
-            val link = manager
+            val link = backendFor(row)
             runInBackground { link.discardFailed(tmpId) }
         }
         b.actionDelete.visibility = if (real) View.VISIBLE else View.GONE
@@ -1465,27 +1963,54 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             sheet.dismiss()
             confirmDeleteMessage(row)
         }
-        // One of the user's iMessages, sent less than 2 minutes ago: Unsend.
-        val unsendLeft = if (real && row.isOutgoing && com.lightdecoder.imessage.ImessageArchive.isImessage(row.id)) {
-            com.lightdecoder.imessage.UnsendWindow.remaining(row.timestampMs, System.currentTimeMillis())
-        } else {
-            0L
-        }
-        b.actionUnsend.visibility = if (unsendLeft > 0) View.VISIBLE else View.GONE
-        if (unsendLeft > 0) {
-            b.actionUnsend.text = getString(R.string.imessage_action_unsend_left, unsendLeft / 60000, (unsendLeft / 1000) % 60)
-        }
-        b.actionUnsend.setOnClickListener {
-            sheet.dismiss()
-            if (isShown(row)) unsend(row)
-        }
         sheet.setContentView(b.root)
         sheet.setOnDismissListener { if (actionSheet === sheet) actionSheet = null }
         actionSheet = sheet
         sheet.show()
     }
 
+    /** The quick reactions: the five usual ones, with [mine] in the last place when it is another emoji. */
+    private fun quickReactions(mine: String?): List<String> =
+        if (mine == null || mine in QUICK_REACTIONS) QUICK_REACTIONS else QUICK_REACTIONS.take(QUICK_REACTIONS.size - 1) + mine
+
+    /** [emoji] chosen for [row]: the same as [mine] takes it back. An iMessage's tapback goes through OpenBubbles. */
+    @androidx.annotation.VisibleForTesting
+    internal fun reactionPicked(row: MessageRow, emoji: String, mine: String?, isIMessage: Boolean) {
+        if (!isShown(row)) return
+        if (isIMessage) openInOpenBubblesFor(row, getString(R.string.imessage_react_how, emoji), "react")
+        else react(row, emoji, remove = emoji == mine)
+    }
+
+    /** Every emoji, by category, recently used first (Android's own picker); one tap reacts with it. */
+    private fun showEmojiPicker(row: MessageRow, mine: String?, isIMessage: Boolean) {
+        val sheet = BottomSheetDialog(this)
+        val view = layoutInflater.inflate(R.layout.sheet_emoji_picker, binding.root as android.view.ViewGroup, false)
+        view.findViewById<androidx.emoji2.emojipicker.EmojiPickerView>(R.id.emojiPicker).setOnEmojiPickedListener { item ->
+            sheet.dismiss()
+            reactionPicked(row, item.emoji, mine, isIMessage)
+        }
+        sheet.setContentView(view)
+        sheet.behavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED
+        sheet.behavior.skipCollapsed = true
+        sheet.show()
+    }
+
     override fun onFailedTap(row: MessageRow) {
+        // An iMessage that had no Reply button to go through: OpenBubbles sends it instead.
+        val link = backendFor(row)
+        if (link is com.lightdecoder.imessage.IMessageManager && row.isLocal) {
+            if (!isShown(row)) return
+            if (link.canReply(row.conversationId, row.text)) {
+                retry(row)
+            } else if (link.handOff(this, row.conversationId, row.text)) {
+                val tmpId = row.tmpId
+                runInBackground { link.discardFailed(tmpId) }
+                toast(getString(R.string.imessage_finish_in_openbubbles))
+            } else {
+                toast(errorText(link, com.lightdecoder.imessage.IMessageErrors.NOT_INSTALLED))
+            }
+            return
+        }
         if (MessageStatus.canRetryLocally(row)) retryOrAsk(row) else toast(getString(ServiceUi.failedOnPhone(manager.service)))
     }
 
@@ -1555,7 +2080,50 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
     }
 
+    private val askMediaAccess = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        if (com.lightdecoder.imessage.IMessageMedia.hasPermission(this)) {
+            com.lightdecoder.imessage.IMessageLog.add(this, "Pictures: photo and video access allowed")
+            com.lightdecoder.imessage.IMessageMedia.schedule(this)
+            explainIMessagePictures(null)
+        } else {
+            com.lightdecoder.imessage.IMessageLog.add(this, "Pictures: photo and video access not allowed (or only some photos)")
+            toast(getString(R.string.imessage_media_partial))
+        }
+    }
+
+    /** An iMessage picture still waiting for OpenBubbles' saved copy: what it needs, and a way to it. */
+    private fun explainIMessagePictures(row: MessageRow?) {
+        if (!com.lightdecoder.imessage.IMessageMedia.hasPermission(this)) {
+            MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.imessage_media_title)
+                .setMessage(getString(R.string.imessage_media_allow) + "\n\n" + getString(R.string.imessage_media_how))
+                .setPositiveButton(R.string.imessage_media_allow_button) { _, _ -> askMediaAccess.launch(com.lightdecoder.imessage.IMessageMedia.permissions()) }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+            return
+        }
+        com.lightdecoder.imessage.IMessageMedia.schedule(this)
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.imessage_media_title)
+            .setMessage(R.string.imessage_media_how)
+            .setPositiveButton(android.R.string.ok, null)
+            .setNeutralButton(R.string.imessage_media_open) { _, _ ->
+                val chat = row?.conversationId?.takeIf { row.let(::backendFor).service == ChatService.IMESSAGE } ?: companionId
+                val opened = (chat != null && com.lightdecoder.imessage.IMessageReplies.open(this, chat)) ||
+                    (chat != null && iMessageLink.handOff(this, chat, "")) || com.lightdecoder.imessage.OpenBubbles.launch(this)
+                if (!opened) toast(errorText(iMessageLink, com.lightdecoder.imessage.IMessageErrors.NOT_INSTALLED))
+            }
+            .show()
+    }
+
     override fun onMediaTap(row: MessageRow, part: MediaRow) {
+        // An iMessage picture waiting for OpenBubbles' saved copy.
+        if ((part.mime == com.lightdecoder.imessage.IMessageCapture.IMAGE || part.mime == com.lightdecoder.imessage.IMessageCapture.VIDEO) &&
+            part.localPath.isEmpty()
+        ) {
+            explainIMessagePictures(row)
+            return
+        }
         val link = manager
         if (PictureGalleryActivity.isPicture(part)) {
             // Pictures open full screen, zoomable, with the conversation's other pictures a swipe away.
@@ -1583,6 +2151,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 return@launch
             }
             val mime = part.mime
+            // Videos play here, as they came (an iPhone's .mov included).
+            if (mime.startsWith("video/")) {
+                startActivity(VideoPlayerActivity.intent(this@ThreadActivity, file, title?.toString()))
+                return@launch
+            }
             if (mime.isEmpty() || mime.startsWith("image/")) {
                 try {
                     startActivity(ViewerActivity.intentForFile(this@ThreadActivity, file, mime, title))
@@ -1613,7 +2186,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     private fun react(row: MessageRow, emoji: String, remove: Boolean) {
-        val link = manager
+        val link = backendFor(row)
         lifecycleScope.launch {
             relayAttempt { link.react(row.id, emoji, remove) }
                 .onFailure { toast(errorText(link, it)) }
@@ -1631,7 +2204,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private fun retry(row: MessageRow) {
         val tmpId = row.tmpId
         if (tmpId.isEmpty()) return
-        val link = manager
+        val link = backendFor(row)
         runInBackground { link.retry(tmpId) }
     }
 
@@ -1643,7 +2216,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private fun confirmResend(row: MessageRow) {
         if (!isShown(row)) return
         val tmpId = row.tmpId
-        val link = manager
+        val link = backendFor(row)
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.chat_resend_title)
             .setMessage(ServiceUi.resendBody(link.service))
@@ -1676,12 +2249,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      */
     private fun confirmDeleteMessage(row: MessageRow) {
         if (!isShown(row)) return
-        val link = manager
+        val link = backendFor(row)
         val linked = link.isPaired()
         val id = row.id
         fun delete(forEveryone: Boolean) {
             // The thread switched under the question (onNewIntent closes it; this is the backstop).
-            if (!isShown(row) || link !== manager) return
+            if (!isShown(row) || link !== backendFor(row)) return
             if (link.isPaired() != linked) {
                 confirmDeleteMessage(row)
                 return
@@ -1702,7 +2275,14 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                     .setPositiveButton(R.string.chat_delete_for_me) { _, _ -> delete(forEveryone = false) }
             }
         } else {
-            builder.setMessage(if (linked) R.string.chat_delete_message_question else R.string.chat_delete_message_question_local)
+            builder.setMessage(
+                when {
+                    // An iMessage goes from this device only: OpenBubbles keeps it.
+                    link.service == ChatService.IMESSAGE -> R.string.imessage_delete_message_question
+                    linked -> R.string.chat_delete_message_question
+                    else -> R.string.chat_delete_message_question_local
+                }
+            )
                 .setPositiveButton(R.string.chat_action_delete) { _, _ -> delete(forEveryone = false) }
         }
         builder.setNegativeButton(android.R.string.cancel, null)
@@ -1710,26 +2290,46 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             .let(::trackConfirm)
     }
 
-    /**
-     * Unsend of an iMessage: Apple's answer is waited for, and shown when it is no (too late, not
-     * connected, refused, no answer). It disappears for people on iOS 16 or later.
-     */
-    private fun unsend(row: MessageRow) {
-        val engine = com.lightdecoder.imessage.ImessageLink.get(this)
-        toast(getString(R.string.imessage_unsending))
-        lifecycleScope.launch {
-            try {
-                engine.unsend(row.id)
-                toast(getString(R.string.imessage_unsent_toast))
-            } catch (e: Exception) {
-                MaterialAlertDialogBuilder(this@ThreadActivity)
-                    .setTitle(R.string.imessage_unsend_failed_title)
-                    .setMessage(getString(R.string.imessage_unsend_failed, com.lightdecoder.imessage.ImessageEngine.readable(e)))
-                    .setPositiveButton(android.R.string.ok, null)
-                    .show()
-                    .let(::trackConfirm)
-            }
+    /** Asks for the new text of one of the user's own messages and sends the change ([Capability.EDIT]). */
+    private fun askEdit(row: MessageRow) {
+        if (!isShown(row)) return
+        val link = manager
+        val field = com.google.android.material.textfield.TextInputEditText(this).apply {
+            setText(row.text)
+            setSelection(row.text.length)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            maxLines = 8
         }
+        val pad = (20 * resources.displayMetrics.density).toInt()
+        val box = android.widget.FrameLayout(this).apply {
+            setPadding(pad, pad / 2, pad, 0)
+            addView(field)
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.chat_edit_title)
+            .setMessage(R.string.chat_edit_note)
+            .setView(box)
+            .setPositiveButton(R.string.chat_edit_save) { _, _ ->
+                val text = field.text?.toString()?.trim().orEmpty()
+                // The thread switched under the question (onNewIntent closes it; this is the backstop).
+                if (text.isEmpty() || text == row.text || !isShown(row) || link !== manager) return@setPositiveButton
+                lifecycleScope.launch {
+                    relayAttempt { edit(link, row.id, text) }.onFailure {
+                        val tooLate = it is RelayException && it.code == RelayException.INVALID_ARGUMENT
+                        toast(if (tooLate) getString(R.string.chat_edit_too_late) else errorText(link, it))
+                    }
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+            .let(::trackConfirm)
+    }
+
+    /** Like "delete for everyone", editing is the service's own manager's. */
+    private suspend fun edit(link: ChatBackend, messageId: String, text: String) {
+        if (link is WaManager) link.editMessage(messageId, text)
+        else throw RelayException(WaErrors.UNSUPPORTED, "no editing")
     }
 
     /** "Delete for everyone" is the one thing [ChatBackend] leaves to the service's own manager. */
@@ -1754,11 +2354,324 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      */
     private fun callNumber(): String? {
         if (manager.service == ChatService.GMAIL) return null
+        return otherAddress()?.takeIf { it.count(Char::isDigit) >= MIN_CALL_DIGITS && !it.contains('@') }
+    }
+
+    /** The one other person's number (or, for iMessage, email address) in a one-to-one conversation. */
+    private fun otherAddress(): String? {
         val conv = conversation ?: return null
         if (conv.isGroup) return null
         val other = participants.filter { !it.isMe }.singleOrNull() ?: return null
-        val number = other.number.ifBlank { other.formattedNumber }.trim()
-        return number.takeIf { it.count(Char::isDigit) >= MIN_CALL_DIGITS }
+        return other.number.ifBlank { other.formattedNumber }.trim().takeIf { it.isNotEmpty() }
+    }
+
+    /**
+     * "Send iMessage" from a Messages conversation with Blue Bubbles on: the
+     * iMessage chat with the same person if one is stored here, else a new
+     * one in OpenBubbles.
+     */
+    private fun sendIMessage() {
+        val address = otherAddress()
+        if (address == null) {
+            toast(getString(R.string.imessage_no_address))
+            return
+        }
+        val iMessage = com.lightdecoder.imessage.IMessageManager.get(this)
+        lifecycleScope.launch {
+            val existing = withContext(Dispatchers.IO) { iMessage.conversationWith(address) }
+                // With the iMessage library registered, a new chat is made here, not in OpenBubbles.
+                ?: com.lightdecoder.imessage.direct.DirectLink.get(this@ThreadActivity).conversationFor(address)
+            if (existing != null) {
+                startActivity(RelayIntents.thread(this@ThreadActivity, existing, service = ChatService.IMESSAGE).setFlags(0))
+            } else {
+                openNewIMessageChat(address, "")
+            }
+        }
+    }
+
+    /**
+     * Opens OpenBubbles on a new chat with [address] and [text], saying what to do when it could
+     * only open its share screen or its main screen. False if it could not be opened at all.
+     */
+    private fun openNewIMessageChat(address: String, text: String): Boolean {
+        val iMessage = com.lightdecoder.imessage.IMessageManager.get(this)
+        return when (iMessage.startInOpenBubbles(this, address, text)) {
+            com.lightdecoder.imessage.OpenBubbles.NewChat.CHAT_OPENED -> true
+            com.lightdecoder.imessage.OpenBubbles.NewChat.SHARE_OPENED -> {
+                copyAddress(address)
+                toast(getString(R.string.imessage_pick_chat_in_share))
+                true
+            }
+            com.lightdecoder.imessage.OpenBubbles.NewChat.APP_OPENED -> {
+                copyAddress(address)
+                toast(getString(R.string.imessage_start_chat_in_app))
+                true
+            }
+            com.lightdecoder.imessage.OpenBubbles.NewChat.NOT_INSTALLED -> {
+                toast(errorText(iMessage, com.lightdecoder.imessage.IMessageErrors.NOT_INSTALLED))
+                false
+            }
+            com.lightdecoder.imessage.OpenBubbles.NewChat.FAILED -> {
+                toast(getString(R.string.imessage_would_not_open))
+                false
+            }
+        }
+    }
+
+    /** Puts the person's number (or email address) on the clipboard, to start the chat with by hand. */
+    private fun copyAddress(address: String) {
+        val clipboard = getSystemService(android.content.ClipboardManager::class.java) ?: return
+        clipboard.setPrimaryClip(android.content.ClipData.newPlainText(getString(R.string.imessage_address_label), address))
+    }
+
+    // --- linking an iMessage chat by hand ---------------------------------------------------
+
+    /** The iMessage chats not inside any conversation; the one picked is shown inside this one from now on. */
+    private fun chooseIMessageToLink() {
+        val id = conversationId
+        lifecycleScope.launch {
+            val chats = withContext(Dispatchers.IO) {
+                BlueBubblesLinks.unpaired(applicationContext).map { row ->
+                    val name = BlueBubblesLinks.iMessageName(applicationContext, row.id).ifBlank { getString(R.string.chat_untitled) }
+                    row.id to (if (row.snippet.isBlank()) name else "$name \u2014 ${row.snippet.take(40)}")
+                }
+            }
+            if (conversationId != id) return@launch
+            if (chats.isEmpty()) {
+                toast(getString(R.string.imessage_link_none))
+                return@launch
+            }
+            MaterialAlertDialogBuilder(this@ThreadActivity)
+                .setTitle(R.string.imessage_link_pick_title)
+                .setItems(chats.map { it.second }.toTypedArray()) { _, which ->
+                    if (conversationId != id) return@setItems
+                    val chosen = chats[which].first
+                    lifecycleScope.launch {
+                        withContext(Dispatchers.IO) { com.lightdecoder.imessage.IMessageLinks.setManual(applicationContext, chosen, id) }
+                        toast(getString(R.string.imessage_linked))
+                        reload()
+                        invalidateOptionsMenu()
+                    }
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+        }
+    }
+
+    private fun confirmUnlinkIMessage() {
+        val companion = companionId ?: return
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.imessage_unlink)
+            .setMessage(R.string.imessage_unlink_body)
+            .setPositiveButton(R.string.imessage_unlink_confirm) { _, _ ->
+                lifecycleScope.launch {
+                    withContext(Dispatchers.IO) { com.lightdecoder.imessage.IMessageLinks.setManual(applicationContext, companion, null) }
+                    reload()
+                    invalidateOptionsMenu()
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    // --- unsending an iMessage ------------------------------------------------------------
+
+    /**
+     * One of the user's iMessages: OpenBubbles' notification has no unsend button, so OpenBubbles opens
+     * on the chat, where a long press on it offers Undo Send. Apple allows that for [UNSEND_WINDOW_MS].
+     */
+    /** Opens OpenBubbles on [row]'s chat for something its notification cannot do ([what]: edit, react), with [how] to do it there. */
+    private fun openInOpenBubblesFor(row: MessageRow, how: String, what: String) {
+        val chat = row.conversationId.takeIf { backendFor(row).service == ChatService.IMESSAGE } ?: companionId ?: return
+        val opened = com.lightdecoder.imessage.IMessageReplies.open(this, chat) ||
+            iMessageLink.handOff(this, chat, "") ||
+            com.lightdecoder.imessage.OpenBubbles.launch(this)
+        com.lightdecoder.imessage.IMessageLog.add(this, "${com.lightdecoder.imessage.IMessageLog.chatRef(chat)}: $what: ${if (opened) "OpenBubbles opened on the chat" else "OpenBubbles would not open"}")
+        toast(if (opened) how else errorText(iMessageLink, com.lightdecoder.imessage.IMessageErrors.NOT_INSTALLED))
+    }
+
+    private fun unsendIMessage(row: MessageRow) {
+        // Sent through the iMessage library: unsent straight away, and Apple's answer is shown.
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(this)
+        if (direct.canUnsend(row)) {
+            unsendDirectly(direct, row)
+            return
+        }
+        val chat = row.conversationId
+        val ref = com.lightdecoder.imessage.IMessageLog.chatRef(chat)
+        val age = System.currentTimeMillis() - row.timestampMs
+        if (age > UNSEND_WINDOW_MS) {
+            com.lightdecoder.imessage.IMessageLog.add(this, "$ref: unsend asked ${age / 60_000} min after sending (too late for Apple)")
+            MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.imessage_unsend)
+                .setMessage(R.string.imessage_unsend_too_late)
+                .setPositiveButton(R.string.imessage_delete_here) { _, _ -> confirmDeleteMessage(row) }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+            return
+        }
+        val opened = com.lightdecoder.imessage.IMessageReplies.open(this, chat) ||
+            iMessageLink.handOff(this, chat, "") ||
+            com.lightdecoder.imessage.OpenBubbles.launch(this)
+        com.lightdecoder.imessage.IMessageLog.add(this, "$ref: unsend: ${if (opened) "OpenBubbles opened on the chat for Undo Send" else "OpenBubbles would not open"}")
+        if (opened) toast(getString(R.string.imessage_unsend_how)) else toast(errorText(iMessageLink, com.lightdecoder.imessage.IMessageErrors.NOT_INSTALLED))
+    }
+
+    /**
+     * Unsend through the iMessage library: who it went to comes from the archive (so it works after a
+     * restart), Apple's answer is waited for, and a no (too late, not connected, refused, no answer)
+     * is shown as "Couldn't unsend: <reason>". It disappears for people on iOS 16 or later.
+     */
+    private fun unsendDirectly(direct: com.lightdecoder.imessage.direct.DirectLink, row: MessageRow) {
+        toast(getString(R.string.imessage_unsending))
+        lifecycleScope.launch {
+            try {
+                direct.unsend(row.id)
+                toast(getString(R.string.imessage_unsent_toast))
+            } catch (e: Exception) {
+                MaterialAlertDialogBuilder(this@ThreadActivity)
+                    .setTitle(R.string.imessage_unsend_failed_title)
+                    .setMessage(getString(R.string.imessage_unsend_failed, com.lightdecoder.imessage.direct.DirectEngine.readable(e)))
+                    .setPositiveButton(android.R.string.ok, null)
+                    .show()
+            }
+        }
+    }
+
+    // --- Check iMessage -------------------------------------------------------------------
+
+    /** Shows what the check sends, and to whom, before anything is sent. */
+    private fun confirmIMessageCheck() {
+        val companion = companionId
+        val address = if (companion == null) otherAddress() ?: return toast(getString(R.string.imessage_no_address)) else null
+        val name = supportActionBar?.title?.toString().orEmpty()
+        val text = com.lightdecoder.imessage.IMessageCheck.TEXT
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.imessage_check)
+            .setMessage(
+                getString(R.string.imessage_check_explain, name, text) +
+                    if (companion == null) "\n\n" + getString(R.string.imessage_check_new_chat) else ""
+            )
+            .setPositiveButton(R.string.imessage_check_send) { _, _ -> runIMessageCheck(companion, address, text) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /** Starts a check of [text] at once, without asking first (for the on-device test). */
+    @androidx.annotation.VisibleForTesting
+    internal fun startIMessageCheck(text: String) {
+        val companion = companionId
+        runIMessageCheck(companion, if (companion == null) otherAddress() else null, text)
+    }
+
+    /** The dialog of the check under way, while it is open. */
+    @androidx.annotation.VisibleForTesting
+    internal var checkDialog: androidx.appcompat.app.AlertDialog? = null
+
+    /**
+     * Sends [text] to the person's iMessage chat [companion] (silently through
+     * OpenBubbles' Reply button, else OpenBubbles opens with it filled in, or
+     * a new chat with [address] when there is none yet), then has
+     * [com.lightdecoder.imessage.IMessageChecks] watch for the reply and shows it.
+     */
+    private fun runIMessageCheck(companion: String?, address: String?, text: String) {
+        if (companion == null && address == null) return
+        val id = conversationId
+        val name = supportActionBar?.title?.toString().orEmpty()
+        val im = iMessageLink
+        val textRepo = manager.repo
+        val sentAt = System.currentTimeMillis()
+        val ref = companion?.let(com.lightdecoder.imessage.IMessageLog::chatRef) ?: "(new chat)"
+        fun log(line: String) = com.lightdecoder.imessage.IMessageLog.add(this, "Check iMessage $ref: $line")
+        lifecycleScope.launch {
+            log("started; ${im.setupSummary()}")
+            val silent = companion != null &&
+                withContext(Dispatchers.IO) { relayAttempt { im.sendText(companion, text) } }.isSuccess
+            if (companion == null) {
+                // No iMessage chat with them yet: OpenBubbles starts one, with the check filled in.
+                log("no iMessage chat with this person yet: opening a new one in OpenBubbles")
+                if (!openNewIMessageChat(address!!, text)) return@launch
+            } else if (!silent) {
+                log("no usable Reply button: OpenBubbles opened for the user to tap send")
+                handOffToOpenBubbles(im, companion, text, emptyList(), clearComposer = false)
+            }
+            val app = applicationContext
+            com.lightdecoder.imessage.IMessageChecks.watch(
+                this@ThreadActivity, id, name, companion,
+                findChat = {
+                    BlueBubblesLinks.iMessageFor(app, textRepo.conversation(id), textRepo.participants(id))
+                        ?: address?.let(im::conversationWith)
+                },
+                text, silent, sentAt, im, textRepo,
+            )
+            showIMessageCheck()
+        }
+    }
+
+    /** The check under way (or just finished) for this conversation, in its dialog. */
+    private fun showIMessageCheck() {
+        val checks = com.lightdecoder.imessage.IMessageChecks
+        val first = checks.current.value?.takeIf { it.conversationId == conversationId } ?: return
+        checkDialog?.dismiss()
+        val view = layoutInflater.inflate(R.layout.dialog_imessage_check, binding.root as android.view.ViewGroup, false)
+        val steps = view.findViewById<android.widget.TextView>(R.id.checkSteps)
+        val verdict = view.findViewById<android.widget.TextView>(R.id.checkVerdict)
+        val dialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.imessage_check)
+            .setView(view)
+            .setPositiveButton(if (first.running) R.string.imessage_check_hide else R.string.imessage_check_close, null)
+            .setNeutralButton(R.string.imessage_check_stop) { _, _ -> checks.stop(this) }
+            .create()
+        checkDialog = dialog
+        val job = lifecycleScope.launch {
+            checks.current.collect { run ->
+                if (run == null || run.conversationId != conversationId) return@collect
+                steps.text = checkSteps(run.progress, run.name, run.silent, run.waitedMs)
+                verdict.text = checkVerdict(run.progress, run.name, run.waitedMs, run.ended)
+                dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE)
+                    ?.setText(if (run.running) R.string.imessage_check_hide else R.string.imessage_check_close)
+                dialog.getButton(android.content.DialogInterface.BUTTON_NEUTRAL)?.visibility = if (run.running) View.VISIBLE else View.GONE
+            }
+        }
+        dialog.setOnShowListener {
+            checks.dialogShowing = true
+            val run = checks.current.value
+            dialog.getButton(android.content.DialogInterface.BUTTON_NEUTRAL)?.visibility = if (run?.running == true) View.VISIBLE else View.GONE
+        }
+        dialog.setOnDismissListener {
+            checks.dialogShowing = false
+            job.cancel()
+            checks.noteHidden(this)
+            if (checkDialog === dialog) checkDialog = null
+            invalidateOptionsMenu()
+        }
+        dialog.show()
+    }
+
+    private fun checkSteps(p: com.lightdecoder.imessage.IMessageCheck.Progress, name: String, silent: Boolean, waitedMs: Long): String {
+        fun line(done: Boolean, text: String) = (if (done) "\u2713  " else "\u2026  ") + text
+        // Sent from OpenBubbles' own screen: nothing of it can be seen here until the reply, so no steps that never tick.
+        val steps = if (silent || p.handedOver) listOf(
+            line(p.handedOver, getString(R.string.imessage_check_step_handed)),
+            line(p.inOpenBubbles, getString(R.string.imessage_check_step_openbubbles)),
+            line(p.done, getString(R.string.imessage_check_step_reply, name)),
+        ) else listOf(
+            "\u2022  " + getString(R.string.imessage_check_step_tap_send),
+            line(p.done, getString(R.string.imessage_check_step_reply, name)),
+        )
+        return steps.joinToString("\n") + when {
+            p.sentAsText -> "\n\n" + getString(R.string.imessage_check_went_as_text)
+            !silent && !p.handedOver && !p.done -> "\n\n" + getString(R.string.imessage_check_come_back)
+            !p.inOpenBubbles && waitedMs > com.lightdecoder.imessage.IMessageChecks.SLOW_MS -> "\n\n" + getString(R.string.imessage_check_not_in_openbubbles)
+            else -> ""
+        }
+    }
+
+    private fun checkVerdict(p: com.lightdecoder.imessage.IMessageCheck.Progress, name: String, waitedMs: Long, ended: Boolean): String = when (p.reply) {
+        com.lightdecoder.imessage.IMessageCheck.Reply.IMESSAGE -> getString(R.string.imessage_check_blue, name)
+        com.lightdecoder.imessage.IMessageCheck.Reply.TEXT -> getString(R.string.imessage_check_green, name)
+        com.lightdecoder.imessage.IMessageCheck.Reply.NONE -> if (ended) getString(R.string.imessage_check_ended, name) else
+            getString(if (waitedMs > com.lightdecoder.imessage.IMessageChecks.SLOW_MS) R.string.imessage_check_still_waiting else R.string.imessage_check_waiting, name)
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
@@ -1769,6 +2682,28 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     override fun onPrepareOptionsMenu(menu: Menu): Boolean {
         val conv = conversation
         menu.findItem(R.id.action_call)?.isVisible = callNumber() != null
+        menu.findItem(R.id.action_open_openbubbles)?.isVisible = manager.service == ChatService.IMESSAGE
+        // Not when the person's iMessages are already here.
+        menu.findItem(R.id.action_send_imessage)?.isVisible = manager.service == ChatService.MESSAGES && companionId == null &&
+            com.lightdecoder.imessage.IMessagePrefs.enabled(this) && conv != null && !conv.isGroup && otherAddress() != null
+        // Also before they have an iMessage chat: the check then starts one in OpenBubbles.
+        menu.findItem(R.id.action_check_imessage)?.isVisible = manager.service == ChatService.MESSAGES &&
+            (companionId != null || (com.lightdecoder.imessage.IMessagePrefs.enabled(this) && conv != null && !conv.isGroup && otherAddress() != null))
+        // The iMessage light: how this conversation sends (Messages tab and its iMessage chats).
+        menu.findItem(R.id.action_imessage_light)?.let { item ->
+            val chat = if (manager.service == ChatService.IMESSAGE) conversationId else companionId
+            if (manager.service == ChatService.MESSAGES || manager.service == ChatService.IMESSAGE) {
+                IMessageLight.bind(this, item, IMessageLight.forConversation(this, chat, conv?.isGroup == true), hideWhenOff = true)
+            } else {
+                item.isVisible = false
+            }
+        }
+        val blueOn = com.lightdecoder.imessage.IMessagePrefs.enabled(this)
+        menu.findItem(R.id.action_link_imessage)?.isVisible =
+            manager.service == ChatService.MESSAGES && blueOn && companionId == null && conv != null && !conv.isGroup
+        menu.findItem(R.id.action_unlink_imessage)?.isVisible = manager.service == ChatService.MESSAGES && companionId != null
+        val checking = com.lightdecoder.imessage.IMessageChecks.current.value?.let { it.running && it.conversationId == conversationId } == true
+        menu.findItem(R.id.action_check_imessage)?.setTitle(if (checking) R.string.imessage_check_running else R.string.imessage_check)
         val archived = conv?.folderEnum == Folder.ARCHIVE
         menu.findItem(R.id.action_archive)?.apply {
             isVisible = conv != null && (conv.folderEnum == Folder.INBOX || archived)
@@ -1787,7 +2722,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         menu.findItem(R.id.action_delete_conversation)?.isVisible = conv != null && !deleted
         menu.findItem(R.id.action_notify_read)?.apply {
             // Where the service says when a message is read, and read notifications are on at all.
-            isVisible = conv != null && !deleted && manager.service != ChatService.GMAIL &&
+            isVisible = conv != null && !deleted && manager.service != ChatService.GMAIL && manager.service != ChatService.IMESSAGE &&
                 com.lightdecoder.relay.ReadNotifyPrefs.enabled(this@ThreadActivity)
             isChecked = com.lightdecoder.relay.ReadNotifyPrefs.forConversation(this@ThreadActivity, manager.service, conversationId)
         }
@@ -1833,6 +2768,21 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             }
             R.id.action_delete_forever -> confirmDeleteForever()
             R.id.action_delete_conversation -> confirmDeleteConversation()
+            R.id.action_send_imessage -> sendIMessage()
+            R.id.action_link_imessage -> chooseIMessageToLink()
+            R.id.action_unlink_imessage -> confirmUnlinkIMessage()
+            R.id.action_check_imessage ->
+                if (com.lightdecoder.imessage.IMessageChecks.current.value?.let { it.running && it.conversationId == conversationId } == true) {
+                    showIMessageCheck()
+                } else {
+                    confirmIMessageCheck()
+                }
+            R.id.action_open_openbubbles -> {
+                val opened = com.lightdecoder.imessage.IMessageReplies.open(this, conversationId) ||
+                    (manager as? com.lightdecoder.imessage.IMessageManager)?.handOff(this, conversationId, "") == true ||
+                    com.lightdecoder.imessage.OpenBubbles.launch(this)
+                if (!opened) toast(errorText(manager, com.lightdecoder.imessage.IMessageErrors.NOT_INSTALLED))
+            }
             R.id.action_link_status -> startActivity(ServiceUi.status(this, manager.service))
             R.id.action_notify_read -> {
                 val on = !com.lightdecoder.relay.ReadNotifyPrefs.forConversation(this, manager.service, conversationId)
@@ -1867,7 +2817,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         startActivity(
             Intent(this, ConversationsActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                .putExtra(RelayIntents.EXTRA_SERVICE, manager.service.key)
+                // iMessage chats are listed in the Messages tab.
+                .putExtra(RelayIntents.EXTRA_SERVICE, ConversationsActivity.tabServiceOf(manager.service).key)
         )
     }
 
@@ -1939,8 +2890,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     companion object {
+        private const val HAND_OFF_KEEP_MS = 24 * 60 * 60 * 1000L
         private const val STATE_WINDOW = "window"
-        private const val STATE_ATTACHMENT = "attachment"
+        private const val STATE_ATTACHMENTS = "attachments"
 
         /** At most this many pictures are taken in at once as stickers. */
         private const val MAX_STICKER_IMPORT = 50
@@ -1978,6 +2930,17 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         private const val REMOTE_RETRY_MS = 30_000L
         private const val MAX_PREVIEW_READ = 32 * 1024 * 1024
         private const val ATTACHMENT_THUMB_DP = 96
+
+        /** How long after sending Apple lets an iMessage be unsent. */
+        private const val UNSEND_WINDOW_MS = 2 * 60 * 1000L
+
+        /** Most pictures picked for one message. */
+        private const val MAX_ATTACHMENTS = 10
+
+        /** Voice messages: shorter than this is a slip of the finger; the longest for an RCS chat and for MMS. */
+        private const val MIN_VOICE_MS = 1_000L
+        private const val MAX_VOICE_RCS_MS = 10 * 60 * 1000
+        private const val MAX_VOICE_MMS_MS = 3 * 60 * 1000
         private const val DISABLED_ALPHA = 0.38f
 
         /** How far behind this phone's clock a message may be stamped and still count as arriving now. */
@@ -1991,7 +2954,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         internal var readerUnavailableShown = false
 
         /** The quick reactions offered on long press, in Google Messages' order. */
-        val QUICK_REACTIONS = listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
+        val QUICK_REACTIONS = listOf("👍", "❤️", "😂", "😮", "😢")
 
         /**
          * Tests only: runs on the IO thread before every read of a

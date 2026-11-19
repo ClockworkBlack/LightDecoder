@@ -98,7 +98,7 @@
     <string name="alert_title">Sticker decoded</string>
     <string name="alert_text">Tap to view</string>
 
-    <!-- iMessage (ui/imessage/ImessageActivity, docs/imessage-openbubbles.md) -->
+    <!-- iMessage (ui/imessage/DirectSetupActivity, docs/imessage-openbubbles.md) -->
     <string name="imessage_title">iMessage</string>
     <string name="imessage_library_title">1. OpenBubbles files</string>
     <string name="imessage_library_missing">LightDecoder uses OpenBubbles\' iMessage library, which it does not include. Import these files from the OpenBubbles 2.0.0 app (its lib/%2$s folder): %1$s.</string>

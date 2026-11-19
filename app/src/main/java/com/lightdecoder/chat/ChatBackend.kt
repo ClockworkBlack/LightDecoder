@@ -143,6 +143,7 @@ object ChatBackends {
         ChatService.MESSAGES -> RelayManager.get(context)
         ChatService.WHATSAPP -> WaManager.get(context)
         ChatService.GMAIL -> com.lightdecoder.mail.MailManager.get(context)
+        ChatService.IMESSAGE -> com.lightdecoder.imessage.IMessageManager.get(context)
     }
 
     /** Every service's backend, in the order of [ChatService]. */

@@ -518,6 +518,64 @@ func (b *WABridge) SetOnline(online bool) (err error) {
 	return exported(sendPresence(ctx, cli, state))
 }
 
+// EditText replaces the text of one of this account's own text messages for
+// everyone in the chat. WhatsApp takes an edit only for a while after the
+// message was sent (whatsmeow.EditWindow), and only of the text: a message
+// with an attachment is refused here. A "message" event with the new text
+// follows.
+func (b *WABridge) EditText(conversationID, messageID, text string) (err error) {
+	defer recoverInto(&err)
+	chat, err := parseChat(conversationID)
+	if err != nil {
+		return err
+	}
+	if messageID == "" {
+		return newError(codeInvalidArgument, "message id is empty")
+	}
+	if strings.TrimSpace(text) == "" {
+		return newError(codeInvalidArgument, "message is empty")
+	}
+	cli, local, ctx, cancel, err := b.rpc()
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	id := resolver{cli: cli}
+	key := id.norm(chat)
+	old, _, exists, err := local.getMessage(key.String(), messageID)
+	if err != nil {
+		return newError(codeInternal, "could not read the message cache")
+	}
+	if !exists || old.Direction == directionDeleted {
+		return newError(codeNotFound, "message not found")
+	}
+	if !editable(old, time.Now()) {
+		return newError(codeInvalidArgument, "this message can no longer be edited")
+	}
+	if _, err := sendMessage(ctx, cli, chat, cli.BuildEdit(chat, messageID, &waE2E.Message{Conversation: new(text)}), whatsmeow.SendRequestExtra{}); err != nil {
+		return sendFailed(err)
+	}
+	a := msgAction{kind: actEdit, chat: key, targetID: messageID, content: content{text: text}}
+	if b.applyAction(local, id, a, true) {
+		b.deliverChat(local, id, key.String())
+	}
+	return nil
+}
+
+// editable is whether WhatsApp would take an edit of m now: this account's
+// own message, text only, sent within the edit window.
+func editable(m messageDTO, now time.Time) bool {
+	if !m.FromMe || m.Text == "" {
+		return false
+	}
+	for _, p := range m.Parts {
+		if p.Kind != partText {
+			return false
+		}
+	}
+	return now.Sub(time.UnixMilli(m.TimestampMs)) < whatsmeow.EditWindow
+}
+
 // DeleteMessage deletes a message for everyone (revoke: this account's own
 // messages, or any as a group admin) or only on this account's devices.
 // A "message" event with direction "deleted" follows.
