@@ -33,7 +33,6 @@ class ArchiveDb(context: Context, name: String? = NAME) :
 
     override fun onCreate(db: SQLiteDatabase) {
         SCHEMA.forEach(db::execSQL)
-        addMessageColumns(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -43,7 +42,10 @@ class ArchiveDb(context: Context, name: String? = NAME) :
         if (oldVersion < 3) addMessageColumns(db)
     }
 
-    /** The version 3 columns of messages that are not there yet. */
+    /**
+     * The version 3 columns of messages that are not there yet (an upgrade that was cut short
+     * may have added one of them already).
+     */
     private fun addMessageColumns(db: SQLiteDatabase) {
         val have = db.rawQuery("PRAGMA table_info(messages)", null).use { c ->
             buildSet { while (c.moveToNext()) add(c.getString(c.getColumnIndexOrThrow("name"))) }
@@ -83,16 +85,17 @@ class ArchiveDb(context: Context, name: String? = NAME) :
         /**
          * Version 3, on messages: `edited_at`, when the sender last edited it (ms; 0 = never), and
          * `extra_json`, display data only one service has (iMessage: [com.lightdecoder.imessage.direct.IMessageExtra]).
+         * A new archive has them from the start ([BASE_SCHEMA]); an older one gets them on upgrade.
          */
         private val MESSAGE_V3_COLUMNS = listOf(
             "edited_at" to "ALTER TABLE messages ADD COLUMN edited_at INTEGER NOT NULL DEFAULT 0",
             "extra_json" to "ALTER TABLE messages ADD COLUMN extra_json TEXT NOT NULL DEFAULT ''",
         )
 
-        /** Versions 1 and 2; [addMessageColumns] adds version 3's. */
+        /** A new archive, as of [VERSION]. */
         private val SCHEMA get() = BASE_SCHEMA + MEDIA_PATH_INDEXES
 
-        /** Version 1. */
+        /** Version 1's tables, with the columns version 3 added to messages ([MESSAGE_V3_COLUMNS]). */
         private val BASE_SCHEMA = listOf(
             """CREATE TABLE conversations (
                 conversation_id TEXT PRIMARY KEY,
@@ -160,7 +163,9 @@ class ArchiveDb(context: Context, name: String? = NAME) :
                 reactions_json TEXT NOT NULL DEFAULT '[]',
                 local_state TEXT NOT NULL DEFAULT 'synced',
                 raw_json TEXT,
-                updated_at INTEGER NOT NULL
+                updated_at INTEGER NOT NULL,
+                edited_at INTEGER NOT NULL DEFAULT 0,
+                extra_json TEXT NOT NULL DEFAULT ''
             )""",
             "CREATE INDEX idx_messages_conv_ts ON messages(conversation_id, timestamp_ms DESC)",
             "CREATE INDEX idx_messages_tmp ON messages(tmp_id)",

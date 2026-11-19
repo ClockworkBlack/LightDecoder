@@ -257,12 +257,16 @@ object DirectArchive {
         return Update.Upsert(conv, msg)
     }
 
-    /** A conversation as the library describes it: its id, members and name. */
+    /**
+     * A conversation as the library describes it: its id, members and name. A group's name is the
+     * one its members gave it, empty when it has none (the main process then names it after its
+     * members, with contact names).
+     */
     private fun conversationDto(id: String, participants: List<String>, cvName: String?, me: Set<String>, nameOf: (String) -> String): ConversationDto {
         val group = isGroup(id)
         val others = participants.filter { it !in me }
         val name = when {
-            group -> cvName?.takeIf { it.isNotBlank() } ?: others.joinToString(", ") { nameOf(it) }
+            group -> cvName?.takeIf { it.isNotBlank() }.orEmpty()
             else -> nameOf(others.firstOrNull() ?: participants.first())
         }
         return ConversationDto(

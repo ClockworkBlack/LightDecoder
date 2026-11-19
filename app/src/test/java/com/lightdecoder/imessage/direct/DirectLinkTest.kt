@@ -1,22 +1,32 @@
 package com.lightdecoder.imessage.direct
 
+import android.app.NotificationManager
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.lightdecoder.archive.ArchiveDb
 import com.lightdecoder.archive.ArchiveRepository
+import com.lightdecoder.archive.MessageRow
 import com.lightdecoder.chat.ChatService
 import com.lightdecoder.imessage.IMessageManager
+import com.lightdecoder.imessage.IMessagePrefs
 import com.lightdecoder.relay.ConversationDto
+import com.lightdecoder.relay.MessageNotifier
 import com.lightdecoder.relay.ParticipantDto
+import java.io.File
+import java.util.Collections
+import kotlinx.coroutines.runBlocking
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Shadows.shadowOf
 import uniffi.rust_bridge.ChatRenameMessage
 import uniffi.rust_bridge.ConversationData
 import uniffi.rust_bridge.EditMessage
@@ -59,6 +69,10 @@ class DirectLinkTest {
 
     @After
     fun tearDown() {
+        MessageNotifier.cancelAll(context, ChatService.IMESSAGE)
+        IMessagePrefs.setEnabled(context, false)
+        DirectPrefs.setRegistered(context, false)
+        DirectLink.resetForTesting()
         IMessageManager.resetForTesting()
         ArchiveRepository.resetForTesting()
         db.close()
@@ -82,9 +96,16 @@ class DirectLinkTest {
     /** As it arrives from the other process. */
     private fun wire(u: DirectArchive.Update) = DirectWire.decode(org.json.JSONObject(DirectWire.encode(u).toString()))
 
-    private fun event(guid: String, from: String, m: PushChatMessage, participants: List<String> = listOf(me, from), groupGuid: String? = null) =
+    private fun event(
+        guid: String,
+        from: String,
+        m: PushChatMessage,
+        participants: List<String> = listOf(me, from),
+        groupGuid: String? = null,
+        ts: Long = 1_700_000_009_000L,
+    ) =
         DirectArchive.map(
-            MessageInst(guid, from, ConversationData(participants, null, groupGuid, null), m, 1_700_000_009_000UL, null, false, false, null),
+            MessageInst(guid, from, ConversationData(participants, null, groupGuid, null), m, ts.toULong(), null, false, false, null),
             setOf(me), Handles::display, DirectTexts(context),
         ).let(::wire)
 
@@ -200,6 +221,146 @@ class DirectLinkTest {
     }
 
     @Test
+    fun theSameUnsendTwiceAndTheMessageAgainLeaveTheRestAlone() {
+        val link = DirectLink.get(context)
+        val parts = listOf(
+            IndexedMessagePart(MessagePart.Text("look", TextFormat.Flags(TextFlags(false, false, false, false))), 0UL, null),
+            IndexedMessagePart(MessagePart.Text("and this", TextFormat.Flags(TextFlags(false, false, false, false))), 1UL, null),
+        )
+        val original = event("U4", bob, PushChatMessage.Message(NormalMessage(parts, null, null, null, MessageType.IMessage, null, null, null, false, null, null)))
+        link.apply(original)
+        val unsend = event("X7", bob, PushChatMessage.Unsend(UnsendMessage("U4", 1UL)))
+        link.apply(unsend)
+        // Apple's journal hands the unsend over again (say the other process restarted before it was acknowledged).
+        link.apply(unsend)
+        assertEquals("in", repo.message("imsg:U4")!!.direction)
+        assertEquals("look", repo.message("imsg:U4")!!.text)
+        // And Apple sends the message itself again: the unsent part stays away.
+        link.apply(original)
+        assertEquals("look", repo.message("imsg:U4")!!.text)
+        assertEquals(setOf(1), IMessageExtra.parse(repo.message("imsg:U4")!!.extra).unsent)
+        // Then the last part too: nothing is left.
+        link.apply(event("X8", bob, PushChatMessage.Unsend(UnsendMessage("U4", 0UL))))
+        assertEquals("system", repo.message("imsg:U4")!!.direction)
+    }
+
+    @Test
+    fun theSameEditTwiceCountsOnce() {
+        val link = DirectLink.get(context)
+        link.apply(incoming("E2", bob, "dinner at 7"))
+        val edit = event("X9", bob, PushChatMessage.Edit(EditMessage("E2", 0UL, listOf(IndexedMessagePart(MessagePart.Text("dinner at 8", TextFormat.Flags(TextFlags(false, false, false, false))), null, null)))))
+        link.apply(edit)
+        link.apply(edit)
+        assertEquals(1, IMessageExtra.parse(repo.message("imsg:E2")!!.extra).edits)
+        // A later edit back to an earlier text is an edit of its own.
+        link.apply(DirectArchive.Update.Edit("imsg:E2", "dinner at 7", 0, 1_700_000_010_000L))
+        assertEquals("dinner at 7", repo.message("imsg:E2")!!.text)
+        assertEquals(2, IMessageExtra.parse(repo.message("imsg:E2")!!.extra).edits)
+    }
+
+    @Test
+    fun theListShowsTheLatestMessageAsItNowReads() {
+        val link = DirectLink.get(context)
+        val id = "imsg:$bob"
+        link.apply(incoming("P1", bob, "dinner at 7"))
+        repo.conversation(id)!!.let {
+            assertEquals("imsg:P1", it.latestMessageId)
+            assertEquals("dinner at 7", it.snippet)
+        }
+        link.apply(event("X10", bob, PushChatMessage.Edit(EditMessage("P1", 0UL, listOf(IndexedMessagePart(MessagePart.Text("dinner at 8", TextFormat.Flags(TextFlags(false, false, false, false))), null, null))))))
+        assertEquals("dinner at 8", repo.conversation(id)!!.snippet)
+        // An older message Apple sends again leaves it as it is.
+        link.apply(incoming("P0", bob, "earlier", ts = 1_600_000_000_000L))
+        assertEquals("imsg:P1", repo.conversation(id)!!.latestMessageId)
+        assertEquals("dinner at 8", repo.conversation(id)!!.snippet)
+        link.apply(event("X11", bob, PushChatMessage.Unsend(UnsendMessage("P1", 0UL))))
+        repo.conversation(id)!!.let {
+            assertEquals("+15559876543 unsent a message.", it.snippet)
+            assertFalse(it.snippetFromMe)
+            assertEquals("", it.snippetSender)
+        }
+    }
+
+    @Test
+    fun aMessageAlreadyReadOrUnsentElsewhereIsNotAnnounced() {
+        IMessagePrefs.setEnabled(context, true)
+        IMessagePrefs.setNotifyMessages(context, true)
+        val link = DirectLink.get(context)
+        fun announced() = shadowOf(context.getSystemService(NotificationManager::class.java)).activeNotifications
+            .any { it.tag?.startsWith("im:") == true }
+        // Read on the user's iPhone before it reached this phone.
+        link.apply(event("N1", me, PushChatMessage.Read))
+        link.apply(incoming("N1", bob, "seen it already"))
+        assertFalse(announced())
+        assertFalse(repo.conversation("imsg:$bob")!!.unread)
+        // Unsent before it got here.
+        link.apply(event("X12", bob, PushChatMessage.Unsend(UnsendMessage("N2", 0UL))))
+        link.apply(incoming("N2", bob, "never mind", ts = 1_700_000_001_000L))
+        assertEquals("system", repo.message("imsg:N2")!!.direction)
+        assertFalse(announced())
+        // Anything else is.
+        link.apply(incoming("N3", bob, "hello", ts = 1_700_000_002_000L))
+        assertTrue(announced())
+    }
+
+    @Test
+    fun whatComesWhileTheSendWaitsForAppleIsAppliedOnceItIsStored() {
+        val asked = Collections.synchronizedList(ArrayList<Pair<Int, JSONObject>>())
+        lateinit var link: DirectLink
+        link = DirectLink.installForTesting(context) { what, request, _ ->
+            asked += what to request
+            // Apple's Delivered and Bob's tapback come before the send's own answer does.
+            link.apply(DirectArchive.Update.Receipt(listOf("imsg:S9"), DirectArchive.STATUS_DELIVERED))
+            link.apply(DirectArchive.Update.Reaction("imsg:S9", "+15559876543", "❤️", true, false, 5))
+            DirectWire.sent("S9", 1_700_000_005_000L)
+        }
+        link.apply(incoming("B0", bob, "hi"))
+        val tmpId = link.sendText("imsg:$bob", "on my way", null)
+        waitFor("the sent message, delivered and loved") {
+            repo.message("imsg:S9")?.let { it.status == DirectArchive.STATUS_DELIVERED && it.reactions.isNotEmpty() } == true
+        }
+        val row = repo.message("imsg:S9")!!
+        assertEquals("on my way", row.text)
+        assertEquals(listOf(com.lightdecoder.relay.ReactionDto("❤️", listOf("+15559876543"))), row.reactions)
+        assertNull("the local copy gave way", repo.message(MessageRow.tmpMessageId(tmpId)))
+        val (what, request) = asked.single()
+        assertEquals(DirectWire.SEND, what)
+        assertEquals("B0", DirectWire.SendRequest.fromJson(request).target.afterGuid)
+    }
+
+    @Test
+    fun onlyAMessageTheUserSentCanBeUnsent() {
+        // Direct mode on: registered, with the library's files.
+        DirectPrefs.setRegistered(context, true)
+        DirectLibrary.REQUIRED.forEach { File(DirectLibrary.dir(context), it).apply { parentFile?.mkdirs(); writeText("") } }
+        val link = DirectLink.get(context)
+        val now = System.currentTimeMillis()
+        sentHere("V1", "oops", ts = now)
+        assertTrue(link.canUnsend(repo.message("imsg:V1")!!, now))
+        // Unsent on the user's iPhone: the placeholder is the user's, but there is nothing to unsend.
+        link.apply(event("X13", me, PushChatMessage.Unsend(UnsendMessage("V1", 0UL)), participants = listOf(me, bob)))
+        val placeholder = repo.message("imsg:V1")!!
+        assertEquals("system", placeholder.direction)
+        assertFalse(link.canUnsend(placeholder, now))
+        try {
+            runBlocking { link.unsend("imsg:V1") }
+            fail("a placeholder was unsent")
+        } catch (e: DirectEngine.ImessageError) {
+            assertEquals("Only your own messages can be unsent.", e.message)
+        }
+    }
+
+    @Test
+    fun aGroupsNameWithACommaIsItsName() {
+        val link = DirectLink.get(context)
+        link.apply(event("GE2", bob, PushChatMessage.RenameMessage(ChatRenameMessage("Mom, Dad & me")), participants = listOf(me, bob, alice), groupGuid = "G-2"))
+        assertEquals("Mom, Dad & me", repo.conversation("imsg:group:G-2")!!.name)
+        // A group without a name is named after its members.
+        link.apply(event("GE3", bob, PushChatMessage.RenameMessage(ChatRenameMessage("")), participants = listOf(me, bob, alice), groupGuid = "G-3"))
+        assertEquals(setOf("+15559876543", "+15551234567"), repo.conversation("imsg:group:G-3")!!.name.split(", ").toSet())
+    }
+
+    @Test
     fun anEditRebuildsTheTextAndKeepsReactions() {
         val link = DirectLink.get(context)
         link.apply(incoming("E1", bob, "dinner at 7"))
@@ -298,6 +459,15 @@ class DirectLinkTest {
         assertEquals("+15559876543 named the conversation “Ski trip”.", row.text)
         assertFalse(repo.conversation(id)!!.unread)
         assertEquals("me", repo.participants(id).single { it.isMe }.id)
+        // The list shows it as it reads: no "Bob:" before it.
+        assertEquals("+15559876543 named the conversation “Ski trip”.", repo.conversation(id)!!.snippet)
+        assertEquals("", repo.conversation(id)!!.snippetSender)
+        // One the user made: not "You: You named …".
+        link.apply(
+            event("GE4", me, PushChatMessage.RenameMessage(ChatRenameMessage("Ski trip 2")), listOf(me, bob, alice), "G-1", ts = 1_700_000_010_000L),
+        )
+        assertEquals("You named the conversation “Ski trip 2”.", repo.conversation(id)!!.snippet)
+        assertFalse(repo.conversation(id)!!.snippetFromMe)
     }
 
     @Test
@@ -353,6 +523,15 @@ class DirectLinkTest {
         assertFalse(DirectPrefs.sendReadReceipts(context))
         DirectPrefs.setSendReadReceipts(context, true)
         assertTrue(DirectPrefs.sendReadReceipts(context))
+    }
+
+    /** Polls, for work the link does on its own threads. */
+    private fun waitFor(what: String, timeoutMs: Long = 5_000, condition: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (!condition()) {
+            if (System.currentTimeMillis() > deadline) fail("timed out waiting for $what")
+            Thread.sleep(20)
+        }
     }
 
     companion object {

@@ -41,6 +41,7 @@ object DirectPrefs {
     /** Whether people are told when the user has read their messages (one-to-one chats). Off, as on an iPhone. */
     fun sendReadReceipts(context: Context): Boolean = prefs(context).getBoolean(KEY_READ_RECEIPTS, false)
 
+    /** Turns read receipts to people on or off (see [sendReadReceipts]). */
     fun setSendReadReceipts(context: Context, on: Boolean) {
         prefs(context).edit().putBoolean(KEY_READ_RECEIPTS, on).apply()
     }

@@ -68,15 +68,23 @@ class DirectWireTest {
 
     @Test
     fun targetsSurviveTheTripWithAndWithoutAGroup() {
-        val one = DirectWire.Target(listOf("tel:+1", "tel:+2"), null, null, "tel:+1")
+        val one = DirectWire.Target(listOf("tel:+2"), null, null, "tel:+1")
         assertEquals(one, DirectWire.Target.fromJson(JSONObject(one.toJson().toString())))
-        val group = DirectWire.Target(listOf("tel:+1", "tel:+2", "mailto:a@b.c"), "Trip", "G-1", "tel:+1", afterGuid = "LAST")
+        val group = DirectWire.Target(listOf("tel:+2", "mailto:a@b.c"), "Trip", "G-1", "tel:+1", afterGuid = "LAST")
         assertEquals(group, DirectWire.Target.fromJson(JSONObject(group.toJson().toString())))
         // From a side that does not know afterGuid yet.
         val older = JSONObject(one.toJson().toString()).apply { remove("afterGuid") }
         assertNull(DirectWire.Target.fromJson(older).afterGuid)
-        assertTrue(DirectWire.Target(listOf("tel:+2"), null, null, "tel:+1").isOneToOne)
+        assertTrue(one.isOneToOne)
+        assertEquals("tel:+2", one.peer)
         assertFalse(group.isOneToOne)
+        assertNull(group.peer)
+        // The user's own address listed too is not another person.
+        val listingMe = DirectWire.Target(listOf("tel:+1", "tel:+2"), null, null, "tel:+1")
+        assertTrue(listingMe.isOneToOne)
+        assertEquals("tel:+2", listingMe.peer)
+        // Two people besides the user, without a group guid: not one-to-one either.
+        assertNull(DirectWire.Target(listOf("tel:+2", "tel:+3"), null, null, "tel:+1").peer)
     }
 
     @Test
@@ -129,7 +137,7 @@ class DirectWireTest {
 
     @Test
     fun requestsCarryWhatTheOtherSideReads() {
-        val t = DirectWire.Target(listOf("tel:+1", "tel:+2"), null, null, "tel:+1")
+        val t = DirectWire.Target(listOf("tel:+2"), null, null, "tel:+1")
         val send = JSONObject(DirectWire.send(t, "hello", null).toString())
         assertEquals("hello", send.getString("text"))
         assertTrue(send.isNull("replyGuid"))

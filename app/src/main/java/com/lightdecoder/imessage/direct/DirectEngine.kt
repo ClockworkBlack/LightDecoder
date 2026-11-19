@@ -2,6 +2,8 @@ package com.lightdecoder.imessage.direct
 
 import android.content.Context
 import android.util.Log
+import androidx.annotation.StringRes
+import com.lightdecoder.R
 import com.lightdecoder.relay.ConversationDto
 import com.lightdecoder.relay.ParticipantDto
 import java.io.File
@@ -393,7 +395,7 @@ class DirectEngine private constructor(private val app: Context) {
         attachments: List<DirectWire.Attachment>,
         voice: Boolean,
     ): DirectWire.SendReply {
-        if (attachments.isNotEmpty()) throw ImessageError("Pictures and files can't be sent over iMessage from LightDecoder yet.")
+        if (attachments.isNotEmpty()) throw ImessageError(app.getString(R.string.imessage_direct_no_attachments_yet))
         val s = requireSession()
         val (conversation, from) = conversationOf(target)
         val message = NormalMessage(
@@ -402,7 +404,7 @@ class DirectEngine private constructor(private val app: Context) {
             null, null, null, voice, null, null,
         )
         val inst = uniffi.rust_bridge.newMsg(conversation, from, PushChatMessage.Message(message))
-        sendAndConfirm(s, inst, "message")
+        sendAndConfirm(s, inst, Sent.MESSAGE)
         return DirectWire.SendReply(inst.id, inst.sentTimestamp.toLong().takeIf { it > 0 } ?: System.currentTimeMillis(), emptyList())
     }
 
@@ -411,7 +413,7 @@ class DirectEngine private constructor(private val app: Context) {
         val s = requireSession()
         val (conversation, from) = conversationOf(target)
         val inst = uniffi.rust_bridge.newMsg(conversation, from, PushChatMessage.Unsend(UnsendMessage(guid, part.toULong())))
-        sendAndConfirm(s, inst, "unsend")
+        sendAndConfirm(s, inst, Sent.UNSEND)
     }
 
     /** Part [part] of the user's message [guid] now reads [text]; the main process checked the limits. */
@@ -421,7 +423,7 @@ class DirectEngine private constructor(private val app: Context) {
         val inst = uniffi.rust_bridge.newMsg(
             conversation, from, PushChatMessage.Edit(EditMessage(guid, part.toULong(), listOf(textPart(text)))),
         ).copy(sentTimestamp = System.currentTimeMillis().toULong())
-        sendAndConfirm(s, inst, "edit")
+        sendAndConfirm(s, inst, Sent.EDIT)
     }
 
     /**
@@ -434,7 +436,7 @@ class DirectEngine private constructor(private val app: Context) {
         val reaction = ReactMessage(guid, part.toULong(), ReactMessageType.React(DirectArchive.reactionOf(emoji), enable), targetText, null)
         val inst = uniffi.rust_bridge.newMsg(conversation, from, PushChatMessage.React(reaction))
             .copy(sentTimestamp = System.currentTimeMillis().toULong())
-        sendAndConfirm(s, inst, "reaction")
+        sendAndConfirm(s, inst, Sent.REACTION)
         return inst.id
     }
 
@@ -472,11 +474,13 @@ class DirectEngine private constructor(private val app: Context) {
                 is AttachmentType.Inline -> partial.writeBytes(type.v1)
                 is AttachmentType.Mmcs -> {
                     val s = requireSession()
-                    val largest = type.v1.maxByOrNull { it.size } ?: throw ImessageError("Apple sent this attachment without a file.")
+                    val largest = type.v1.maxByOrNull { it.size } ?: throw ImessageError(app.getString(R.string.imessage_direct_attachment_no_file))
                     call { uniffi.rust_bridge.downloadMmcsFile(s, largest, partial.path, null) }
                 }
             }
-            if (partial.length() <= 0 || !partial.renameTo(file)) throw ImessageError("The attachment could not be saved.")
+            if (partial.length() <= 0 || !partial.renameTo(file)) {
+                throw ImessageError(app.getString(R.string.imessage_direct_attachment_not_saved))
+            }
             return file.length()
         } finally {
             partial.delete()
@@ -493,32 +497,34 @@ class DirectEngine private constructor(private val app: Context) {
     private fun conversationOf(target: DirectWire.Target): Pair<ConversationData, String> {
         val from = target.from.takeIf { it in myHandles } ?: Handles.preferredSender(myHandles)
             ?: throw ImessageError("This device has no registered iMessage address.")
-        val chatGuid = if (target.isOneToOne) chatGuids.guidFor(target.participants.single()) else null
+        val chatGuid = target.peer?.let(chatGuids::guidFor)
         return DirectMessages.conversation(target, from, chatGuid) to from
+    }
+
+    /** What [sendAndConfirm] sends, with the errors it can end in. */
+    private enum class Sent(@StringRes val notConfirmed: Int, @StringRes val refused: Int) {
+        MESSAGE(R.string.imessage_direct_message_not_confirmed, R.string.imessage_direct_message_refused),
+        UNSEND(R.string.imessage_direct_unsend_not_confirmed, R.string.imessage_direct_unsend_refused),
+        EDIT(R.string.imessage_direct_edit_not_confirmed, R.string.imessage_direct_edit_refused),
+        REACTION(R.string.imessage_direct_reaction_not_confirmed, R.string.imessage_direct_reaction_refused),
     }
 
     /**
      * Sends [inst] and waits for Apple's answer. When the library had nobody to send it to (no
      * device besides this one), no answer comes and there is nothing to wait for.
      */
-    private suspend fun sendAndConfirm(s: SharedPushStateHandle, inst: MessageInst, what: String) {
+    private suspend fun sendAndConfirm(s: SharedPushStateHandle, inst: MessageInst, what: Sent) {
         val waiter = CompletableDeferred<String?>()
         confirms[inst.id] = waiter
         try {
             val sent = call { uniffi.rust_bridge.sendMessage(s, inst) }
             if (!sent) {
-                Log.i(TAG, "$what had no device to go to")
+                Log.i(TAG, "${what.name.lowercase()} had no device to go to")
                 return
             }
             val answer = withTimeoutOrNull(CONFIRM_TIMEOUT_MS) { waiter.await() }
-                ?: throw ImessageError(
-                    if (what == "message") {
-                        "Apple did not confirm the message within ${CONFIRM_TIMEOUT_MS / 1000} seconds. It may not have been delivered."
-                    } else {
-                        "Apple did not confirm the $what within ${CONFIRM_TIMEOUT_MS / 1000} seconds. It may not have gone through."
-                    },
-                )
-            if (answer.isNotEmpty()) throw ImessageError("Apple refused the $what: $answer")
+                ?: throw ImessageError(app.getString(what.notConfirmed, (CONFIRM_TIMEOUT_MS / 1000).toInt()))
+            if (answer.isNotEmpty()) throw ImessageError(app.getString(what.refused, answer))
         } finally {
             confirms.remove(inst.id)
         }

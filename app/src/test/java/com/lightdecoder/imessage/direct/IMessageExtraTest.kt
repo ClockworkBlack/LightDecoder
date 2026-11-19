@@ -1,5 +1,7 @@
 package com.lightdecoder.imessage.direct
 
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -32,6 +34,7 @@ class IMessageExtraTest {
                 secondarySubcaption = "ssc", tertiarySubcaption = "tsc", root = "imsg:R",
             ),
             sticker = true,
+            unsent = setOf(1, 3),
         )
         assertEquals(full, IMessageExtra.parse(full.toJson()))
         val noAppId = IMessageExtra(app = IMessageExtra.App(name = "Polls"))
@@ -55,9 +58,12 @@ class IMessageExtraTest {
 
     @Test
     fun effectsHaveTheirIphoneNames() {
-        assertEquals("Slam", IMessageExtra.effectName("com.apple.MobileSMS.expressivesend.impact"))
-        assertEquals("Invisible Ink", IMessageExtra.effectName("com.apple.MobileSMS.expressivesend.invisibleink"))
-        assertEquals("Celebration", IMessageExtra.effectName("com.apple.messages.effect.CKSparklesEffect"))
+        val context: Context = ApplicationProvider.getApplicationContext()
+        fun name(id: String) = IMessageExtra.effectName(id)?.let { context.getString(it) }
+        assertEquals("Slam", name("com.apple.MobileSMS.expressivesend.impact"))
+        assertEquals("Invisible Ink", name("com.apple.MobileSMS.expressivesend.invisibleink"))
+        assertEquals("Celebration", name("com.apple.messages.effect.CKSparklesEffect"))
+        assertEquals(12, IMessageExtra.EFFECTS.map { context.getString(it.second) }.toSet().size)
         assertNull(IMessageExtra.effectName("com.example.unknown"))
         assertNull(IMessageExtra.effectName(null))
         assertEquals(12, IMessageExtra.EFFECTS.size)

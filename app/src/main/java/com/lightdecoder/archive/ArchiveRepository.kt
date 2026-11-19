@@ -351,7 +351,9 @@ class ArchiveRepository private constructor(
      * Puts [text] in a message's place, as a row of the conversation's own
      * ("You unsent a message."): same id, time and conversation; its
      * reactions, reply, subject and media go (media files nothing else uses
-     * are deleted). False if there is no such message.
+     * are deleted). As the conversation's latest message, the snippet reads
+     * [text], with no "You:" or sender before it. False if there is no such
+     * message.
      */
     fun replaceWithPlaceholder(messageId: String, text: String): Boolean = write { b ->
         val found = query(b.db, "SELECT rowid, conversation_id FROM messages WHERE message_id = ?", arrayOf(messageId)) {
@@ -377,7 +379,7 @@ class ArchiveRepository private constructor(
             put("updated_at", b.now)
         }, "message_id = ?", arrayOf(messageId))
         indexForSearch(b.db, rowId, messageId, conversationId, "", text)
-        followSnippet(b, conversationId, messageId, text)
+        followSnippet(b, conversationId, messageId, text, systemRow = true)
         b.changed(Kind.MESSAGES, conversationId)
         true
     }
@@ -1026,7 +1028,12 @@ class ArchiveRepository private constructor(
         }
 
         indexForSearch(b.db, rowId, dto.id, dto.conversationId, dto.subject, dto.text)
-        advanceConversation(b, dto.conversationId, dto.id, dto.timestampMs, dto.text, dto.fromMe, dto.senderName)
+        // A row of the conversation's own ("You named the conversation …") already says who.
+        val system = dto.direction == "system"
+        advanceConversation(
+            b, dto.conversationId, dto.id, dto.timestampMs, dto.text,
+            dto.fromMe && !system, if (system) "" else dto.senderName,
+        )
         b.changed(Kind.MESSAGES, dto.conversationId)
         return UpsertResult(inserted = existingRowId == null, replacedTmpId = replacedTmpId, newMediaParts = newMedia)
     }
@@ -1074,10 +1081,18 @@ class ArchiveRepository private constructor(
         if (updated > 0) b.changed(Kind.CONVERSATIONS, conversationId)
     }
 
-    /** The conversation's snippet becomes [text] if [messageId] is its latest message. */
-    private fun followSnippet(b: Batch, conversationId: String, messageId: String, text: String) {
+    /**
+     * The conversation's snippet becomes [text] if [messageId] is its latest
+     * message; for a [systemRow] (which says who itself) without "You:" or a
+     * sender before it.
+     */
+    private fun followSnippet(b: Batch, conversationId: String, messageId: String, text: String, systemRow: Boolean = false) {
         val updated = b.db.update("conversations", ContentValues().apply {
             put("snippet", text)
+            if (systemRow) {
+                put("snippet_from_me", 0)
+                put("snippet_sender", "")
+            }
             put("updated_at", b.now)
         }, "conversation_id = ? AND latest_message_id = ?", arrayOf(conversationId, messageId))
         if (updated > 0) b.changed(Kind.CONVERSATIONS, conversationId)

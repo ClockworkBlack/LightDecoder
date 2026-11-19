@@ -21,6 +21,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 
 /**
  * The direct iMessage link, main-process side: OpenBubbles' library (in the ":imessage" process,
@@ -38,10 +39,16 @@ import kotlinx.coroutines.launch
  * receipt for a message whose send has not returned yet) is held for a while ([HeldUpdates]) and
  * applied once it is.
  */
-class DirectLink private constructor(private val app: Context) {
+class DirectLink private constructor(private val app: Context, requests: Requests?) {
+
+    /** Asks the ":imessage" process ([DirectIpc.Client]); tests answer in its place. */
+    internal fun interface Requests {
+        suspend fun call(what: Int, request: JSONObject, timeoutMs: Long): JSONObject
+    }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val client by lazy { DirectIpc.Client(app, DirectService::class.java) }
+    private val requests: Requests = requests ?: Requests { what, request, timeoutMs -> client.call(what, request, timeoutMs) }
     private val manager: IMessageManager get() = IMessageManager.get(app)
     private val repo: ArchiveRepository get() = manager.repo
 
@@ -85,7 +92,7 @@ class DirectLink private constructor(private val app: Context) {
     suspend fun conversationFor(address: String): String? {
         if (!active) return null
         manager.conversationWith(address)?.let { return it }
-        val reply = client.call(DirectWire.REACH, DirectWire.reach(address), REACH_TIMEOUT_MS)
+        val reply = requests.call(DirectWire.REACH, DirectWire.reach(address), REACH_TIMEOUT_MS)
         val dto = reply.optJSONObject("conversation")?.let(ConversationDto::fromJson) ?: return null
         val stored = toArchive(dto)
         repo.upsertConversation(stored)
@@ -120,29 +127,31 @@ class DirectLink private constructor(private val app: Context) {
             // a reply to one goes as a message of its own.
             val replyGuid = replyToId?.let(DirectArchive::guidOf)
             val replyPart = replyGuid?.let { DirectWire.replyPart(repo.message(replyToId)?.text.orEmpty()) }
-            val reply = client.call(DirectWire.SEND, DirectWire.send(target, text, replyGuid, replyPart), SEND_TIMEOUT_MS)
+            val reply = requests.call(DirectWire.SEND, DirectWire.send(target, text, replyGuid, replyPart), SEND_TIMEOUT_MS)
             DirectWire.errorOf(reply)?.let { throw DirectEngine.ImessageError(it) }
             val sent = DirectWire.SendReply.fromJson(reply)
             val messageId = DirectArchive.messageId(sent.guid)
-            repo.upsertMessage(
-                MessageDto(
-                    id = messageId,
-                    conversationId = conversationId,
-                    tmpId = tmpId,
-                    fromMe = true,
-                    timestampMs = sent.timestampMs.takeIf { it > 0 } ?: System.currentTimeMillis(),
-                    direction = "out",
-                    status = DirectArchive.STATUS_SENT,
-                    statusCode = 1,
-                    transport = IMessageManager.TRANSPORT,
-                    text = text,
-                    parts = listOf(PartDto(partId = "0", kind = "text", text = text)),
-                    replyToId = replyToId.orEmpty(),
-                    isOld = true,
-                ),
+            val stored = MessageDto(
+                id = messageId,
+                conversationId = conversationId,
+                tmpId = tmpId,
+                fromMe = true,
+                timestampMs = sent.timestampMs.takeIf { it > 0 } ?: System.currentTimeMillis(),
+                direction = "out",
+                status = DirectArchive.STATUS_SENT,
+                statusCode = 1,
+                transport = IMessageManager.TRANSPORT,
+                text = text,
+                parts = listOf(PartDto(partId = "0", kind = "text", text = text)),
+                replyToId = replyToId.orEmpty(),
+                isOld = true,
             )
-            // A receipt (or a reaction) can come from Apple before the send's answer did.
-            replayHeld(messageId)
+            // A receipt (or a reaction) can come from Apple before the send's answer did: what
+            // [apply] held for it is applied now, under the same lock, so none slips between.
+            synchronized(this) {
+                repo.upsertMessage(stored)
+                replayHeld(messageId)
+            }
             IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: sent through the iMessage library (Apple confirmed)")
         } catch (e: Exception) {
             Log.w(TAG, "direct send failed", e)
@@ -163,12 +172,13 @@ class DirectLink private constructor(private val app: Context) {
     suspend fun unsend(messageId: String, part: Int = 0) {
         val guid = DirectArchive.guidOf(messageId) ?: throw DirectEngine.ImessageError("Only messages sent through the iMessage library can be unsent here.")
         val row = repo.message(messageId) ?: throw DirectEngine.ImessageError("This message is not in the archive any more.")
-        if (!row.isOutgoing) throw DirectEngine.ImessageError("Only your own messages can be unsent.")
+        // An unsent message's or a group event's row is the user's too, but there is nothing to unsend.
+        if (!row.isOutgoing || row.direction != "out") throw DirectEngine.ImessageError("Only your own messages can be unsent.")
         if (!UnsendWindow.canUnsend(row.timestampMs, System.currentTimeMillis())) {
             throw DirectEngine.ImessageError("Too late to unsend: Apple only allows it within 2 minutes of sending.")
         }
         val target = targetOf(row.conversationId) ?: throw DirectEngine.ImessageError("This chat cannot be reached directly.")
-        val reply = client.call(DirectWire.UNSEND, DirectWire.unsend(target, guid, part), SEND_TIMEOUT_MS)
+        val reply = requests.call(DirectWire.UNSEND, DirectWire.unsend(target, guid, part), SEND_TIMEOUT_MS)
         DirectWire.errorOf(reply)?.let { throw DirectEngine.ImessageError(it) }
         repo.applyDeletion(messageId)
         IMessageLog.add(app, "${IMessageLog.chatRef(row.conversationId)}: unsent through the iMessage library (Apple confirmed)")
@@ -201,11 +211,8 @@ class DirectLink private constructor(private val app: Context) {
             val address = Handles.display(it.id)
             ParticipantDto(id = address, name = nameOf(it.id), number = address, formattedNumber = address)
         }
-        val name = when {
-            !c.isGroup -> ""
-            c.name.isNotBlank() && others.none { Handles.display(it.id) == c.name } && ',' !in c.name -> c.name
-            else -> people.joinToString(", ") { it.name }
-        }
+        // A group's own name (commas and all), else its members' names.
+        val name = if (c.isGroup) c.name.ifBlank { people.joinToString(", ") { it.name } } else ""
         return ConversationDto(
             id = id,
             name = name,
@@ -216,7 +223,9 @@ class DirectLink private constructor(private val app: Context) {
             pinned = existing?.pinned == true,
             muted = existing?.muted == true,
             avatarColor = existing?.avatarColor.orEmpty(),
-            lastMessageTs = maxOf(existing?.lastMessageTs ?: 0, c.lastMessageTs),
+            // A stored chat's latest message (time, id, snippet) moves with its messages only
+            // (ArchiveRepository.upsertMessage); given a time here, they would be written blank.
+            lastMessageTs = if (existing == null) c.lastMessageTs else 0,
             defaultOutgoingId = c.defaultOutgoingId.ifBlank { existing?.defaultOutgoingId.orEmpty() },
             participants = listOf(ParticipantDto(id = ME, isMe = true)) + people,
         )
@@ -273,12 +282,8 @@ class DirectLink private constructor(private val app: Context) {
         val existing = repo.message(update.message.id)
         // Unsent since: it stays unsent.
         if (existing != null && existing.direction == "system" && !system) return
-        repo.upsertConversation(
-            conversation.copy(
-                unread = (conversation.unread || incoming) && !onScreen,
-                lastMessageTs = maxOf(conversation.lastMessageTs, update.message.timestampMs),
-            ),
-        )
+        // The message moves the chat's latest message, time and snippet (see toArchive).
+        repo.upsertConversation(conversation.copy(unread = (conversation.unread || incoming) && !onScreen, lastMessageTs = 0))
         val fresh = update.message.copy(
             conversationId = conversation.id,
             senderId = if (update.message.fromMe) "" else Handles.display(update.message.senderId),
@@ -288,7 +293,10 @@ class DirectLink private constructor(private val app: Context) {
         val message = existing?.let { merged(fresh, it) } ?: fresh
         val result = repo.upsertMessage(message)
         if (incoming) manager.noteTyping(conversation.id, message.senderId, "", typing = false)
-        if (result.inserted && incoming) MessageNotifier.onIncoming(app, repo, message)
+        // What came for it first (read on another device, unsent, edited) applies before it is
+        // announced, so a message already read or unsent makes no sound.
+        replayHeld(message.id)
+        if (result.inserted && incoming) notifyIfStillNew(message)
         if (result.inserted && !system) {
             IMessageLog.add(
                 app,
@@ -296,31 +304,46 @@ class DirectLink private constructor(private val app: Context) {
                     (if (incoming) "received" else "sent from another device") + " through the iMessage library",
             )
         }
-        replayHeld(message.id)
     }
 
-    /** The sender edited a part: the message's text is rebuilt from its parts, marked edited. */
+    /** A notification for [message], just stored, unless it was unsent or its chat read since; with its text as it now is. */
+    private fun notifyIfStillNew(message: MessageDto) {
+        val row = repo.message(message.id) ?: return
+        if (row.direction != "in") return
+        if (repo.conversation(row.conversationId)?.unread != true) return
+        MessageNotifier.onIncoming(app, repo, message.copy(text = row.text))
+    }
+
+    /**
+     * The sender edited a part: the message's text is rebuilt from its parts, marked edited. The
+     * same edit handed over again (Apple's journal does that after a restart) counts once.
+     */
     private fun edit(update: DirectArchive.Update.Edit) {
         val row = repo.message(update.messageId) ?: return hold(update.messageId, update)
         if (row.direction == "system") return
         val extra = IMessageExtra.parse(row.extra)
-        val next = extra.copy(parts = partsOf(row, extra) + (update.part to update.text), edits = extra.edits + 1)
+        if (update.part in extra.unsent) return
+        val parts = partsOf(row, extra)
+        if (parts[update.part] == update.text && update.atMs <= row.editedAtMs) return
+        val next = extra.copy(parts = parts + (update.part to update.text), edits = extra.edits + 1)
         repo.editText(row.id, next.text(), update.atMs, next.toJson())
     }
 
     /**
-     * The sender unsent a part. All of the message: it gives way to "… unsent a message." One
-     * part of several: only that part goes.
+     * The sender unsent a part. Nothing of the message left: it gives way to "… unsent a
+     * message." Else only that part goes, and is remembered as unsent, so the same unsend handed
+     * over again changes nothing.
      */
     private fun unsent(update: DirectArchive.Update.Unsent) {
         val row = repo.message(update.messageId) ?: return hold(update.messageId, update)
         if (row.direction == "system") return
         val extra = IMessageExtra.parse(row.extra)
+        if (update.part in extra.unsent) return
         val parts = partsOf(row, extra)
         val partId = DirectArchive.partId(update.part)
         val media = row.media.map { it.partId }
-        val known = update.part in parts || partId in media
-        if (!known || ((parts - update.part).isEmpty() && (media - partId).isEmpty())) {
+        val textLeft = parts - update.part
+        if (textLeft.isEmpty() && (media - partId).isEmpty()) {
             val text = if (update.fromMe || row.isOutgoing) {
                 app.getString(R.string.imessage_you_unsent)
             } else {
@@ -330,10 +353,8 @@ class DirectLink private constructor(private val app: Context) {
             return
         }
         if (partId in media) repo.removeMediaPart(row.id, partId)
-        if (update.part in parts) {
-            val next = extra.copy(parts = parts - update.part)
-            repo.editText(row.id, next.text(), row.editedAtMs, next.toJson())
-        }
+        val next = extra.copy(parts = textLeft, unsent = extra.unsent + update.part)
+        repo.editText(row.id, next.text(), row.editedAtMs, next.toJson())
     }
 
     /** The user read [update]'s message on another device: the chat is read here too, unless something newer came since. */
@@ -400,18 +421,26 @@ class DirectLink private constructor(private val app: Context) {
 
         /**
          * A message Apple sent again, over the stored copy: what happened to it since (reactions,
-         * edits, later receipts) is kept.
+         * edits, parts unsent, later receipts) is kept.
          */
         internal fun merged(fresh: MessageDto, stored: MessageRow): MessageDto {
             val further = DirectArchive.statusRank(stored.status) > DirectArchive.statusRank(fresh.status)
-            val edited = stored.editedAtMs > 0
+            val unsent = IMessageExtra.parse(stored.extra).unsent
+            val changed = stored.editedAtMs > 0 || unsent.isNotEmpty()
+            val gone = unsent.map(DirectArchive::partId).toSet()
             return fresh.copy(
                 reactions = stored.reactions,
                 status = if (further) stored.status else fresh.status,
                 statusCode = if (further) stored.statusCode else fresh.statusCode,
-                text = if (edited) stored.text else fresh.text,
-                editedAtMs = if (edited) stored.editedAtMs else fresh.editedAtMs,
-                extra = if (edited) stored.extra else fresh.extra,
+                text = if (changed) stored.text else fresh.text,
+                parts = if (changed) {
+                    listOfNotNull(stored.text.takeIf { it.isNotEmpty() }?.let { PartDto(partId = "0", kind = "text", text = it) }) +
+                        fresh.parts.filter { it.isMedia && it.partId !in gone }
+                } else {
+                    fresh.parts
+                },
+                editedAtMs = if (changed) stored.editedAtMs else fresh.editedAtMs,
+                extra = if (changed) stored.extra else fresh.extra,
             )
         }
 
@@ -425,8 +454,17 @@ class DirectLink private constructor(private val app: Context) {
         /** Only in the main process. */
         fun get(context: Context): DirectLink =
             instance ?: synchronized(this) {
-                instance ?: DirectLink(context.applicationContext).also { instance = it }
+                instance ?: DirectLink(context.applicationContext, null).also { instance = it }
             }
+
+        /** Tests: a fresh link whose requests [requests] answers, instead of the ":imessage" process. */
+        internal fun installForTesting(context: Context, requests: Requests): DirectLink = synchronized(this) {
+            DirectLink(context.applicationContext, requests).also { instance = it }
+        }
+
+        internal fun resetForTesting() = synchronized(this) {
+            instance = null
+        }
     }
 }
 

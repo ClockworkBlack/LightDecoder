@@ -133,12 +133,16 @@ class DirectArchiveTest {
     }
 
     @Test
-    fun aGroupTakesItsNameOrItsMembers() {
+    fun aGroupTakesTheNameItsMembersGaveIt() {
         val named = map(message("M3", bob, listOf(me, bob, carol), "hi all", "G-2", "Trip"))
         assertEquals("Trip", (named as DirectArchive.Update.Upsert).conversation.name)
         assertTrue(named.conversation.isGroup)
+        // None: the main process names it after its members, with their contact names.
         val unnamed = map(message("M4", bob, listOf(me, bob, carol), "hi", "G-3"))
-        assertEquals("Bob, Carol", (unnamed as DirectArchive.Update.Upsert).conversation.name)
+        assertEquals("", (unnamed as DirectArchive.Update.Upsert).conversation.name)
+        // A name with a comma is still a name.
+        val commas = map(message("M5", bob, listOf(me, bob, carol), "hi", "G-4", "Mom, Dad & me"))
+        assertEquals("Mom, Dad & me", (commas as DirectArchive.Update.Upsert).conversation.name)
     }
 
     @Test

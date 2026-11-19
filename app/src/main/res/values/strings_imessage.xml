@@ -123,6 +123,33 @@
     <string name="imessage_you_unsent">You unsent a message.</string>
     <string name="imessage_unsent">%1$s unsent a message.</string>
 
+    <!-- Apple's message effects, named as on an iPhone ("Sent with Slam"). -->
+    <string name="imessage_effect_slam">Slam</string>
+    <string name="imessage_effect_loud">Loud</string>
+    <string name="imessage_effect_gentle">Gentle</string>
+    <string name="imessage_effect_invisible_ink">Invisible Ink</string>
+    <string name="imessage_effect_echo">Echo</string>
+    <string name="imessage_effect_spotlight">Spotlight</string>
+    <string name="imessage_effect_balloons">Balloons</string>
+    <string name="imessage_effect_confetti">Confetti</string>
+    <string name="imessage_effect_love">Love</string>
+    <string name="imessage_effect_lasers">Lasers</string>
+    <string name="imessage_effect_fireworks">Fireworks</string>
+    <string name="imessage_effect_celebration">Celebration</string>
+
+    <!-- Direct mode: what the iMessage library's process answers when something does not go through. -->
+    <string name="imessage_direct_no_attachments_yet">Pictures and files can\'t be sent over iMessage from LightDecoder yet.</string>
+    <string name="imessage_direct_attachment_no_file">Apple sent this attachment without a file.</string>
+    <string name="imessage_direct_attachment_not_saved">The attachment could not be saved.</string>
+    <string name="imessage_direct_message_not_confirmed">Apple did not confirm the message within %1$d seconds. It may not have been delivered.</string>
+    <string name="imessage_direct_message_refused">Apple refused the message: %1$s</string>
+    <string name="imessage_direct_unsend_not_confirmed">Apple did not confirm the unsend within %1$d seconds. It may not have gone through.</string>
+    <string name="imessage_direct_unsend_refused">Apple refused the unsend: %1$s</string>
+    <string name="imessage_direct_edit_not_confirmed">Apple did not confirm the edit within %1$d seconds. It may not have gone through.</string>
+    <string name="imessage_direct_edit_refused">Apple refused the edit: %1$s</string>
+    <string name="imessage_direct_reaction_not_confirmed">Apple did not confirm the reaction within %1$d seconds. It may not have gone through.</string>
+    <string name="imessage_direct_reaction_refused">Apple refused the reaction: %1$s</string>
+
     <!-- Errors. -->
     <string name="imessage_error_not_enabled">Blue Bubbles is off. Tick it in the Messages menu.</string>
     <string name="imessage_error_not_installed">OpenBubbles is not installed.</string>

@@ -1,5 +1,8 @@
 package com.lightdecoder.imessage.direct
 
+import androidx.annotation.StringRes
+import com.lightdecoder.R
+import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 
@@ -15,6 +18,8 @@ import org.json.JSONObject
  * @param link    the rich link preview it came with (no image)
  * @param app     the iMessage app (or game) balloon it is
  * @param sticker it is a sticker
+ * @param unsent  the part indexes the sender unsent (gone from [parts] and from the media), so
+ *   that the same unsend handed over again, or Apple sending the message again, changes nothing
  *
  * Pure. Tested in IMessageExtraTest.
  */
@@ -26,6 +31,7 @@ data class IMessageExtra(
     val link: Link? = null,
     val app: App? = null,
     val sticker: Boolean = false,
+    val unsent: Set<Int> = emptySet(),
 ) {
     /** A link preview: the address, the page's title and summary, and the site it is on. */
     data class Link(val url: String, val title: String = "", val summary: String = "", val site: String = "")
@@ -85,6 +91,7 @@ data class IMessageExtra(
             )
         }
         if (sticker) o.put("sticker", true)
+        if (unsent.isNotEmpty()) o.put("unsent", JSONArray(unsent.sorted()))
         return if (o.length() == 0) "" else o.toString()
     }
 
@@ -92,27 +99,33 @@ data class IMessageExtra(
         /** An iPhone lets a message be edited this many times. */
         const val MAX_EDITS = 5
 
+        /** Apple's id of the invisible ink effect: the text stays hidden until tapped. */
         const val INVISIBLE_INK = "com.apple.MobileSMS.expressivesend.invisibleink"
 
-        /** Apple's effects, by id, with the names an iPhone shows ("Sent with Slam"). */
-        val EFFECTS: List<Pair<String, String>> = listOf(
-            "com.apple.MobileSMS.expressivesend.impact" to "Slam",
-            "com.apple.MobileSMS.expressivesend.loud" to "Loud",
-            "com.apple.MobileSMS.expressivesend.gentle" to "Gentle",
-            INVISIBLE_INK to "Invisible Ink",
-            "com.apple.messages.effect.CKEchoEffect" to "Echo",
-            "com.apple.messages.effect.CKSpotlightEffect" to "Spotlight",
-            "com.apple.messages.effect.CKHappyBirthdayEffect" to "Balloons",
-            "com.apple.messages.effect.CKConfettiEffect" to "Confetti",
-            "com.apple.messages.effect.CKHeartEffect" to "Love",
-            "com.apple.messages.effect.CKLasersEffect" to "Lasers",
-            "com.apple.messages.effect.CKFireworksEffect" to "Fireworks",
-            "com.apple.messages.effect.CKSparklesEffect" to "Celebration",
+        /** Apple's effects, by id, with the string resource of the name an iPhone shows ("Sent with Slam"). */
+        val EFFECTS: List<Pair<String, Int>> = listOf(
+            "com.apple.MobileSMS.expressivesend.impact" to R.string.imessage_effect_slam,
+            "com.apple.MobileSMS.expressivesend.loud" to R.string.imessage_effect_loud,
+            "com.apple.MobileSMS.expressivesend.gentle" to R.string.imessage_effect_gentle,
+            INVISIBLE_INK to R.string.imessage_effect_invisible_ink,
+            "com.apple.messages.effect.CKEchoEffect" to R.string.imessage_effect_echo,
+            "com.apple.messages.effect.CKSpotlightEffect" to R.string.imessage_effect_spotlight,
+            "com.apple.messages.effect.CKHappyBirthdayEffect" to R.string.imessage_effect_balloons,
+            "com.apple.messages.effect.CKConfettiEffect" to R.string.imessage_effect_confetti,
+            "com.apple.messages.effect.CKHeartEffect" to R.string.imessage_effect_love,
+            "com.apple.messages.effect.CKLasersEffect" to R.string.imessage_effect_lasers,
+            "com.apple.messages.effect.CKFireworksEffect" to R.string.imessage_effect_fireworks,
+            "com.apple.messages.effect.CKSparklesEffect" to R.string.imessage_effect_celebration,
         )
 
-        /** The name of the effect [id] ("Slam"), or null for none or one this app does not know. */
-        fun effectName(id: String?): String? = EFFECTS.firstOrNull { it.first == id }?.second
+        /**
+         * The string resource of the effect [id]'s name ("Slam"), or null for none or one this app
+         * does not know.
+         */
+        @StringRes
+        fun effectName(id: String?): Int? = EFFECTS.firstOrNull { it.first == id }?.second
 
+        /** Whether [id] is the invisible ink effect. */
         fun isInvisibleInk(id: String?): Boolean = id == INVISIBLE_INK
 
         /** Reads what [toJson] wrote; anything unreadable gives an empty one. */
@@ -149,6 +162,9 @@ data class IMessageExtra(
                         )
                     },
                     sticker = o.optBoolean("sticker"),
+                    unsent = o.optJSONArray("unsent")?.let { a ->
+                        (0 until a.length()).map { a.optInt(it, -1) }.filter { it >= 0 }.toSet()
+                    }.orEmpty(),
                 )
             } catch (e: JSONException) {
                 IMessageExtra()

@@ -95,6 +95,16 @@ class ArchiveEditsTest {
     }
 
     @Test
+    fun aNewArchivesMessagesTableHasTheNewColumns() {
+        val sql = db.readableDatabase.rawQuery("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'messages'", null).use { c ->
+            assertTrue(c.moveToFirst())
+            c.getString(0)
+        }
+        assertTrue(sql, "edited_at INTEGER NOT NULL DEFAULT 0" in sql)
+        assertTrue(sql, "extra_json TEXT NOT NULL DEFAULT ''" in sql)
+    }
+
+    @Test
     fun anEditKeepsReactionsMediaAndStatusAndMovesTheSnippet() {
         repo.upsertMessage(
             message(
@@ -187,9 +197,26 @@ class ArchiveEditsTest {
         assertEquals("", row.replyToId)
         assertEquals("", row.subject)
         assertFalse(file.exists())
-        assertEquals("You unsent a message.", repo.conversation(CONV)!!.snippet)
+        val conversation = repo.conversation(CONV)!!
+        assertEquals("You unsent a message.", conversation.snippet)
+        // Not "You: You unsent a message."
+        assertFalse(conversation.snippetFromMe)
+        assertEquals("", conversation.snippetSender)
         assertTrue(repo.search("oops").isEmpty())
         assertFalse(repo.replaceWithPlaceholder("imsg:missing", "x"))
+    }
+
+    @Test
+    fun aRowOfTheConversationsOwnIsTheSnippetWithoutWhoBeforeIt() {
+        repo.upsertMessage(message("imsg:A", "hello", ts = 1_000))
+        repo.upsertMessage(
+            message("imsg:EV", "You named the conversation “Trip”.", ts = 2_000, fromMe = true, status = "").copy(direction = "system"),
+        )
+        val conversation = repo.conversation(CONV)!!
+        assertEquals("imsg:EV", conversation.latestMessageId)
+        assertEquals("You named the conversation “Trip”.", conversation.snippet)
+        assertFalse(conversation.snippetFromMe)
+        assertEquals("", conversation.snippetSender)
     }
 
     @Test

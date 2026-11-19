@@ -47,9 +47,10 @@ object DirectWire {
     const val KEY_JSON = "json"
 
     /**
-     * Where a message goes: the conversation's members (the user's own address included), its
-     * group guid and name, the address to send from, and the GUID of the conversation's latest
-     * message ([afterGuid], null when it has none). Built from the archive by the main process.
+     * Where a message goes: the conversation's other members (the user's own address left out:
+     * the library adds the one sent from), its group guid and name, the address to send from, and
+     * the GUID of the conversation's latest message ([afterGuid], null when it has none). Built
+     * from the archive by the main process.
      */
     data class Target(
         val participants: List<String>,
@@ -58,8 +59,11 @@ object DirectWire {
         val from: String,
         val afterGuid: String? = null,
     ) {
+        /** The other person of a one-to-one conversation, else null. [from] is not counted, should it be listed. */
+        val peer: String? get() = participants.filter { it != from }.distinct().singleOrNull()?.takeIf { groupGuid == null }
+
         /** A conversation with one other person. */
-        val isOneToOne: Boolean get() = groupGuid == null && participants.size == 1
+        val isOneToOne: Boolean get() = peer != null
 
         fun toJson(): JSONObject = JSONObject()
             .put("participants", JSONArray(participants))
@@ -172,6 +176,7 @@ object DirectWire {
         JSONObject().put("target", target.toJson()).put("guid", guid).put("part", part).put("emoji", emoji)
             .put("enable", enable).put("targetText", targetText)
 
+    /** The user started ([typing]) or stopped typing in [target]. */
     fun typing(target: Target, typing: Boolean): JSONObject = JSONObject().put("target", target.toJson()).put("typing", typing)
 
     /** The user read the chat up to message [guid]. */

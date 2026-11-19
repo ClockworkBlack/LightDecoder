@@ -67,7 +67,7 @@ object DirectMessages {
      * only in a one-to-one chat and only with read receipts on, as on an iPhone.
      */
     fun readReceiptParticipants(target: DirectWire.Target, sendReadReceipts: Boolean): List<String> =
-        if (sendReadReceipts && target.isOneToOne) target.participants else emptyList()
+        if (sendReadReceipts) listOfNotNull(target.peer) else emptyList()
 
     /**
      * The library's conversation for [target], sent from [from]: its members with the user, the
