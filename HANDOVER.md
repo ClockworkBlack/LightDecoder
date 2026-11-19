@@ -8,6 +8,11 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
    had earlier chosen "build with a warning", then "pause on Discord", and has now asked for
    the web-view tab only, with no bridge). **Instagram: skipped** (ban risk, like Messenger).
 
+## 0.5.67 (versionCode 78) - full emoji list scrolls when reacting
+- The reaction emoji picker's BottomSheet took vertical drags (its nested-scroll child was the
+  category row), so the list could not scroll. `behavior.isDraggable = false`; Back or outside tap
+  closes. Unit tests: 1130 (1 skipped), all passing. Next version: 0.5.68 / 79.
+
 ## 0.5.66 (versionCode 77) - answered message shown by default; real blur behind the thread view
 - Owner: show the message being replied to in the default view too. Every reply has a faded copy of
   what it answers (tap opens the thread); no lines unless "Show reply threads in the chat" is on.
@@ -15,7 +20,7 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - Thread view: RenderEffect blur on ThreadActivity's root (Android 12+), lighter veil (55% white /
   45% black); Android 8-11 get a 1/8-size snapshot blurred in software (`Blur.kt`). Owner's phone is
   Android 12+. Not yet seen on a device. Unit tests: 1130 (1 skipped), all passing.
-  Next version: 0.5.67 / 78.
+ 
 
 ## 0.5.65 (versionCode 76) - reply threads open on tap, clean chat by default
 - Owner: the chain should show when a reply is pressed, not by default. Default now: plain bubbles, a
