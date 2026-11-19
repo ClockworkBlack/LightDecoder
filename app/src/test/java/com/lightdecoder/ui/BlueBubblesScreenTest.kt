@@ -2089,11 +2089,11 @@ class BlueBubblesScreenTest {
             val download = asked(asked, com.lightdecoder.imessage.direct.DirectWire.DOWNLOAD).single()
             assertEquals("DESC-P1", download.getString("descriptor"))
             assertTrue(java.io.File(imRepo.mediaPart("imsg:P1", "p0")!!.localPath).readBytes().contentEquals(picture))
-            // Her reply quotes her message, from the iMessage archive (iPhone-style: "Reply" under it says what it answers).
+            // Her reply quotes her message, from the iMessage archive (iPhone-style: a faded copy of it above the reply).
             scenario.waitFor("the quote") { a ->
                 val row = bubbleOf(a, "About that")
                 row?.findViewById<android.widget.TextView>(R.id.quoteText)?.takeIf { it.isShown }?.text?.toString() == "Hers" ||
-                    row?.findViewById<android.widget.TextView>(R.id.replyMarker)?.takeIf { it.isShown }?.contentDescription?.toString()?.contains(": Hers, ") == true
+                    row?.findViewById<android.widget.TextView>(R.id.threadQuote)?.takeIf { it.isShown }?.text?.toString() == "Hers"
             }
             // Tapped: the gallery of her iMessage chat.
             scenario.onActivity { a -> a.findViewById<RecyclerView>(R.id.messages).findViewById<View>(R.id.mediaFrame).performClick() }

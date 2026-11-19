@@ -25,7 +25,9 @@ import com.lightdecoder.databinding.DialogReplyThreadBinding
 
 /**
  * The thread view of iPhone-style chats, opened by a tap on a reply, on a message others answered
- * or on "N Replies" (as an iPhone opens it from "N Replies" or a reply's faded copy): over the whole chat, which is blurred (Android 12 and later) and veiled behind it,
+ * or on "N Replies" (as an iPhone opens it from "N Replies" or a reply's faded copy): over the whole
+ * chat, which is blurred and lightly veiled behind it ([Backdrop]: Android 12 and later blur the
+ * chat itself; earlier ones show a blurred snapshot of it taken when the panel opens),
  * the first message of the thread ([rootId]) and every reply in it, drawn as in the chat and
  * joined by a line, with a field at the bottom whose message goes into the thread ([send]). A tap
  * beside the messages, or Back, closes it. [update] shows it as the chat now is (new replies
@@ -89,9 +91,6 @@ class ReplyThreadPanel(
             view.setPadding(bars.left, bars.top, bars.right, maxOf(bars.bottom, ime.bottom))
             WindowInsetsCompat.CONSUMED
         }
-        // A veil over the chat: lighter where the chat is blurred under it.
-        val blurs = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
-        b.threadScrim.setBackgroundColor(ContextCompat.getColor(activity, if (blurs) R.color.phone_thread_scrim else R.color.phone_thread_scrim_solid))
         b.threadScrim.setOnClickListener { dismiss() }
 
         b.threadMessages.layoutManager = layoutManager
@@ -152,6 +151,10 @@ class ReplyThreadPanel(
 
     fun show() {
         blur()
+        // A veil over the blurred chat: light, so the chat shows faded through it; nearly opaque where nothing blurs.
+        binding.threadScrim.setBackgroundColor(
+            ContextCompat.getColor(activity, if (backdrop == Backdrop.VEIL) R.color.phone_thread_scrim_solid else R.color.phone_thread_scrim),
+        )
         dialog.show()
     }
 
@@ -173,19 +176,84 @@ class ReplyThreadPanel(
         }
     }
 
+    /** How the chat behind is shown while the panel is open. */
+    enum class Backdrop {
+        /** Not open (or closed). */
+        NONE,
+
+        /** Android 12 and later: the chat's own views are blurred ([blurEffect] on [behind]). */
+        RENDER_EFFECT,
+
+        /** Earlier: a blurred snapshot of the chat, taken when the panel opens, behind the veil. */
+        SNAPSHOT,
+
+        /** No snapshot could be taken: a nearly opaque veil only. */
+        VEIL,
+    }
+
+    /** How the chat behind is shown now. */
+    var backdrop: Backdrop = Backdrop.NONE
+        private set
+
+    /** The blur set on [behind] while open (Android 12 and later); null otherwise. */
+    var blurEffect: RenderEffect? = null
+        private set
+
     private fun blur() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val radius = BLUR_DP * activity.resources.displayMetrics.density
-            behind.setRenderEffect(RenderEffect.createBlurEffect(radius, radius, Shader.TileMode.CLAMP))
+            val effect = RenderEffect.createBlurEffect(radius, radius, Shader.TileMode.CLAMP)
+            behind.setRenderEffect(effect)
+            blurEffect = effect
+            backdrop = Backdrop.RENDER_EFFECT
+            return
         }
+        val snapshot = snapshot(activity.window.decorView)
+        if (snapshot == null) {
+            backdrop = Backdrop.VEIL
+            return
+        }
+        binding.threadPanel.background = android.graphics.drawable.BitmapDrawable(activity.resources, snapshot).apply { isFilterBitmap = true }
+        backdrop = Backdrop.SNAPSHOT
     }
 
     private fun unblur() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) behind.setRenderEffect(null)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && blurEffect != null) behind.setRenderEffect(null)
+        blurEffect = null
+        val shown = binding.threadPanel.background as? android.graphics.drawable.BitmapDrawable
+        binding.threadPanel.background = null
+        shown?.bitmap?.recycle()
+        backdrop = Backdrop.NONE
+    }
+
+    /** [view] drawn at an eighth of its size and blurred ([Blur.boxBlur]); null when it cannot be drawn. */
+    private fun snapshot(view: View): android.graphics.Bitmap? {
+        val w = view.width / SNAPSHOT_SCALE
+        val h = view.height / SNAPSHOT_SCALE
+        if (w < 1 || h < 1) return null
+        return try {
+            val bitmap = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+            val canvas = android.graphics.Canvas(bitmap)
+            canvas.scale(w.toFloat() / view.width, h.toFloat() / view.height)
+            view.draw(canvas)
+            Blur.boxBlur(bitmap, SNAPSHOT_BLUR_RADIUS)
+            bitmap
+        } catch (e: RuntimeException) {
+            // A view that cannot be drawn in software (a hardware bitmap): the veil alone.
+            null
+        } catch (e: OutOfMemoryError) {
+            null
+        }
     }
 
     private companion object {
         const val BLUR_DP = 18f
+
+        /** The snapshot (before Android 12) is taken at 1/this of the screen's size... */
+        const val SNAPSHOT_SCALE = 8
+
+        /** ...and blurred this many of its pixels (about 24 of the screen's). */
+        const val SNAPSHOT_BLUR_RADIUS = 3
         const val FIELD_RADIUS_DP = 18f
         const val DISABLED_ALPHA = 0.4f
     }

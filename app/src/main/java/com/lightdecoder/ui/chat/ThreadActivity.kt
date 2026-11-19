@@ -675,7 +675,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         })
         ItemTouchHelper(SwipeToReply()).attachToRecyclerView(binding.messages)
         // iPhone-style chats: the lines joining inline replies to what they answer.
-        binding.messages.addItemDecoration(ReplyLines(this))
+        binding.messages.addItemDecoration(ReplyLines(this) { threadsInChat })
     }
 
     /**

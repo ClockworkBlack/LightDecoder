@@ -56,8 +56,14 @@ class ReplyRowLayout @JvmOverloads constructor(
  * side to the other, an elbow out of the message's inner edge into the top of the reply. Drawn
  * under the rows each frame from where their bubbles are now, so it follows scrolling, swipes,
  * recycling and rows changing height; an end scrolled out of sight runs off the list's edge.
+ * Without [copyLines] (the default look, reply threads not drawn in the chat) a faded copy stands
+ * alone: no line joins it to its reply.
  */
-class ReplyLines(context: Context) : RecyclerView.ItemDecoration() {
+class ReplyLines(
+    context: Context,
+    /** Whether a faded copy is joined to its reply by a line ("Show reply threads in the chat"). */
+    private val copyLines: () -> Boolean = { true },
+) : RecyclerView.ItemDecoration() {
 
     private val density = context.resources.displayMetrics.density
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -103,7 +109,7 @@ class ReplyLines(context: Context) : RecyclerView.ItemDecoration() {
             val replyRight = rightSide(item, rtl)
             val quote = holder?.binding?.threadQuote?.takeIf { it.visibility == View.VISIBLE }
             // The faded copy (on the answered message's side) to its reply.
-            if (holder != null && quote != null && bounds(quote, parent, upper) && bodyBounds(holder, parent, lower)) {
+            if (holder != null && quote != null && copyLines() && bounds(quote, parent, upper) && bodyBounds(holder, parent, lower)) {
                 val quoteRight = upper.centerX() > parent.width / 2f
                 connect(c, upper, quoteRight, lower, replyRight, parent)
             }
