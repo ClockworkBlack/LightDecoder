@@ -214,6 +214,32 @@
     <!-- %1$s: the iMessage app's name, or imessage_app_unnamed. -->
     <string name="imessage_app_only_on_apple">%1$s can only be opened on an iPhone, iPad or Mac.</string>
     <string name="imessage_app_unnamed">This iMessage app</string>
+    <!-- iMessage apps played in a separately installed extension app (OpenPigeon for GamePigeon). -->
+    <!-- The composer's attach choices in an iMessage chat, when an extension app is installed. -->
+    <string name="imessage_attach_photos">Photos and videos</string>
+    <string name="imessage_attach_games">Games</string>
+    <!-- %1$s: the extension app (OpenPigeon); %2$s: the iMessage app it plays (GamePigeon). -->
+    <string name="imessage_app_install">Install %1$s to play %2$s games with iPhone users.</string>
+    <string name="imessage_app_install_button">Install</string>
+    <!-- %1$s: the extension app (OpenPigeon). -->
+    <string name="imessage_app_unverified">This copy of %1$s could not be verified, so games are not opened with it.</string>
+    <!-- %1$s: the extension app (OpenPigeon). -->
+    <string name="imessage_app_no_answer">%1$s did not respond. Try again.</string>
+    <!-- %1$s: why, in words. -->
+    <string name="imessage_app_move_failed">The move was not sent: %1$s</string>
+    <!-- %1$s: why, in words. -->
+    <string name="imessage_app_card_failed">The game was not sent: %1$s</string>
+    <!-- %1$s: the extension app (OpenPigeon). -->
+    <string name="imessage_app_card_invalid">%1$s made a game that cannot be sent.</string>
+    <!-- Title of the confirmation before a new game goes. %1$s: the iMessage app (GamePigeon). -->
+    <string name="imessage_app_send_title">Send this %1$s game?</string>
+    <string name="imessage_app_send">Send</string>
+    <string name="imessage_app_no_store">No app store on this phone can install it.</string>
+    <string name="imessage_app_still_sending">This game has not been sent yet. Open it once it has been sent.</string>
+    <!-- A reason, used in imessage_app_move_failed. -->
+    <string name="imessage_app_move_too_soon">it came too soon after the last one. Try again.</string>
+    <!-- A reason, used in imessage_app_move_failed and imessage_app_card_failed. -->
+    <string name="imessage_app_move_invalid">it cannot be sent.</string>
     <!-- For TalkBack. %1$s: the page's title, or its address. -->
     <string name="imessage_link_preview">Link preview: %1$s</string>
     <string name="imessage_new_group">New iMessage group</string>

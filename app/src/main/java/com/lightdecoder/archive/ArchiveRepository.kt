@@ -417,6 +417,20 @@ class ArchiveRepository private constructor(
         arrayOf(conversationId, prefix),
     ) { it.getString(0) }.firstOrNull()
 
+    /**
+     * Up to [limit] messages of a conversation whose id starts with [prefix] and whose extra data
+     * contains [needle] (a caller checks what it really holds), newest first.
+     */
+    fun messagesWithExtra(conversationId: String, needle: String, prefix: String = "imsg:", limit: Int = 20): List<MessageRow> {
+        if (needle.isEmpty()) return emptyList()
+        val rows = query(
+            "SELECT * FROM messages WHERE conversation_id = ? AND substr(message_id, 1, ${prefix.length}) = ? " +
+                "AND instr(extra_json, ?) > 0 ORDER BY timestamp_ms DESC, rowid DESC LIMIT ${limit.coerceAtLeast(0)}",
+            arrayOf(conversationId, prefix, needle),
+        ) { it.toMessage() }
+        return withMedia(rows)
+    }
+
     /** Like [latestMessageId], among the messages other people sent. */
     fun latestIncomingMessageId(conversationId: String, prefix: String = "imsg:"): String? = query(
         "SELECT message_id FROM messages WHERE conversation_id = ? AND substr(message_id, 1, ${prefix.length}) = ? " +

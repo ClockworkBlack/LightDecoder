@@ -68,6 +68,43 @@ data class IMessageExtra(
         /** Whether a tap can open it in the browser (an app that keeps its state in a web address, as a Mac opens it). */
         val opensInBrowser: Boolean
             get() = url.startsWith("https://", ignoreCase = true) || url.startsWith("http://", ignoreCase = true)
+
+        /** As stored with the message (and as it crosses to the ":imessage" process, [DirectWire]). */
+        fun toJson(): JSONObject = JSONObject()
+            .put("name", name)
+            .put("appId", appId ?: JSONObject.NULL)
+            .put("bundleId", bundleId)
+            .put("url", url)
+            .put("session", session)
+            .put("ldText", ldText)
+            .put("isLive", isLive)
+            .put("imageTitle", imageTitle)
+            .put("imageSubtitle", imageSubtitle)
+            .put("caption", caption)
+            .put("subcaption", subcaption)
+            .put("secondarySubcaption", secondarySubcaption)
+            .put("tertiarySubcaption", tertiarySubcaption)
+            .put("root", root)
+
+        companion object {
+            /** Reads what [toJson] wrote. */
+            fun fromJson(o: JSONObject) = App(
+                name = o.text("name"),
+                appId = if (o.has("appId") && !o.isNull("appId")) o.optLong("appId") else null,
+                bundleId = o.text("bundleId"),
+                url = o.text("url"),
+                session = o.text("session"),
+                ldText = o.text("ldText"),
+                isLive = o.optBoolean("isLive"),
+                imageTitle = o.text("imageTitle"),
+                imageSubtitle = o.text("imageSubtitle"),
+                caption = o.text("caption"),
+                subcaption = o.text("subcaption"),
+                secondarySubcaption = o.text("secondarySubcaption"),
+                tertiarySubcaption = o.text("tertiarySubcaption"),
+                root = o.text("root"),
+            )
+        }
     }
 
     /** The message's text from [parts]: each part's text in part order, one per line. */
@@ -83,26 +120,7 @@ data class IMessageExtra(
         link?.let {
             o.put("link", JSONObject().put("url", it.url).put("title", it.title).put("summary", it.summary).put("site", it.site))
         }
-        app?.let {
-            o.put(
-                "app",
-                JSONObject()
-                    .put("name", it.name)
-                    .put("appId", it.appId ?: JSONObject.NULL)
-                    .put("bundleId", it.bundleId)
-                    .put("url", it.url)
-                    .put("session", it.session)
-                    .put("ldText", it.ldText)
-                    .put("isLive", it.isLive)
-                    .put("imageTitle", it.imageTitle)
-                    .put("imageSubtitle", it.imageSubtitle)
-                    .put("caption", it.caption)
-                    .put("subcaption", it.subcaption)
-                    .put("secondarySubcaption", it.secondarySubcaption)
-                    .put("tertiarySubcaption", it.tertiarySubcaption)
-                    .put("root", it.root),
-            )
-        }
+        app?.let { o.put("app", it.toJson()) }
         if (sticker) o.put("sticker", true)
         if (unsent.isNotEmpty()) o.put("unsent", JSONArray(unsent.sorted()))
         return if (o.length() == 0) "" else o.toString()
@@ -159,24 +177,7 @@ data class IMessageExtra(
                     link = o.optJSONObject("link")?.let {
                         Link(it.text("url"), it.text("title"), it.text("summary"), it.text("site"))
                     },
-                    app = o.optJSONObject("app")?.let {
-                        App(
-                            name = it.text("name"),
-                            appId = if (it.has("appId") && !it.isNull("appId")) it.optLong("appId") else null,
-                            bundleId = it.text("bundleId"),
-                            url = it.text("url"),
-                            session = it.text("session"),
-                            ldText = it.text("ldText"),
-                            isLive = it.optBoolean("isLive"),
-                            imageTitle = it.text("imageTitle"),
-                            imageSubtitle = it.text("imageSubtitle"),
-                            caption = it.text("caption"),
-                            subcaption = it.text("subcaption"),
-                            secondarySubcaption = it.text("secondarySubcaption"),
-                            tertiarySubcaption = it.text("tertiarySubcaption"),
-                            root = it.text("root"),
-                        )
-                    },
+                    app = o.optJSONObject("app")?.let(App::fromJson),
                     sticker = o.optBoolean("sticker"),
                     unsent = o.optJSONArray("unsent")?.let { a ->
                         (0 until a.length()).map { a.optInt(it, -1) }.filter { it >= 0 }.toSet()
@@ -186,7 +187,8 @@ data class IMessageExtra(
                 IMessageExtra()
             }
         }
-
-        private fun JSONObject.text(key: String): String = if (!has(key) || isNull(key)) "" else optString(key)
     }
 }
+
+private fun JSONObject.text(key: String): String = if (!has(key) || isNull(key)) "" else optString(key)
+

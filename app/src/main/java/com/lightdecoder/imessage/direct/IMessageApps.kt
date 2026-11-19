@@ -21,7 +21,7 @@ object IMessageApps {
         fun engage(context: Context, row: MessageRow, app: IMessageExtra.App): Boolean
     }
 
-    /** The extension host, when one is set up; none yet. */
+    /** The extension host ([com.lightdecoder.imessage.madrid.MadridHost]), set at app start. */
     @Volatile
     var host: Host? = null
 

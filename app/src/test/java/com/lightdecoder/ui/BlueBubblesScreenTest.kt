@@ -2241,7 +2241,19 @@ class BlueBubblesScreenTest {
                     assertEquals("8 Ball", item.findViewById<android.widget.TextView>(R.id.appImageTitle).text.toString())
                     assertEquals("GamePigeon", item.findViewById<android.widget.TextView>(R.id.appName).text.toString())
                     assertEquals(View.GONE, item.findViewById<View>(R.id.appSubcaption).visibility)
-                    // Nothing here plays it: it opens on an Apple device, and nothing is opened.
+                    // The app that plays it here is not installed: it is offered, from the store.
+                    item.findViewById<View>(R.id.bubble).performClick()
+                    val install = latestDialog()
+                    assertEquals(
+                        "Install OpenPigeon to play GamePigeon games with iPhone users.",
+                        install.findViewById<android.widget.TextView>(android.R.id.message)!!.text.toString(),
+                    )
+                    assertEquals(null, shadowOf(activity).nextStartedActivity)
+                    install.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+                    shadowOf(android.os.Looper.getMainLooper()).idle()
+                    assertEquals("market://details?id=com.openbubbles.openpigeon", shadowOf(activity).nextStartedActivity.dataString)
+                    // With no app to play it here at all, it opens on an Apple device, and nothing is opened.
+                    com.lightdecoder.imessage.direct.IMessageApps.host = null
                     item.findViewById<View>(R.id.bubble).performClick()
                     assertEquals("GamePigeon can only be opened on an iPhone, iPad or Mac.", org.robolectric.shadows.ShadowToast.getTextOfLatestToast())
                     assertEquals(null, shadowOf(activity).nextStartedActivity)

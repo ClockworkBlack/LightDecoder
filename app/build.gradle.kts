@@ -127,6 +127,8 @@ android {
     }
     buildFeatures {
         viewBinding = true
+        // The iMessage-app extension interface (src/main/aidl/com/bluebubbles/messaging).
+        aidl = true
     }
     testOptions {
         unitTests {

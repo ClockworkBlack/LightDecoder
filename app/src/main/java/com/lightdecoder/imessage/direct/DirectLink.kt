@@ -284,6 +284,152 @@ class DirectLink private constructor(
         return tmpId
     }
 
+    /**
+     * Sends an iMessage app's new card (a new game an extension app made, [com.lightdecoder.imessage.madrid.MadridHost]):
+     * [app]'s balloon, with the picture [jpeg] if it has one. As a text: a local copy now
+     * ("tmp:<tmpId>"), the sent card once Apple confirms it; the card is the root of its session.
+     */
+    fun sendAppCard(conversationId: String, app: IMessageExtra.App, jpeg: ByteArray?): String {
+        val tmpId = UUID.randomUUID().toString()
+        val media = jpeg?.let { bytes ->
+            val file = repo.outboxFileFor(tmpId)
+            file.parentFile?.mkdirs()
+            file.writeBytes(bytes)
+            Outgoing(file, DirectEngine.APP_IMAGE_MIME, DirectEngine.APP_IMAGE_NAME, voice = false)
+        }
+        typingThrottle.sent(conversationId)
+        val card = app.copy(root = "")
+        repo.insertLocalOutgoing(
+            tmpId, conversationId, card.summary(), media?.file?.path, media?.mime, media?.name, null,
+            System.currentTimeMillis(), IMessageExtra(app = card).toJson(),
+        )
+        inTurn(conversationId) { deliver(tmpId, conversationId, card.summary(), null, media, appCard = card) }
+        return tmpId
+    }
+
+    /** How an iMessage app's update went ([sendAppUpdate]). */
+    data class AppUpdate(
+        /** Apple confirmed it; it is stored. */
+        val sent: Boolean,
+        /** Why it did not go, for the screens; null when it went. */
+        val error: String? = null,
+        /** Apple's confirmation did not come in time: it may have gone all the same. */
+        val unconfirmed: Boolean = false,
+    )
+
+    /**
+     * Sends an iMessage app's update (a game's move) to its session, whose first card is
+     * [rootMessageId]: [app]'s new state, with the new picture [jpeg] if there is one (else the
+     * stored copy shows the session's previous picture). In turn with the chat's other sends. Once
+     * Apple confirmed it, it is stored as a card of its own (as an iPhone shows a move).
+     */
+    suspend fun sendAppUpdate(conversationId: String, rootMessageId: String, app: IMessageExtra.App, jpeg: ByteArray?): AppUpdate {
+        val rootGuid = DirectArchive.guidOf(rootMessageId)
+            ?: return AppUpdate(sent = false, error = this.app.getString(R.string.imessage_direct_unreachable))
+        val done = kotlinx.coroutines.CompletableDeferred<AppUpdate>()
+        inTurn(conversationId) {
+            try {
+                done.complete(deliverAppUpdate(conversationId, rootGuid, app.copy(root = rootMessageId), jpeg))
+            } finally {
+                done.complete(AppUpdate(sent = false, error = this.app.getString(R.string.imessage_direct_unreachable)))
+            }
+        }
+        return done.await()
+    }
+
+    /**
+     * The newest stored iMessage of [conversationId] in iMessage app session [session] (a card or
+     * a move; the one a tap opens), or null when there is none.
+     */
+    fun latestOfAppSession(conversationId: String, session: String): MessageRow? =
+        appSessionRows(conversationId, session).firstOrNull()
+
+    /** The stored iMessages of [conversationId] in iMessage app session [session], newest first. */
+    private fun appSessionRows(conversationId: String, session: String, limit: Int = 20): List<MessageRow> {
+        if (session.isEmpty()) return emptyList()
+        return repo.messagesWithExtra(conversationId, session, limit = limit)
+            .filter { IMessageExtra.parse(it.extra).app?.session == session }
+    }
+
+    /** The newest picture shown here for iMessage app session [session] (a file and its type), or null. */
+    private fun previousAppImage(conversationId: String, session: String): Pair<File, String>? {
+        for (row in appSessionRows(conversationId, session)) {
+            val m = row.media.firstOrNull { it.mime.startsWith("image/") && existing(it.localPath) != null } ?: continue
+            return File(m.localPath) to m.mime
+        }
+        return null
+    }
+
+    private suspend fun deliverAppUpdate(conversationId: String, rootGuid: String, balloon: IMessageExtra.App, jpeg: ByteArray?): AppUpdate {
+        val file = jpeg?.let { bytes -> repo.outboxFileFor(UUID.randomUUID().toString()).also { it.parentFile?.mkdirs(); it.writeBytes(bytes) } }
+        try {
+            val target = targetOf(conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
+            val reply = requests.call(DirectWire.EXTENSION, DirectWire.extension(target, rootGuid, false, balloon, file?.path), MEDIA_SEND_TIMEOUT_MS)
+            DirectWire.errorOf(reply)?.let {
+                throw if (DirectWire.unconfirmed(reply)) DirectEngine.Unconfirmed(it) else DirectEngine.ImessageError(it)
+            }
+            val sent = DirectWire.SendReply.fromJson(reply)
+            val messageId = DirectArchive.messageId(sent.guid)
+            val mediaParts = sent.parts.map { p ->
+                PartDto(
+                    partId = p.partId, kind = "media", mediaId = DirectArchive.mediaId(sent.guid, p.idx),
+                    mime = p.mime, fileName = p.name, size = p.size,
+                )
+            }
+            val kept = file?.let { f -> mediaParts.firstOrNull()?.let { part -> part to keepSent(f, part) } }
+            // No new picture: the stored copy shows the session's previous one (as an iPhone does),
+            // a copy of its own, here only (Apple was sent none).
+            val reused = if (file != null || mediaParts.isNotEmpty()) null else previousAppImage(conversationId, balloon.session)?.let { (old, mime) ->
+                val part = PartDto(
+                    partId = DirectArchive.partId(1), kind = "media", mediaId = DirectArchive.mediaId(sent.guid, 1),
+                    mime = mime, fileName = old.name, size = old.length(),
+                )
+                val copy = repo.mediaFileFor(part.mediaId, DirectMedia.extensionFor(part.mime, part.fileName))
+                try {
+                    old.copyTo(copy, overwrite = true)
+                    part to copy
+                } catch (e: java.io.IOException) {
+                    Log.w(TAG, "previous picture not copied", e)
+                    copy.delete()
+                    null
+                }
+            }
+            val text = balloon.summary()
+            val stored = MessageDto(
+                id = messageId,
+                conversationId = conversationId,
+                fromMe = true,
+                timestampMs = sent.timestampMs.takeIf { it > 0 } ?: System.currentTimeMillis(),
+                direction = "out",
+                status = DirectArchive.STATUS_SENT,
+                statusCode = 1,
+                transport = IMessageManager.TRANSPORT,
+                text = text,
+                parts = listOfNotNull(text.takeIf { it.isNotEmpty() }?.let { PartDto(partId = "0", kind = "text", text = it) }) +
+                    mediaParts + listOfNotNull(reused?.first),
+                isOld = true,
+                extra = IMessageExtra(app = balloon).toJson(),
+            )
+            synchronized(this) {
+                repo.upsertMessage(stored)
+                kept?.let { (part, f) -> if (f != null) record(messageId, part.partId, part.mediaId, f, part.mime) }
+                reused?.let { (part, f) -> if (record(messageId, part.partId, part.mediaId, f, part.mime) == null) f.delete() }
+                replayHeld(messageId)
+            }
+            IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: iMessage app update sent through the iMessage library (Apple confirmed)")
+            return AppUpdate(sent = true)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "iMessage app update not sent", e)
+            IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: iMessage app update FAILED: ${DirectEngine.readable(e)}")
+            return AppUpdate(sent = false, error = DirectEngine.readable(e), unconfirmed = e is DirectEngine.Unconfirmed)
+        } finally {
+            // Sent, it was moved to the message's media; else it is not needed any more.
+            file?.delete()
+        }
+    }
+
     /** Copies [uri] into [target], at most [DirectMedia.MAX_SEND_BYTES]; throws why it could not. */
     private fun copyCapped(uri: Uri, target: File) {
         val tooBig = DirectEngine.ImessageError(app.getString(R.string.imessage_direct_attachment_too_big, (DirectMedia.MAX_SEND_BYTES shr 20).toInt()))
@@ -363,7 +509,9 @@ class DirectLink private constructor(
         val extra = IMessageExtra.parse(row.extra)
         val media = row.media.firstOrNull()?.let { Outgoing(File(it.localPath), it.mime, it.fileName, extra.voice) }
         repo.setLocalState(tmpId, LocalState.PENDING)
-        inTurn(row.conversationId) { deliver(tmpId, row.conversationId, row.text, row.replyToId.ifEmpty { null }, media, extra.effect) }
+        inTurn(row.conversationId) {
+            deliver(tmpId, row.conversationId, row.text, row.replyToId.ifEmpty { null }, media, extra.effect, extra.app)
+        }
         return true
     }
 
@@ -407,6 +555,7 @@ class DirectLink private constructor(
         replyToId: String?,
         media: Outgoing? = null,
         effect: String? = null,
+        appCard: IMessageExtra.App? = null,
     ) {
         try {
             repo.setLocalState(tmpId, LocalState.SENDING)
@@ -417,9 +566,10 @@ class DirectLink private constructor(
             val replyGuid = replyToId?.let(DirectArchive::guidOf)
             val replyPart = replyGuid?.let { DirectWire.replyPart(repo.message(replyToId)?.text.orEmpty()) }
             val request = DirectWire.send(
-                target, text, replyGuid, replyPart, effect,
+                target, if (appCard != null) "" else text, replyGuid, replyPart, effect,
                 attachments = listOfNotNull(media?.let { DirectWire.Attachment(it.file.path, it.mime, it.name) }),
                 voice = media?.voice == true,
+                app = appCard,
             )
             // A file is uploaded first: that takes longer than a text.
             val reply = requests.call(DirectWire.SEND, request, if (media == null) SEND_TIMEOUT_MS else MEDIA_SEND_TIMEOUT_MS)
@@ -450,7 +600,8 @@ class DirectLink private constructor(
                 parts = listOfNotNull(text.takeIf { it.isNotEmpty() }?.let { PartDto(partId = "0", kind = "text", text = it) }) + mediaParts,
                 replyToId = replyToId.orEmpty(),
                 isOld = true,
-                extra = IMessageExtra(voice = media?.voice == true, effect = effect).toJson(),
+                // An app's card is the first of its session.
+                extra = IMessageExtra(voice = media?.voice == true, effect = effect, app = appCard?.copy(root = messageId)).toJson(),
             )
             // A receipt (or a reaction) can come from Apple before the send's answer did: what
             // [apply] held for it is applied now, under the same lock, so none slips between.
@@ -465,7 +616,8 @@ class DirectLink private constructor(
                 app,
                 "${IMessageLog.chatRef(conversationId)}: sent through the iMessage library (Apple confirmed)" +
                     (if (media != null) " with ${if (media.voice) "a voice message" else media.mime.substringBefore('/')}" else "") +
-                    (if (effect != null) ", with an effect" else ""),
+                    (if (effect != null) ", with an effect" else "") +
+                    (if (appCard != null) ", an iMessage app's card" else ""),
             )
         } catch (e: Exception) {
             Log.w(TAG, "direct send failed", e)
@@ -925,6 +1077,12 @@ class DirectLink private constructor(
         // announced, so a message already read or unsent makes no sound.
         replayHeld(message.id)
         if (result.inserted && incoming) notifyIfStillNew(message)
+        // A move in an iMessage app's session (from them, or from the user's other device): the
+        // extension app that has the session open hears of it.
+        if (result.inserted && !system) {
+            val balloon = IMessageExtra.parse(message.extra).app
+            if (balloon != null && balloon.root.isNotEmpty() && balloon.root != message.id) appEvents?.appUpdateArrived(conversation.id, message)
+        }
         if (result.inserted && !system) {
             IMessageLog.add(
                 app,
@@ -979,6 +1137,8 @@ class DirectLink private constructor(
         val row = repo.message(message.id) ?: return
         if (row.direction != "in") return
         if (repo.conversation(row.conversationId)?.unread != true) return
+        // A game is open in an extension app, which asked for quiet.
+        if (appEvents?.silences(row.conversationId) == true) return
         val inked = IMessageExtra.isInvisibleInk(IMessageExtra.parse(row.extra).effect)
         val text = if (inked) app.getString(R.string.imessage_sent_with, app.getString(R.string.imessage_effect_invisible_ink)) else row.text
         MessageNotifier.onIncoming(app, repo, message.copy(text = text))
@@ -995,6 +1155,7 @@ class DirectLink private constructor(
         val known = row.reactions.any { it.emoji == update.emoji && who in it.participantIds }
         repo.applyReaction(update.messageId, who, update.emoji, update.enable, update.fromMe, update.atMs)
         if (update.fromMe || !update.enable || known || !row.isOutgoing || row.direction != "out") return
+        if (appEvents?.silences(row.conversationId) == true) return
         val quoted = tapbackText(row.text).takeIf { it.isNotBlank() }?.let { app.getString(R.string.imessage_tapback_quote, it) }
             ?: app.getString(R.string.imessage_tapback_a_message)
         MessageNotifier.onIncoming(
@@ -1096,6 +1257,15 @@ class DirectLink private constructor(
         }
     }
 
+    /** What the iMessage apps' host ([com.lightdecoder.imessage.madrid.MadridHost]) hears of the archive's iMessages. */
+    interface AppEvents {
+        /** [message], just stored in [conversationId], is an update (a move) in an iMessage app's session. Returns at once. */
+        fun appUpdateArrived(conversationId: String, message: MessageDto)
+
+        /** Whether [conversationId]'s notifications are to stay quiet now (a game is open). */
+        fun silences(conversationId: String): Boolean
+    }
+
     companion object {
         private const val TAG = "DirectLink"
 
@@ -1116,6 +1286,10 @@ class DirectLink private constructor(
 
         /** The archive's id for the user (as Blue Bubbles stores it). */
         const val ME = "me"
+
+        /** The iMessage apps' host, once there is one. */
+        @Volatile
+        var appEvents: AppEvents? = null
 
         /**
          * A message Apple sent again, over the stored copy: what happened to it since (reactions,

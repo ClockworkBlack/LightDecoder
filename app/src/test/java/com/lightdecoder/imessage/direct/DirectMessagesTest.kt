@@ -150,4 +150,58 @@ class DirectMessagesTest {
         assertEquals(1, text.parts.size)
         assertTrue(text.attachments.isEmpty())
     }
+
+    private val game = IMessageExtra.App(
+        name = "GamePigeon", appId = 1124197642L, bundleId = "com.apple.messages.MSMessageExtensionBalloonPlugin:EWFNLB79LQ:com.gamerdelights.gamepigeon.ext",
+        url = "data:?ver=52&data=x", session = "0f8fad5b-d9cb-469f-a165-70867728950e", ldText = "8 Ball", isLive = true,
+        imageTitle = "t", imageSubtitle = "st", caption = "Your move", subcaption = "sc", secondarySubcaption = "2", tertiarySubcaption = "3",
+    )
+
+    private val picture = uniffi.rust_bridge.MessageAttachment(
+        uniffi.rust_bridge.AttachmentType.Mmcs(listOf(uniffi.rust_bridge.MmcsFile(byteArrayOf(1), "o", "https://x", byteArrayOf(2), 77UL))),
+        0UL, "public.jpeg", "image/jpeg", "jpeg-image.jpeg", false,
+    )
+
+    @Test
+    fun anIMessageAppsBalloonGoesAsOpenBubbleSendsIt() {
+        val ext = DirectMessages.extensionApp(game)
+        assertEquals("GamePigeon", ext.name)
+        assertEquals(1124197642UL, ext.appId)
+        assertEquals(game.bundleId, ext.bundleId)
+        val b = ext.balloon!!
+        assertEquals("data:?ver=52&data=x", b.url)
+        assertEquals(game.session, b.session)
+        assertEquals("8 Ball", b.ldText)
+        assertTrue(b.isLive)
+        val layout = b.layout as uniffi.rust_bridge.BalloonLayout.TemplateLayout
+        assertEquals("Your move", layout.caption)
+        assertEquals("2", layout.secondarySubcaption)
+        assertEquals("3", layout.tertiarySubcaption)
+        assertEquals("sc", layout.subcaption)
+        assertEquals("t", layout.imageTitle)
+        assertEquals("st", layout.imageSubtitle)
+        // No session or summary: none, never an empty one.
+        val bare = DirectMessages.extensionApp(game.copy(session = "", ldText = "")).balloon!!
+        assertNull(bare.session)
+        assertNull(bare.ldText)
+    }
+
+    @Test
+    fun aCardsSummaryComesFirstAndItsPictureAfter() {
+        val card = DirectMessages.appParts(game, listOf(picture), move = false)
+        assertEquals(MessagePart.Object("8 Ball"), card.parts[0].part)
+        assertTrue(card.parts[1].part is MessagePart.Attachment)
+        assertEquals(listOf(DirectWire.SentPart(1, "p1", "image/jpeg", "jpeg-image.jpeg", 77)), card.attachments)
+        // A new card without a summary is its picture alone; a move always has its placeholder.
+        assertEquals(listOf("p0"), DirectMessages.appParts(game.copy(ldText = ""), listOf(picture), move = false).attachments.map { it.partId })
+        val move = DirectMessages.appParts(game.copy(ldText = ""), emptyList(), move = true)
+        assertEquals(listOf<MessagePart>(MessagePart.Object("")), move.parts.map { it.part })
+        val update = DirectMessages.appUpdate("ROOT", game, move.parts, isMeta = false)
+        assertEquals("ROOT", update.toUuid)
+        assertEquals("", update.toText)
+        val ext = update.reaction as uniffi.rust_bridge.ReactMessageType.Extension
+        assertFalse(ext.isMeta)
+        assertEquals(game.url, ext.spec.balloon!!.url)
+        assertEquals(move.parts, ext.body)
+    }
 }

@@ -200,6 +200,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private var actionSheet: Dialog? = null
     private var confirmDialog: Dialog? = null
 
+    /** An iMessage games picker ("Games") and its "Send this game?", for this conversation; closed with it. */
+    private var gamesSheet: com.lightdecoder.imessage.madrid.MadridHost.Sheet? = null
+
     private var started = false
     private var paired = true
     private var online = false
@@ -394,6 +397,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             fullSizeAsked.clear()
             fullSizeWanted.clear()
             confirmDialog?.dismiss()
+            gamesSheet?.dismiss()
+            gamesSheet = null
             closeOptionsMenu()
             // Leaving the thread: stop reading its messages; the next one's are new from its first read.
             readerInstance?.stop()
@@ -483,6 +488,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     override fun onDestroy() {
+        // The extension app is told its picker closed, and let go.
+        gamesSheet?.dismiss()
+        gamesSheet = null
         cancelRecording(quietly = true)
         voicePlayer.release()
         readerInstance?.shutdown()
@@ -1161,9 +1169,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         binding.send.setOnClickListener { send() }
         // As on an iPhone: held down, it offers Apple's effects, in a chat that goes through the iMessage library.
         binding.send.setOnLongClickListener { offerEffects() }
-        binding.attach.setOnClickListener {
-            pickMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
-        }
+        binding.attach.setOnClickListener { onAttachTapped() }
         binding.stickers.setOnClickListener { showStickers() }
         binding.voiceInput.setOnClickListener { startDictation() }
         binding.voiceMessage.setOnClickListener { onRecordTapped() }
@@ -1548,6 +1554,41 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             .setNegativeButton(android.R.string.cancel, null)
             .show()
         return true
+    }
+
+    /**
+     * The attach button: the photo picker; in an iMessage chat the library can reach, with an
+     * extension app for iMessage games installed (OpenPigeon), a choice of that or "Games".
+     */
+    private fun onAttachTapped() {
+        val photos = { pickMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) }
+        val chat = gamesChat() ?: return photos()
+        confirmDialog?.dismiss()
+        confirmDialog = MaterialAlertDialogBuilder(this)
+            .setItems(arrayOf(getString(R.string.imessage_attach_photos), getString(R.string.imessage_attach_games))) { _, which ->
+                if (which == 0) {
+                    photos()
+                } else {
+                    gamesSheet?.dismiss()
+                    gamesSheet = com.lightdecoder.imessage.madrid.MadridHost.get(this).openPicker(this, chat)
+                }
+            }
+            .show()
+    }
+
+    /**
+     * The iMessage chat a game would be sent to ("Games" in the attach choices): this iMessage chat,
+     * or the person's iMessage chat shown in this Messages conversation, when the library can reach
+     * it and an extension app for iMessage games is installed; else null.
+     */
+    private fun gamesChat(): String? {
+        if (!directMode()) return null
+        val chat = when (manager.service) {
+            ChatService.MESSAGES -> companionId?.takeIf { it in directReachable }
+            ChatService.IMESSAGE -> conversationId.takeIf { it in directReachable }
+            else -> null
+        } ?: return null
+        return chat.takeIf { com.lightdecoder.imessage.madrid.MadridHost.get(this).available(this).isNotEmpty() }
     }
 
     /** Sends what the composer holds; [effect] is Apple's effect to send it with (iMessage through the library only). */

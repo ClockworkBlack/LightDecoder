@@ -7,14 +7,20 @@ import java.util.UUID
 import org.json.JSONException
 import org.json.JSONObject
 import uniffi.rust_bridge.AttachmentType
+import uniffi.rust_bridge.Balloon
+import uniffi.rust_bridge.BalloonLayout
 import uniffi.rust_bridge.CertifiedContext
 import uniffi.rust_bridge.ConversationData
+import uniffi.rust_bridge.ExtensionApp
 import uniffi.rust_bridge.IndexedMessagePart
 import uniffi.rust_bridge.MessageAttachment
 import uniffi.rust_bridge.MessageInst
 import uniffi.rust_bridge.MessagePart
 import uniffi.rust_bridge.MessageType
+import uniffi.rust_bridge.NsDictionaryClass
 import uniffi.rust_bridge.PushChatMessage
+import uniffi.rust_bridge.ReactMessage
+import uniffi.rust_bridge.ReactMessageType
 import uniffi.rust_bridge.TextFlags
 import uniffi.rust_bridge.TextFormat
 
@@ -98,6 +104,56 @@ object DirectMessages {
         }
         return Outgoing(parts, sent)
     }
+
+    /**
+     * The parts of an iMessage app's card or move, as OpenBubbles builds them: the app's summary
+     * ([IMessageExtra.App.ldText], what a device without the app shows) as the placeholder part,
+     * then the picture (uploaded with MMCS: one inside the message would carry no data in a move).
+     * A new card leaves the placeholder out when it has no summary; a move always has one.
+     */
+    fun appParts(app: IMessageExtra.App, attachments: List<MessageAttachment>, move: Boolean): Outgoing {
+        val parts = listOfNotNull(
+            app.ldText.takeIf { move || it.isNotEmpty() }?.let { IndexedMessagePart(MessagePart.Object(it), null, null) },
+        ) + attachments.map { IndexedMessagePart(MessagePart.Attachment(it), null, null) }
+        val indexes = DirectArchive.partIndexes(parts)
+        val sent = parts.indices.mapNotNull { i ->
+            val att = (parts[i].part as? MessagePart.Attachment)?.v1 ?: return@mapNotNull null
+            val size = (att.aType as? AttachmentType.Mmcs)?.v1?.maxOfOrNull { it.size }?.toLong() ?: 0L
+            DirectWire.SentPart(indexes[i], DirectArchive.partId(indexes[i]), att.mime, att.name, size)
+        }
+        return Outgoing(parts, sent)
+    }
+
+    /**
+     * [app]'s balloon as the library sends it (OpenBubbles' `toExtensionApp`): its name, App Store
+     * id and bundle, its address and session (none when empty: the library takes only a UUID), its
+     * summary and captions (as Apple's template layout), and whether it is live. [icon] is the
+     * app's icon as a JPEG, if any.
+     */
+    fun extensionApp(app: IMessageExtra.App, icon: ByteArray? = null): ExtensionApp =
+        ExtensionApp(
+            app.name,
+            app.appId?.toULong(),
+            app.bundleId,
+            Balloon(
+                app.url,
+                app.session.ifEmpty { null },
+                BalloonLayout.TemplateLayout(
+                    app.imageSubtitle, app.imageTitle, app.caption,
+                    app.secondarySubcaption, app.tertiarySubcaption, app.subcaption, NsDictionaryClass.NS_DICTIONARY,
+                ),
+                app.ldText.ifEmpty { null },
+                app.isLive,
+                icon,
+            ),
+        )
+
+    /**
+     * An iMessage app's update (a game's move) to the session message [rootGuid] started: a
+     * tapback-like message to it, carrying [app]'s new balloon and the [parts] ([appParts]).
+     */
+    fun appUpdate(rootGuid: String, app: IMessageExtra.App, parts: List<IndexedMessagePart>, isMeta: Boolean): ReactMessage =
+        ReactMessage(rootGuid, null, ReactMessageType.Extension(extensionApp(app), parts, isMeta), "", null)
 
     /**
      * The library's conversation for [target], sent from [from]: its members with the user, the

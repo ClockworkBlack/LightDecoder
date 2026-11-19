@@ -412,7 +412,8 @@ class DirectEngine private constructor(private val app: Context) {
      * Sends a message and returns its GUID, timestamp and attachment parts once Apple confirmed
      * it: [text], then [attachments] (each uploaded first), an inline reply to [replyGuid] (part
      * [replyPart]), sent with [effect] (Apple's effect id), [voice] when it is a recorded audio
-     * message.
+     * message. With [app] it is that iMessage app's new card (a new game): its balloon, with
+     * [attachments] as its picture.
      */
     suspend fun send(
         target: DirectWire.Target,
@@ -422,18 +423,41 @@ class DirectEngine private constructor(private val app: Context) {
         effect: String?,
         attachments: List<DirectWire.Attachment>,
         voice: Boolean,
+        app: IMessageExtra.App? = null,
     ): DirectWire.SendReply {
         val s = requireSession()
         val (conversation, from) = conversationOf(target)
-        val outgoing = DirectMessages.outgoing(text, attachments.map { upload(s, it) })
+        val uploaded = attachments.map { upload(s, it) }
+        val outgoing = if (app != null) DirectMessages.appParts(app, uploaded, move = false) else DirectMessages.outgoing(text, uploaded)
         val message = NormalMessage(
             outgoing.parts,
             effect, replyGuid, replyGuid?.let { replyPart ?: "0:0:0" }, MessageType.IMessage,
-            null, null, null, voice, null, null,
+            null, app?.let { DirectMessages.extensionApp(it) }, null, voice, null, null,
         )
         val inst = uniffi.rust_bridge.newMsg(conversation, from, PushChatMessage.Message(message))
         sendAndConfirm(s, inst, Sent.MESSAGE)
         return DirectWire.SendReply(inst.id, inst.sentTimestamp.toLong().takeIf { it > 0 } ?: System.currentTimeMillis(), outgoing.attachments)
+    }
+
+    /**
+     * Sends an iMessage app's update (a game's move) to the session message [rootGuid] started, as
+     * OpenBubbles does: [app]'s new balloon, with the picture at [imagePath] (uploaded with MMCS) if
+     * there is a new one. Returns the update's GUID, time and picture part once Apple confirmed it.
+     */
+    suspend fun extension(
+        target: DirectWire.Target,
+        rootGuid: String,
+        isMeta: Boolean,
+        app: IMessageExtra.App,
+        imagePath: String?,
+    ): DirectWire.SendReply {
+        val s = requireSession()
+        val (conversation, from) = conversationOf(target)
+        val image = imagePath?.let { upload(s, DirectWire.Attachment(it, APP_IMAGE_MIME, APP_IMAGE_NAME)) }
+        val parts = DirectMessages.appParts(app, listOfNotNull(image), move = true)
+        val inst = uniffi.rust_bridge.newMsg(conversation, from, PushChatMessage.React(DirectMessages.appUpdate(rootGuid, app, parts.parts, isMeta)))
+        sendAndConfirm(s, inst, Sent.MESSAGE)
+        return DirectWire.SendReply(inst.id, inst.sentTimestamp.toLong().takeIf { it > 0 } ?: System.currentTimeMillis(), parts.attachments)
     }
 
     /** Puts the file to send on Apple's servers ([DirectMedia.MAX_SEND_BYTES] at most): the attachment the message carries. */
@@ -620,6 +644,10 @@ class DirectEngine private constructor(private val app: Context) {
     companion object {
         private const val TAG = "Imessage"
         const val CONFIRM_TIMEOUT_MS = 45_000L
+
+        /** The name OpenBubbles gives an iMessage app's picture. */
+        const val APP_IMAGE_NAME = "jpeg-image.jpeg"
+        const val APP_IMAGE_MIME = "image/jpeg"
 
         /** How long a delivery receipt may hold up the next message from Apple. */
         private const val RECEIPT_TIMEOUT_MS = 15_000L

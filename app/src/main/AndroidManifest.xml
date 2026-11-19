@@ -97,6 +97,11 @@
         <package android:name="com.openbubbles.messaging" />
         <package android:name="com.bluebubbles.messaging.alpha" />
         <package android:name="com.bluebubbles.messaging.beta" />
+        <!--
+            iMessage apps: OpenPigeon plays GamePigeon games with iPhone users. LightDecoder only
+            carries the game's messages, and binds to it only after its signing certificate is checked.
+        -->
+        <package android:name="com.openbubbles.openpigeon" />
     </queries>
 
     <!--

@@ -42,6 +42,8 @@ class LightDecoderApp : Application() {
         // The iMessage library, once registered: its chats show in Messages (Blue Bubbles on, once),
         // and its service keeps it connected in the background.
         com.lightdecoder.imessage.direct.DirectLink.onAppStart(this)
+        // iMessage apps (games) played in an installed extension app: card taps and moves go to it.
+        com.lightdecoder.imessage.madrid.MadridHost.install(this)
         // With a Gmail account added, its background check is scheduled (survives updates).
         // While the Gmail tab is paused, nothing checks the mailbox in the background.
         if (com.lightdecoder.chat.Features.GMAIL && com.lightdecoder.mail.MailVault.exists(this)) {

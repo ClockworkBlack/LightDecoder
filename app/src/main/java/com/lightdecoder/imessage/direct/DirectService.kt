@@ -24,7 +24,7 @@ import org.json.JSONObject
  * The ":imessage" process's service: keeps the iMessage session connected (in the foreground,
  * like the Google Messages link's service) so iMessages reach the Messages tab whether a screen is
  * open or not, answers the main process's requests ([DirectWire]: send, unsend, reach, edit,
- * react, typing, read, download), and hands what Apple sends to the main process's
+ * react, typing, read, download, an iMessage app's update), and hands what Apple sends to the main process's
  * [DirectSinkService].
  */
 class DirectService : Service() {
@@ -37,7 +37,11 @@ class DirectService : Service() {
         when (what) {
             DirectWire.SEND -> {
                 val r = DirectWire.SendRequest.fromJson(request)
-                engine.send(r.target, r.text, r.replyGuid, r.replyPart, r.effect, r.attachments, r.voice).toJson()
+                engine.send(r.target, r.text, r.replyGuid, r.replyPart, r.effect, r.attachments, r.voice, r.app).toJson()
+            }
+            DirectWire.EXTENSION -> {
+                val r = DirectWire.ExtensionRequest.fromJson(request)
+                engine.extension(r.target, r.rootGuid, r.isMeta, r.app, r.imagePath).toJson()
             }
             DirectWire.UNSEND -> {
                 engine.unsend(target(request), request.getString("guid"), request.optInt("part", 0))

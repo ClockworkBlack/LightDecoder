@@ -199,4 +199,41 @@ class DirectWireTest {
         assertFalse(DirectProcess.isImessageProcess("com.lightdecoder:discord", "com.lightdecoder"))
         assertFalse(DirectProcess.isImessageProcess(null, "com.lightdecoder"))
     }
+
+    private val game = IMessageExtra.App(
+        name = "GamePigeon", appId = 1124197642L, bundleId = "com.apple.messages.MSMessageExtensionBalloonPlugin:EWFNLB79LQ:com.gamerdelights.gamepigeon.ext",
+        url = "data:?ver=52&data=a%2Bb/c\"d", session = "0f8fad5b-d9cb-469f-a165-70867728950e", ldText = "8 Ball", isLive = true,
+        imageTitle = "t", imageSubtitle = "st", caption = "Your move", subcaption = "sc", secondarySubcaption = "2", tertiarySubcaption = "3",
+        root = "imsg:ROOT",
+    )
+
+    @Test
+    fun anIMessageAppsUpdateSurvivesTheTripWithItsAddressAsItWas() {
+        val target = DirectWire.Target(listOf("tel:+15550000002"), null, null, "tel:+15550000001", "G9")
+        val r = DirectWire.ExtensionRequest.fromJson(JSONObject(DirectWire.extension(target, "ROOT", false, game, "/data/x.jpeg").toString()))
+        assertEquals(target, r.target)
+        assertEquals("ROOT", r.rootGuid)
+        assertFalse(r.isMeta)
+        assertEquals(game, r.app)
+        assertEquals("data:?ver=52&data=a%2Bb/c\"d", r.app.url)
+        assertEquals("/data/x.jpeg", r.imagePath)
+        val bare = DirectWire.ExtensionRequest.fromJson(JSONObject(DirectWire.extension(target, "ROOT", true, game.copy(appId = null), null).toString()))
+        assertNull(bare.imagePath)
+        assertTrue(bare.isMeta)
+        assertNull(bare.app.appId)
+        // Answered as a send is.
+        val reply = DirectWire.SendReply.fromJson(JSONObject(DirectWire.sent("MV1", 5, listOf(DirectWire.SentPart(1, "p1", "image/jpeg", "jpeg-image.jpeg", 9))).toString()))
+        assertEquals("p1", reply.parts.single().partId)
+    }
+
+    @Test
+    fun aNewCardsSendCarriesItsAppAndAPlainSendNone() {
+        val target = DirectWire.Target(listOf("tel:+15550000002"), null, null, "tel:+15550000001")
+        val card = DirectWire.SendRequest.fromJson(
+            JSONObject(DirectWire.send(target, "", null, attachments = listOf(DirectWire.Attachment("/p.jpeg", "image/jpeg", "jpeg-image.jpeg")), app = game).toString()),
+        )
+        assertEquals(game, card.app)
+        assertEquals("/p.jpeg", card.attachments.single().path)
+        assertNull(DirectWire.SendRequest.fromJson(JSONObject(DirectWire.send(target, "hi", null).toString())).app)
+    }
 }

@@ -54,6 +54,11 @@ class DirectWordingTest {
             R.string.imessage_effect_pick_title, R.string.imessage_invisible_ink_hidden, R.string.imessage_app_only_on_apple,
             R.string.imessage_app_unnamed, R.string.imessage_link_preview, R.string.imessage_new_group, R.string.imessage_to_hint,
             R.string.imessage_group_body, R.string.imessage_group_nobody, R.string.imessage_not_on_imessage,
+            R.string.imessage_attach_photos, R.string.imessage_attach_games, R.string.imessage_app_install,
+            R.string.imessage_app_install_button, R.string.imessage_app_unverified, R.string.imessage_app_no_answer,
+            R.string.imessage_app_move_failed, R.string.imessage_app_card_failed, R.string.imessage_app_card_invalid,
+            R.string.imessage_app_send_title, R.string.imessage_app_send, R.string.imessage_app_no_store,
+            R.string.imessage_app_still_sending, R.string.imessage_app_move_too_soon, R.string.imessage_app_move_invalid,
         )
         for (res in direct) {
             val text = context.getString(res)
@@ -69,6 +74,10 @@ class DirectWordingTest {
             context.getString(R.string.imessage_app_only_on_apple, "GamePigeon"),
         )
         assertEquals("Bob updated Polls.", context.getString(R.string.imessage_event_app_updated, "Bob", "Polls"))
+        assertEquals(
+            "Install OpenPigeon to play GamePigeon games with iPhone users.",
+            context.getString(R.string.imessage_app_install, "OpenPigeon", "GamePigeon"),
+        )
         assertEquals("Delivered", context.getString(R.string.imessage_receipt_delivered))
         assertEquals("Read 9:41", context.getString(R.string.imessage_receipt_read_at, "9:41"))
         assertEquals(

@@ -37,7 +37,10 @@ object DirectWire {
     /** Fetches an attachment into a file: [download], answered with [downloaded]. */
     const val DOWNLOAD = 8
 
-    /** Sends an iMessage app's session update (a game move). */
+    /**
+     * Sends an iMessage app's session update (a game's move) to the card that started the session:
+     * [extension], answered as a [SEND] is ([SendReply]: the move's GUID, its time, its picture's part).
+     */
     const val EXTENSION = 9
 
     const val UPDATE = 10
@@ -121,6 +124,7 @@ object DirectWire {
         val effect: String?,
         val attachments: List<Attachment>,
         val voice: Boolean,
+        val app: IMessageExtra.App? = null,
     ) {
         companion object {
             fun fromJson(o: JSONObject) = SendRequest(
@@ -131,6 +135,26 @@ object DirectWire {
                 o.optStringOrNull("effect")?.ifEmpty { null },
                 o.objects("attachments").map(Attachment::fromJson),
                 o.optBoolean("voice"),
+                o.optJSONObject("app")?.let(IMessageExtra.App::fromJson),
+            )
+        }
+    }
+
+    /** What an [EXTENSION] request asks for, read by the ":imessage" process. */
+    data class ExtensionRequest(
+        val target: Target,
+        val rootGuid: String,
+        val isMeta: Boolean,
+        val app: IMessageExtra.App,
+        val imagePath: String?,
+    ) {
+        companion object {
+            fun fromJson(o: JSONObject) = ExtensionRequest(
+                Target.fromJson(o.getJSONObject("target")),
+                o.getString("rootGuid"),
+                o.optBoolean("isMeta"),
+                IMessageExtra.App.fromJson(o.getJSONObject("app")),
+                o.optStringOrNull("imagePath")?.ifEmpty { null },
             )
         }
     }
@@ -139,7 +163,8 @@ object DirectWire {
      * A message to send: [text] (may be empty with attachments), then [attachments]. An inline
      * reply names the message it answers ([replyGuid]) and the part of it ([replyPart],
      * "<part>:<start>:<end>" of that message's text, as iMessage expects). [effect] is Apple's
-     * effect id; [voice] marks a recorded audio message.
+     * effect id; [voice] marks a recorded audio message. [app] makes it an iMessage app's card
+     * (a new game): the app's balloon, with its picture as the attachment.
      */
     fun send(
         target: Target,
@@ -149,12 +174,23 @@ object DirectWire {
         effect: String? = null,
         attachments: List<Attachment> = emptyList(),
         voice: Boolean = false,
+        app: IMessageExtra.App? = null,
     ): JSONObject =
         JSONObject().put("target", target.toJson()).put("text", text)
             .put("replyGuid", replyGuid ?: JSONObject.NULL).put("replyPart", replyPart ?: JSONObject.NULL)
             .put("effect", effect ?: JSONObject.NULL)
             .put("attachments", JSONArray().apply { attachments.forEach { put(it.toJson()) } })
             .put("voice", voice)
+            .apply { if (app != null) put("app", app.toJson()) }
+
+    /**
+     * An iMessage app's update to the session that message [rootGuid] started: [app]'s new state
+     * (a game's move), with the picture at [imagePath] (a JPEG in the app's own storage) if it has
+     * a new one. [isMeta] marks an update that is no card of its own (a vote in a poll).
+     */
+    fun extension(target: Target, rootGuid: String, isMeta: Boolean, app: IMessageExtra.App, imagePath: String?): JSONObject =
+        JSONObject().put("target", target.toJson()).put("rootGuid", rootGuid).put("isMeta", isMeta)
+            .put("app", app.toJson()).put("imagePath", imagePath ?: JSONObject.NULL)
 
     /** iMessage's reply part for a reply to part 0 of a message whose text is [targetText]. */
     fun replyPart(targetText: String): String = "0:0:" + targetText.length
