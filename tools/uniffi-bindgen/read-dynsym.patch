@@ -1,0 +1,23 @@
+--- a/src/macro_metadata/extract.rs
++++ b/src/macro_metadata/extract.rs
+@@ -46,10 +46,16 @@
+         .find(|sh| sh.sh_type == goblin::elf::section_header::SHT_SYMTAB_SHNDX)
+         .map(|sh| sh.sh_offset as usize);
+ 
+-    for (i, sym) in elf.syms.iter().enumerate() {
+-        let name = elf
+-            .strtab
+-            .get_at(sym.st_name)
++    // Stripped Android libraries keep only the dynamic symbol table: read that when the full
++    // one has nothing (local change for LightDecoder's tools/uniffi-bindgen).
++    let use_dyn = elf.syms.is_empty();
++    let all: Vec<(usize, goblin::elf::Sym)> = if use_dyn {
++        elf.dynsyms.iter().enumerate().collect()
++    } else {
++        elf.syms.iter().enumerate().collect()
++    };
++    for (i, sym) in all {
++        let name = if use_dyn { elf.dynstrtab.get_at(sym.st_name) } else { elf.strtab.get_at(sym.st_name) }
+             .context("Error getting symbol name")?;
+         if !is_metadata_symbol(name) {
+             continue;

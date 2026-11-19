@@ -1,0 +1,10 @@
+[package]
+name = "ld-uniffi-bindgen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# uniffi-bindgen 0.32.0 (MPL-2.0), the version the official OpenBubbles 2.0.0 library was built with
+# (it reports uniffi_core 0.32.0). gen.sh patches it to read stripped Android libraries.
+[dependencies]
+uniffi = { version = "=0.32.0", features = ["cli"] }

@@ -1,7 +1,7 @@
 # iMessage in LightDecoder via OpenBubbles' library (design, 2026-11-19)
 
-Status: **research done, inspection tool written; no app code yet.** Next step needs the
-OpenBubbles 2.0.0 Android APK (see "What is needed next").
+Status: **route decided (see "Result 2026-11-19"); no app code yet.** The older Flutter-based
+analysis below applies to 1.15.x only.
 
 ## Goal (owner's direction)
 - iMessage inside LightDecoder, built from open-source tools that need no paid licence.
@@ -13,6 +13,30 @@ OpenBubbles 2.0.0 Android APK (see "What is needed next").
   retracts it. LightDecoder stores only those GUIDs, never message content. The Unsend
   button works for about 2 minutes after sending; the recipient needs iOS 16+ for it to
   disappear on their side; a retract that does not go through shows a clear error.
+
+## Result 2026-11-19: 2.0.0 library inspected, route decided
+Files inspected (owner's own download, not committed): OpenBubbles 2.0.0 base APK and the
+`config.armeabi_v7a` `librust_bridge.so` (sha256 7d628384...e05e, 23 MB, uniffi_core 0.32.0).
+- **It exposes everything needed**, with these Kotlin shapes (generated; see below):
+  `configFromRelay(code, host, token?) -> JoinedOsConfig`, `validateRelay(config) -> String?`,
+  `newNgmIdentity()`, `setupPush(config, identity, state?, statePath) -> SetupPushResult`,
+  `registerIds(path, config, aps, identity, users) -> RegisterResult`,
+  `startSession(path, config, conn, anisette, account?, users, identity, circleSession?, pipeline)
+  -> SharedPushStateHandle`, `sendMessage(session, MessageInst) -> Boolean`, `doReregister(session)`.
+- **GUID**: `MessageInst.id` is a String the caller sets, so `sendImessage` makes a UUID, sends,
+  and returns that id (only if `sendMessage` returned true).
+- **Unsend**: `PushChatMessage` has an unsend variant carrying `UnsendMessage(tuuid: String,
+  editPart: ULong)`: `unsend(guid, part)` = `sendMessage` of that, to the same conversation.
+- **Bindings are generated from the library itself**, not copied from OpenBubbles' app:
+  `tools/uniffi-bindgen/gen.sh <librust_bridge.so> <out>` (uniffi-bindgen 0.32.0, MPL-2.0, plus a
+  3-line patch because stripped Android libraries keep metadata only in the dynamic symbol
+  table). Output (32,948 lines, package `uniffi.rust_bridge`, uses JNA) is made on the
+  machine and not committed. Same bindings come from any ABI's library.
+- **Needed on the phone**: the arm64 `librust_bridge.so` + `libuniffi_runtime.so` (the
+  v7a files cannot run on the Fold 7), imported by the user and pinned by SHA-256.
+- Still open: how 2.0.0's own app registers (the sequence around `setupPush` ->
+  `registerIds` -> `startSession`, and the Android keystore callback `NativeKeystore`
+  the library needs); read from the APK's `classes*.dex`.
 
 ## Update 2026-11-19: 2.0.0 is not a Flutter app any more
 The owner opened the 2.0.0 XAPK (`config.armeabi_v7a` split, lib/armeabi-v7a). It has
