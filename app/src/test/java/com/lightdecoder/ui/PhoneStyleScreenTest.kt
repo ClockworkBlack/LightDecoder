@@ -75,8 +75,15 @@ class PhoneStyleScreenTest {
     /** What was sent to Apple, through the iMessage library ([directMode]). */
     private val sentRequests: MutableList<org.json.JSONObject> = java.util.Collections.synchronizedList(ArrayList())
 
+    private val zone: java.util.TimeZone = java.util.TimeZone.getDefault()
+
     @Before
     fun setUp() {
+        // The chats are seeded "an hour ago" and "a day ago": in a time zone where it is now midday,
+        // so that a run just after midnight still finds them under Today and Yesterday.
+        val utcHour = java.time.ZonedDateTime.now(java.time.ZoneOffset.UTC).hour
+        val offset = ((12 - utcHour + 36) % 24) - 12
+        java.util.TimeZone.setDefault(java.util.TimeZone.getTimeZone(java.time.ZoneOffset.ofHours(offset)))
         two = TwoServicesEnv()
         two.app.deleteDatabase(IM_DB)
         imDb = ArchiveDb(two.app, IM_DB)
@@ -91,6 +98,7 @@ class PhoneStyleScreenTest {
 
     @After
     fun tearDown() {
+        java.util.TimeZone.setDefault(zone)
         DirectPrefs.setPhoneStyleOn(two.app, true)
         DirectPrefs.setReplyThreadsInChat(two.app, false)
         ChatBackgrounds.dir(two.app).deleteRecursively()

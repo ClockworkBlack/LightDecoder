@@ -8,10 +8,20 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
    had earlier chosen "build with a warning", then "pause on Discord", and has now asked for
    the web-view tab only, with no bridge). **Instagram: skipped** (ban risk, like Messenger).
 
+## 0.5.68 (versionCode 79) - videos play; share goes to a ready draft; share list matches the inbox
+- Videos showed "not available" on phones: VideoPlayerActivity compared a canonical file path with the
+  non-canonical dataDir (/data/user/0 symlink). `ownFile()` canonicalizes both sides.
+- Share: the "Send to..." list uses the inbox's fold-in (`InboxLists`, shared with ConversationsActivity),
+  refreshes live; picking a conversation opens the thread with text and all files in the composer
+  (nothing sent). Direct Share shortcuts for the 8 newest inbox conversations (`ShareShortcuts`).
+  ViewerActivity no longer has an ACTION_SEND filter (one LightDecoder entry in the share sheet).
+- Owner chose to keep iPhone behaviour: media-only messages have no bubble.
+- Unit tests: 1138 (1 skipped), all passing. Next version: 0.5.69 / 80.
+
 ## 0.5.67 (versionCode 78) - full emoji list scrolls when reacting
 - The reaction emoji picker's BottomSheet took vertical drags (its nested-scroll child was the
   category row), so the list could not scroll. `behavior.isDraggable = false`; Back or outside tap
-  closes. Unit tests: 1130 (1 skipped), all passing. Next version: 0.5.68 / 79.
+  closes. Unit tests: 1130 (1 skipped), all passing.
 
 ## 0.5.66 (versionCode 77) - answered message shown by default; real blur behind the thread view
 - Owner: show the message being replied to in the default view too. Every reply has a faded copy of
