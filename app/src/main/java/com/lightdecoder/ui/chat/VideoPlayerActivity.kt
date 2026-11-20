@@ -36,8 +36,7 @@ class VideoPlayerActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        val path = intent.getStringExtra(EXTRA_PATH)
-        val file = path?.let(::File)?.takeIf { it.isFile && it.canonicalPath.startsWith(applicationInfo.dataDir) }
+        val file = ownFile(this, intent.getStringExtra(EXTRA_PATH))
         if (file == null) {
             Toast.makeText(this, R.string.chat_media_unavailable, Toast.LENGTH_LONG).show()
             finish()
@@ -82,6 +81,26 @@ class VideoPlayerActivity : AppCompatActivity() {
         private const val EXTRA_TITLE = "title"
         private const val STATE_POSITION = "position"
         private const val STATE_PLAYING = "playing"
+
+        /**
+         * The file at [path] if it is one of this app's own, else null. Both sides are compared as
+         * their real (canonical) paths: on a phone the app's data directory is reached through
+         * /data/user/0, a link to /data/data, so a file's real path does not begin with
+         * [android.content.pm.ApplicationInfo.dataDir] as it is written ("This attachment is not
+         * available" for every video, sent or received, when only the file's side was resolved).
+         */
+        internal fun ownFile(context: Context, path: String?): File? {
+            val file = path?.takeIf { it.isNotEmpty() }?.let(::File) ?: return null
+            return try {
+                val real = file.canonicalFile
+                if (!real.isFile) return null
+                val roots = listOfNotNull(context.applicationInfo.dataDir?.let(::File), context.filesDir, context.cacheDir)
+                    .map { it.canonicalPath.trimEnd(File.separatorChar) + File.separator }
+                real.takeIf { f -> roots.any { f.path.startsWith(it) } }
+            } catch (e: java.io.IOException) {
+                null
+            }
+        }
 
         fun intent(context: Context, file: File, title: String?): Intent =
             Intent(context, VideoPlayerActivity::class.java)

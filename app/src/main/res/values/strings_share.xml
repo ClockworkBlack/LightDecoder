@@ -14,6 +14,4 @@
     <string name="share_no_match">No conversation matches.</string>
     <string name="share_could_not_read">The shared file could not be read.</string>
     <string name="share_some_not_read">Some of the files could not be read and were left out.</string>
-    <string name="share_send_many_question">Send %1$s to %2$s?</string>
-    <string name="share_send">Send</string>
 </resources>

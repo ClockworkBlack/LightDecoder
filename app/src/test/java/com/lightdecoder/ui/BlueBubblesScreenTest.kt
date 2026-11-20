@@ -3003,12 +3003,14 @@ class BlueBubblesScreenTest {
 
     /** Taps [id]'s video and returns what the thread started for it (null: nothing, a toast said why). */
     private fun tapVideo(scenario: ActivityScenario<ThreadActivity>, id: String): Intent? {
+        org.robolectric.shadows.ShadowToast.reset()
         scenario.onActivity { a -> a.onMediaTap(shownRow(a, id)!!, shownRow(a, id)!!.media.single()) }
         var started: Intent? = null
         two.waitUntil("the video's tap answered") {
             org.robolectric.shadows.ShadowLooper.idleMainLooper()
             started = shadowOf(two.app).nextStartedActivity
-            started != null || org.robolectric.shadows.ShadowToast.getLatestToast() != null
+            val said = org.robolectric.shadows.ShadowToast.getTextOfLatestToast()
+            started != null || (said != null && said != two.app.getString(R.string.chat_media_downloading))
         }
         return started
     }
@@ -3111,10 +3113,11 @@ class BlueBubblesScreenTest {
         )
         ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
             scenario.waitFor("her video") { shownRow(it, "imsg:V1") != null }
-            two.waitUntil("her video downloaded") { imRepo.mediaPart("imsg:V1", "p0")?.localPath?.isNotEmpty() == true }
-            scenario.waitFor("her video's file shown") { shownRow(it, "imsg:V1")?.media?.single()?.localPath?.isNotEmpty() == true }
-            assertEquals("DESC-V1", asked(asked, com.lightdecoder.imessage.direct.DirectWire.DOWNLOAD).first().getString("descriptor"))
-            assertPlaysOnAPhone(tapVideo(scenario, "imsg:V1"))
+            // Tapped: downloaded through iMessage (Apple's description), then played.
+            val started = tapVideo(scenario, "imsg:V1")
+            assertEquals("DESC-V1", asked(asked, com.lightdecoder.imessage.direct.DirectWire.DOWNLOAD).single().getString("descriptor"))
+            assertEquals(imRepo.mediaPart("imsg:V1", "p0")!!.localPath, started?.getStringExtra("path"))
+            assertPlaysOnAPhone(started)
         }
     }
 
@@ -3142,6 +3145,109 @@ class BlueBubblesScreenTest {
             assertTrue(part.mime, part.mime.startsWith("video/"))
             scenario.waitFor("the sent video") { shownRow(it, "imsg:S1")?.media?.singleOrNull()?.localPath == part.localPath }
             assertPlaysOnAPhone(tapVideo(scenario, "imsg:S1"))
+        }
+    }
+
+    // --- sharing from another app -----------------------------------------------------------------
+
+    /** The share screen's rows: title and snippet, in order. */
+    private fun shareRows(activity: Activity): List<Pair<String, String>> =
+        (activity.findViewById<RecyclerView>(R.id.list).adapter as ConversationsAdapter).currentList.map { it.title to it.row.snippet }
+
+    @Test
+    fun theShareListIsTheMessagesInboxWithTheCompanionsNewestIMessageAndFollowsIt() {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        directMode(asked)
+        val answer = appleSends()
+        com.lightdecoder.imessage.direct.DirectLink.installForTesting(two.app) { what, request, _ ->
+            asked += what to request
+            answer(what, request)
+        }
+        val now = System.currentTimeMillis()
+        // Alice's texts are old; her newest is an iMessage the user sent in her companion chat.
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = now - 600_000, number = "+1 555-123-4567")
+        two.seedIncoming(ChatService.MESSAGES, "sms1", "c1", "Old text", ts = now - 599_000)
+        two.seedConversation(ChatService.MESSAGES, "c2", "Taylor", lastTs = now - 300_000, number = "+1 770-343-3554")
+        two.seedIncoming(ChatService.MESSAGES, "sms2", "c2", "Hi Ramon! This is Taylor", ts = now - 299_000)
+        two.seedConversation(ChatService.MESSAGES, "c3", "TEMU", lastTs = now - 400_000, number = "+1 555-000-7777")
+        two.seedIncoming(ChatService.MESSAGES, "sms3", "c3", "Deals", ts = now - 399_000)
+        directMessage("M1", "You there?", now - 60_000, mine = true)
+        launchList().use { list ->
+            list.waitFor("the inbox") { titles(it).firstOrNull() == "Alice" }
+            var inbox: List<Pair<String, String>> = emptyList()
+            list.onActivity { inbox = shareRows(it) }
+            assertEquals(listOf("Alice" to "You there?", "Taylor" to "Hi Ramon! This is Taylor", "TEMU" to "Deals"), inbox)
+            val share = Intent(Intent.ACTION_SEND).setClassName(two.app, com.lightdecoder.ui.share.ShareActivity::class.java.name)
+                .setType("text/plain").putExtra(Intent.EXTRA_TEXT, "Look at this")
+            ActivityScenario.launch<com.lightdecoder.ui.share.ShareActivity>(share).use { scenario ->
+                // The inbox's own rows, order and snippets: Alice once, with her iMessage.
+                scenario.waitFor("the inbox's rows") { shareRows(it) == inbox }
+                // While it is open: a text moves TEMU up, then a new iMessage moves Alice back.
+                two.seedIncoming(ChatService.MESSAGES, "sms4", "c3", "Flash sale", ts = now - 30_000)
+                scenario.waitFor("TEMU up") { shareRows(it).first() == ("TEMU" to "Flash sale") }
+                directMessage("M2", "Are you coming?", now - 10_000, mine = false)
+                scenario.waitFor("Alice up with her iMessage") { shareRows(it).first() == ("Alice" to "Are you coming?") }
+                list.onActivity { inbox = shareRows(it) }
+                scenario.onActivity { assertEquals(inbox, shareRows(it)) }
+            }
+        }
+    }
+
+    @Test
+    fun aPictureSharedToAMessagesConversationWithAnIMessageChatGoesThroughTheLibrary() {
+        two.env.pairedManager()
+        installOpenBubbles()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        directMode(asked)
+        val answer = appleSends()
+        com.lightdecoder.imessage.direct.DirectLink.installForTesting(two.app) { what, request, _ ->
+            asked += what to request
+            answer(what, request)
+        }
+        val now = System.currentTimeMillis()
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = now - 600_000, number = "+1 555-123-4567")
+        directMessage("M1", "You there?", now - 60_000, mine = true)
+        org.robolectric.Robolectric.setupContentProvider(com.lightdecoder.ui.share.SharingAppFiles::class.java, com.lightdecoder.ui.share.SharingAppFiles.AUTHORITY)
+        val jpeg = byteArrayOf(-1, -40, -1, -32, 0, 16, 74, 70, 73, 70)
+        val shared = com.lightdecoder.ui.share.SharingAppFiles.add(two.app, "IMG_5.jpg", jpeg)
+        val share = Intent(Intent.ACTION_SEND).setClassName(two.app, com.lightdecoder.ui.share.ShareActivity::class.java.name)
+            .setType("image/jpeg").putExtra(Intent.EXTRA_STREAM, shared)
+        var started: Intent? = null
+        ActivityScenario.launch<com.lightdecoder.ui.share.ShareActivity>(share).use { scenario ->
+            scenario.waitFor("Alice, as in the inbox") { shareRows(it) == listOf("Alice" to "You there?") }
+            scenario.onActivity { a ->
+                val list = a.findViewById<RecyclerView>(R.id.list)
+                list.measure(0, 0)
+                list.layout(0, 0, 1080, 2000)
+                list.findViewHolderForAdapterPosition(0)!!.itemView.performClick()
+            }
+            two.waitUntil("the conversation opened") {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                started = shadowOf(two.app).nextStartedActivity
+                started != null
+            }
+        }
+        // Her Messages conversation, the picture in its composer: nothing sent yet.
+        assertEquals(ThreadActivity::class.java.name, started!!.component?.className)
+        assertEquals("c1", started!!.getStringExtra(RelayIntents.EXTRA_CONVERSATION_ID))
+        assertEquals(ChatService.MESSAGES, RelayIntents.serviceOf(started!!))
+        assertTrue(asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).isEmpty())
+        ActivityScenario.launch<ThreadActivity>(Intent(started).setFlags(0)).use { scenario ->
+            scenario.waitFor("the picture ready, to go as iMessage") {
+                it.findViewById<View>(R.id.attachmentBar).isShown && it.findViewById<View>(R.id.send).isEnabled &&
+                    it.findViewById<EditText>(R.id.input).hint.toString() == it.getString(R.string.imessage_compose_hint)
+            }
+            scenario.onActivity { it.findViewById<View>(R.id.send).performClick() }
+            two.waitUntil("sent through the library") { asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).size == 1 }
+            val sent = com.lightdecoder.imessage.direct.DirectWire.SendRequest.fromJson(asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).single())
+            assertEquals("image/jpeg", sent.attachments.single().mime)
+            two.waitUntil("stored in her iMessage chat") { imRepo.message("imsg:S1")?.conversationId == ALICE_DIRECT }
+            assertTrue(java.io.File(imRepo.message("imsg:S1")!!.media.single().localPath).readBytes().contentEquals(jpeg))
+            // Nothing handed to OpenBubbles.
+            scenario.onActivity { assertNull(shadowOf(it).nextStartedActivity) }
         }
     }
 

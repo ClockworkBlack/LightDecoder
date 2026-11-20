@@ -538,14 +538,15 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      */
     private fun takeShared(intent: Intent) {
         val text = intent.getStringExtra(RelayIntents.EXTRA_SHARED_TEXT)
-        val stream = intent.getStringExtra(RelayIntents.EXTRA_SHARED_STREAM)
+        val streams = intent.getStringArrayListExtra(RelayIntents.EXTRA_SHARED_STREAMS).orEmpty().filter { it.isNotEmpty() }
         intent.removeExtra(RelayIntents.EXTRA_SHARED_TEXT)
-        intent.removeExtra(RelayIntents.EXTRA_SHARED_STREAM)
+        intent.removeExtra(RelayIntents.EXTRA_SHARED_STREAMS)
         if (!text.isNullOrEmpty()) {
             binding.input.setText(text)
             binding.input.setSelection(binding.input.length())
         }
-        if (!stream.isNullOrEmpty()) setAttachment(Uri.parse(stream))
+        // All of them, as the "+" picker attaches several: each goes as a message of its own.
+        if (streams.isNotEmpty()) setAttachments(streams.map(Uri::parse))
     }
 
     override fun onStart() {
