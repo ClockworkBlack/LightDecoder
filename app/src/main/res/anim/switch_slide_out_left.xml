@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- The conversation being left goes out to the left (a swipe to the left). -->
-<translate xmlns:android="http://schemas.android.com/apk/res/android"
-    android:duration="220"
-    android:fromXDelta="0"
-    android:interpolator="@android:interpolator/decelerate_quad"
-    android:toXDelta="-100%" />

@@ -377,7 +377,6 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         setUpList()
         effectPlayer = EffectPlayer(this, binding.messages)
         setUpComposer()
-        setUpAppSwipe()
         binding.phoneHeader.setOnClickListener { binding.toolbar.showOverflowMenu() }
         updateThreadsInChat()
         updatePhoneStyle()
@@ -1510,57 +1509,6 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             }
         })
         updateSendEnabled()
-    }
-
-    // --- switching apps from the composer ------------------------------------------------------
-
-    /** A sideways swipe over the composer: the next app's conversation list or the one before ([AppSwipe]). */
-    private var appSwipe: AppSwipe? = null
-
-    /** Text selection or paste menus open (the composer's, or a message's text): no switch then. */
-    private var actionModes = 0
-
-    /**
-     * A sideways swipe that starts over the composer (the "+", the text field, Send and the mic,
-     * and the reply or attachment bar above them) goes to the next app's conversation list, or
-     * the one before, as a swipe on the list does; the message list keeps its swipe to reply. Not
-     * while recording (the recording bar stands in for the composer) or with text selected.
-     */
-    private fun setUpAppSwipe() {
-        appSwipe = AppSwipe(
-            binding.root,
-            excluded = { emptyList() },
-            enabled = {
-                !isFinishing && recorder == null && actionModes == 0 && !binding.input.hasSelection() &&
-                    ConversationsActivity.appTabCount() > 1
-            },
-            within = { listOf(binding.composer, binding.replyBar, binding.attachmentBar) },
-            onStep = ::switchApp,
-        )
-    }
-
-    override fun dispatchTouchEvent(ev: android.view.MotionEvent): Boolean =
-        appSwipe?.dispatch(ev) { super.dispatchTouchEvent(it) } ?: super.dispatchTouchEvent(ev)
-
-    override fun onActionModeStarted(mode: android.view.ActionMode) {
-        super.onActionModeStarted(mode)
-        actionModes++
-    }
-
-    override fun onActionModeFinished(mode: android.view.ActionMode) {
-        super.onActionModeFinished(mode)
-        actionModes = (actionModes - 1).coerceAtLeast(0)
-    }
-
-    /**
-     * Leaves the conversation for the list of the app next to its own ([step] 1) or the one before
-     * (-1): the list takes the step as its switcher's swipe does ([ConversationsActivity.EXTRA_APP_STEP]).
-     */
-    private fun switchApp(step: Int) {
-        if (isFinishing) return
-        openConversations(step)
-        AppSwipe.slideOnClose(this, step)
-        finish()
     }
 
     /** The composer's text selection menu: formatting and text effects where they can be sent ([sendsWithEffects]). */
@@ -4321,16 +4269,14 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      * Up: always the conversation list, on this conversation's service.
      * CLEAR_TOP|SINGLE_TOP returns to the one below this thread when there
      * is one, else starts it (on top of the sticker inbox, or as the task's
-     * root after a cold start). With [appStep], the list goes on to the app
-     * next to this one (1) or the one before (-1) ([switchApp]).
+     * root after a cold start).
      */
-    private fun openConversations(appStep: Int = 0) {
+    private fun openConversations() {
         startActivity(
             Intent(this, ConversationsActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 // iMessage chats are listed in the Messages tab.
                 .putExtra(RelayIntents.EXTRA_SERVICE, ConversationsActivity.tabServiceOf(manager.service).key)
-                .apply { if (appStep != 0) putExtra(ConversationsActivity.EXTRA_APP_STEP, appStep) }
         )
     }
 

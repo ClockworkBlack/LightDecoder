@@ -12,7 +12,7 @@ import kotlin.math.abs
 import kotlin.math.max
 
 /**
- * A sideways swipe anywhere on the conversation list (or over a conversation's composer) goes to the next app (leftwards) or the one
+ * A sideways swipe anywhere on the conversation list goes to the next app (leftwards) or the one
  * before, as the swipe along the top bar does ([ServiceTabStrip.Refresh.go], the same path).
  *
  * The screen hands it every touch first ([handle], from `dispatchTouchEvent`). It only takes a
@@ -27,16 +27,11 @@ import kotlin.math.max
  * Once it takes a touch, the views under the finger get a cancel, so the touch is not also a tap.
  * The switch happens when the finger lifts, after a swipe across a quarter of the screen or a quick
  * fling.
- *
- * In a conversation ([ThreadActivity]) only a swipe that starts over the composer switches: [within]
- * names the views a swipe may start in (null: anywhere on [root]), and the message list keeps its
- * own swipe (to reply).
  */
 internal class AppSwipe(
     private val root: View,
     private val excluded: () -> List<View>,
     private val enabled: () -> Boolean,
-    private val within: (() -> List<View>)? = null,
     private val onStep: (Int) -> Unit,
 ) {
     enum class Result {
@@ -120,23 +115,6 @@ internal class AppSwipe(
         }
     }
 
-    /**
-     * The screen's `dispatchTouchEvent` through this: [superDispatch] (the screen's own) gets the
-     * events that are not taken, and a cancel in place of the one that takes the touch, so the
-     * views under the finger let go of it (no tap, long press or scroll).
-     */
-    fun dispatch(event: MotionEvent, superDispatch: (MotionEvent) -> Boolean): Boolean =
-        when (handle(event)) {
-            Result.PASS -> superDispatch(event)
-            Result.CONSUMED -> true
-            Result.CLAIMED -> {
-                val cancel = MotionEvent.obtain(event).apply { action = MotionEvent.ACTION_CANCEL }
-                superDispatch(cancel)
-                cancel.recycle()
-                true
-            }
-        }
-
     private fun reset() {
         tracking = false
         claimed = false
@@ -153,7 +131,6 @@ internal class AppSwipe(
         val edge = EDGE_DP * density
         if (left < max(edge, (gestures?.left ?: 0).toFloat())) return false
         if (left > root.width - max(edge, (gestures?.right ?: 0).toFloat())) return false
-        if (within != null && within.invoke().none { it.isShown && contains(it, x, y) }) return false
         if (excluded().any { it.isShown && contains(it, x, y) }) return false
         return !overSidewaysThing(root, x, y)
     }
@@ -178,21 +155,6 @@ internal class AppSwipe(
     }
 
     companion object {
-        /**
-         * Slides the screen being left out, and the one coming in in, the way the finger went: for
-         * [step] 1 (a swipe to the left) the new one comes from the right. Call it on the screen
-         * that is closing, before `finish()`.
-         */
-        @Suppress("DEPRECATION")
-        fun slideOnClose(activity: android.app.Activity, step: Int) {
-            val enter = if (step > 0) com.lightdecoder.R.anim.switch_slide_in_right else com.lightdecoder.R.anim.switch_slide_in_left
-            val exit = if (step > 0) com.lightdecoder.R.anim.switch_slide_out_left else com.lightdecoder.R.anim.switch_slide_out_right
-            if (android.os.Build.VERSION.SDK_INT >= 34) {
-                activity.overrideActivityTransition(android.app.Activity.OVERRIDE_TRANSITION_CLOSE, enter, exit)
-            }
-            activity.overridePendingTransition(enter, exit)
-        }
-
         /** How many times further across than up or down a swipe must go. */
         const val RATIO = 2.5f
 
