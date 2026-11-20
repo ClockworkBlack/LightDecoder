@@ -279,14 +279,24 @@ class TranscriptScreenTest {
                 assertEquals(reveal.maxShift, reveal.offset, 0.5f)
                 val messages = holders(activity).filterIsInstance<MessagesAdapter.MessageHolder>()
                 assertEquals(3, messages.size)
-                // Every bubble moved together, the user's and hers; the time between them stays put.
-                for (h in messages) assertEquals(-reveal.maxShift, h.itemView.translationX, 0.5f)
+                val mine = messages.filter { it.outgoing }
+                val hers = messages.filter { !it.outgoing }
+                assertEquals(1, mine.size)
+                assertEquals(2, hers.size)
+                // As on an iPhone: the user's own bubble moves over; hers, and the times between the messages, stay where they are.
+                for (h in mine) assertEquals(-reveal.maxShift, h.itemView.translationX, 0.5f)
+                for (h in hers) assertEquals(0f, h.itemView.translationX, 0.01f)
                 holders(activity).filter { it !is MessagesAdapter.MessageHolder }.forEach { assertEquals(0f, it.itemView.translationX, 0.01f) }
-                // Each row's time beside it, at the right edge, as on an iPhone.
+                // Every row's time, hers too, in the column at the right edge, as on an iPhone.
                 val labels = reveal.labels()
                 assertEquals(messages.map { it.shownTime }.toSet(), labels.map { it.time }.toSet())
                 assertEquals(TimeFormat.clock(activity, shownRow(activity, "Perfect, see you there").timestampMs), messages.single { it.itemView === row }.shownTime)
-                assertTrue(labels.all { it.x > list(activity).width - reveal.maxShift && it.alpha == 1f })
+                val width = list(activity).width
+                assertTrue(labels.all { it.x > width - reveal.maxShift && it.right <= width && it.alpha == 1f })
+                // Never over her bubbles.
+                for (label in labels.filter { l -> hers.any { it.itemView === l.row } }) {
+                    assertTrue("clear of her bubble", label.x >= bubbleEnd(activity, label.row))
+                }
                 // Let go: back in place, nothing replied to.
                 val end = MotionEvent.obtain(SystemClock.uptimeMillis(), SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, 0f, y, 0)
                 list(activity).dispatchTouchEvent(end)
@@ -312,14 +322,19 @@ class TranscriptScreenTest {
                 drag(activity, list(activity).width * 0.75f, row.top + row.height / 2f, -dp(activity, 150f), 0f, up = false)
                 assertEquals(activity.timeReveal.maxShift, activity.timeReveal.offset, 0.5f)
             }
-            // A message arrives while the finger is still down: its row is laid out moved, as the others are.
-            message("H4", "One more thing", 60_000)
-            scenario.waitFor("it shows") { rowOf(it, "One more thing") != null }
+            // Messages arrive while the finger is still down (one of the user's, sent from another device,
+            // and one of hers): their rows are laid out as the others are, the user's moved, hers in place.
+            message("H4", "One more thing", 90_000, mine = true)
+            message("H5", "Sure, what is it?", 60_000)
+            scenario.waitFor("they show") { rowOf(it, "One more thing") != null && rowOf(it, "Sure, what is it?") != null }
             scenario.onActivity { activity ->
                 val reveal = activity.timeReveal
                 assertEquals(reveal.maxShift, reveal.offset, 0.5f)
                 assertEquals(-reveal.maxShift, rowOf(activity, "One more thing")!!.translationX, 0.5f)
-                assertTrue(reveal.labels().any { it.time == TimeFormat.clock(activity, shownRow(activity, "One more thing").timestampMs) })
+                assertEquals(0f, rowOf(activity, "Sure, what is it?")!!.translationX, 0.01f)
+                val times = reveal.labels().map { it.time }
+                assertTrue(times.contains(TimeFormat.clock(activity, shownRow(activity, "One more thing").timestampMs)))
+                assertTrue(times.contains(TimeFormat.clock(activity, shownRow(activity, "Sure, what is it?").timestampMs)))
                 val end = MotionEvent.obtain(SystemClock.uptimeMillis(), SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, 0f, 0f, 0)
                 list(activity).dispatchTouchEvent(end)
                 end.recycle()
@@ -328,6 +343,46 @@ class TranscriptScreenTest {
             scenario.onActivity { activity ->
                 assertEquals(0f, activity.timeReveal.offset, 0.01f)
                 holders(activity).forEach { assertEquals(0f, it.itemView.translationX, 0.01f) }
+            }
+        }
+    }
+
+    /** Where [row]'s bubble ends, in the list. */
+    private fun bubbleEnd(activity: Activity, row: View): Float {
+        val bubble = row.findViewById<View>(R.id.bubble)
+        val at = IntArray(2).also { bubble.getLocationInWindow(it) }
+        val listAt = IntArray(2).also { list(activity).getLocationInWindow(it) }
+        return (at[0] - listAt[0] + bubble.width).toFloat()
+    }
+
+    @Test
+    fun aTimeNeverCoversSomeoneElsesWideBubble() {
+        groupChat()
+        val long = "Leaving in five minutes from the north car park, the one by the visitor centre, so text me if you are running late or need a lift up"
+        message("W1", long, 20 * 60_000, chat = GROUP)
+        message("W2", "Ok!", 19 * 60_000, chat = GROUP, sender = "+15557654321" to "Ben Ortiz")
+        message("W3", "On my way", 18 * 60_000, chat = GROUP, mine = true)
+        launch(GROUP).use { scenario ->
+            scenario.waitFor("the group") { rowOf(it, long) != null && rowOf(it, "Ok!") != null && rowOf(it, "On my way") != null }
+            scenario.onActivity { activity ->
+                val reveal = activity.timeReveal
+                val row = rowOf(activity, "Ok!")!!
+                drag(activity, list(activity).width * 0.75f, row.top + row.height / 2f, -dp(activity, 150f), 0f, up = false)
+                assertEquals(reveal.maxShift, reveal.offset, 0.5f)
+                val wide = rowOf(activity, long)!!
+                // Her wide bubble reaches into the column: it stays put, and nothing is drawn over it.
+                assertEquals(0f, wide.translationX, 0.01f)
+                assertTrue(bubbleEnd(activity, wide) > list(activity).width - reveal.maxShift)
+                val labels = reveal.labels()
+                labels.filter { it.row === wide }.forEach { assertTrue("clear of her bubble", it.x >= bubbleEnd(activity, wide)) }
+                // The short ones have their times, and so does the user's (moved over).
+                assertTrue(labels.any { it.row === row && it.x >= bubbleEnd(activity, row) })
+                assertTrue(labels.any { it.row === rowOf(activity, "On my way") })
+                assertEquals(-reveal.maxShift, rowOf(activity, "On my way")!!.translationX, 0.5f)
+                assertTrue(labels.all { it.right <= list(activity).width })
+                val end = MotionEvent.obtain(SystemClock.uptimeMillis(), SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, 0f, 0f, 0)
+                list(activity).dispatchTouchEvent(end)
+                end.recycle()
             }
         }
     }
@@ -751,9 +806,10 @@ class TranscriptScreenTest {
     // --- screenshots for review ------------------------------------------------------------------
 
     /**
-     * Draws, in light and dark, a chat mid-drag with every time showing, an edited message with its
-     * earlier versions, and the "Report Junk" banner (transcript-*.png); and an iMessage that was not
-     * delivered with its sheet (transcript-failed-*.png, transcript-sheet-*.png). Only when asked.
+     * Draws, in light and dark, a chat mid-drag with every time showing and an edited message with its
+     * earlier versions (transcript-*.png); a stranger's chat with "Report Junk" (transcript-junk-*.png);
+     * and an iMessage that was not delivered with its sheet (transcript-failed-*.png,
+     * transcript-sheet-*.png). Only when asked.
      */
     @Test
     @Config(qualifiers = "w390dp-h900dp-xhdpi")
@@ -766,25 +822,35 @@ class TranscriptScreenTest {
             val mode = if (night) "dark" else "light"
             RuntimeEnvironment.setQualifiers(if (night) "+night" else "+notnight")
             imRepo.deleteConversationLocal(ALICE)
-            aliceChat(name = "+15551234567")
-            message("J1", "Hi! Is this the right number for the bike?", 50 * 60_000)
-            message("J2", "It's still for sale I hope", 49 * 60_000)
+            aliceChat()
+            message("T1", "Hi! Is the bike still for sale?", 50 * 60_000)
+            message("T2", "It is! Want to come and see it?", 48 * 60_000, mine = true)
             message(
-                "J3", "Can you do $250?", 20 * 60_000, editedAgoMs = 15 * 60_000,
+                "T3", "Can you do $250?", 20 * 60_000, editedAgoMs = 15 * 60_000,
                 extra = IMessageExtra(edits = 2, history = listOf(IMessageExtra.Version("Can you do $200?", now - 20 * 60_000), IMessageExtra.Version("Can you do $220?", now - 18 * 60_000))),
             )
+            message("T4", "Deal. Saturday at 10?", 12 * 60_000, mine = true)
+            message("T5", "Perfect, see you then", 11 * 60_000)
             launch().use { scenario ->
-                scenario.waitFor("the chat") { rowOf(it, "Can you do $250?") != null && it.findViewById<View>(R.id.junkBanner).visibility == View.VISIBLE }
+                scenario.waitFor("the chat") { rowOf(it, "Can you do $250?") != null && rowOf(it, "Perfect, see you then") != null }
                 scenario.onActivity { rowOf(it, "Can you do $250?")!!.findViewById<View>(R.id.edited).performClick() }
                 scenario.waitFor("its earlier versions") { rowOf(it, "Can you do $250?")?.findViewById<View>(R.id.editHistory)?.visibility == View.VISIBLE }
                 scenario.onActivity { activity ->
-                    val row = rowOf(activity, "Can you do $250?")!!
-                    drag(activity, list(activity).width * 0.75f, row.top + row.height / 2f, -dp(activity, 50f), 0f, up = false)
+                    val row = rowOf(activity, "Deal. Saturday at 10?")!!
+                    drag(activity, list(activity).width * 0.75f, row.top + row.height / 2f, -dp(activity, 150f), 0f, up = false)
                     shoot(activity, File(out, "transcript-$mode.png"))
                     val end = MotionEvent.obtain(SystemClock.uptimeMillis(), SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, 0f, 0f, 0)
                     list(activity).dispatchTouchEvent(end)
                     end.recycle()
                 }
+            }
+            imRepo.deleteConversationLocal(ALICE)
+            aliceChat(name = "+15551234567")
+            message("J1", "Hi! Is this the right number for the bike?", 50 * 60_000)
+            message("J2", "It's still for sale I hope", 49 * 60_000)
+            launch().use { scenario ->
+                scenario.waitFor("the banner") { rowOf(it, "It's still for sale I hope") != null && it.findViewById<View>(R.id.junkBanner).visibility == View.VISIBLE }
+                scenario.onActivity { shoot(it, File(out, "transcript-junk-$mode.png")) }
             }
             imRepo.deleteConversationLocal(ALICE)
             aliceChat()

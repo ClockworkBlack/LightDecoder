@@ -18,9 +18,12 @@ import kotlin.math.abs
 
 /**
  * iPhone-style chats: drag the transcript to the left (to the right in a right-to-left language) and
- * every message's time shows, small and grey, at the far side, as Messages on an iPhone shows them:
- * the bubbles all slide over together by at most [MAX_SHIFT_DP], each row's time beside it, and
- * spring back when the finger lets go.
+ * every message's time shows, small and grey, in a column at the far edge, as Messages on an iPhone
+ * shows them: the user's own bubbles (blue and green) slide over by at most [MAX_SHIFT_DP] to make
+ * room for it, while other people's bubbles, the notices and the times between the messages stay
+ * where they are, their times in the free space beside them; all spring back when the finger lets
+ * go. A time never covers a bubble: beside one of someone else's that reaches into the column it is
+ * moved over into what room is left, or not drawn for that row when there is none.
  *
  * It only ever takes a drag that is plainly sideways that way: a scroll up or down is the list's, a
  * drag the other way is swipe-to-reply's (the thread's [androidx.recyclerview.widget.ItemTouchHelper]),
@@ -31,9 +34,12 @@ import kotlin.math.abs
  * rows are, frame by frame.
  *
  * @param enabled whether it is on now (iPhone-style chats)
- * @param timeOf the time to show beside a row (its message's); null for a row that stays put (a time
+ * @param timeOf the time to show beside a row (its message's); null for a row with none (a time
  *   between messages, a notice)
- * @param anchorOf the view of a row its time lines up with (its bubble); null for the row's middle
+ * @param anchorOf the view of a row its time lines up with and keeps clear of (its bubble); null for
+ *   the row's middle
+ * @param slides whether a row with a time slides over to make room for it (the user's own messages,
+ *   on the far side); the others stay put
  * @param color the times' colour now (grey; white over a chat's picture)
  */
 class TimeReveal(
@@ -43,6 +49,7 @@ class TimeReveal(
     private val anchorOf: (RecyclerView.ViewHolder) -> View? = { null },
     private val color: () -> Int = { Color.GRAY },
     private val shadow: () -> Boolean = { false },
+    private val slides: (RecyclerView.ViewHolder) -> Boolean = { true },
 ) : RecyclerView.ItemDecoration(), RecyclerView.OnItemTouchListener, RecyclerView.OnChildAttachStateChangeListener {
 
     private val density = list.resources.displayMetrics.density
@@ -57,7 +64,7 @@ class TimeReveal(
         textSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, TEXT_SP, list.resources.displayMetrics)
     }
 
-    /** How far the rows are slid now, 0 to [maxShift]. */
+    /** How far the user's own rows are slid now (how far the times are in), 0 to [maxShift]. */
     var offset = 0f
         private set
 
@@ -185,7 +192,7 @@ class TimeReveal(
 
     // --- the rows --------------------------------------------------------------------------
 
-    /** Slides every row that moves to [to]; at 0 they are back where they were. */
+    /** Slides every row that moves (the user's own) to [to]; at 0 they are back where they were. */
     private fun shift(to: Float) {
         if (to == offset && (to != 0f || moved.isEmpty())) return
         offset = to
@@ -207,7 +214,7 @@ class TimeReveal(
 
     private fun moves(child: View): Boolean {
         val holder = list.getChildViewHolder(child) ?: return false
-        return timeOf(holder) != null
+        return timeOf(holder) != null && slides(holder)
     }
 
     override fun onChildViewAttachedToWindow(view: View) {
@@ -222,12 +229,20 @@ class TimeReveal(
 
     // --- the times -------------------------------------------------------------------------
 
-    /** A time as drawn: its words, where its text starts and its baseline, and how opaque (0..1). */
-    data class Label(val time: String, val x: Float, val baseline: Float, val alpha: Float)
+    /**
+     * A time as drawn: its words, where its text starts (and ends: [right]) and its baseline, how
+     * opaque (0..1), and the row it is the time of.
+     */
+    data class Label(val time: String, val x: Float, val right: Float, val baseline: Float, val alpha: Float, val row: View)
 
     private val rect = Rect()
 
-    /** The times drawn now, one per row on screen that moves; none while the rows are in place. */
+    /**
+     * The times drawn now, one per message row on screen (none while the rows are in place): in the
+     * column at the far edge, coming in as the drag goes on, never past the list's edge. Beside a row
+     * that stays put, never over its bubble: moved into the room left beside a bubble that reaches into
+     * the column, or left out for that row when there is no room for it at all.
+     */
     @VisibleForTesting
     fun labels(): List<Label> {
         if (offset <= 0f) return emptyList()
@@ -238,23 +253,31 @@ class TimeReveal(
             val child = list.getChildAt(i)
             val holder = list.getChildViewHolder(child) ?: continue
             val time = timeOf(holder) ?: continue
-            val anchor = anchorOf(holder)?.takeIf { it.isShown && it.height > 0 }
-            val middle = if (anchor != null && child is ViewGroup && isInside(anchor, child)) {
+            val anchor = anchorOf(holder)?.takeIf { it.isShown && it.height > 0 && child is ViewGroup && isInside(it, child) }
+            if (anchor != null) {
                 rect.set(0, 0, anchor.width, anchor.height)
-                child.offsetDescendantRectToMyCoords(anchor, rect)
-                rect.exactCenterY()
-            } else {
-                child.height / 2f
+                (child as ViewGroup).offsetDescendantRectToMyCoords(anchor, rect)
             }
+            val middle = if (anchor != null) rect.exactCenterY() else child.height / 2f
             val y = child.top + child.translationY + middle
             val width = paint.measureText(time)
-            // Just beyond where the rows now end, held inside the list's edge.
-            val x = if (rtl) {
-                (offset - gap - width).coerceAtLeast(edge)
-            } else {
-                (list.width - offset + gap).coerceAtMost(list.width - edge - width)
+            // The column: just beyond where the user's own rows now end, held inside the list's edge.
+            var x = if (rtl) (offset - gap - width).coerceAtLeast(edge) else (list.width - offset + gap).coerceAtMost(list.width - edge - width)
+            if (anchor != null && !slides(holder)) {
+                // A row that stays put: its bubble is never covered.
+                if (rtl) {
+                    val bubbleStart = child.left + child.translationX + rect.left
+                    val room = bubbleStart - gap
+                    if (room - width < edge) continue
+                    x = minOf(x, room - width)
+                } else {
+                    val bubbleEnd = child.left + child.translationX + rect.right
+                    val from = bubbleEnd + gap
+                    if (from + width > list.width - edge) continue
+                    x = maxOf(x, from)
+                }
             }
-            out += Label(time, x, y - (metrics.ascent + metrics.descent) / 2f, alpha)
+            out += Label(time, x, x + width, y - (metrics.ascent + metrics.descent) / 2f, alpha, child)
         }
         return out
     }

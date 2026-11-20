@@ -196,6 +196,9 @@ class MessagesAdapter(
         /** Its message's time, as the last bind wrote it: what iPhone-style chats show beside it on a drag to the side ([TimeReveal]). */
         var shownTime = ""
 
+        /** Whether it is one of the user's own messages, as the last bind found: those slide over for their times ([TimeReveal]). */
+        var outgoing = false
+
         /** The "Open link" accessibility actions added at the last bind ([BubbleLinks]). */
         var linkActionIds: List<Int> = emptyList()
 
@@ -414,6 +417,7 @@ class MessagesAdapter(
         // Time and delivery status.
         b.time.text = TimeFormat.clock(context, row.timestampMs)
         holder.shownTime = b.time.text.toString()
+        holder.outgoing = outgoing
         // Changed since it was sent: "Edited" by the time, as on an iPhone. A tap shows what it read
         // before (iOS 16) above it, in faded bubbles, and hides them again; with none kept it says when.
         val edited = row.editedAtMs > 0

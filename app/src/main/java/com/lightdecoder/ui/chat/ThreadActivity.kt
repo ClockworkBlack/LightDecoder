@@ -735,7 +735,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         ItemTouchHelper(SwipeToReply()).attachToRecyclerView(binding.messages)
         // iPhone-style chats: the lines joining inline replies to what they answer.
         binding.messages.addItemDecoration(ReplyLines(this) { threadsInChat })
-        // iPhone-style chats: a drag to the left shows every message's time (a swipe to the right replies).
+        // iPhone-style chats: a drag to the left shows every message's time, the user's own bubbles moving
+        // over for it and everyone else's staying where they are (a swipe to the right replies).
         timeReveal = TimeReveal(
             list = binding.messages,
             enabled = { phoneStyle && threadPanel == null },
@@ -743,6 +744,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             anchorOf = { holder -> (holder as? MessagesAdapter.MessageHolder)?.binding?.bubble },
             color = { if (adapter.onPicture) android.graphics.Color.WHITE else ContextCompat.getColor(this, R.color.phone_meta) },
             shadow = { adapter.onPicture },
+            slides = { holder -> (holder as? MessagesAdapter.MessageHolder)?.outgoing == true },
         ).attach()
     }
 
