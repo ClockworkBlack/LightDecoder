@@ -8,12 +8,47 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
    had earlier chosen "build with a warning", then "pause on Discord", and has now asked for
    the web-view tab only, with no bridge). **Instagram: skipped** (ban risk, like Messenger).
 
-## 0.5.70 (versionCode 81) - swipe over a chat's composer switches apps
+## 0.5.71 (versionCode 82) - security audit and fixes; missing iPhone features
+- 0.5.70's composer swipe was removed again (5011c63): apps switch only by swiping the middle of the
+  conversation list (0.5.69); inside a chat no swipe switches apps.
+- Three security audits (reports were kept in the session scratchpad) and three fix batches:
+  - 9517fdf: chat-background poster caps + Kotlin zip pre-check (PosterArchive), Throwable-safe
+    consumer + per-event death counter (EventAttempts); edits/unsends author-only within Apple's
+    windows; tapbacks/receipts members-only; full E.164 address comparison (CallingCodes, SIM/network
+    region); group membership only via membership events from members; background/version bounds;
+    reused GUIDs dropped; unverified events never the user's; sender times clamped; download caps.
+  - 7b01ee8: imported libraries must match pins (hash re-checked before load; no unpinned v7a/x86_64
+    heifdec, which the bridge needs); OpenBubbles trusted only with its Play signing cert
+    54:33:6B:2F:...:1D:A2 (AppSigning; alpha/beta debug-only; no linking by name alone);
+    ExternalUris (userId@ / %40 authority bypasses); CAF caps; HMAC chat tags + Redact; RelayHost
+    https-only; DirectIpc uid check + DirectPaths; Discord allowContentAccess=false; .gitignore.
+  - bf3d6fd: sticker/group-photo fetches only after main-process acceptance with caps and Apple
+    MMCS host allowlist (https, *.icloud.com / *.icloud-content.com / *.apple.com; unverified
+    against real Apple hosts: automatic fetches fail closed otherwise); bounded group versions;
+    unverified extension events dropped; poll changes append-only; mention bypass only in groups;
+    LinkPreviews connect-time local refusal, embedded IPv4 checks, deadline, og:url same-site.
+- iPhone features (gap analysis kept in scratchpad; Apple-Account-only features not possible):
+  - Batch 1: ChatDetailsActivity (rename, group photo, add/remove/leave, Hide Alerts, per-chat read
+    receipts), DirectWire RENAME=13 MEMBERS=14 GROUP_PHOTO=15, GroupPhotos/GroupVersions, contact
+    photos from Google Messages thumbnails (ContactPhotos, AvatarPhotos).
+  - Batch 2: Mentions (+ "Notify me when mentioned"), LinkPreviews for sent links (+ "Link previews"
+    setting) and pictures in received previews, sticker tapbacks/placed stickers, iOS 26 Polls.
+  - Batch 3: TimeReveal (swipe left shows times; reply is right-swipe in iPhone-style chats), edit
+    history, Not Delivered sheet (Try Again / Send as Text Message / Delete), Pin and Mark as
+    Unread (MARK_UNREAD=16), MergedChats, Report Junk (REPORT_JUNK=17), PeerCacheInvalidate
+    (PEERS=18), typer avatar in groups. Skipped: catch-up arrow (no per-message read state).
+- None of the new Apple requests (group changes, mentions, link metadata, polls, MarkUnread, junk
+  reports, peer invalidation) has been seen against a real iPhone yet.
+- Known flaky tests (timing races in untouched relay tests): RelayLimitsTest
+  aConversationThePhoneDeletesCanBeRestoredOrPurgedHere / theLastSettingsAreKeptSeeded...
+- Unit tests: 1399 (3 skipped: gated screenshot tests), all passing. Next version: 0.5.72 / 83.
+
+## 0.5.70 (versionCode 81) - swipe over a chat's composer switches apps (removed in 0.5.71)
 - In ThreadActivity a sideways swipe starting over the composer, reply bar or attachment bar opens
   the list with `ConversationsActivity.EXTRA_APP_STEP` (+/-1), which runs the top switcher's
   `go(step)`; the message list keeps swipe-to-reply. Off during selection/action modes and recording.
   Dragging the cursor sideways in the field now switches apps instead (Android 11+ behaviour lost).
-- Unit tests: 1159 (1 skipped), all passing. Next version: 0.5.71 / 82.
+- Unit tests: 1159 (1 skipped), all passing.
 
 ## 0.5.69 (versionCode 80) - quiet iMessage status notice; swipe anywhere to switch apps
 - The ":imessage" service notice moved to channel `imessage_service_quiet` (MIN, no badge, silent,

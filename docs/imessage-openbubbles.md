@@ -3,6 +3,19 @@
 Status: **built in 0.5.28 (see "What is built"); not yet tried on a phone.** The older
 Flutter-based analysis further down applies to OpenBubbles 1.15.x only and is kept as history.
 
+## Later additions (0.5.59-0.5.71)
+- iPhone-style chats (PhoneStyle), reply threads (ReplyThreads, ReplyThreadPanel), effects played on
+  screen (EffectPlayer), iOS 18 text effects/formatting (TextRuns), chat backgrounds incl. stock
+  gradients/Aurora/themes (ChatBackgrounds, BackgroundPosters, BackgroundPicker), Send Later.
+- 0.5.71: chat Details and group management, group/contact photos, mentions, link previews both
+  ways, sticker tapbacks, polls, time reveal, edit history, Not Delivered actions, pins, Mark as
+  Unread, Report Junk, peer cache invalidation. Not possible without an Apple Account session:
+  Name and Photo sharing, Focus status, iCloud history, Find My/Check In, Apple Cash.
+- Security model (0.5.71): remote events are authorised (author-only edits/unsends, members-only
+  group events, verified-only for the user's own and destructive events), sizes are capped before
+  native parsing, and every automatic fetch happens only after acceptance from Apple-hosted https
+  files. Imported libraries must match the pins; OpenBubbles is trusted by its signing certificate.
+
 ## iPhone-level iMessage in the Messages tab (0.5.58)
 With the bundled library set up ("direct mode"), nothing hands off to OpenBubbles; every feature runs
 here through the `:imessage` process (`DirectEngine`/`DirectService`) and the main process
