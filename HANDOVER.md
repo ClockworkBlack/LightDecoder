@@ -8,6 +8,16 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
    had earlier chosen "build with a warning", then "pause on Discord", and has now asked for
    the web-view tab only, with no bridge). **Instagram: skipped** (ban risk, like Messenger).
 
+## 0.5.69 (versionCode 80) - quiet iMessage status notice; swipe anywhere to switch apps
+- The ":imessage" service notice moved to channel `imessage_service_quiet` (MIN, no badge, silent,
+  own group, no timestamp, re-posted only on text change; old `imessage_status` deleted) in
+  `ServiceNotice.kt`; "iMessage is on / Running in the background". The "4" was most likely Android
+  bundling ungrouped notifications. Setup screen button opens the channel settings to hide it.
+- `AppSwipe.kt`: a horizontal swipe anywhere on the conversation list switches apps through the same
+  `ServiceTabStrip.Refresh.go(step)` as the top swipe; ignores edges, top bar, sideways scrollers,
+  snackbars, open search. Not in threads.
+- Unit tests: 1149 (1 skipped), all passing. Not yet seen on the owner's Samsung. Next: 0.5.70 / 81.
+
 ## 0.5.68 (versionCode 79) - videos play; share goes to a ready draft; share list matches the inbox
 - Videos showed "not available" on phones: VideoPlayerActivity compared a canonical file path with the
   non-canonical dataDir (/data/user/0 symlink). `ownFile()` canonicalizes both sides.
@@ -16,7 +26,7 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
   (nothing sent). Direct Share shortcuts for the 8 newest inbox conversations (`ShareShortcuts`).
   ViewerActivity no longer has an ACTION_SEND filter (one LightDecoder entry in the share sheet).
 - Owner chose to keep iPhone behaviour: media-only messages have no bubble.
-- Unit tests: 1138 (1 skipped), all passing. Next version: 0.5.69 / 80.
+- Unit tests: 1138 (1 skipped), all passing.
 
 ## 0.5.67 (versionCode 78) - full emoji list scrolls when reacting
 - The reaction emoji picker's BottomSheet took vertical drags (its nested-scroll child was the

@@ -54,7 +54,11 @@ object RelayNotifications {
     /** iMessage ("Blue Bubbles"): new messages only; there is no connection of its own to show. */
     const val CHANNEL_IMESSAGE_MESSAGES = "imessage_messages"
 
-    /** iMessage runs no foreground service: never posted. */
+    /**
+     * Never posted: nothing here shows an ongoing notice for iMessage. Through the iMessage library
+     * its own service shows one, quiet, on a channel of its own
+     * ([com.lightdecoder.imessage.direct.ServiceNotice]).
+     */
     const val ID_IMESSAGE_UNUSED = 0x5245_4c23
     private const val ID_WA_RELINK = 0x5245_4c22
 

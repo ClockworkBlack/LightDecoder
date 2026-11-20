@@ -1,8 +1,5 @@
 package com.lightdecoder.imessage.direct
 
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -10,11 +7,9 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
-import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.lightdecoder.R
-import com.lightdecoder.ui.imessage.DirectSetupActivity
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
@@ -30,6 +25,7 @@ import org.json.JSONObject
 class DirectService : Service() {
 
     private val scope = MainScope()
+    private val notice by lazy { ServiceNotice.Poster(this) }
     private lateinit var engine: DirectEngine
     private lateinit var sinkClient: DirectIpc.Client
 
@@ -108,7 +104,7 @@ class DirectService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         try {
             ServiceCompat.startForeground(
-                this, NOTIFICATION_ID, notification(engine.status.value),
+                this, NOTIFICATION_ID, notice.forForeground(engine.status.value),
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING else 0,
             )
         } catch (e: RuntimeException) {
@@ -135,50 +131,17 @@ class DirectService : Service() {
     private fun update(status: DirectEngine.Status) {
         // For the main process's logs: it cannot ask the engine without starting it.
         DirectPrefs.setLastStatus(this, DirectEngine.describe(status))
-        try {
-            getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(status))
-        } catch (e: SecurityException) {
-            // Notifications not allowed.
-        }
+        notice.update(status)
     }
-
-    private fun notification(status: DirectEngine.Status) =
-        NotificationCompat.Builder(this, CHANNEL)
-            .setSmallIcon(R.drawable.ic_chat)
-            .setContentTitle(getString(R.string.imessage_title))
-            .setContentText(
-                when (status) {
-                    is DirectEngine.Status.Registered -> getString(R.string.imessage_service_on)
-                    is DirectEngine.Status.Working -> status.step + "…"
-                    is DirectEngine.Status.Retrying -> getString(R.string.imessage_service_retrying, status.error)
-                    is DirectEngine.Status.Failed -> getString(R.string.imessage_service_failed, status.error)
-                    else -> getString(R.string.imessage_service_starting)
-                },
-            )
-            .setOngoing(true)
-            .setSilent(true)
-            .setContentIntent(
-                PendingIntent.getActivity(
-                    this, 0, Intent(this, DirectSetupActivity::class.java),
-                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-                ),
-            )
-            .build()
 
     companion object {
         private const val TAG = "DirectService"
-        const val CHANNEL = "imessage_status"
-        private const val NOTIFICATION_ID = 7301
+        /** The notice's channel ([ServiceNotice]). */
+        const val CHANNEL = ServiceNotice.CHANNEL
+        private const val NOTIFICATION_ID = ServiceNotice.NOTIFICATION_ID
         private const val SINK_TIMEOUT_MS = 30_000L
 
-        fun ensureChannel(context: Context) {
-            val nm = context.getSystemService(NotificationManager::class.java)
-            if (nm.getNotificationChannel(CHANNEL) == null) {
-                nm.createNotificationChannel(
-                    NotificationChannel(CHANNEL, context.getString(R.string.imessage_service_channel), NotificationManager.IMPORTANCE_MIN),
-                )
-            }
-        }
+        fun ensureChannel(context: Context) = ServiceNotice.ensureChannel(context)
 
         /** Starts the service if iMessage is set up (from either process). False if Android refused. */
         fun start(context: Context): Boolean {

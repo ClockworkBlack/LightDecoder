@@ -134,8 +134,6 @@
     <string name="imessage_paste_other_request">That reply is for an earlier attempt (its r= number differs). Use the reply to the latest verification text.</string>
     <string name="imessage_menu">iMessage…</string>
     <string name="imessage_where">Once iMessage is on, iMessage conversations are in the Messages tab with your texts, and LightDecoder stays connected in the background so they arrive whether it is open or not. A new conversation with someone who has iMessage starts as an iMessage.</string>
-    <string name="imessage_service_channel">iMessage connection</string>
-    <string name="imessage_service_on">Connected. iMessages arrive in Messages.</string>
     <string name="imessage_service_starting">Connecting…</string>
     <string name="imessage_service_failed">Not working: %1$s</string>
     <string name="imessage_no_reactions">Reactions can\'t be sent over iMessage from LightDecoder yet.</string>

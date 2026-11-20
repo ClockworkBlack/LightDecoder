@@ -314,6 +314,14 @@
     <!-- %1$s: Apple's reason; %2$d: seconds until the next try. -->
     <string name="imessage_status_retrying_body">Apple could not finish the registration just now (%1$s). LightDecoder tries again by itself in about %2$d seconds.</string>
     <string name="imessage_service_retrying">Trying again soon: %1$s</string>
+    <!-- The quiet notice of the iMessage service (ServiceNotice), and its channel. -->
+    <string name="imessage_service_on_title">iMessage is on</string>
+    <string name="imessage_service_on_body">Running in the background</string>
+    <string name="imessage_service_quiet_channel">iMessage status</string>
+    <string name="imessage_service_quiet_channel_description">A quiet notice that iMessage is running. Turn it off to hide it: iMessage keeps working.</string>
+    <!-- The setup screen: opens the system settings of that channel. -->
+    <string name="imessage_hide_status">Hide status notification</string>
+    <string name="imessage_hide_status_help">Turn off \"iMessage status\" on the next screen. iMessage keeps working; only the status notice is hidden.</string>
 
     <!-- Errors. -->
     <string name="imessage_error_not_enabled">Blue Bubbles is off. Tick it in the Messages menu.</string>

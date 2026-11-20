@@ -18,13 +18,20 @@ import com.lightdecoder.R
  * screens listen to it as before. The switcher shows the app on screen, and
  * how many conversations are unread in the others; a tap lists every app with
  * its count, the one showing ticked, and choosing one selects its tab. A
- * sideways swipe along the bar goes to the next app, or the one before.
+ * sideways swipe along the bar goes to the next app, or the one before; on the
+ * conversation list a sideways swipe anywhere does the same ([AppSwipe]).
  */
 object ServiceTabStrip {
 
     /** Updates the switcher; call it again when the badges change. */
     fun interface Refresh {
         fun refresh()
+
+        /**
+         * Goes to the next app ([step] 1) or the one before (-1), as a sideways swipe along the bar
+         * does: the same path, so a swipe elsewhere on the screen ([AppSwipe]) acts the same.
+         */
+        fun go(step: Int) = Unit
     }
 
     /**
@@ -34,7 +41,7 @@ object ServiceTabStrip {
     fun attachSwitcher(tabs: TabLayout, switcher: View, current: () -> CharSequence): Refresh {
         val label = switcher.findViewById<TextView>(R.id.switcherLabel)
         val badge = switcher.findViewById<TextView>(R.id.switcherBadge)
-        val refresh = Refresh {
+        val show: () -> Unit = {
             val showing = current()
             label.text = showing
             val elsewhere = (0 until tabs.tabCount).mapNotNull { tabs.getTabAt(it) }
@@ -43,6 +50,16 @@ object ServiceTabStrip {
             badge.visibility = if (elsewhere > 0) View.VISIBLE else View.GONE
             badge.text = if (elsewhere > 99) "99+" else elsewhere.toString()
             switcher.contentDescription = switcher.context.getString(R.string.chat_switcher_description, showing)
+        }
+        val goTo: (Int) -> Unit = { step ->
+            val showing = current()
+            val at = (0 until tabs.tabCount).firstOrNull { tabs.getTabAt(it)?.text == showing } ?: tabs.selectedTabPosition
+            neighbour(at, tabs.tabCount, step)?.let { tabs.getTabAt(it)?.select() }
+            switcher.post { show() }
+        }
+        val refresh = object : Refresh {
+            override fun refresh() { show() }
+            override fun go(step: Int) { goTo(step) }
         }
         switcher.setOnClickListener {
             val menu = PopupMenu(switcher.context, switcher)
@@ -65,12 +82,7 @@ object ServiceTabStrip {
             menu.show()
         }
         // A sideways swipe along the top bar goes to the next app (leftwards) or the one before.
-        val swipe = swipeListener(switcher.resources.displayMetrics.density) { step ->
-            val showing = current()
-            val at = (0 until tabs.tabCount).firstOrNull { tabs.getTabAt(it)?.text == showing } ?: tabs.selectedTabPosition
-            neighbour(at, tabs.tabCount, step)?.let { tabs.getTabAt(it)?.select() }
-            switcher.post { refresh.refresh() }
-        }
+        val swipe = swipeListener(switcher.resources.displayMetrics.density) { step -> refresh.go(step) }
         switcher.setOnTouchListener(swipe)
         (switcher.parent as? View)?.setOnTouchListener(swipe)
         tabs.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {

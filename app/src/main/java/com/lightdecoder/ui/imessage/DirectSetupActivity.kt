@@ -20,6 +20,7 @@ import com.lightdecoder.imessage.direct.DirectEngine
 import com.lightdecoder.imessage.direct.DirectEngine.Status
 import com.lightdecoder.imessage.direct.DirectLibrary
 import com.lightdecoder.imessage.direct.DirectPrefs
+import com.lightdecoder.imessage.direct.ServiceNotice
 import com.lightdecoder.imessage.direct.SmsPhoneVerifier
 import com.lightdecoder.imessage.madrid.MadridApps
 import com.lightdecoder.imessage.madrid.MadridHost
@@ -96,6 +97,8 @@ class DirectSetupActivity : AppCompatActivity() {
         binding.switchReplyThreads.isChecked = DirectPrefs.replyThreadsInChat(this)
         binding.switchReplyThreads.setOnCheckedChangeListener { _, on -> DirectPrefs.setReplyThreadsInChat(this, on) }
         binding.getGames.setOnClickListener { MadridHost.openStore(this, MadridApps.OPENPIGEON) }
+        // The service's status notice: turned off in its channel's settings, iMessage keeps running.
+        binding.hideStatus.setOnClickListener { openStatusSettings() }
 
         showLibrary()
         engine.start()
@@ -110,6 +113,14 @@ class DirectSetupActivity : AppCompatActivity() {
         super.onResume()
         // Back from the store, maybe with OpenPigeon installed.
         showGames()
+    }
+
+    private fun openStatusSettings() {
+        try {
+            startActivity(ServiceNotice.channelSettingsIntent(this))
+        } catch (e: android.content.ActivityNotFoundException) {
+            showError(getString(R.string.imessage_hide_status_help))
+        }
     }
 
     /** Whether games can be played: OpenPigeon installed (and the real one), with "Get games" without it. Nothing while games are off. */

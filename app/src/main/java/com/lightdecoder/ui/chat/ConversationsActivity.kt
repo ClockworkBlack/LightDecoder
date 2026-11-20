@@ -4,6 +4,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.view.Menu
 import android.view.MenuItem
+import android.view.MotionEvent
 import android.view.View
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SearchView
@@ -169,6 +170,14 @@ class ConversationsActivity : AppCompatActivity() {
         setUpFolderTabs()
         renderFolderControls()
         binding.swipe.setOnRefreshListener { refreshFromPhone() }
+        // A sideways swipe anywhere below the top bar switches apps, as the one along the bar does.
+        // Not while searching: the results are of the app the search was started in.
+        appSwipe = AppSwipe(
+            binding.root,
+            excluded = { listOf(binding.toolbar) },
+            enabled = { searchQuery == null && binding.services.tabCount > 1 },
+            onStep = { step -> switcher?.go(step) },
+        )
         binding.fab.setOnClickListener {
             if (backend.service == ChatService.GMAIL) {
                 // An email needs a subject and addresses, not a phone number.
@@ -345,6 +354,22 @@ class ConversationsActivity : AppCompatActivity() {
 
     /** The app switcher in the top bar; refreshed when the unread counts change. */
     private var switcher: ServiceTabStrip.Refresh? = null
+
+    /** A sideways swipe over the list: the next app or the one before ([AppSwipe]). */
+    private var appSwipe: AppSwipe? = null
+
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean =
+        when (appSwipe?.handle(ev) ?: AppSwipe.Result.PASS) {
+            AppSwipe.Result.PASS -> super.dispatchTouchEvent(ev)
+            AppSwipe.Result.CONSUMED -> true
+            AppSwipe.Result.CLAIMED -> {
+                // The views under the finger let go of it: no tap, long press or scroll.
+                val cancel = MotionEvent.obtain(ev).apply { action = MotionEvent.ACTION_CANCEL }
+                super.dispatchTouchEvent(cancel)
+                cancel.recycle()
+                true
+            }
+        }
 
     private fun selectServiceTab(service: ChatService) {
         val tabs = binding.services
