@@ -451,6 +451,161 @@ class DirectGroupsTest {
         assertEquals(7L, GroupVersions(context).next(id))
     }
 
+    private fun waitFor(what: String, timeoutMs: Long = 5_000, condition: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (!condition()) {
+            if (System.currentTimeMillis() > deadline) fail("timed out waiting for $what")
+            Thread.sleep(20)
+        }
+    }
+
+    /** [from]'s change of the group's photo, at the group's [version], as the ":imessage" process now hands it over: where the photo is, nothing fetched. */
+    private fun fileEvent(guid: String, from: String, version: ULong, participants: List<String> = listOf(me, bob, alice, carol), groupGuid: String = "G-1") =
+        DirectArchive.map(
+            MessageInst(
+                guid, from, ConversationData(participants, null, groupGuid, null),
+                PushChatMessage.IconChange(IconChangeMessage(photoFile, version)), 1_700_000_005_000UL, null, false, false, null,
+            ),
+            setOf(me), Handles::display, DirectTexts(context), { "<plist>photo</plist>" },
+        ).let(::wire)
+
+    @Test
+    fun aGroupPhotoFromAppleIsFetchedOnlyOnceItsChangeIsTakenThenShows() {
+        val downloads = Collections.synchronizedList(ArrayList<DirectWire.DownloadRequest>())
+        val l = link { what, request ->
+            if (what != DirectWire.DOWNLOAD) return@link null
+            val r = DirectWire.DownloadRequest.fromJson(request)
+            downloads += r
+            File(r.path).apply { parentFile?.mkdirs() }.writeBytes(jpeg(800, 400))
+            DirectWire.downloaded(File(r.path).length())
+        }
+        group(l)
+        // From someone not in the group, or for a group not stored here: nothing is fetched.
+        l.apply(fileEvent("PF1", mallory, 3UL, listOf(me, bob, alice, carol, mallory)))
+        l.apply(fileEvent("PF2", bob, 3UL, groupGuid = "G-OTHER"))
+        Thread.sleep(200)
+        assertTrue(downloads.isEmpty())
+        assertNull(repo.message("imsg:PF1"))
+        // From a member: its row at once, the photo once it came.
+        l.apply(fileEvent("PF3", bob, 4UL))
+        assertEquals("+15559876543 changed the group photo.", repo.message("imsg:PF3")!!.text)
+        waitFor("the photo") { GroupPhotos(context).pictureOf(id) != null }
+        val r = downloads.single()
+        assertEquals("<plist>photo</plist>", r.descriptor)
+        assertEquals("never more than a group photo", GroupPhotos.MAX_DOWNLOAD_BYTES, r.maxBytes)
+        assertEquals("one nobody asked for: Apple's servers only, in its time", DirectLink.GROUP_PHOTO_FETCH_MS, r.automaticMs)
+        assertTrue("fetched where the other process may write", DirectPaths.isAllowed(r.path, DirectPaths.forApp(context)))
+        assertFalse("and not left there", File(r.path).exists())
+        val shown = BitmapFactory.decodeFile(GroupPhotos(context).pictureOf(id)!!.path)!!
+        assertEquals(GroupPhotoImages.SIDE to GroupPhotoImages.SIDE, shown.width to shown.height)
+        assertEquals(4L, GroupPhotos(context).of(id).version)
+        assertEquals("nothing left but the photo and its index", 2, GroupPhotos.dir(context).list()!!.size)
+        // The same change again (Apple's journal after a restart): nothing new to fetch.
+        l.apply(fileEvent("PF3", bob, 4UL))
+        Thread.sleep(200)
+        assertEquals(1, downloads.size)
+    }
+
+    @Test
+    fun aGroupPhotoThatDoesNotComeOrIsNoPictureLeavesThePhotoAsItWas() {
+        var bytes: ByteArray? = null
+        val l = link { what, request ->
+            if (what != DirectWire.DOWNLOAD) return@link null
+            val path = DirectWire.DownloadRequest.fromJson(request).path
+            bytes?.let { File(path).writeBytes(it) } ?: return@link DirectWire.error("not on Apple's file servers")
+            DirectWire.downloaded(File(path).length())
+        }
+        group(l)
+        l.apply(photoEvent("PN1", bob, 2UL, fetched().path))
+        val before = GroupPhotos(context).pictureOf(id)!!
+        // Refused (not on Apple's servers, too large, not in time): the row, the photo as it was.
+        l.apply(fileEvent("PN2", bob, 3UL))
+        // Something that is no picture: the same.
+        bytes = "not a picture".toByteArray()
+        l.apply(fileEvent("PN3", bob, 4UL))
+        Thread.sleep(500)
+        assertEquals(before, GroupPhotos(context).pictureOf(id))
+        assertEquals("+15559876543 changed the group photo.", repo.message("imsg:PN3")!!.text)
+        assertEquals("the photo and its index only", 2, GroupPhotos.dir(context).list()!!.size)
+    }
+
+    @Test
+    fun aGroupVersionFarAheadOfTheGroupsIsNotTakenAndTheUsersOwnChangeAlwaysShows() {
+        val l = link()
+        group(l)
+        // Far ahead of the group's (it would hold every later photo back): not taken, no row.
+        for (v in listOf(ULong.MAX_VALUE, 1UL shl 40, (1UL shl 32), 1_001UL)) {
+            val ahead = fetched()
+            l.apply(photoEvent("PV$v", bob, v, ahead.path))
+            assertFalse(ahead.exists())
+            assertNull(repo.message("imsg:PV$v"))
+        }
+        assertNull(GroupPhotos(context).pictureOf(id))
+        assertNull(GroupVersions(context).of(id))
+        // Within reach of what is known: taken.
+        l.apply(photoEvent("PV1", bob, 1_000UL, fetched().path))
+        assertNotNull(GroupPhotos(context).pictureOf(id))
+        assertEquals(1_000L, GroupVersions(context).of(id))
+        l.apply(photoEvent("PV2", alice, 2_000UL, fetched().path))
+        assertEquals(2_000L, GroupPhotos(context).of(id).version)
+        // A member's change of members as of a version far ahead: the change is taken, its version is not.
+        l.apply(event("PV3", carol, PushChatMessage.ChangeParticipants(uniffi.rust_bridge.ChangeParticipantMessage(listOf(me, bob, alice, carol, dave), ULong.MAX_VALUE)), listOf(me, bob, alice, carol)))
+        assertTrue(members().contains("+15556667777"))
+        assertEquals(2_000L, GroupVersions(context).of(id))
+        assertEquals(2_001L, GroupVersions(context).next(id))
+        // A photo kept as of a version far ahead (from before such were refused): the user's own change,
+        // Apple having confirmed it, shows all the same.
+        GroupPhotos(context).apply(id, fetched(), Long.MAX_VALUE)
+        GroupVersions(context).note(id, Long.MAX_VALUE)
+        val source = File(context.cacheDir, "picked-green.jpg").apply { writeBytes(jpeg(300, 300, Color.GREEN)) }
+        runBlocking { l.setGroupPhoto(id, Uri.fromFile(source)) }
+        assertEquals("You changed the group photo.", latestRow().text)
+        val mine = BitmapFactory.decodeFile(GroupPhotos(context).pictureOf(id)!!.path)!!
+        val px = mine.getPixel(mine.width / 2, mine.height / 2)
+        assertTrue("the user's own photo", Color.green(px) > 180 && Color.red(px) < 90 && Color.blue(px) < 90)
+        // Taken off by the user: gone here too.
+        runBlocking { l.setGroupPhoto(id, null) }
+        assertNull(GroupPhotos(context).pictureOf(id))
+        assertEquals("You removed the group photo.", latestRow().text)
+    }
+
+    @Test
+    fun aGroupPhotoChangeNamingWhatIsKeptThereAlreadyTakesNothing() {
+        val l = link()
+        group(l)
+        l.apply(photoEvent("PK1", bob, 3UL, fetched().path))
+        val kept = GroupPhotos(context).pictureOf(id)!!
+        val index = File(GroupPhotos.dir(context), "index.json")
+        assertTrue(index.isFile)
+        // The index, a group's photo kept there, a picture the user is sending: none is a new picture that came.
+        val outgoing = GroupPhotos.incomingFile(context, GroupPhotos.OUTGOING).apply { writeBytes(jpeg(10, 10)) }
+        for ((n, path) in listOf(index.path, kept.path, outgoing.path).withIndex()) {
+            l.apply(photoEvent("PK${n + 2}", alice, (4 + n).toULong(), path))
+            assertNull(repo.message("imsg:PK${n + 2}"))
+        }
+        assertTrue(index.isFile)
+        assertTrue(kept.isFile)
+        assertTrue(outgoing.isFile)
+        assertEquals(kept, GroupPhotos(context).pictureOf(id))
+        assertEquals(3L, GroupPhotos(context).of(id).version)
+    }
+
+    @Test
+    fun aDeletedChatTakesItsGroupPhotoVersionAndOwnReadReceiptsWithIt() {
+        val l = link()
+        group(l)
+        l.apply(photoEvent("PD1", bob, 3UL, fetched().path))
+        val picture = GroupPhotos(context).pictureOf(id)!!
+        l.setSendsReadReceipts(id, true)
+        assertEquals(3L, GroupVersions(context).of(id))
+        runBlocking { IMessageManager.get(context).deleteConversation(id) }
+        assertNull(repo.conversation(id))
+        assertFalse(picture.exists())
+        assertEquals(GroupPhotos.Photo(null, 0, known = false), GroupPhotos(context).of(id))
+        assertNull(GroupVersions(context).of(id))
+        assertNull(ReadReceiptChoices(context).of(id))
+    }
+
     // --- a chat's own read receipts ------------------------------------------------------------------
 
     @Test

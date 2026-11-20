@@ -26,6 +26,32 @@ object DirectMedia {
     fun pendingInlineFile(file: java.io.File): java.io.File =
         java.io.File(file.parentFile, file.name + ".inline" + com.lightdecoder.archive.MediaCache.PART_SUFFIX)
 
+    /**
+     * Whether [url], where a file someone sent says it is on Apple's file servers (MMCS: the library
+     * asks there for it, and tells it when the file came), is one of Apple's: https, on a host of
+     * Apple's iCloud ([APPLE_FILE_HOSTS]: rustpush takes the address as the sender gave it, and none
+     * is named in its sources, so these are Apple's domains themselves), its own port or none, and
+     * nothing in it that another reader of addresses could take for a different host. A file that
+     * is fetched without anyone asking (a sticker, a group's photo, a chat's background) is fetched
+     * only from there: the sender cannot make this phone ask a server of theirs.
+     */
+    fun isAppleFileServer(url: String): Boolean {
+        if (url.length > MAX_FILE_URL_CHARS) return false
+        val m = FILE_URL.matchEntire(url) ?: return false
+        val host = m.groupValues[1].lowercase()
+        val port = m.groupValues[2]
+        if (port.isNotEmpty() && port != "443") return false
+        return APPLE_FILE_HOSTS.any { host.endsWith(it) && host.length > it.length }
+    }
+
+    /** The domains Apple's file servers are under: iMessage's attachments (`pNN-content.icloud.com`), iCloud's content hosts, Apple's own. */
+    val APPLE_FILE_HOSTS = listOf(".icloud.com", ".icloud-content.com", ".apple.com")
+
+    /** An https address with a plain host name (letters, digits, hyphens; two labels at least) and then nothing but printable ASCII bar backslashes. */
+    private val FILE_URL = Regex("https://([A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+)(?::(\\d{1,5}))?(?:[/?][\\x21-\\x5b\\x5d-\\x7e]*)?", RegexOption.IGNORE_CASE)
+
+    private const val MAX_FILE_URL_CHARS = 2048
+
     const val OCTET_STREAM = "application/octet-stream"
 
     /** What any other file is to Apple. */

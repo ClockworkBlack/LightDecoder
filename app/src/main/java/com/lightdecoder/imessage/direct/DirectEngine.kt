@@ -130,9 +130,6 @@ class DirectEngine private constructor(private val app: Context) {
         },
     )
 
-    /** Group photos from Apple: fetched, their square picture written for the main process. */
-    private val groupPhotos = IncomingGroupPhotos(app) { file, path, maxBytes -> downloadCapped(requireSession(), file, path, maxBytes) }
-
     /** How often reading each of Apple's events took this process down ([EventAttempts]). */
     private val attempts = EventAttempts(File(app.filesDir, "imessage/event-attempts"))
 
@@ -209,9 +206,10 @@ class DirectEngine private constructor(private val app: Context) {
         if (!inst.verificationFailed) DirectMessages.oneToOneChat(inst, me)?.let { (peer, guid) -> chatGuids.remember(peer, guid) }
         attempts.risky()
         val update = try {
+            // A group's photo (and a sticker) is not fetched here: the change names where it is, and the
+            // main process fetches it once it took the change (the group stored, its sender in it).
             val mapped = when (inst.message) {
                 is PushChatMessage.SetTranscriptBackground -> backgrounds.receive(inst, me, Handles::display, texts)
-                is PushChatMessage.IconChange -> groupPhotos.receive(inst, me, Handles::display, texts)
                 else -> DirectArchive.map(inst, me, Handles::display, texts, ::describe)
             }
             if (mapped is DirectArchive.Update.Upsert) keepInlineFiles(inst)
@@ -265,53 +263,34 @@ class DirectEngine private constructor(private val app: Context) {
     }
 
     /**
-     * The pictures a change names that are no attachment of a message: a link preview's (it came
-     * inside the message: drawn again as a JPEG, [PreviewImages.jpeg]) and a sticker's put on a
-     * message (as a tapback, or dragged onto it: fetched from Apple's file servers, never more than
-     * [STICKER_MAX_BYTES], drawn again as a PNG). Each is written aside under its key
+     * The pictures a change names that are no attachment of a message and came inside the message:
+     * a link preview's (drawn again as a JPEG, [PreviewImages.jpeg]) and a sticker's put on a message
+     * (as a tapback, or dragged onto it; drawn again as a PNG). Each is written aside under its key
      * ([DirectMedia.pendingInlineFile]), as a small attachment is: the main process moves it into
-     * place only once it took the change.
+     * place only once it took the change. A sticker on Apple's file servers is not fetched here: the
+     * change names where it is ([DirectArchive.Update.Reaction.stickerFile]), and the main process
+     * fetches it once it took the change ([download]), so nothing is fetched for a change it drops.
      */
-    private suspend fun keepPictures(inst: MessageInst, update: DirectArchive.Update) {
+    private fun keepPictures(inst: MessageInst, update: DirectArchive.Update) {
         when (update) {
             is DirectArchive.Update.Upsert -> {
                 val key = IMessageExtra.parse(update.message.extra).link?.image?.takeIf { it.isNotEmpty() } ?: return
                 val bytes = DirectArchive.linkImage((inst.message as? PushChatMessage.Message)?.v1?.linkMeta) ?: return
                 writePending(key, PreviewImages.jpeg(bytes, PreviewImages.LINK_SIDE))
             }
-            is DirectArchive.Update.Reaction -> update.sticker?.let { key -> writePending(key, fetchSticker(inst)) }
+            is DirectArchive.Update.Reaction -> update.sticker?.let { key -> writePending(key, inlineSticker(inst)) }
             is DirectArchive.Update.Sticker -> {
                 val guid = DirectArchive.guidOf(update.messageId) ?: return
-                writePending(IMessageExtra.stickerKey(guid, update.stickerGuid), fetchSticker(inst))
+                writePending(IMessageExtra.stickerKey(guid, update.stickerGuid), inlineSticker(inst))
             }
             else -> Unit
         }
     }
 
-    /** The sticker [inst] puts on a message, as a PNG to show ([PreviewImages.png]); null when it has none or it cannot be fetched or read. */
-    private suspend fun fetchSticker(inst: MessageInst): ByteArray? {
+    /** The sticker [inst] puts on a message, when it came inside the message, as a PNG to show ([PreviewImages.png]); null otherwise or when it cannot be read. */
+    private fun inlineSticker(inst: MessageInst): ByteArray? {
         val attachment = DirectArchive.stickerAttachment(inst.message) ?: return null
-        val bytes = when (val type = attachment.aType) {
-            is AttachmentType.Inline -> type.v1.takeIf { it.isNotEmpty() && it.size <= STICKER_MAX_BYTES }
-            is AttachmentType.Mmcs -> {
-                val file = type.v1.maxByOrNull { it.size } ?: return null
-                if (file.size > STICKER_MAX_BYTES.toULong()) return null
-                // Named as the media cache's partial files, so one left by a crash is cleaned up.
-                val partial = File(MediaCache.mediaDir(app, ChatService.IMESSAGE).apply { mkdirs() }, "sticker-${java.util.UUID.randomUUID()}${MediaCache.PART_SUFFIX}")
-                try {
-                    withTimeoutOrNull(STICKER_TIMEOUT_MS) { downloadCapped(requireSession(), file, partial.path, STICKER_MAX_BYTES) }
-                        ?: return null.also { Log.w(TAG, "a sticker was not fetched in time") }
-                    partial.takeIf { it.isFile && it.length() in 1..STICKER_MAX_BYTES }?.readBytes()
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    Log.w(TAG, "a sticker was not fetched (${e::class.java.simpleName})")
-                    null
-                } finally {
-                    partial.delete()
-                }
-            }
-        } ?: return null
+        val bytes = (attachment.aType as? AttachmentType.Inline)?.v1?.takeIf { it.isNotEmpty() && it.size <= STICKER_MAX_BYTES } ?: return null
         return PreviewImages.png(bytes, PreviewImages.STICKER_SIDE)
     }
 
@@ -746,7 +725,7 @@ class DirectEngine private constructor(private val app: Context) {
 
     /** The group photo at [jpeg] on Apple's file servers: where it is, and its key. */
     private suspend fun uploadGroupPhoto(s: SharedPushStateHandle, jpeg: File): MmcsFile {
-        if (!jpeg.isFile || jpeg.length() == 0L || jpeg.length() > IncomingGroupPhotos.MAX_DOWNLOAD_BYTES) {
+        if (!jpeg.isFile || jpeg.length() == 0L || jpeg.length() > GroupPhotos.MAX_DOWNLOAD_BYTES) {
             throw ImessageError(app.getString(R.string.imessage_group_photo_unreadable))
         }
         val uploaded = call { uniffi.rust_bridge.uploadMmcsAttachment(s, jpeg.path, APP_IMAGE_MIME, GROUP_PHOTO_UTI, GROUP_PHOTO_NAME, null) }
@@ -841,11 +820,14 @@ class DirectEngine private constructor(private val app: Context) {
      * can still describe. Throws [ImessageError] when Apple did not take the report.
      */
     suspend fun reportJunk(target: DirectWire.Target, messages: List<DirectWire.JunkMessage>) {
+        // As an iPhone offers it: a chat with one person, and only what that person sent.
+        val peer = junkPeer(target) ?: throw ImessageError(app.getString(R.string.imessage_junk_not_offered))
         if (messages.isEmpty()) throw ImessageError(app.getString(R.string.imessage_junk_nothing))
         val s = requireSession()
         val (_, from) = conversationOf(target)
         val reports = messages.mapNotNull { m ->
-            val sender = Handles.normalize(m.sender) ?: return@mapNotNull null
+            val sender = Handles.normalize(m.sender)?.takeIf { it == peer || com.lightdecoder.imessage.IMessageAddress.same(it, peer) }
+                ?: return@mapNotNull null
             // One the library cannot read again goes without it: the rest of the report still goes.
             val attachments = m.attachments.mapNotNull { descriptor ->
                 try {
@@ -887,11 +869,21 @@ class DirectEngine private constructor(private val app: Context) {
 
     /**
      * Fetches the attachment [descriptor] (as the library saved it, `saveAttachment`) into the
-     * file [path], through a partial file of its own so a half-written file is never taken for
-     * the whole. Two downloads of the same file (one asked again after the first took too long
-     * to answer) each write their own and rename it into place whole. Returns its size.
+     * file [path], never more than [maxBytes] of it, through a partial file of its own so a
+     * half-written file is never taken for the whole. Two downloads of the same file (one asked again
+     * after the first took too long to answer) each write their own and rename it into place whole.
+     * One nobody asked for ([automaticMs]: a sticker, a group's photo, fetched once the main process
+     * took the change that names it) comes only from Apple's own file servers
+     * ([DirectMedia.isAppleFileServer]) and is given that long at most. Returns its size.
      */
-    suspend fun download(descriptor: String, path: String): Long {
+    suspend fun download(descriptor: String, path: String, maxBytes: Long = DirectMedia.MAX_DOWNLOAD_BYTES, automaticMs: Long? = null): Long {
+        val cap = maxBytes.coerceIn(1L, DirectMedia.MAX_DOWNLOAD_BYTES)
+        if (automaticMs == null) return downloadInto(descriptor, path, cap, automatic = false)
+        return withTimeoutOrNull(automaticMs) { downloadInto(descriptor, path, cap, automatic = true) }
+            ?: throw ImessageError(app.getString(R.string.imessage_direct_attachment_not_saved))
+    }
+
+    private suspend fun downloadInto(descriptor: String, path: String, maxBytes: Long, automatic: Boolean): Long {
         val attachment = call { uniffi.rust_bridge.restoreAttachment(descriptor) }
         val file = File(path)
         file.parentFile?.mkdirs()
@@ -900,15 +892,19 @@ class DirectEngine private constructor(private val app: Context) {
         try {
             when (val type = attachment.aType) {
                 is AttachmentType.Inline -> {
-                    if (type.v1.size > DirectMedia.MAX_DOWNLOAD_BYTES) throw tooBigToDownload()
+                    if (type.v1.size > maxBytes) throw tooBigToDownload(maxBytes)
                     partial.writeBytes(type.v1)
                 }
                 is AttachmentType.Mmcs -> {
-                    val s = requireSession()
                     val largest = type.v1.maxByOrNull { it.size } ?: throw ImessageError(app.getString(R.string.imessage_direct_attachment_no_file))
+                    if (automatic && !DirectMedia.isAppleFileServer(largest.url)) {
+                        Log.w(TAG, "a file not on Apple's file servers was not fetched")
+                        throw ImessageError(app.getString(R.string.imessage_direct_attachment_not_saved))
+                    }
+                    val s = requireSession()
                     // The library makes the file itself, as it does for OpenBubbles: only its name is taken here.
                     partial.delete()
-                    downloadCapped(s, largest, partial.path, DirectMedia.MAX_DOWNLOAD_BYTES)
+                    downloadCapped(s, largest, partial.path, maxBytes)
                 }
             }
             if (partial.length() <= 0 || !partial.renameTo(file)) {
@@ -1077,9 +1073,6 @@ class DirectEngine private constructor(private val app: Context) {
         /** The largest sticker fetched to show on a message (an iPhone's is a small HEIC or PNG). */
         const val STICKER_MAX_BYTES = 2L * 1024 * 1024
 
-        /** How long a sticker's fetch may hold up the next event from Apple. */
-        private const val STICKER_TIMEOUT_MS = 20_000L
-
         /** How a group photo is uploaded (a square JPEG; Apple keeps it as the transfer "GroupPhotoImage"). */
         private const val GROUP_PHOTO_UTI = "public.jpeg"
         private const val GROUP_PHOTO_NAME = "GroupPhotoImage.jpg"
@@ -1127,6 +1120,14 @@ class DirectEngine private constructor(private val app: Context) {
 
         @Volatile
         private var instance: DirectEngine? = null
+
+        /**
+         * Whose messages a junk report of the chat [target] may carry: its one other person's (their
+         * address as the library has it), as an iPhone offers "Report Junk" only there; null for a
+         * group or a chat with more people, of which nothing is reported.
+         */
+        internal fun junkPeer(target: DirectWire.Target): String? =
+            target.peer?.takeIf { target.groupGuid.isNullOrBlank() }?.let(Handles::normalize)
 
         /** Only in the ":imessage" process. */
         fun get(context: Context): DirectEngine =

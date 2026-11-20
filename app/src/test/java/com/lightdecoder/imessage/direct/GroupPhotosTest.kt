@@ -8,8 +8,6 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import java.io.ByteArrayOutputStream
 import java.io.File
-import kotlinx.coroutines.runBlocking
-import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -19,16 +17,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
-import uniffi.rust_bridge.ConversationData
-import uniffi.rust_bridge.IconChangeMessage
-import uniffi.rust_bridge.MessageInst
-import uniffi.rust_bridge.MmcsFile
-import uniffi.rust_bridge.PushChatMessage
 
 /**
  * A group's photo through the iMessage library: kept per group with the group's version (an older
- * one ignored), its picture fetched from Apple (the library faked), decoded no larger than needed
- * and cut square; and the group's version a change from here goes as.
+ * one ignored, the user's own always shown), decoded no larger than needed and cut square, its new
+ * pictures taken only by their own names and swept away when left; and the group's version a change
+ * from here goes as, and one from someone else's change taken only within reach of what is known.
  */
 @RunWith(AndroidJUnit4::class)
 class GroupPhotosTest {
@@ -145,80 +139,97 @@ class GroupPhotosTest {
         assertTrue((100L / sample) * (200_000L / sample) <= 4_000_000L)
     }
 
-    // --- fetched from Apple (the library faked) ---------------------------------------------------------
+    // --- new pictures: which a request may name, and those left behind -----------------------------------
 
-    private class FakeDownloads(private val bytes: ByteArray?, private val fail: Exception? = null) : IncomingGroupPhotos.Natives {
-        val asked = ArrayList<Pair<MmcsFile, Long>>()
-
-        override suspend fun download(file: MmcsFile, path: String, maxBytes: Long) {
-            asked += file to maxBytes
-            fail?.let { throw it }
-            File(path).writeBytes(bytes ?: ByteArray(0))
+    @Test
+    fun aNewPictureIsTakenOnlyByItsOwnNameWhereGroupPhotosAreKept() {
+        val incoming = GroupPhotos.incomingFile(context)
+        val outgoing = GroupPhotos.incomingFile(context, GroupPhotos.OUTGOING)
+        assertTrue(GroupPhotos.isNew(context, incoming, GroupPhotos.INCOMING))
+        assertTrue(GroupPhotos.isNew(context, outgoing, GroupPhotos.OUTGOING))
+        // Each only as what it is.
+        assertFalse(GroupPhotos.isNew(context, incoming, GroupPhotos.OUTGOING))
+        assertFalse(GroupPhotos.isNew(context, outgoing, GroupPhotos.INCOMING))
+        // Not the index, nor a group's photo kept there, nor anything elsewhere or named otherwise.
+        val store = GroupPhotos(context)
+        store.apply("imsg:group:G-1", GroupPhotos.incomingFile(context).apply { writeBytes(jpeg(10, 10)) }, 3)
+        val kept = store.pictureOf("imsg:group:G-1")!!
+        for (f in listOf(
+            File(GroupPhotos.dir(context), "index.json"), kept, File(GroupPhotos.dir(context), "incoming-x.jpg"),
+            File(GroupPhotos.dir(context), "incoming-${java.util.UUID.randomUUID()}.png"),
+            File(context.cacheDir, "incoming-${java.util.UUID.randomUUID()}.jpg"),
+            File(GroupPhotos.dir(context), "../backgrounds/incoming-${java.util.UUID.randomUUID()}.jpg"),
+        )) {
+            assertFalse(f.path, GroupPhotos.isNew(context, f, GroupPhotos.INCOMING))
+            assertFalse(f.path, GroupPhotos.isNew(context, f, GroupPhotos.OUTGOING))
         }
     }
 
-    private fun iconChange(id: String, sender: String?, file: MmcsFile?, version: ULong, guid: String? = "G-7", unverified: Boolean = false) =
-        MessageInst(
-            id, sender, ConversationData(listOf(me, bob, carol, dave), "Trip", guid, null),
-            PushChatMessage.IconChange(IconChangeMessage(file, version)), 1_700_000_005_000UL, null, false, unverified, null,
-        )
-
-    private fun receive(i: MessageInst, natives: FakeDownloads) =
-        runBlocking { IncomingGroupPhotos(context, natives).receive(i, setOf(me), Handles::display, DirectTexts(context)) }
-
-    private val photoFile = MmcsFile(byteArrayOf(1), "OBJ", "https://mmcs.example/obj", byteArrayOf(2), 5_000UL)
-
     @Test
-    fun aPhotoIsFetchedCutSquareAndWrittenForTheMainProcess() {
-        val natives = FakeDownloads(jpeg(800, 400))
-        val u = receive(iconChange("IC1", bob, photoFile, 4UL), natives) as DirectArchive.Update.GroupPhoto
-        assertEquals("OBJ", natives.asked.single().first.`object`)
-        assertEquals(IncomingGroupPhotos.MAX_DOWNLOAD_BYTES, natives.asked.single().second)
-        assertEquals("imsg:group:G-7", u.conversationId)
-        assertEquals(4L, u.version)
-        val file = File(u.path!!)
-        assertTrue("where group photos are kept", GroupPhotos.isOurs(context, file))
-        val bitmap = BitmapFactory.decodeFile(file.path)!!
-        assertEquals(bitmap.width, bitmap.height)
-        assertEquals("+15550000002 changed the group photo.", u.row.message.text)
-        // Nothing is left behind but the picture.
-        assertEquals(listOf(file.name), GroupPhotos.dir(context).list()!!.toList())
-        // As it crosses to the main process.
-        val wired = DirectWire.decode(JSONObject(DirectWire.encode(u).toString())) as DirectArchive.Update.GroupPhoto
-        assertEquals(u.path, wired.path)
-        assertEquals(4L, wired.version)
+    fun newPicturesLeftByWorkThatNeverEndedAreSweptAway() {
+        val now = System.currentTimeMillis()
+        val store = GroupPhotos(context)
+        store.apply("imsg:group:G-1", incoming(), 3)
+        val kept = store.pictureOf("imsg:group:G-1")!!
+        val index = File(GroupPhotos.dir(context), "index.json")
+        val old = listOf(
+            GroupPhotos.incomingFile(context), GroupPhotos.incomingFile(context, GroupPhotos.PICKED), GroupPhotos.incomingFile(context, GroupPhotos.OUTGOING),
+            File(GroupPhotos.dir(context), "photo-${java.util.UUID.randomUUID()}.part"),
+        ).onEach { it.writeBytes(byteArrayOf(1)) }
+        val fresh = GroupPhotos.incomingFile(context).apply { writeBytes(byteArrayOf(2)) }
+        for (f in old + kept + index) f.setLastModified(now - 2 * GroupPhotos.STALE_MS)
+        assertEquals(old.size, GroupPhotos.sweep(context, now))
+        assertTrue(old.none { it.exists() })
+        // One still being worked on, a group's photo and the index stay, however old.
+        assertTrue(fresh.exists())
+        assertTrue(kept.exists())
+        assertTrue(index.exists())
+        assertEquals(kept, GroupPhotos(context).pictureOf("imsg:group:G-1"))
     }
 
     @Test
-    fun aPhotoTakenOffOrOneNobodyCanTakeIsNotFetched() {
-        val natives = FakeDownloads(jpeg(10, 10))
-        val removed = receive(iconChange("IC2", carol, null, 5UL), natives) as DirectArchive.Update.GroupPhoto
-        assertNull(removed.path)
-        assertEquals("+15550000003 removed the group photo.", removed.row.message.text)
-        assertEquals(DirectArchive.Update.Ignore, receive(iconChange("IC3", bob, photoFile, 6UL, unverified = true), natives))
-        assertEquals(DirectArchive.Update.Ignore, receive(iconChange("IC4", null, photoFile, 6UL), natives))
-        assertEquals(DirectArchive.Update.Ignore, receive(iconChange("IC5", bob, photoFile, 6UL, guid = null), natives))
-        assertTrue(natives.asked.isEmpty())
+    fun theUsersOwnChangeIsThePhotoWhateverVersionTheGroupsIsAt() {
+        val store = GroupPhotos(context)
+        val id = "imsg:group:G-9"
+        // Someone set it as of a version far ahead (before such were refused).
+        assertEquals(GroupPhotos.Applied.APPLIED, store.apply(id, incoming(), Long.MAX_VALUE))
+        val theirs = store.pictureOf(id)!!
+        // Anyone else's next one is older: ignored.
+        assertEquals(GroupPhotos.Applied.OLDER, store.apply(id, incoming(), 5))
+        // The user's own, Apple having confirmed it: shown, kept as of the higher version.
+        val mine = incoming(jpeg(40, 40) { it.eraseColor(Color.GREEN) })
+        assertEquals(GroupPhotos.Applied.APPLIED, store.apply(id, mine, 5, own = true))
+        assertFalse(mine.exists())
+        // In theirs' place: the user's picture.
+        val shown = BitmapFactory.decodeFile(store.pictureOf(id)!!.path)!!
+        val px = shown.getPixel(shown.width / 2, shown.height / 2)
+        assertTrue("the user's own", Color.green(px) > 180 && Color.red(px) < 90)
+        assertEquals("one picture kept", 1, GroupPhotos.dir(context).list()!!.count { it.endsWith(".jpg") })
+        assertTrue(theirs.path == store.pictureOf(id)!!.path || !theirs.exists())
+        assertEquals(Long.MAX_VALUE, store.of(id).version)
+        // Taken off by the user: none.
+        assertEquals(GroupPhotos.Applied.APPLIED, store.apply(id, null, 6, own = true))
+        assertNull(store.pictureOf(id))
+        assertTrue(GroupPhotos.dir(context).list()!!.none { it.endsWith(".jpg") })
     }
 
     @Test
-    fun aPhotoTooLargeUnreadableOrNotFetchedLeavesTheRowAlone() {
-        // Said to be larger than it may be: not fetched.
-        val big = FakeDownloads(jpeg(10, 10))
-        val tooBig = receive(iconChange("IC6", bob, photoFile.copy(size = (IncomingGroupPhotos.MAX_DOWNLOAD_BYTES + 1).toULong()), 7UL), big)
-        tooBig as DirectArchive.Update.Upsert
-        assertEquals("+15550000002 changed the group photo.", tooBig.message.text)
-        assertEquals(7L, tooBig.groupVersion)
-        assertTrue(big.asked.isEmpty())
-        // Stopped for growing past it, or not fetched at all: the row alone.
-        for (fail in listOf(DirectEngine.TooLarge("stopped"), DirectEngine.ImessageError("no network"))) {
-            val u = receive(iconChange("IC7", bob, photoFile, 8UL), FakeDownloads(null, fail))
-            assertTrue(u.toString(), u is DirectArchive.Update.Upsert)
-        }
-        // Something that is no picture: the row alone, and nothing left behind.
-        val garbage = receive(iconChange("IC8", bob, photoFile, 9UL), FakeDownloads("not a picture".toByteArray()))
-        assertTrue(garbage is DirectArchive.Update.Upsert)
-        assertTrue(GroupPhotos.dir(context).list().orEmpty().isEmpty())
+    fun aGroupsVersionFromSomeonesChangeIsTakenOnlyWithinReachOfWhatIsKnown() {
+        // Nothing known: up to a thousand changes on.
+        assertTrue(GroupVersions.plausible(0))
+        assertTrue(GroupVersions.plausible(1_000))
+        assertFalse(GroupVersions.plausible(1_001))
+        assertFalse(GroupVersions.plausible(-1))
+        // From the highest known, the group's or its photo's.
+        assertTrue(GroupVersions.plausible(1_500, 700, null))
+        assertTrue(GroupVersions.plausible(1_500, null, 600))
+        assertFalse(GroupVersions.plausible(1_701, 700, 600))
+        assertTrue(GroupVersions.plausible(3, 700, 600))
+        // Past 2^32: none, unless one known is that high already (then a thousand on from it).
+        assertFalse(GroupVersions.plausible(GroupVersions.MAX_PLAUSIBLE, GroupVersions.MAX_PLAUSIBLE - 1))
+        assertTrue(GroupVersions.plausible(GroupVersions.MAX_PLAUSIBLE + 5, GroupVersions.MAX_PLAUSIBLE))
+        assertFalse(GroupVersions.plausible(Long.MAX_VALUE, 3))
+        assertTrue(GroupVersions.plausible(Long.MAX_VALUE, Long.MAX_VALUE - 10))
     }
 
     // --- the group's version, and a chat's own read receipts ---------------------------------------

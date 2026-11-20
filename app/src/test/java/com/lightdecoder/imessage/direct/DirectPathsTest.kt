@@ -75,4 +75,17 @@ class DirectPathsTest {
         assertTrue(e.message == "This file could not be read.")
         DirectPaths.require(context, MediaCache.outboxFile(context, "abc", ChatService.IMESSAGE).path, "never")
     }
+
+    @Test
+    fun aLinkPreviewsPictureIsTakenOnlyFromTheImessageMediaFolders() {
+        val media = DirectPaths.forImessageMedia(context)
+        assertTrue(DirectPaths.isAllowed(DirectLink.pictureFile(context, IMessageExtra.linkImageKey("tmp:abc")).path, media))
+        assertTrue(DirectPaths.isAllowed(MediaCache.outboxFile(context, "1b2c-3d", ChatService.IMESSAGE).path, media))
+        // Anywhere else of the app's own: not a link preview's picture.
+        assertFalse(DirectPaths.isAllowed(File(context.cacheDir, "shared-in/x/photo.jpg").path, media))
+        assertFalse(DirectPaths.isAllowed(MediaCache.fileFor(context, "media-1", "jpg", ChatService.MESSAGES).path, media))
+        assertFalse(DirectPaths.isAllowed(File(context.filesDir, "imessage/state/keys.plist").path, media))
+        assertFalse(DirectPaths.isAllowed(File(context.filesDir, "imessage-media/../shared_prefs/x.xml").path, media))
+        assertFalse(DirectPaths.isAllowed(File(context.filesDir, "contact-photos/x.jpg").path, media))
+    }
 }

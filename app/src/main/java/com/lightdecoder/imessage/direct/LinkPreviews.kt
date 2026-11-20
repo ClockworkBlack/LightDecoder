@@ -8,10 +8,18 @@ import java.net.IDN
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
+import java.net.Proxy
+import java.net.Socket
+import java.net.SocketException
 import java.net.URI
 import java.net.URISyntaxException
 import java.net.URL
 import java.nio.charset.Charset
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.ScheduledThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SSLSocketFactory
 
 /**
  * Rich link previews for links the user sends (iMessage's "LPLinkMetadata"), fetched in the main
@@ -20,10 +28,13 @@ import java.nio.charset.Charset
  *
  * Fetched as privately as a preview can be: http and https only (an http address is asked for
  * over https: the app sends nothing in the clear), at most [MAX_REDIRECTS] redirects that stay
- * http(s), never a host on this phone or its local network, no cookies, no referrer, a generic
- * User-Agent, [BUDGET_MS] in all; a page read only as far as [MAX_PAGE_BYTES] and only if it is
- * HTML, a picture only up to [MAX_IMAGE_BYTES] and only if it says it is one. No address is ever
- * logged. The network is passed in ([Fetcher]) so all of it is tested without one.
+ * http(s), never a host on this phone or its local network (checked again as the connection is
+ * made, [HttpFetcher]), no proxy, no cookies, no referrer, a generic User-Agent, [BUDGET_MS] in all;
+ * a page read only as far as [MAX_PAGE_BYTES] and only if it is HTML, a picture only up to
+ * [MAX_IMAGE_BYTES] and only if it says it is one. The card opens the page the link led to (after
+ * its redirects), or the address the page names as its own only when that is on its own site
+ * ([sameSite]). No address is ever logged. The network is passed in ([Fetcher]) so all of it is
+ * tested without one.
  *
  * Pure apart from [HttpFetcher]. Tested in LinkPreviewsTest.
  */
@@ -68,7 +79,7 @@ object LinkPreviews {
         val resolve: (String) -> List<InetAddress> = { host -> InetAddress.getAllByName(host).toList() },
     )
 
-    /** What a page says of itself: its address (after redirects, or its own `og:url`), title, summary, site name and picture's address. */
+    /** What a page says of itself: its address (after redirects, or its own `og:url` on its own site, over https), title, summary, site name and picture's address. */
     data class Page(val url: String, val title: String, val summary: String, val site: String, val imageUrl: String?)
 
     /** A preview: the [page] for the link as typed ([originalUrl]), and its picture's bytes and type if it has one. */
@@ -192,7 +203,12 @@ object LinkPreviews {
         host == "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal") ||
             host.endsWith(".lan") || host.endsWith(".home.arpa") || !host.contains('.') && !host.contains(':')
 
-    /** Whether [address] is on this phone or a local or private network (loopback, link-local, private ranges, multicast, unspecified). */
+    /**
+     * Whether [address] is on this phone or a local or private network (loopback, link-local, private
+     * ranges, multicast, unspecified), also when it is an IPv4 address carried in an IPv6 one: mapped
+     * (::ffff:0:0/96), IPv4-compatible (::/96), NAT64 (64:ff9b::/96, and the local-use 64:ff9b:1::/48
+     * wherever its translator puts the IPv4 address) and 6to4 (2002::/16), each checked as that IPv4 address.
+     */
     internal fun isLocal(address: InetAddress): Boolean {
         if (address.isLoopbackAddress || address.isLinkLocalAddress || address.isSiteLocalAddress || address.isAnyLocalAddress ||
             address.isMulticastAddress
@@ -211,17 +227,32 @@ object LinkPreviews {
             is Inet6Address -> {
                 val first = b[0].toInt() and 0xff
                 // Unique local fc00::/7; an IPv4 address in IPv6 dress checked as one.
-                (first and 0xfe) == 0xfc || mappedV4(b)?.let(::isLocal) == true
+                (first and 0xfe) == 0xfc || embeddedV4(b).any(::isLocal)
             }
             else -> true
         }
     }
 
-    private fun mappedV4(b: ByteArray): InetAddress? {
-        if (b.size != 16) return null
-        for (i in 0 until 10) if (b[i].toInt() != 0) return null
-        if ((b[10].toInt() and 0xff) != 0xff || (b[11].toInt() and 0xff) != 0xff) return null
-        return InetAddress.getByAddress(b.copyOfRange(12, 16))
+    /** The IPv4 addresses the IPv6 address [b] carries ([isLocal]'s ways of carrying one), none for any other. */
+    internal fun embeddedV4(b: ByteArray): List<InetAddress> {
+        if (b.size != 16) return emptyList()
+        fun u(i: Int) = b[i].toInt() and 0xff
+        fun v4(vararg at: Int): InetAddress = InetAddress.getByAddress(ByteArray(4) { b[at[it]] })
+        fun zero(from: Int, until: Int) = (from until until).all { u(it) == 0 }
+        val last = intArrayOf(12, 13, 14, 15)
+        return when {
+            // Mapped ::ffff:a.b.c.d, and IPv4-compatible ::a.b.c.d (:: and ::1 are caught above).
+            zero(0, 10) && u(10) == 0xff && u(11) == 0xff -> listOf(v4(*last))
+            zero(0, 12) -> listOf(v4(*last))
+            // NAT64's well-known prefix 64:ff9b::/96 (RFC 6052).
+            u(0) == 0x00 && u(1) == 0x64 && u(2) == 0xff && u(3) == 0x9b && zero(4, 12) -> listOf(v4(*last))
+            // Its local-use prefix 64:ff9b:1::/48 (RFC 8215): the IPv4 address where each prefix length a translator may use puts it.
+            u(0) == 0x00 && u(1) == 0x64 && u(2) == 0xff && u(3) == 0x9b && u(4) == 0x00 && u(5) == 0x01 ->
+                listOf(v4(6, 7, 9, 10), v4(7, 9, 10, 11), v4(9, 10, 11, 12), v4(*last))
+            // 6to4 2002:a.b.c.d::/48.
+            u(0) == 0x20 && u(1) == 0x02 -> listOf(v4(2, 3, 4, 5))
+            else -> emptyList()
+        }
     }
 
     /** [location] (a redirect's target) against the address it came from. */
@@ -271,12 +302,40 @@ object LinkPreviews {
         val site = clean(meta["og:site_name"] ?: "", MAX_SITE_CHARS).ifBlank { hostOf(pageUrl) }
         val image = (meta["og:image:secure_url"] ?: meta["og:image"] ?: meta["og:image:url"] ?: meta["twitter:image"] ?: meta["twitter:image:src"])
             ?.let { entities(it).trim() }?.let { resolve(pageUrl, it) }?.takeIf { it.length <= MAX_URL_CHARS && webUrl(it) != null }
-        val own = meta["og:url"]?.let { entities(it).trim() }?.let { resolve(pageUrl, it) }?.takeIf { it.length <= MAX_URL_CHARS && webUrl(it) != null }
+        // The card opens what the page names as its own address only when that is on the page's own
+        // site, over https: a page cannot make the card of a link it is at open somewhere else.
+        val own = meta["og:url"]?.let { entities(it).trim() }?.let { resolve(pageUrl, it) }
+            ?.takeIf { it.length <= MAX_URL_CHARS && it.startsWith("https://", ignoreCase = true) && sameSite(it, pageUrl) }
         return Page(own ?: pageUrl, title, summary, site, image)
     }
 
     /** The site a page is on, as a card names it: its host without "www.". */
     fun hostOf(url: String): String = webUrl(url)?.host.orEmpty().removePrefix("www.")
+
+    /** Whether [a] and [b] are web addresses on the same site: the same registrable domain ([siteOf]). */
+    internal fun sameSite(a: String, b: String): Boolean {
+        val sa = webUrl(a)?.host?.let(::siteOf) ?: return false
+        val sb = webUrl(b)?.host?.let(::siteOf) ?: return false
+        return sa == sb
+    }
+
+    /**
+     * The registrable domain of [host], near enough without the public suffix list: its last two
+     * labels ("example.com"), or its last three when the one before the last is a common
+     * second-level label ("bbc.co.uk", "example.com.au"). An address written as such is itself.
+     */
+    internal fun siteOf(host: String): String? {
+        val h = host.trim('[', ']').trimEnd('.').lowercase()
+        if (h.isEmpty()) return null
+        if (':' in h || IPV4_LITERAL.matches(h)) return h
+        val labels = h.split('.')
+        if (labels.any { it.isEmpty() }) return null
+        val take = if (labels.size >= 3 && labels[labels.size - 2] in COMMON_SLDS) 3 else 2
+        return labels.takeLast(minOf(take, labels.size)).joinToString(".")
+    }
+
+    /** Second-level labels under which each name is a site of its own ("co.uk", "com.au", "gov.in", ...). */
+    private val COMMON_SLDS = setOf("co", "com", "org", "net", "gov", "ac", "edu")
 
     /** A tag's attributes, by lower-case name (the first of each). */
     private fun attributes(tag: String): Map<String, String> {
@@ -333,12 +392,27 @@ object LinkPreviews {
      * The network as a phone has it: one [HttpURLConnection] per request, redirects not followed
      * (they are, above, by the rules), no caches, no cookies (the app sets no cookie handler), no
      * referrer, a generic User-Agent, its connect and read times what is left of the budget.
+     *
+     * Straight to the site, never through a proxy ([Proxy.NO_PROXY]), and over https only to the
+     * address the host was checked at: the name is looked up again as the connection is made (and a
+     * name's answer can change between the two), so the address it is made to is checked again
+     * before anything goes over it ([GuardedSockets]: none on this phone or its network, [isLocal]).
+     * The whole request, its answer's headers too, has until [Fetcher.fetch]'s deadline: then the
+     * connection is closed under it, however slowly the site sends ([readTimeout] alone would wait
+     * as long as a byte came now and then).
      */
-    class HttpFetcher(private val now: () -> Long = System::currentTimeMillis) : Fetcher {
+    class HttpFetcher(
+        private val now: () -> Long = System::currentTimeMillis,
+        /** Which addresses the connection may not be made to (tests let their own server through). */
+        private val refused: (InetAddress) -> Boolean = LinkPreviews::isLocal,
+    ) : Fetcher {
         override fun fetch(url: String, accept: String, maxBytes: Int, deadlineMs: Long): Response {
             val left = (deadlineMs - now()).coerceAtLeast(1).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
-            val c = URL(url).openConnection() as HttpURLConnection
+            val c = URL(url).openConnection(Proxy.NO_PROXY) as HttpURLConnection
+            // Past the deadline the connection is closed, whatever it is waiting for.
+            val watchdog = DEADLINES.schedule({ c.disconnect() }, left.toLong(), TimeUnit.MILLISECONDS)
             try {
+                if (c is HttpsURLConnection) c.sslSocketFactory = GuardedSockets(c.sslSocketFactory, refused)
                 c.instanceFollowRedirects = false
                 c.useCaches = false
                 c.connectTimeout = left
@@ -347,6 +421,7 @@ object LinkPreviews {
                 c.setRequestProperty("Accept", accept)
                 c.setRequestProperty("Accept-Language", "en")
                 val code = c.responseCode
+                if (now() > deadlineMs) throw IOException("link preview: out of time")
                 val location = c.getHeaderField("Location")
                 val type = c.contentType
                 if (code in REDIRECTS || code !in 200..299) return Response(code, location, type, ByteArray(0))
@@ -355,6 +430,7 @@ object LinkPreviews {
                 val (body, more) = (c.inputStream).use { readCapped(it, maxBytes, deadlineMs) }
                 return Response(code, location, type, body, more)
             } finally {
+                watchdog.cancel(false)
                 c.disconnect()
             }
         }
@@ -370,6 +446,62 @@ object LinkPreviews {
                 out.write(buffer, 0, n)
                 if (out.size() > max) return out.toByteArray().copyOf(max) to true
             }
+        }
+    }
+
+    /** Closes connections whose time is up ([HttpFetcher]): one thread for all of them, never in the way of the app's end. */
+    private val DEADLINES: ScheduledExecutorService = ScheduledThreadPoolExecutor(1) { r ->
+        Thread(r, "link-preview-deadline").apply { isDaemon = true }
+    }.apply { removeOnCancelPolicy = true }
+
+    /**
+     * An https connection's sockets, made only to an address [refused] lets through: the TLS socket
+     * is laid over the connection already made to the site ([createSocket] with a socket), whose
+     * address is checked first; one made here from a name is made to an address checked the same
+     * way. A refused one is closed, and nothing is sent over it.
+     */
+    internal class GuardedSockets(private val delegate: SSLSocketFactory, private val refused: (InetAddress) -> Boolean) : SSLSocketFactory() {
+        override fun getDefaultCipherSuites(): Array<String> = delegate.defaultCipherSuites
+
+        override fun getSupportedCipherSuites(): Array<String> = delegate.supportedCipherSuites
+
+        override fun createSocket(s: Socket, host: String?, port: Int, autoClose: Boolean): Socket {
+            val address = s.inetAddress
+            if (address == null || refused(address)) {
+                try {
+                    s.close()
+                } catch (e: IOException) {
+                    // Closed either way.
+                }
+                throw IOException("link preview: refused to connect there")
+            }
+            return delegate.createSocket(s, host, port, autoClose)
+        }
+
+        override fun createSocket(host: String?, port: Int): Socket = delegate.createSocket(checked(host), port)
+
+        override fun createSocket(host: String?, port: Int, localHost: InetAddress?, localPort: Int): Socket =
+            delegate.createSocket(checked(host), port, localHost, localPort)
+
+        override fun createSocket(host: InetAddress, port: Int): Socket = delegate.createSocket(checked(host), port)
+
+        override fun createSocket(address: InetAddress, port: Int, localAddress: InetAddress?, localPort: Int): Socket =
+            delegate.createSocket(checked(address), port, localAddress, localPort)
+
+        /** An unconnected socket would connect wherever it is told later, unchecked: none (the connection then makes its own, laid over as above). */
+        override fun createSocket(): Socket =
+            throw SocketException("link preview: unconnected sockets are not made").apply { initCause(UnsupportedOperationException()) }
+
+        /** The address [host] stands for, if [refused] lets it through: the one the socket is made to. */
+        private fun checked(host: String?): InetAddress {
+            val addresses = InetAddress.getAllByName(host).toList()
+            if (addresses.isEmpty() || addresses.any(refused)) throw IOException("link preview: refused to connect there")
+            return addresses.first()
+        }
+
+        private fun checked(address: InetAddress): InetAddress {
+            if (refused(address)) throw IOException("link preview: refused to connect there")
+            return address
         }
     }
 }

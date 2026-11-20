@@ -16,7 +16,9 @@ import android.os.TransactionTooLargeException
 import android.util.Log
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -39,10 +41,15 @@ object DirectIpc {
     /** Whether [msg] came from this app (either of its processes): [Message.sendingUid], which Android sets for a Messenger's messages. */
     internal fun fromThisApp(msg: Message): Boolean = msg.sendingUid == android.os.Process.myUid()
 
-    /** Answers requests: [handle] runs off the main thread and returns the reply's JSON. */
+    /**
+     * Answers requests: [handle] runs off the main thread and returns the reply's JSON. Whatever a
+     * request makes [handle] throw, an error too (memory or a stack run out), is its answer, never
+     * the end of the process: the other process is told it failed.
+     */
     class Server(private val handle: suspend (what: Int, request: JSONObject) -> JSONObject) {
         private val thread = HandlerThread("imessage-ipc-server").apply { start() }
-        private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        private val failures = CoroutineExceptionHandler { _, e -> Log.e(TAG, "a request's work failed (${e::class.java.simpleName})") }
+        private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + failures)
 
         val messenger = Messenger(
             object : Handler(thread.looper) {
@@ -62,8 +69,13 @@ object DirectIpc {
                     scope.launch {
                         val reply = try {
                             handle(what, request)
+                        } catch (e: CancellationException) {
+                            throw e
                         } catch (e: Exception) {
-                            Log.w(TAG, "request $what failed", e)
+                            Log.w(TAG, "request $what failed (${e::class.java.simpleName})")
+                            DirectWire.failure(e)
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "request $what failed (${e::class.java.simpleName})")
                             DirectWire.failure(e)
                         }
                         try {

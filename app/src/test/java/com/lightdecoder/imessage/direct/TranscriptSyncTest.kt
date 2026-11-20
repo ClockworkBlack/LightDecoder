@@ -276,10 +276,13 @@ class TranscriptSyncTest {
     fun theUsersNewDeviceIsToldToThePeopleOfTheRecentChatsAtMostOnceInTenMinutes() {
         val now = System.currentTimeMillis()
         fromAlice("A1", "Recent", now - 60 * 60_000)
-        // A group with Bob, recent too.
+        outgoing("S1", aliceChat, "Hi Alice", now - 59 * 60_000)
+        // A group with Bob, recent too, the user wrote in it.
         link.apply(map(inst("G1", bob, text("Group news"), participants = listOf(me, alice, bob), groupGuid = "GRP-1", ts = now - 2 * 60 * 60_000)))
-        // Carol wrote two days ago: not recent.
+        outgoing("S2", "imsg:group:GRP-1", "Nice", now - 2 * 60 * 60_000 + 1_000)
+        // Carol wrote two days ago (and the user answered): not recent.
         link.apply(map(inst("C1", carol, text("Old news"), participants = listOf(me, carol), ts = now - 2 * 24 * 60 * 60_000)))
+        outgoing("S3", "imsg:$carol", "Old answer", now - 2 * 24 * 60 * 60_000 + 1_000)
         link.apply(DirectArchive.Update.PeerCacheInvalidate)
         waitFor("the people told") { asked(DirectWire.PEERS).isNotEmpty() }
         val groups = DirectWire.PeersRequest.fromJson(asked(DirectWire.PEERS).single()).groups
@@ -327,6 +330,73 @@ class TranscriptSyncTest {
         assertTrue(notices.due(now - 60_000))
     }
 
+    @Test
+    fun aNewDeviceIsNeverToldToSomeoneUnknownTheUserNeverWroteTo() {
+        val now = System.currentTimeMillis()
+        // Carol, whom the user does not know, wrote an hour ago; the user never answered. Nor Bob's group.
+        link.apply(map(inst("C1", carol, text("Who is this?"), participants = listOf(me, carol), ts = now - 60 * 60_000)))
+        link.apply(map(inst("G1", bob, text("Join us"), participants = listOf(me, bob, carol), groupGuid = "GRP-9", ts = now - 30 * 60_000)))
+        link.apply(DirectArchive.Update.PeerCacheInvalidate)
+        Thread.sleep(300)
+        assertTrue("nobody told", asked(DirectWire.PEERS).isEmpty())
+        // Once the user wrote to her, she is (and only she).
+        outgoing("S1", "imsg:$carol", "Hi Carol", now - 20 * 60_000)
+        link.apply(DirectArchive.Update.PeerCacheInvalidate)
+        waitFor("Carol told") { asked(DirectWire.PEERS).isNotEmpty() }
+        val groups = DirectWire.PeersRequest.fromJson(asked(DirectWire.PEERS).single()).groups
+        assertEquals(listOf(DirectWire.PeerGroup(me, listOf(me, carol))), groups)
+    }
+
+    @Test
+    fun aNewDeviceIsToldToAContactWhoWroteThoughTheUserDidNotAnswer() {
+        context.deleteDatabase(MESSAGES_DB)
+        val messagesDb = ArchiveDb(context, MESSAGES_DB)
+        try {
+            val messages = ArchiveRepository.forTesting(messagesDb, ChatService.MESSAGES)
+            ArchiveRepository.installForTesting(messages)
+            com.lightdecoder.relay.RelayManager.installForTesting(context, messages, com.lightdecoder.relay.RelayManager.Timing())
+            messages.upsertContacts(listOf(ContactDto(id = "c1", name = "Alice Martin", number = "+15551234567", formattedNumber = "(555) 123-4567")))
+            fromAlice("A1", "New phone, who dis")
+            link.apply(map(inst("C1", carol, text("Hello?"), participants = listOf(me, carol))))
+            link.apply(DirectArchive.Update.PeerCacheInvalidate)
+            waitFor("Alice told") { asked(DirectWire.PEERS).isNotEmpty() }
+            assertEquals(listOf(DirectWire.PeerGroup(me, listOf(me, alice))), DirectWire.PeersRequest.fromJson(asked(DirectWire.PEERS).single()).groups)
+        } finally {
+            com.lightdecoder.relay.RelayManager.resetForTesting()
+            messagesDb.close()
+        }
+    }
+
+    // --- an edited message of which a part was unsent ---------------------------------------------------
+
+    @Test
+    fun aPartUnsentTakesTheEarlierTextsWithIt() {
+        val sent = System.currentTimeMillis() - 60_000
+        fun part(s: String, idx: Int) = IndexedMessagePart(MessagePart.Text(s, plain), idx.toULong(), null)
+        val two = PushChatMessage.Message(NormalMessage(listOf(part("Meet at 6", 0), part("the code is 4721", 1)), null, null, null, MessageType.IMessage, null, null, null, false, null, null))
+        link.apply(map(inst("PU1", alice, two, ts = sent)))
+        // The first part edited: what the whole message read before is kept, the second part in it.
+        link.apply(wire(DirectArchive.Update.Edit("imsg:PU1", "Meet at 7", 0, sent + 10_000, sender = alice)))
+        var row = repo.message("imsg:PU1")!!
+        assertEquals(listOf("Meet at 6\nthe code is 4721"), IMessageExtra.parse(row.extra).history.map { it.text })
+        assertTrue(row.editedAtMs > 0)
+        // The second part unsent: nothing of it stays, in the earlier texts either.
+        link.apply(wire(DirectArchive.Update.Unsent("imsg:PU1", 1, false, "Alice", sender = alice, atMs = sent + 20_000)))
+        row = repo.message("imsg:PU1")!!
+        assertEquals("Meet at 7", row.text)
+        val extra = IMessageExtra.parse(row.extra)
+        assertTrue(extra.history.isEmpty())
+        assertFalse(row.extra.contains("4721"))
+        assertEquals("the edited marker goes with what it showed", 0L, row.editedAtMs)
+        assertEquals("Apple's five edits still count", 1, extra.edits)
+        // The same edit handed over again (Apple's journal after a restart): nothing changes.
+        link.apply(wire(DirectArchive.Update.Edit("imsg:PU1", "Meet at 7", 0, sent + 10_000, sender = alice)))
+        row = repo.message("imsg:PU1")!!
+        assertEquals(0L, row.editedAtMs)
+        assertEquals(1, IMessageExtra.parse(row.extra).edits)
+        assertTrue(IMessageExtra.parse(row.extra).history.isEmpty())
+    }
+
     // --- Report Junk ------------------------------------------------------------------------------------
 
     @Test
@@ -365,9 +435,39 @@ class TranscriptSyncTest {
     }
 
     @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun aPictureAloneMakesNobodyAKnownContactForReportJunk() {
+        fromAlice("A1", "You won a prize")
+        // Google Messages has a picture for her number (anyone's own, sent with an RCS message), but no name.
+        val bitmap = android.graphics.Bitmap.createBitmap(20, 20, android.graphics.Bitmap.Config.ARGB_8888).apply { eraseColor(android.graphics.Color.BLUE) }
+        val jpeg = java.io.ByteArrayOutputStream().also { bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, it) }.toByteArray()
+        val photos = com.lightdecoder.relay.ContactPhotos.get(context)
+        try {
+            photos.store(mapOf("p1" to "+15551234567"), listOf(com.lightdecoder.relay.ThumbnailDto("p1", jpeg)), System.currentTimeMillis())
+            assertNotNull(photos.forAddress("+15551234567"))
+            assertTrue(link.junkReportable(aliceChat))
+        } finally {
+            photos.clear()
+        }
+    }
+
+    @Test
+    fun theImessageProcessReportsJunkOfAChatWithOnePersonOnlyAndOnlyWhatTheySent() {
+        assertEquals(alice, DirectEngine.junkPeer(DirectWire.Target(listOf(alice), null, null, me)))
+        assertEquals(alice, DirectEngine.junkPeer(DirectWire.Target(listOf(alice, me), null, null, me)))
+        // A group (by its guid, or of several people): none.
+        assertNull(DirectEngine.junkPeer(DirectWire.Target(listOf(alice, bob), "Trip", "GRP-1", me)))
+        assertNull(DirectEngine.junkPeer(DirectWire.Target(listOf(alice), null, "GRP-1", me)))
+        assertNull(DirectEngine.junkPeer(DirectWire.Target(listOf(alice, bob), null, null, me)))
+        assertNull(DirectEngine.junkPeer(DirectWire.Target(emptyList(), null, null, me)))
+    }
+
+    @Test
     fun reportJunkSendsTheirLastFiveMessagesThenDeletesTheChat() {
         val base = System.currentTimeMillis() - 30 * 60_000
         for (i in 1..7) fromAlice("J$i", "Offer $i", base + i * 60_000L)
+        // The chat's own "Send Read Receipts" goes with it too.
+        link.setSendsReadReceipts(aliceChat, false)
         // A picture kept with one of them (its link's) goes with the chat.
         val picture = DirectLink.pictureFile(context, IMessageExtra.linkImageKey("J7")).apply { parentFile?.mkdirs(); writeBytes(byteArrayOf(1, 2, 3)) }
         val row = repo.message("imsg:J7")!!
@@ -384,6 +484,7 @@ class TranscriptSyncTest {
         assertEquals((base + 7 * 60_000L) / 1000.0, last.timeOfMessage, 0.0005)
         assertNull("the chat is deleted here", repo.conversation(aliceChat))
         assertFalse("with its pictures", picture.exists())
+        assertNull("and its own read receipts", ReadReceiptChoices(context).of(aliceChat))
     }
 
     @Test

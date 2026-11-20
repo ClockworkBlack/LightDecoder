@@ -82,8 +82,8 @@ class ChatBackgroundsTest {
 
     // --- what Apple's change is for -----------------------------------------------------------------
 
-    private fun set(bid: Long, chatId: String? = null) = SetTranscriptBackgroundMessage.Set(
-        1u, bid.toULong(), chatId, "OBJ", 1u, "BG-1", "https://mmcs.example/obj", "c2ln", "AGtleQ==", 0UL,
+    private fun set(bid: Long, chatId: String? = null, url: String = "https://p42-content.icloud.com/OBJ") = SetTranscriptBackgroundMessage.Set(
+        1u, bid.toULong(), chatId, "OBJ", 1u, "BG-1", url, "c2ln", "AGtleQ==", 0UL,
     )
 
     private fun remove(bid: Long, chatId: String? = null) = SetTranscriptBackgroundMessage.Remove(1u, bid.toULong(), chatId, true)
@@ -236,6 +236,16 @@ class ChatBackgroundsTest {
         val wired = DirectWire.decode(JSONObject(DirectWire.encode(u).toString())) as DirectArchive.Update.Background
         assertEquals(u.copy(row = null), wired.copy(row = null))
         assertEquals(u.row!!.message.text, wired.row!!.message.text)
+    }
+
+    @Test
+    fun aPosterSaidToBeAnywhereButApplesFileServersIsNeverFetched() {
+        for (url in listOf("https://mmcs.example/obj", "http://p42-content.icloud.com/OBJ", "https://p42-content.icloud.com.evil.net/OBJ", "https://192.168.1.1/OBJ")) {
+            val natives = natives(photo())
+            val u = receive(inst("BX", bob, set(1_000, url = url)), natives)
+            assertTrue(url, u is DirectArchive.Update.Dropped)
+            assertTrue(url, natives.downloads.isEmpty())
+        }
     }
 
     private fun gradient(vararg colors: PosterColor): SimplifiedTranscriptPoster {

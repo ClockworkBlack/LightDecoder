@@ -190,6 +190,35 @@ class DirectContentTest {
     }
 
     @Test
+    fun aMentionInAChatWithOnePersonDoesNotLiftItsHiddenAlerts() {
+        IMessagePrefs.setEnabled(context, true)
+        IMessagePrefs.setNotifyMessages(context, true)
+        val link = DirectLink.installForTesting(context) { _, _, _ -> DirectWire.ok() }
+        val chat = "imsg:$alice"
+        link.apply(map(inst("O0", alice, normal(listOf(text("hi"))), participants = listOf(me, alice), groupGuid = null)))
+        repo.markConversationRead(chat)
+        MessageNotifier.cancelAll(context, ChatService.IMESSAGE)
+        repo.setConversationMuted(chat, true)
+        val notifications = shadowOf(context.getSystemService(NotificationManager::class.java))
+        fun announced() = notifications.activeNotifications.any { it.tag?.startsWith("im:") == true }
+        // Anyone can write a mention of the user to them: in a chat with one person it is no reason to be heard.
+        link.apply(
+            map(
+                inst(
+                    "O1", alice, normal(listOf(text("Hey "), IndexedMessagePart(MessagePart.Mention("+15550000001", "You"), null, null))),
+                    participants = listOf(me, alice), groupGuid = null, ts = 1_700_000_003_000L,
+                ),
+            ),
+        )
+        assertTrue(IMessageExtra.parse(repo.message("imsg:O1")!!.extra).mentionsMe)
+        assertFalse(announced())
+        // Not muted: it notifies as any message does.
+        repo.setConversationMuted(chat, false)
+        link.apply(map(inst("O2", alice, normal(listOf(text("there?"))), participants = listOf(me, alice), groupGuid = null, ts = 1_700_000_004_000L)))
+        assertTrue(announced())
+    }
+
+    @Test
     fun theSettingsAreOnByDefaultAndKept() {
         DirectPrefs.setNotifyWhenMentioned(context, true)
         DirectPrefs.setLinkPreviews(context, true)
@@ -277,6 +306,26 @@ class DirectContentTest {
     }
 
     @Test
+    fun aPreviewThatGoesWrongAnyWayNeverStopsTheMessage() {
+        val asked = Collections.synchronizedList(ArrayList<JSONObject>())
+        var n = 0
+        val link = DirectLink.installForTesting(context) { what, request, _ ->
+            if (what == DirectWire.SEND) asked += request
+            DirectWire.sent("SE${++n}", 1_700_000_005_000L)
+        }
+        link.linkPolicy = public
+        aGroup(link)
+        // A page that runs the stack or the memory out while it is read (errors, not exceptions).
+        for (error in listOf(StackOverflowError("deep"), OutOfMemoryError("huge"))) {
+            link.linkFetcher = LinkPreviews.Fetcher { _, _, _, _ -> throw error }
+            link.sendText(group, "Look https://example.com/s", null)
+        }
+        waitFor("both sent") { asked.size == 2 }
+        assertTrue(asked.all { DirectWire.SendRequest.fromJson(it).link == null })
+        waitFor("both stored") { repo.message("imsg:SE1") != null && repo.message("imsg:SE2") != null }
+    }
+
+    @Test
     fun anIncomingLinksPictureBecomesItsOwnOnlyOnceTheMessageIsTaken() {
         val link = DirectLink.installForTesting(context) { _, _, _ -> DirectWire.ok() }
         aGroup(link)
@@ -359,6 +408,108 @@ class DirectContentTest {
         // Apple handing the message over again keeps them.
         link.apply(map(inst("G0", alice, normal(listOf(text("hello all"))))))
         assertEquals(listOf("PS1", "PS2"), IMessageExtra.parse(repo.message("imsg:G0")!!.extra).stickers.map { it.id })
+    }
+
+    /** A link whose ":imessage" process answers a download with [picture] written where it was asked to, every download it was asked kept in [downloads]. */
+    private fun fetching(downloads: MutableList<DirectWire.DownloadRequest>, picture: () -> ByteArray? = ::png) = DirectLink.installForTesting(context) { what, request, _ ->
+        if (what != DirectWire.DOWNLOAD) return@installForTesting DirectWire.ok()
+        val r = DirectWire.DownloadRequest.fromJson(request)
+        downloads += r
+        val bytes = picture() ?: return@installForTesting DirectWire.error("not on Apple's file servers")
+        java.io.File(r.path).apply { parentFile?.mkdirs() }.writeBytes(bytes)
+        DirectWire.downloaded(bytes.size.toLong())
+    }
+
+    @Test
+    fun aStickerOnApplesServersIsFetchedOnlyOnceItsTapbackIsTaken() {
+        val downloads = Collections.synchronizedList(ArrayList<DirectWire.DownloadRequest>())
+        val link = fetching(downloads)
+        aGroup(link)
+        val key = IMessageExtra.tapbackStickerKey("G0", "+15559876543")
+        // Someone not in the group, or from another chat: nothing fetched.
+        val stranger = IMessageExtra.tapbackStickerKey("G0", "+15554443333")
+        link.apply(wire(DirectArchive.Update.Reaction("imsg:G0", "+15554443333", DirectArchive.STICKER_TAPBACK, true, false, 5, group, "GRP-1", stranger, "<plist>s</plist>")))
+        link.apply(wire(DirectArchive.Update.Reaction("imsg:G0", "+15559876543", DirectArchive.STICKER_TAPBACK, true, false, 5, "imsg:group:OTHER", "OTHER", key, "<plist>s</plist>")))
+        // For a message not stored yet: nothing until it is.
+        link.apply(wire(DirectArchive.Update.Reaction("imsg:LATER", "+15559876543", DirectArchive.STICKER_TAPBACK, true, false, 5, group, "GRP-1", IMessageExtra.tapbackStickerKey("LATER", "+15559876543"), "<plist>later</plist>")))
+        Thread.sleep(200)
+        assertTrue(downloads.isEmpty())
+        // From Bob, in the group: fetched now, then shown.
+        link.apply(wire(DirectArchive.Update.Reaction("imsg:G0", "+15559876543", DirectArchive.STICKER_TAPBACK, true, false, 6, group, "GRP-1", key, "<plist>s</plist>")))
+        waitFor("the sticker's picture") { DirectLink.pictureFile(context, key).length() > 0 }
+        val r = downloads.single()
+        assertEquals("<plist>s</plist>", r.descriptor)
+        assertEquals(DirectEngine.STICKER_MAX_BYTES, r.maxBytes)
+        assertEquals(DirectLink.STICKER_FETCH_MS, r.automaticMs)
+        assertFalse("not left where it was fetched to", java.io.File(r.path).exists())
+        assertEquals(listOf(com.lightdecoder.relay.ReactionDto(DirectArchive.STICKER_TAPBACK, listOf("+15559876543"))), repo.message("imsg:G0")!!.reactions)
+        // Drawn again here, no larger than it is shown.
+        val drawn = android.graphics.BitmapFactory.decodeFile(DirectLink.pictureFile(context, key).path)!!
+        assertTrue(drawn.width <= PreviewImages.STICKER_SIDE && drawn.height <= PreviewImages.STICKER_SIDE)
+        // Its message stored: its sticker is fetched then.
+        link.apply(map(inst("LATER", alice, normal(listOf(text("later"))))))
+        waitFor("the later one") { downloads.size == 2 }
+        assertEquals("<plist>later</plist>", downloads.last().descriptor)
+    }
+
+    @Test
+    fun aStickerWhoseFetchEndsAfterItsTapbackWentIsNotKept() {
+        val downloads = Collections.synchronizedList(ArrayList<DirectWire.DownloadRequest>())
+        val release = java.util.concurrent.CountDownLatch(1)
+        val link = fetching(downloads) { release.await(5, java.util.concurrent.TimeUnit.SECONDS); png() }
+        aGroup(link)
+        val key = IMessageExtra.tapbackStickerKey("G0", "+15559876543")
+        link.apply(wire(DirectArchive.Update.Reaction("imsg:G0", "+15559876543", DirectArchive.STICKER_TAPBACK, true, false, 6, group, "GRP-1", key, "<plist>s</plist>")))
+        waitFor("the fetch asked") { downloads.isNotEmpty() }
+        // A heart in its place before the picture came.
+        link.apply(wire(DirectArchive.Update.Reaction("imsg:G0", "+15559876543", "❤️", true, false, 7, group, "GRP-1")))
+        release.countDown()
+        Thread.sleep(300)
+        assertFalse(DirectLink.pictureFile(context, key).exists())
+        assertEquals(listOf("❤️"), repo.message("imsg:G0")!!.reactions.map { it.emoji })
+    }
+
+    @Test
+    fun aStickerDraggedOntoAMessageFromApplesServersIsFetchedOnlyOnceTaken() {
+        val downloads = Collections.synchronizedList(ArrayList<DirectWire.DownloadRequest>())
+        val link = fetching(downloads)
+        aGroup(link)
+        link.apply(wire(DirectArchive.Update.Sticker("imsg:G0", "PS3", "+15554443333", false, 11, group, "GRP-1", "<plist>theirs</plist>")))
+        Thread.sleep(200)
+        assertTrue("someone not in the group: nothing fetched", downloads.isEmpty())
+        link.apply(wire(DirectArchive.Update.Sticker("imsg:G0", "PS1", "+15559876543", false, 9, group, "GRP-1", "<plist>bob's</plist>")))
+        val key = IMessageExtra.stickerKey("G0", "PS1")
+        waitFor("the sticker's picture") { DirectLink.pictureFile(context, key).length() > 0 }
+        assertEquals("<plist>bob's</plist>", downloads.single().descriptor)
+        assertEquals(listOf("PS1"), IMessageExtra.parse(repo.message("imsg:G0")!!.extra).stickers.map { it.id })
+    }
+
+    @Test
+    fun onePersonsChangesFetchSoManyPicturesAnHourAtMost() {
+        val fetches = AutoFetches(maxPerWindow = 3, windowMs = 60_000)
+        val t = 1_000_000L
+        assertTrue((1..3).all { fetches.take("tel:+15559876543", t + it) })
+        assertFalse(fetches.take("+15559876543", t + 10))
+        // Someone else's are their own; the user's own too.
+        assertTrue(fetches.take("tel:+15551234567", t + 10))
+        assertTrue(fetches.take(DirectArchive.TAPBACK_ME, t + 10))
+        // An hour (here a minute) later: again.
+        assertTrue(fetches.take("tel:+15559876543", t + 60_005))
+        // A clock gone back counts as since.
+        assertTrue(AutoFetches(maxPerWindow = 1).let { it.take("a", 5_000) && it.take("a", 1_000) })
+        // Through the link: past the hour's limit, a sticker shows as its tapback without its picture.
+        val downloads = Collections.synchronizedList(ArrayList<DirectWire.DownloadRequest>())
+        val link = fetching(downloads)
+        aGroup(link)
+        val many = AutoFetches.MAX_PER_HOUR + 5
+        for (i in 1..many) {
+            link.apply(map(inst("M$i", alice, normal(listOf(text("m$i"))))))
+            link.apply(wire(DirectArchive.Update.Sticker("imsg:M$i", "PS$i", "+15559876543", false, i.toLong(), group, "GRP-1", "<plist>$i</plist>")))
+        }
+        waitFor("the fetches") { downloads.size >= AutoFetches.MAX_PER_HOUR }
+        Thread.sleep(300)
+        assertEquals(AutoFetches.MAX_PER_HOUR, downloads.size)
+        assertEquals(listOf("PS$many"), IMessageExtra.parse(repo.message("imsg:M$many")!!.extra).stickers.map { it.id })
     }
 
     // --- polls -----------------------------------------------------------------------------------------
@@ -545,6 +696,63 @@ class DirectContentTest {
         assertEquals("Poll: Where to?", stored.text)
         assertEquals("imsg:NP1", IMessageExtra.parse(stored.extra).app!!.root)
         assertTrue(runCatching { link.sendPoll(group, "Q", listOf("Only one")) }.isFailure)
+    }
+
+    private fun pollChange(guid: String, p: Polls.Poll, from: String = bob) = map(
+        inst(guid, from, PushChatMessage.React(ReactMessage("P1", null, ReactMessageType.Extension(pollApp(p), listOf(IndexedMessagePart(MessagePart.Object(Polls.ldText(p)), null, null)), false), "", null))),
+    )
+
+    private fun shownPoll() = Polls.decode(IMessageExtra.parse(repo.message("imsg:P1")!!.extra).app!!.url)!!
+
+    @Test
+    fun aChangeFarAheadOfThePollIsRefusedSoItNeverFreezesIt() {
+        val link = DirectLink.installForTesting(context) { _, _, _ -> DirectWire.ok() }
+        aGroup(link)
+        val poll = aPoll(link)
+        // A member sends it again as of c=999999: were it taken, no later change (nor the user's) could follow it.
+        link.apply(pollChange("PC9", Polls.addChoice(poll, "Curry", "+15559876543", "OPT-9")!!.copy(count = 999_999)))
+        assertEquals(listOf("Pizza", "Tacos"), shownPoll().options.map { it.text })
+        assertEquals(Polls.FIRST_COUNT, shownPoll().count)
+        assertTrue(IMessageExtra.parse(repo.message("imsg:P1")!!.extra).pollCards.isEmpty())
+        // The next choice added as an iPhone adds it still is.
+        link.apply(pollChange("PC3", Polls.addChoice(poll, "Soup", "+15551234567", "OPT-3")!!))
+        assertEquals(listOf("Pizza", "Tacos", "Soup"), shownPoll().options.map { it.text })
+        assertEquals(3, shownPoll().count)
+        // The user's own "Add Choice" goes as the one after that.
+        val sent = Collections.synchronizedList(ArrayList<JSONObject>())
+        val own = DirectLink.installForTesting(context) { what, request, _ ->
+            if (what == DirectWire.EXTENSION) sent += request
+            DirectWire.sent("AC9", 1_700_000_010_000L)
+        }
+        runBlocking { own.addPollChoice("imsg:P1", "Curry") }
+        assertEquals(4, Polls.countOf(DirectWire.ExtensionRequest.fromJson(sent.single()).app.url))
+        assertEquals(4, shownPoll().count)
+    }
+
+    @Test
+    fun aChangeThatRewritesSomeoneElsesPollKeepsItsQuestionAndChoicesAsTheyAre() {
+        val link = DirectLink.installForTesting(context) { _, _, _ -> DirectWire.ok() }
+        aGroup(link)
+        val poll = aPoll(link)
+        link.apply(voteFrom("V1", alice, "P1", listOf("OPT-1"), 1_700_000_001_000L))
+        // Bob sends the card again with the choices' words swapped (so Alice's vote would read "Tacos"),
+        // another question, and a choice of his own.
+        val swapped = poll.copy(
+            title = "Bob's poll now",
+            options = listOf(poll.options[0].copy(text = "Tacos"), poll.options[1].copy(text = "Pizza"), Polls.Option("OPT-3", "Curry", "+15559876543")),
+            count = poll.count + 1,
+        )
+        link.apply(pollChange("PC2", swapped))
+        val shown = shownPoll()
+        assertEquals("Dinner?", shown.title)
+        assertEquals(listOf("OPT-1" to "Pizza", "OPT-2" to "Tacos", "OPT-3" to "Curry"), shown.options.map { it.id to it.text })
+        assertEquals("Poll: Dinner?", repo.message("imsg:P1")!!.text)
+        // Alice's vote is still for Pizza.
+        val tally = Polls.tally(shown, IMessageExtra.parse(repo.message("imsg:P1")!!.extra).pollVotes)
+        assertEquals(listOf("+15551234567"), tally.first { it.option.text == "Pizza" }.voters)
+        // One that adds nothing (the same choices, words swapped) is no change at all.
+        link.apply(pollChange("PC3", swapped.copy(options = swapped.options.take(2), count = poll.count + 2)))
+        assertEquals(listOf("PC2"), IMessageExtra.parse(repo.message("imsg:P1")!!.extra).pollCards)
     }
 
     companion object {

@@ -110,6 +110,8 @@ class DirectLink private constructor(
     init {
         if (active) scope.launch { failInterruptedSends() }
         scope.launch { for (notice in typingOut) tell(notice) }
+        // New group photos left by work that never ended (the app stopped in the middle of it).
+        scope.launch { runCatching { GroupPhotos.sweep(app) } }
     }
 
     // --- where a message goes ------------------------------------------------------------------
@@ -742,9 +744,20 @@ class DirectLink private constructor(
      * The preview of the first web address in [text], fetched now ([LinkPreviews.fetch], with the
      * iMessage screen's "Link previews" on), its picture made small ([PreviewImages.jpeg]) and kept
      * under local copy [tmpId]'s key, and shown on that copy at once; null when there is none (no
-     * address, the setting off, nothing to show, not in time). Never logs the address.
+     * address, the setting off, nothing to show, not in time). Never logs the address, and never
+     * throws: whatever goes wrong making it (an error too: a page that runs memory or a stack out),
+     * the message goes without one.
      */
-    private suspend fun linkPreviewFor(tmpId: String, text: String): SentPreview? {
+    private suspend fun linkPreviewFor(tmpId: String, text: String): SentPreview? = try {
+        makeLinkPreview(tmpId, text)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Throwable) {
+        Log.w(TAG, "link preview not made (${e::class.java.simpleName})")
+        null
+    }
+
+    private suspend fun makeLinkPreview(tmpId: String, text: String): SentPreview? {
         if (!DirectPrefs.linkPreviews(app)) return null
         val url = LinkPreviews.firstUrl(text) ?: return null
         val fetched = try {
@@ -826,6 +839,20 @@ class DirectLink private constructor(
             reactionNeedles = listOf(DirectArchive.STICKER_TAPBACK),
         )
         for (row in rows) forgetPictures(row)
+    }
+
+    /**
+     * What is kept of [conversationId] outside the archive goes: the chat is being deleted here (by
+     * the user, with Report Junk, or with the Messages conversation it is shown in). Its pictures
+     * ([forgetConversationPictures]), a group's photo and version ([GroupPhotos], [GroupVersions]: should
+     * it come back, it starts again from what Apple says then, not from a version someone set before),
+     * and its own "Send Read Receipts". Each is tried whatever happens to the others.
+     */
+    fun forgetConversation(conversationId: String) {
+        runCatching { forgetConversationPictures(conversationId) }
+        runCatching { GroupPhotos(app).forget(conversationId) }
+        runCatching { groupVersions.forget(conversationId) }
+        runCatching { receiptChoices.set(conversationId, null) }
     }
 
     /** The pictures kept with [row] that are no attachment of it (its link's, the stickers on it) go: the message is gone. */
@@ -1451,8 +1478,19 @@ class DirectLink private constructor(
         // Only a message not stored before makes the chat unread: Apple handing one over again
         // (after a restart) leaves a chat the user read as read.
         repo.upsertConversation(conversation.copy(unread = (conversation.unread || (incoming && existing == null)) && !onScreen, lastMessageTs = 0))
-        // The group's version a change of its members (or photo) carried: a change from here goes as the next one.
-        update.groupVersion?.let { if (DirectArchive.isGroup(conversation.id)) groupVersions.note(conversation.id, it) }
+        // The group's version a change of its members (or photo) carried: a change from here goes as the
+        // next one. One far ahead of the group's is not taken (every change from here would go as one
+        // after it, and the group's photo be held against any change); the user's own from here, one
+        // after the highest known, always is.
+        update.groupVersion?.let { v ->
+            if (!DirectArchive.isGroup(conversation.id)) return@let
+            val photo = GroupPhotos(app).of(conversation.id)
+            if (GroupVersions.plausible(v, groupVersions.of(conversation.id), photo.version.takeIf { photo.known })) {
+                groupVersions.note(conversation.id, v)
+            } else {
+                IMessageLog.add(app, "${IMessageLog.chatRef(conversation.id)}: a group version far ahead of the group's was not taken")
+            }
+        }
         if (added.isNotEmpty()) noteAdded(conversation.id, update.message, added)
         val fresh = update.message.copy(
             conversationId = conversation.id,
@@ -1579,8 +1617,11 @@ class DirectLink private constructor(
         if (repo.conversation(row.conversationId)?.unread != true) return
         // A game is open in an extension app, which asked for quiet.
         if (appEvents?.silences(row.conversationId) == true) return
-        // Mentioned: heard of even with the chat's alerts hidden, as an iPhone's "Notify Me" does.
-        val mentioned = IMessageExtra.parse(row.extra).mentionsMe && DirectPrefs.notifyWhenMentioned(app)
+        // Mentioned in a group: heard of even with the group's alerts hidden, as an iPhone's "Notify Me"
+        // does. Only a group's: in a chat with one person a mention is no reason to be heard (anyone can
+        // write one), and the chat's hidden alerts stay hidden.
+        val group = repo.conversation(row.conversationId)?.isGroup == true
+        val mentioned = group && IMessageExtra.parse(row.extra).mentionsMe && DirectPrefs.notifyWhenMentioned(app)
         MessageNotifier.onIncoming(app, repo, message.copy(text = IMessageExtra.shownText(row.text, row.extra, inkedLabel())), mentioned)
     }
 
@@ -1695,6 +1736,14 @@ class DirectLink private constructor(
             update.sticker?.let(::dropPicture)
             deletePicture(stickerKey)
         }
+        // On Apple's file servers: fetched now that the tapback was taken, while it is still this one
+        // (an earlier sticker of theirs does not show meanwhile).
+        if (sticker && update.stickerFile.isNotEmpty()) {
+            deletePicture(stickerKey!!)
+            fetchSticker(row.id, row.conversationId, stickerKey, update.stickerFile, who) { current ->
+                current.reactions.any { it.emoji == DirectArchive.STICKER_TAPBACK && who in it.participantIds }
+            }
+        }
         if (update.fromMe || !update.enable || known || !row.isOutgoing || row.direction != "out") return
         if (appEvents?.silences(row.conversationId) == true) return
         val quoted = tapbackText(IMessageExtra.shownText(row.text, row.extra, inkedLabel())).takeIf { it.isNotBlank() }?.let { app.getString(R.string.imessage_tapback_quote, it) }
@@ -1742,6 +1791,85 @@ class DirectLink private constructor(
         (extra.stickers + sticker).filter { it !in kept }.forEach { deletePicture(IMessageExtra.stickerKey(guid, it.id)) }
         if (sticker !in kept) return
         repo.editText(row.id, row.text, row.editedAtMs, extra.copy(stickers = kept).toJson(), snippetOf(row.text, row.extra))
+        // On Apple's file servers: fetched now that it was taken, while the message still has it.
+        if (update.file.isNotEmpty()) {
+            fetchSticker(row.id, row.conversationId, key, update.file, sticker.by) { current ->
+                IMessageExtra.parse(current.extra).stickers.any { it.id == update.stickerGuid }
+            }
+        }
+    }
+
+    // --- pictures fetched from Apple once a change was taken -------------------------------------
+
+    /** How many pictures each person's changes had fetched from Apple without anyone asking ([AutoFetches]). */
+    private val autoFetches = AutoFetches()
+
+    /** The latest fetch of each sticker picture's key: an earlier one that ends later is not kept. */
+    private val stickerFetches = HashMap<String, Any>()
+
+    /**
+     * The sticker [by] put on message [messageId] (in [conversationId]), on Apple's file servers where
+     * the library's description [file] says: fetched now that its change was taken (never more than
+     * [DirectEngine.STICKER_MAX_BYTES], [STICKER_FETCH_MS] at most, from Apple's own servers only:
+     * [DirectWire.download]), drawn again no larger than shown ([PreviewImages.png]) and kept under
+     * [key], while [stillWanted] says the message still has it; at most [AutoFetches.MAX_PER_HOUR] a
+     * person's an hour. Not waited for: the message shows it once it is there. Under this link's lock.
+     */
+    private fun fetchSticker(messageId: String, conversationId: String, key: String, file: String, by: String, stillWanted: (MessageRow) -> Boolean) {
+        if (!autoFetches.take(by, System.currentTimeMillis())) {
+            refused("a sticker's picture", conversationId, "past what one person's changes may fetch in an hour")
+            return
+        }
+        val token = Any()
+        stickerFetches[key] = token
+        scope.launch {
+            val picture = try {
+                fetchFile(file, DirectEngine.STICKER_MAX_BYTES, STICKER_FETCH_MS)?.let { PreviewImages.png(it, PreviewImages.STICKER_SIDE) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                Log.w(TAG, "a sticker's picture was not made (${e::class.java.simpleName})")
+                null
+            }
+            synchronized(this@DirectLink) {
+                if (stickerFetches[key] !== token) return@synchronized
+                stickerFetches.remove(key)
+                if (picture == null) return@synchronized
+                val current = repo.message(messageId)?.takeIf(stillWanted) ?: return@synchronized
+                try {
+                    MediaCache.writeAtomically(pictureFile(key), picture)
+                } catch (e: java.io.IOException) {
+                    Log.w(TAG, "a sticker's picture was not written", e)
+                    return@synchronized
+                }
+                com.lightdecoder.archive.ArchiveEvents.notify(
+                    com.lightdecoder.archive.ArchiveChange(current.conversationId, com.lightdecoder.archive.ArchiveChange.Kind.MESSAGES, ChatService.IMESSAGE),
+                )
+            }
+        }
+    }
+
+    /**
+     * The file the library's description [file] names, fetched from Apple through the ":imessage"
+     * process ([DirectWire.DOWNLOAD]) as one nobody asked for: only from Apple's own file servers,
+     * never more than [maxBytes], in [timeoutMs] at most. Its bytes, or null when it did not come.
+     */
+    private suspend fun fetchFile(file: String, maxBytes: Long, timeoutMs: Long): ByteArray? {
+        // Named as a partial file, so one the other process wrote after this gave up is cleaned up.
+        val raw = repo.mediaFileFor("fetched/" + UUID.randomUUID(), "part")
+        try {
+            val reply = withTimeoutOrNull(timeoutMs + FETCH_SLACK_MS) {
+                requests.call(DirectWire.DOWNLOAD, DirectWire.download(file, raw.path, maxBytes, timeoutMs), timeoutMs + FETCH_SLACK_MS)
+            } ?: return null
+            DirectWire.errorOf(reply)?.let {
+                Log.i(TAG, "a picture was not fetched: ${com.lightdecoder.imessage.Redact.text(it)}")
+                return null
+            }
+            if (!raw.isFile || raw.length() !in 1..maxBytes) return null
+            return raw.readBytes()
+        } finally {
+            raw.delete()
+        }
     }
 
     /**
@@ -1792,7 +1920,10 @@ class DirectLink private constructor(
      * A poll's card sent again with its new state (a choice added): where its card is stored, that
      * card shows the new state (votes and all), as an iPhone updates a poll in place; else the new
      * card is stored as the poll's. Only from someone in the chat (or the user, on another device),
-     * in it, and never an older state over a newer one.
+     * in it, and only as "Add Choice" changes a poll ([Polls.merged]): new choices added at the end,
+     * the question and every choice there already kept as they are (nobody rewrites someone else's
+     * poll, or moves its votes to other words), its count one higher (or a few, for changes missed):
+     * never an older state over a newer one, nor one far ahead that no later change could follow.
      */
     private fun pollChange(update: DirectArchive.Update.PollChange) {
         val row = update.row.message
@@ -1805,13 +1936,17 @@ class DirectLink private constructor(
         if (!row.fromMe && !isMember(card.conversationId, row.senderId)) return refused("a poll's change", card.conversationId, "from someone not in the chat")
         val guid = DirectArchive.guidOf(row.id) ?: return
         val extra = IMessageExtra.parse(card.extra)
-        val shown = extra.app
-        if (guid in extra.pollCards || (shown != null && Polls.countOf(shown.url) > Polls.countOf(changed.url))) return
+        if (guid in extra.pollCards) return
+        val shown = extra.app?.takeIf(Polls::isPoll) ?: return
+        val stored = Polls.decode(shown.url) ?: return
+        val incoming = Polls.decode(changed.url) ?: return
+        val poll = Polls.merged(stored, incoming)
+            ?: return refused("a poll's change", card.conversationId, "that is no choice added to it")
         val next = extra.copy(
-            app = changed.copy(root = shown?.root?.ifEmpty { null } ?: card.id),
+            app = shown.copy(url = Polls.encode(poll), ldText = Polls.ldText(poll), root = shown.root.ifEmpty { card.id }),
             pollCards = (extra.pollCards + guid).takeLast(IMessageExtra.MAX_POLL_CARDS),
         )
-        val text = row.text.ifBlank { card.text }
+        val text = card.text
         repo.editText(card.id, text, card.editedAtMs, next.toJson(), snippetOf(text, card.extra))
         // Votes on the new card that came before it.
         replayHeld(row.id)
@@ -1832,11 +1967,15 @@ class DirectLink private constructor(
         val extra = IMessageExtra.parse(row.extra)
         if (update.part in extra.unsent) return
         val parts = partsOf(row, extra)
-        if (parts[update.part] == update.text && update.atMs <= row.editedAtMs) return
+        val newRuns = TextRuns.normalize(update.text, update.runs)
+        val newMentions = Mentions.normalize(update.text, update.mentions)
+        // The same edit again (Apple's journal after a restart), or one that changes nothing of the part: nothing to do.
+        val same = extra.runs[update.part].orEmpty() == newRuns && extra.mentions[update.part].orEmpty() == newMentions
+        if (parts[update.part] == update.text && (update.atMs <= row.editedAtMs || same)) return
         if (!inWindow(row.timestampMs, update.atMs, EditRule.WINDOW_MS)) return refused("an edit", row.conversationId, "after Apple's 15 minutes")
         if (extra.edits >= IMessageExtra.MAX_EDITS) return refused("an edit", row.conversationId, "past Apple's ${IMessageExtra.MAX_EDITS} edits")
-        val runs = extra.withRuns(update.part, TextRuns.normalize(update.text, update.runs))
-        val mentions = extra.withMentions(update.part, Mentions.normalize(update.text, update.mentions))
+        val runs = extra.withRuns(update.part, newRuns)
+        val mentions = extra.withMentions(update.part, newMentions)
         val next = extra.copy(
             parts = parts + (update.part to update.text), edits = extra.edits + 1, runs = runs, mentions = mentions,
             // What it read until now, as an iPhone keeps it for "Edited".
@@ -1874,8 +2013,13 @@ class DirectLink private constructor(
             return
         }
         if (partId in media) repo.removeMediaPart(row.id, partId)
-        val next = extra.copy(parts = textLeft, unsent = extra.unsent + update.part, runs = extra.runs - update.part, mentions = extra.mentions - update.part)
-        repo.editText(row.id, next.text(), row.editedAtMs, next.toJson(), snippetOf(next.text(), row.extra))
+        // What it read before an edit is the whole message's, the part unsent among it: that goes too,
+        // with the "Edited" by it (the count of edits stays, Apple's five are five).
+        val next = extra.copy(
+            parts = textLeft, unsent = extra.unsent + update.part, runs = extra.runs - update.part, mentions = extra.mentions - update.part,
+            history = emptyList(),
+        )
+        repo.editText(row.id, next.text(), 0, next.toJson(), snippetOf(next.text(), row.extra))
     }
 
     /**
@@ -2324,13 +2468,13 @@ class DirectLink private constructor(
 
     /** The picture at [uri] as the square JPEG that is sent and shown ([GroupPhotoImages]), where the group photos are kept. */
     private fun prepareGroupPhoto(uri: Uri): File {
-        val raw = GroupPhotos.incomingFile(app, "picked")
+        val raw = GroupPhotos.incomingFile(app, GroupPhotos.PICKED)
         copyCapped(uri, raw)
         if (raw.length() > MAX_BACKGROUND_SOURCE_BYTES) {
             raw.delete()
             throw DirectEngine.ImessageError(app.getString(R.string.imessage_group_photo_too_big))
         }
-        val out = GroupPhotos.incomingFile(app, "outgoing")
+        val out = GroupPhotos.incomingFile(app, GroupPhotos.OUTGOING)
         val ok = try {
             GroupPhotoImages.write(raw.readBytes(), out)
         } catch (e: OutOfMemoryError) {
@@ -2346,14 +2490,14 @@ class DirectLink private constructor(
     }
 
     /**
-     * The photo just set from here: shown, with the row saying so, as one from Apple would be. Not
-     * when the group's photo is as new already (a change from another device came meanwhile): then
-     * nothing changed here, and no row says it did.
+     * The photo just set from here, Apple having confirmed it: shown, with the row saying so, as one
+     * from Apple would be; whatever version the group's photo is at here, as the user's own change it
+     * always shows ([GroupPhotos.apply]'s own: a version someone else claimed holds nothing back).
      */
     private fun groupPhotoSetHere(conversationId: String, target: DirectWire.Target, reply: JSONObject, picture: File?, version: Long) {
         groupVersions.note(conversationId, version)
-        if (GroupPhotos(app).apply(conversationId, picture, version) != GroupPhotos.Applied.APPLIED) {
-            Log.i(TAG, "a group photo set here was not newer than the group's")
+        if (GroupPhotos(app).apply(conversationId, picture, version, own = true) != GroupPhotos.Applied.APPLIED) {
+            Log.i(TAG, "a group photo set here was not kept")
             return
         }
         val texts = DirectTexts(app)
@@ -2415,13 +2559,16 @@ class DirectLink private constructor(
 
     /**
      * A group's photo was set or taken off (by someone in it, or the user on another device): the
-     * picture the ":imessage" process wrote becomes the group's ([GroupPhotos]) and the row saying so
-     * is stored, unless the group's photo is as new already (then neither: the picture goes). Only a
-     * group stored here, and only from one of its members.
+     * photo becomes the group's ([GroupPhotos]) and the row saying so is stored, unless the group's
+     * photo is as new already (then neither). Only a group stored here, only from one of its members,
+     * and only as of a version that could be the group's ([GroupVersions.plausible]: one far ahead
+     * would hold every later change back). A photo on Apple's file servers is fetched only now that
+     * all of that is so ([fetchGroupPhoto]); a picture already made ([DirectArchive.Update.GroupPhoto.path])
+     * is taken only from where new group photos are made, and goes with a change that is not taken.
      */
     private fun groupPhoto(update: DirectArchive.Update.GroupPhoto) {
-        val incoming = update.path?.let(::File)?.takeIf { GroupPhotos.isOurs(app, it) }
-        // A path that is not where group photos are kept: nothing of it is taken.
+        val incoming = update.path?.let(::File)?.takeIf { GroupPhotos.isNew(app, it, GroupPhotos.INCOMING) }
+        // A path that is not a new picture where group photos are kept (their index, another group's photo): nothing of it is taken.
         if (update.path != null && incoming == null) return
         val id = DirectArchive.groupConversationId(update.groupGuid).takeIf { repo.conversation(it)?.isGroup == true } ?: run {
             // A group not stored here: nothing to show it in.
@@ -2436,6 +2583,11 @@ class DirectLink private constructor(
         }
         val store = GroupPhotos(app)
         val stored = store.of(id)
+        if (!GroupVersions.plausible(update.version, groupVersions.of(id), stored.version.takeIf { stored.known })) {
+            incoming?.delete()
+            refused("a group photo", id, "as of a version far ahead of the group's")
+            return
+        }
         groupVersions.note(id, update.version)
         // Older than the group's photo, or that one again (Apple's journal after a restart): nothing new.
         if (stored.known && update.version <= stored.version) {
@@ -2443,12 +2595,71 @@ class DirectLink private constructor(
             return
         }
         upsert(update.row)
+        if (incoming == null && !update.removed) {
+            fetchGroupPhoto(id, update.file, update.version, by.senderId.takeIf { !by.fromMe } ?: ME)
+            return
+        }
         if (store.apply(id, incoming, update.version) == GroupPhotos.Applied.APPLIED) {
             IMessageLog.add(app, "${IMessageLog.chatRef(id)}: group photo ${if (incoming != null) "set" else "taken off"} (through the iMessage library)")
         }
         com.lightdecoder.archive.ArchiveEvents.notify(
             com.lightdecoder.archive.ArchiveChange(id, com.lightdecoder.archive.ArchiveChange.Kind.CONVERSATIONS, ChatService.IMESSAGE),
         )
+    }
+
+    /** The group photos being fetched, by group and version: Apple's journal handing a change over again fetches it once. */
+    private val groupPhotoFetches = HashSet<String>()
+
+    /**
+     * Group [id]'s photo as of [version], on Apple's file servers where the library's description
+     * [file] says, set by [by]: fetched now that its change was taken (never more than
+     * [GroupPhotos.MAX_DOWNLOAD_BYTES], [GROUP_PHOTO_FETCH_MS] at most, from Apple's own servers only),
+     * decoded no larger than needed and cut square ([GroupPhotoImages]), then the group's photo,
+     * unless one as new came meanwhile; at most [AutoFetches.MAX_PER_HOUR] a person's an hour. Not
+     * waited for: the group shows it once it is there; one that does not come leaves the photo as it was.
+     */
+    private fun fetchGroupPhoto(id: String, file: String, version: Long, by: String) {
+        val key = "$id@$version"
+        if (file.isEmpty() || key in groupPhotoFetches) return
+        if (!autoFetches.take(by, System.currentTimeMillis())) {
+            refused("a group photo", id, "past what one person's changes may fetch in an hour")
+            return
+        }
+        groupPhotoFetches += key
+        scope.launch {
+            var picture: File? = null
+            try {
+                val bytes = fetchFile(file, GroupPhotos.MAX_DOWNLOAD_BYTES, GROUP_PHOTO_FETCH_MS)
+                if (bytes != null) {
+                    val out = GroupPhotos.incomingFile(app)
+                    picture = out.takeIf { GroupPhotoImages.write(bytes, it) } ?: run {
+                        out.delete()
+                        Log.w(TAG, "a group photo that is no picture that can be shown here")
+                        null
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                Log.w(TAG, "a group photo was not made (${e::class.java.simpleName})")
+                picture?.delete()
+                picture = null
+            }
+            synchronized(this@DirectLink) {
+                groupPhotoFetches -= key
+                val made = picture ?: return@synchronized
+                if (repo.conversation(id)?.isGroup != true) {
+                    made.delete()
+                    return@synchronized
+                }
+                if (GroupPhotos(app).apply(id, made, version) == GroupPhotos.Applied.APPLIED) {
+                    IMessageLog.add(app, "${IMessageLog.chatRef(id)}: group photo set (through the iMessage library)")
+                    com.lightdecoder.archive.ArchiveEvents.notify(
+                        com.lightdecoder.archive.ArchiveChange(id, com.lightdecoder.archive.ArchiveChange.Kind.CONVERSATIONS, ChatService.IMESSAGE),
+                    )
+                }
+            }
+        }
     }
 
     // --- polls (iOS 26) ----------------------------------------------------------------------------
@@ -2594,7 +2805,7 @@ class DirectLink private constructor(
             val guid = repo.latestIncomingMessageId(conversationId, DirectArchive.PREFIX)?.let(DirectArchive::guidOf) ?: return
             guid to (targetOf(conversationId) ?: return)
         } catch (e: RuntimeException) {
-            Log.w(TAG, "unread mark not sent", e)
+            Log.w(TAG, "unread mark not sent (${e::class.java.simpleName}): ${com.lightdecoder.imessage.Redact.text(e.message.orEmpty())}")
             return
         }
         // Read again later, the read receipt for it goes again.
@@ -2611,7 +2822,7 @@ class DirectLink private constructor(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "unread mark not sent", e)
+            Log.w(TAG, "unread mark not sent (${e::class.java.simpleName}): ${com.lightdecoder.imessage.Redact.text(e.message.orEmpty())}")
         }
     }
 
@@ -2624,7 +2835,10 @@ class DirectLink private constructor(
      * The user's devices changed (Apple's library said so of the user's own account): the people of
      * the chats with something in them in the last [PeerInvalidation.RECENT_MS] are told, so that
      * their phones look the user's devices up again (as OpenBubbles' `invalidatePeerCaches` does), at
-     * most once in [PeerInvalidation.EVERY_MS]. Asked of the ":imessage" process without waiting here.
+     * most once in [PeerInvalidation.EVERY_MS]. Only chats the user wrote in, or with someone among the
+     * user's contacts ([knownPeople]): nobody unknown who merely wrote to the user hears from them
+     * (that this number is in use, and that its owner just got a new device). Asked of the ":imessage"
+     * process without waiting here.
      */
     private fun devicesChanged() {
         val now = System.currentTimeMillis()
@@ -2634,6 +2848,7 @@ class DirectLink private constructor(
         }
         val recent = runCatching { repo.conversations(null) }.getOrDefault(emptyList())
             .filter { it.folderEnum != Folder.DELETED && PeerInvalidation.recent(it.lastMessageTs, now) }
+            .filter { runCatching { repo.hasOutgoing(it.id) || knownPeople(it.id) }.getOrDefault(false) }
             .mapNotNull { runCatching { targetOf(it.id) }.getOrNull() }
         val groups = PeerInvalidation.groups(recent)
         if (groups.isEmpty()) return
@@ -2645,20 +2860,27 @@ class DirectLink private constructor(
                 IMessageLog.add(
                     app,
                     if (error == null) "the user's devices changed: $people people of ${recent.size} recent chat(s) told through the iMessage library"
-                    else "the user's devices changed: the people of the recent chats were not told (${loggableText(error, 120)})",
+                    else "the user's devices changed: the people of the recent chats were not told (${loggableText(com.lightdecoder.imessage.Redact.text(error), 120)})",
                 )
             } catch (e: Exception) {
-                Log.w(TAG, "the people of the recent chats were not told", e)
+                Log.w(TAG, "the people of the recent chats were not told (${e::class.java.simpleName}): ${com.lightdecoder.imessage.Redact.text(e.message.orEmpty())}")
             }
         }
+    }
+
+    /** Whether someone of [conversationId] (besides the user) is among the user's contacts: has a name of their own ([knownName]). */
+    private fun knownPeople(conversationId: String): Boolean = repo.participants(conversationId).filter { !it.isMe }.any { p ->
+        val handle = Handles.normalize(p.number.ifBlank { p.formattedNumber }.ifBlank { p.id })
+        handle != null && knownName(p, handle)
     }
 
     // --- "Report Junk" ---------------------------------------------------------------------------
 
     /**
      * Whether "Report Junk" is offered for [conversationId], as an iPhone offers it: a chat with one
-     * person the library reaches, who is not among the user's contacts (no contact's name or picture
-     * for their address), and in which the user never wrote, with something of theirs to report
+     * person the library reaches, who is not among the user's contacts (no contact's name for their
+     * address: a picture alone, as Google Messages may have one of anyone who wrote, makes nobody
+     * known), and in which the user never wrote, with something of theirs to report
      * ([JunkReports.offered]). Reads the archives: not on the main thread.
      */
     fun junkReportable(conversationId: String): Boolean {
@@ -2669,7 +2891,7 @@ class DirectLink private constructor(
             val other = others.singleOrNull()
             val address = other?.let { it.number.ifBlank { it.formattedNumber }.ifBlank { it.id } }.orEmpty()
             val handle = Handles.normalize(address)
-            val known = other != null && handle != null && (knownName(other, handle) || com.lightdecoder.relay.ContactPhotos.get(app).forAddress(address) != null)
+            val known = other != null && handle != null && knownName(other, handle)
             val incoming = repo.latestIncomingMessageId(conversationId, DirectArchive.PREFIX) != null
             JunkReports.offered(
                 isGroup = row.isGroup, readOnly = row.readOnly, deleted = row.folderEnum == Folder.DELETED, others = others.size,
@@ -2986,6 +3208,15 @@ class DirectLink private constructor(
         /** A download from Apple may take this long. */
         private const val DOWNLOAD_TIMEOUT_MS = 5 * 60_000L
 
+        /** A sticker's picture fetched without anyone asking may take this long ([fetchSticker]). */
+        const val STICKER_FETCH_MS = 20_000L
+
+        /** A group's photo fetched without anyone asking may take this long ([fetchGroupPhoto]). */
+        const val GROUP_PHOTO_FETCH_MS = 60_000L
+
+        /** What the ":imessage" process is given past a fetch's own time to answer that it did not come. */
+        private const val FETCH_SLACK_MS = 5_000L
+
         /** A voice message larger than this is not made playable here (it is opened in another app). */
         private const val MAX_REMUX_BYTES = 32L * 1024 * 1024
 
@@ -3038,6 +3269,39 @@ class DirectLink private constructor(
         internal fun resetForTesting() = synchronized(this) {
             instance = null
         }
+    }
+}
+
+/**
+ * How many pictures each person's changes had fetched from Apple without anyone asking (a sticker put
+ * on a message, a group's photo: [DirectLink]) in the last [windowMs]: at most [maxPerWindow] each,
+ * so nobody in a chat can make this phone fetch on and on. By the person's address ([IMessageAddress.key]),
+ * the user's own as "me"; at most [maxPeople] people remembered (the one longest quiet forgotten
+ * first). In memory: a restart starts again.
+ */
+internal class AutoFetches(
+    private val maxPerWindow: Int = MAX_PER_HOUR,
+    private val windowMs: Long = 60 * 60 * 1000L,
+    private val maxPeople: Int = 500,
+) {
+    private val times = LinkedHashMap<String, ArrayDeque<Long>>(16, 0.75f, true)
+
+    /** Whether [who]'s change may fetch one more at [nowMs]; counted when it may. */
+    @Synchronized
+    fun take(who: String, nowMs: Long): Boolean {
+        val key = IMessageAddress.key(who) ?: who
+        val list = times.getOrPut(key) { ArrayDeque() }
+        // Older than the window, or from a clock that went back since.
+        while (list.isNotEmpty() && (nowMs - list.first() >= windowMs || list.first() > nowMs)) list.removeFirst()
+        if (list.size >= maxPerWindow) return false
+        list.addLast(nowMs)
+        if (times.size > maxPeople) times.keys.iterator().let { it.next(); it.remove() }
+        return true
+    }
+
+    companion object {
+        /** A person's changes fetch at most this many pictures an hour. */
+        const val MAX_PER_HOUR = 60
     }
 }
 

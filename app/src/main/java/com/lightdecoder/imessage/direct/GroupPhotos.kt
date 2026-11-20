@@ -14,11 +14,8 @@ import com.lightdecoder.heif.ImageSniffer
 import com.lightdecoder.ui.chat.MediaLoader
 import java.io.File
 import java.util.UUID
-import kotlinx.coroutines.CancellationException
 import org.json.JSONException
 import org.json.JSONObject
-import uniffi.rust_bridge.MessageInst
-import uniffi.rust_bridge.MmcsFile
 import uniffi.rust_bridge.PushChatMessage
 
 /**
@@ -28,9 +25,11 @@ import uniffi.rust_bridge.PushChatMessage
  *
  * Kept as [ChatBackgrounds] keeps backgrounds: the pictures in [dir] (one per group,
  * `<key>-<version>.jpg`) and an index (`index.json`) the main process alone writes and reads
- * ([DirectLink] when Apple says, or the user, changes one; the screens to show it). The ":imessage"
- * process only writes new pictures into [dir] ([incomingFile]), which the main process then takes
- * over or deletes. Every read goes to the file, so nothing is cached across processes or tests.
+ * ([DirectLink] when Apple says, or the user, changes one; the screens to show it). New pictures
+ * are written into [dir] first ([incomingFile]: one that came, fetched by the main process once it
+ * took the change; one the user picked, while it goes), then taken over or deleted; one left by work
+ * that never ended is swept away later ([sweep]). Every read goes to the file, so nothing is cached
+ * across processes or tests.
  *
  * A photo taken off is kept as a version without a picture, so an older change that arrives late
  * (Apple's journal handing one over again, or a slow device) never puts it back.
@@ -70,23 +69,24 @@ class GroupPhotos(context: Context) {
      * [conversationId]'s photo is now [picture] (a file in [dir], moved into place), or none, as of
      * [version]. One older than the group's photo is ignored ([Applied.OLDER]), and the same version
      * again changes nothing ([Applied.SAME]); either way [picture] is deleted. A new one replaces the
-     * old picture, which is deleted.
+     * old picture, which is deleted. The user's own change Apple confirmed ([own]) is the photo
+     * whatever version the group's photo is at (one from someone else can claim any): it is kept as
+     * of the higher of the two, so nothing older than either comes back.
      */
-    fun apply(conversationId: String, picture: File?, version: Long): Applied = synchronized(LOCK) {
+    fun apply(conversationId: String, picture: File?, version: Long, own: Boolean = false): Applied = synchronized(LOCK) {
         val all = read()
         val entry = all.optJSONObject(conversationId)
-        if (entry != null) {
-            val stored = entry.optLong(KEY_VERSION)
-            if (version <= stored) {
-                picture?.delete()
-                return if (version == stored) Applied.SAME else Applied.OLDER
-            }
+        val stored = entry?.optLong(KEY_VERSION)
+        if (stored != null && version <= stored && !own) {
+            picture?.delete()
+            return if (version == stored) Applied.SAME else Applied.OLDER
         }
+        val kept = maxOf(version, stored ?: version)
         val old = entry?.optString(KEY_PATH).orEmpty()
-        val kept = picture?.let { moveIntoPlace(conversationId, it, version) }
-        all.put(conversationId, JSONObject().put(KEY_PATH, kept?.path.orEmpty()).put(KEY_VERSION, version))
+        val placed = picture?.let { moveIntoPlace(conversationId, it, kept) }
+        all.put(conversationId, JSONObject().put(KEY_PATH, placed?.path.orEmpty()).put(KEY_VERSION, kept))
         write(all)
-        if (old.isNotEmpty() && old != kept?.path) File(old).delete()
+        if (old.isNotEmpty() && old != placed?.path) File(old).delete()
         Applied.APPLIED
     }
 
@@ -136,6 +136,9 @@ class GroupPhotos(context: Context) {
     companion object {
         private const val TAG = "GroupPhotos"
         private const val INDEX = "index.json"
+
+        /** The largest group photo fetched (an iPhone's is a small square picture), or sent. */
+        const val MAX_DOWNLOAD_BYTES = 10L * 1024 * 1024
         private const val KEY_PATH = "path"
         private const val KEY_VERSION = "version"
         private val LOCK = Any()
@@ -143,8 +146,15 @@ class GroupPhotos(context: Context) {
         /** Where the pictures are, in either process. */
         fun dir(context: Context): File = File(context.applicationContext.filesDir, "imessage/group-photos")
 
+        /** What a picture that came is named before [apply] takes it over ([incomingFile]). */
+        const val INCOMING = "incoming"
+
+        /** What the picture the user picked is named while it is made square, and the square one while it is sent. */
+        const val PICKED = "picked"
+        const val OUTGOING = "outgoing"
+
         /** A new file in [dir] for a picture not yet taken over by the main process ([apply]). */
-        fun incomingFile(context: Context, prefix: String = "incoming"): File =
+        fun incomingFile(context: Context, prefix: String = INCOMING): File =
             File(dir(context).apply { mkdirs() }, "$prefix-${UUID.randomUUID()}.jpg")
 
         /** Whether [file] is one of [dir]'s (a path from the other process is taken only from there). */
@@ -153,6 +163,28 @@ class GroupPhotos(context: Context) {
         } catch (e: java.io.IOException) {
             false
         }
+
+        /**
+         * Whether [file] is one of [dir]'s new pictures named with [prefix] ([incomingFile]): not the
+         * index, nor a group's photo kept there, nor anything else. A path the other process names is
+         * taken only so ([OUTGOING] for one to send, [INCOMING] for one that came).
+         */
+        fun isNew(context: Context, file: File, prefix: String): Boolean =
+            isOurs(context, file) && NEW_FILE.matchEntire(file.name)?.groupValues?.get(1) == prefix
+
+        private val NEW_FILE = Regex("(incoming|picked|outgoing)-[0-9a-fA-F-]{36}\\.jpg")
+
+        /** A new picture this old was left by work that never ended (the app stopped in the middle): [sweep] takes it. */
+        const val STALE_MS = 60 * 60 * 1000L
+
+        /**
+         * The new pictures ([INCOMING], [PICKED], [OUTGOING]) and partial downloads in [dir] older than
+         * [STALE_MS] at [now]: left by work that never ended, none is any group's photo. Returns how many went.
+         */
+        fun sweep(context: Context, now: Long = System.currentTimeMillis()): Int =
+            (dir(context).listFiles() ?: emptyArray())
+                .filter { f -> f.isFile && (NEW_FILE.matches(f.name) || f.name.endsWith(".part")) && now - f.lastModified() > STALE_MS }
+                .count { it.delete() }
     }
 }
 
@@ -248,66 +280,4 @@ object GroupPhotoImages {
     }
 
     private const val TAG = "GroupPhotoImages"
-}
-
-/**
- * A group photo change from Apple, in the ":imessage" process: its picture is fetched from Apple's
- * file servers (never more than [MAX_DOWNLOAD_BYTES]), decoded no larger than needed and cut square
- * ([GroupPhotoImages]), and written where the main process takes it from ([GroupPhotos.incomingFile]);
- * then it becomes the archive's change ([DirectArchive.groupPhoto]). Nothing is fetched for a change
- * nobody can take (one Apple could not verify, one not a group's). A photo that cannot be fetched or
- * read leaves the row alone ("Bob changed the group photo."), as [DirectArchive.map] makes it. The
- * library's download is passed in ([Natives]) so this can be tested without it.
- */
-class IncomingGroupPhotos(private val app: Context, private val natives: Natives) {
-
-    fun interface Natives {
-        /** Fetches [file] into [path] ([uniffi.rust_bridge.downloadMmcsFile]), never more than [maxBytes] of it ([DirectEngine.TooLarge] past it). */
-        suspend fun download(file: MmcsFile, path: String, maxBytes: Long)
-    }
-
-    suspend fun receive(inst: MessageInst, me: Set<String>, nameOf: (String) -> String, texts: DirectArchive.Texts): DirectArchive.Update {
-        val m = (inst.message as? PushChatMessage.IconChange)?.v1 ?: return DirectArchive.Update.Ignore
-        // Taken off, or nothing anyone can take: nothing to fetch.
-        val removed = DirectArchive.groupPhoto(inst, me, nameOf, texts, null)
-        if (removed == DirectArchive.Update.Ignore) return removed
-        val file = m.file ?: return removed
-        val rowAlone = DirectArchive.map(inst, me, nameOf, texts)
-        if (file.size > MAX_DOWNLOAD_BYTES.toULong()) {
-            Log.w(TAG, "a group photo larger than ${MAX_DOWNLOAD_BYTES shr 20} MB was not fetched")
-            return rowAlone
-        }
-        val out = GroupPhotos.incomingFile(app)
-        val partial = File(GroupPhotos.dir(app), "photo-${UUID.randomUUID()}.part")
-        try {
-            try {
-                // The library makes the file itself.
-                natives.download(file, partial.path, MAX_DOWNLOAD_BYTES)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.w(TAG, "a group photo was not fetched (${e::class.java.simpleName})")
-                return rowAlone
-            }
-            // Whatever the library or the sender said: what is on disk is what counts.
-            if (!partial.isFile || partial.length() <= 0 || partial.length() > MAX_DOWNLOAD_BYTES) return rowAlone
-            if (!GroupPhotoImages.write(partial.readBytes(), out)) {
-                Log.w(TAG, "a group photo that is no picture that can be shown here")
-                out.delete()
-                return rowAlone
-            }
-        } finally {
-            partial.delete()
-        }
-        val update = DirectArchive.groupPhoto(inst, me, nameOf, texts, out.path)
-        if (update !is DirectArchive.Update.GroupPhoto) out.delete()
-        return update
-    }
-
-    companion object {
-        private const val TAG = "IncomingGroupPhotos"
-
-        /** The largest group photo fetched (an iPhone's is a small square picture). */
-        const val MAX_DOWNLOAD_BYTES = 10L * 1024 * 1024
-    }
 }

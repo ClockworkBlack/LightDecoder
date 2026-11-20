@@ -652,10 +652,106 @@ class DirectArchiveTest {
     @Test
     fun aGroupPhotoChangeIsARow() {
         val file = MmcsFile(byteArrayOf(), "o", "u", byteArrayOf(), 1UL)
+        // A photo the library cannot describe (nothing to fetch it by): its row alone.
         val changed = map(inst("E5", bob, PushChatMessage.IconChange(IconChangeMessage(file, 3UL)), listOf(me, bob, carol), "G-7"))
         assertEquals("Bob changed the group photo.", (changed as DirectArchive.Update.Upsert).message.text)
+        // Taken off: the group's change, with no photo.
         val removed = map(inst("E6", carol, PushChatMessage.IconChange(IconChangeMessage(null, 4UL)), listOf(me, bob, carol), "G-7"))
-        assertEquals("Carol removed the group photo.", (removed as DirectArchive.Update.Upsert).message.text)
+        removed as DirectArchive.Update.GroupPhoto
+        assertTrue(removed.removed)
+        assertEquals(4L, removed.version)
+        assertEquals("Carol removed the group photo.", removed.row.message.text)
+        // A group known by its members alone (no guid): the row.
+        val byMembers = map(inst("E7", carol, PushChatMessage.IconChange(IconChangeMessage(null, 4UL)), listOf(me, bob, carol)))
+        assertEquals("Carol removed the group photo.", (byMembers as DirectArchive.Update.Upsert).message.text)
+    }
+
+    @Test
+    fun aGroupPhotoChangeNamesWhereThePhotoIsForTheMainProcessToFetch() {
+        val file = MmcsFile(byteArrayOf(1), "OBJ", "https://p42-content.icloud.com/OBJ", byteArrayOf(2), 1_000UL)
+        val described = ArrayList<uniffi.rust_bridge.MessageAttachment>()
+        val u = DirectArchive.map(
+            inst("P1", bob, PushChatMessage.IconChange(IconChangeMessage(file, 7UL)), listOf(me, bob, carol), "G-7"), setOf(me), ::nameOf, TestTexts,
+            { a -> described += a; "<plist>photo</plist>" },
+        ) as DirectArchive.Update.GroupPhoto
+        // Nothing fetched or made yet: where it is, as the library describes an attachment.
+        assertNull(u.path)
+        assertFalse(u.removed)
+        assertEquals("<plist>photo</plist>", u.file)
+        assertEquals(listOf(file), (described.single().aType as uniffi.rust_bridge.AttachmentType.Mmcs).v1)
+        assertEquals("image/jpeg", described.single().mime)
+        assertEquals("imsg:group:G-7", u.conversationId)
+        assertEquals(7L, u.version)
+        assertEquals("Bob changed the group photo.", u.row.message.text)
+        // Across the processes as it went.
+        assertEquals(u, DirectWire.decode(org.json.JSONObject(DirectWire.encode(u).toString())))
+        // A description too long to be the library's: none to fetch by (the row alone).
+        val long = DirectArchive.map(
+            inst("P2", bob, PushChatMessage.IconChange(IconChangeMessage(file, 8UL)), listOf(me, bob, carol), "G-7"), setOf(me), ::nameOf, TestTexts,
+            { "x".repeat(DirectArchive.MAX_FILE_CHARS + 1) },
+        )
+        assertTrue(long is DirectArchive.Update.Upsert)
+    }
+
+    @Test
+    fun aStickerOnApplesServersGoesWithWhereItIsAndOneThatCameInsideWithNone() {
+        fun described(i: MessageInst) = DirectArchive.map(i, setOf(me), ::nameOf, TestTexts, { a -> "<plist>${a.name}</plist>" })
+        fun tapback(body: List<IndexedMessagePart>) =
+            inst("ST1", bob, PushChatMessage.React(ReactMessage("M1", 0UL, ReactMessageType.React(Reaction.Sticker(null, body), true), "", null)))
+        val onServers = described(tapback(listOf(sticker()))) as DirectArchive.Update.Reaction
+        assertEquals(IMessageExtra.tapbackStickerKey("M1", "+15550000002"), onServers.sticker)
+        assertEquals("<plist>sticker.heic</plist>", onServers.stickerFile)
+        // One that came inside the message: the ":imessage" process writes it aside, nothing to fetch.
+        val inline = IndexedMessagePart(
+            MessagePart.Attachment(
+                uniffi.rust_bridge.MessageAttachment(uniffi.rust_bridge.AttachmentType.Inline(byteArrayOf(1, 2, 3)), 0UL, "public.png", "image/png", "s.png", false),
+            ),
+            0UL, null,
+        )
+        val inside = described(tapback(listOf(inline))) as DirectArchive.Update.Reaction
+        assertEquals(IMessageExtra.tapbackStickerKey("M1", "+15550000002"), inside.sticker)
+        assertEquals("", inside.stickerFile)
+        // Dragged onto a message: the same.
+        val spec = ExtensionApp("Stickers", null, "com.apple.Stickers.UserGenerated.MessagesExtension", null)
+        val placed = described(
+            inst("PS1", bob, PushChatMessage.React(ReactMessage("M7", 0UL, ReactMessageType.Extension(spec, listOf(sticker()), false), "", null)), listOf(me, bob, carol), "G-S"),
+        ) as DirectArchive.Update.Sticker
+        assertEquals("<plist>sticker.heic</plist>", placed.file)
+        // Across the processes as they went.
+        assertEquals(onServers, DirectWire.decode(org.json.JSONObject(DirectWire.encode(onServers).toString())))
+        assertEquals(placed, DirectWire.decode(org.json.JSONObject(DirectWire.encode(placed).toString())))
+        // A description too long to be the library's: none to fetch by.
+        val long = DirectArchive.map(tapback(listOf(sticker())), setOf(me), ::nameOf, TestTexts, { "x".repeat(DirectArchive.MAX_FILE_CHARS + 1) })
+        assertEquals("", (long as DirectArchive.Update.Reaction).stickerFile)
+    }
+
+    @Test
+    fun anAppsUpdateOrAStickerAppleCouldNotVerifyIsDropped() {
+        val poll = Polls.create("Dinner?", listOf("Pizza", "Tacos"), "+15550000002")!!
+        val vote = PushChatMessage.React(
+            ReactMessage(
+                "CARD1", null,
+                ReactMessageType.Extension(
+                    ExtensionApp("Polls", null, pollsBundle, Balloon(Polls.votesUrl(listOf("O1"), "+19999999999"), "CARD1", null, null, false, null)),
+                    listOf(objectPart("")), true,
+                ),
+                Polls.VOTE_NOTICE, null,
+            ),
+        )
+        val change = PushChatMessage.React(ReactMessage("P1", null, ReactMessageType.Extension(pollCard(Polls.addChoice(poll, "Curry", "+1")!!), listOf(objectPart("x", 0)), false), "", null))
+        val spec = ExtensionApp("Stickers", null, "com.apple.Stickers.UserGenerated.MessagesExtension", null)
+        val placed = PushChatMessage.React(ReactMessage("M7", 0UL, ReactMessageType.Extension(spec, listOf(sticker()), false), "", null))
+        val tapback = PushChatMessage.React(ReactMessage("M1", 0UL, ReactMessageType.React(Reaction.Sticker(null, listOf(sticker())), true), "", null))
+        val move = PushChatMessage.React(ReactMessage("G1", null, ReactMessageType.Extension(pollCard(poll).copy(bundleId = "com.example.game"), listOf(objectPart("Your move", 0)), false), "", null))
+        for (m in listOf(vote, change, placed, tapback, move)) {
+            // From someone in the chat, verified: taken (as anything they send).
+            assertTrue(m.toString(), map(inst("X1", bob, m, listOf(me, bob, carol), "G-P")) != DirectArchive.Update.Ignore)
+            // Unverified: a vote would count as theirs, a change rewrite the card, a sticker be fetched as theirs.
+            assertEquals(m.toString(), DirectArchive.Update.Ignore, map(inst("X1", bob, m, listOf(me, bob, carol), "G-P", unverified = true)))
+        }
+        // An unverified emoji tapback is still shown, as OpenBubbles shows it.
+        val heart = map(inst("X2", bob, PushChatMessage.React(ReactMessage("M1", 0UL, ReactMessageType.React(Reaction.Heart, true), "", null)), unverified = true))
+        assertTrue(heart is DirectArchive.Update.Reaction)
     }
 
     @Test

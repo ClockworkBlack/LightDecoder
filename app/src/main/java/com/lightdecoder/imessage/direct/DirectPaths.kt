@@ -22,6 +22,18 @@ object DirectPaths {
         excluded = listOf(File(context.filesDir, "imessage")),
     )
 
+    /**
+     * Where the main process keeps iMessages' own files ([com.lightdecoder.archive.MediaCache]'s iMessage
+     * media and outbox folders): what a link preview's picture that goes with a message may be.
+     */
+    fun forImessageMedia(context: Context): Rules = Rules(
+        roots = listOf(
+            com.lightdecoder.archive.MediaCache.mediaDir(context, com.lightdecoder.chat.ChatService.IMESSAGE),
+            com.lightdecoder.archive.MediaCache.outboxDir(context, com.lightdecoder.chat.ChatService.IMESSAGE),
+        ),
+        excluded = emptyList(),
+    )
+
     /** Whether [path] is a file under one of [rules]' roots and none of its excluded folders. */
     fun isAllowed(path: String, rules: Rules): Boolean {
         if (path.isEmpty() || '\u0000' in path) return false

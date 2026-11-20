@@ -39,6 +39,29 @@ class GroupVersions(context: Context) {
             known == Long.MAX_VALUE -> Long.MAX_VALUE
             else -> known + 1
         }
+
+        /**
+         * How far past the highest version known a group's version from someone's change may be.
+         * Each change counts one (OpenBubbles, iPhones), so a few missed changes are far within it.
+         */
+        const val MAX_STEP = 1_000L
+
+        /** A version this high or higher is none a group reaches by counting its changes. */
+        const val MAX_PLAUSIBLE = 1L shl 32
+
+        /**
+         * Whether a group's [version] from someone's change (anyone in the group can send any) is one to
+         * take, given the [known] versions of it here (the group's, its photo's; null: none): at most
+         * [MAX_STEP] past the highest of them, and below [MAX_PLAUSIBLE] unless one known is that high
+         * already. One far ahead would hold every later change back (only a newer one is taken), so
+         * that the group's photo, say, could never change again.
+         */
+        fun plausible(version: Long, vararg known: Long?): Boolean {
+            if (version < 0) return false
+            val base = known.filterNotNull().filter { it >= 0 }.maxOrNull() ?: 0L
+            if (version >= MAX_PLAUSIBLE && base < MAX_PLAUSIBLE) return false
+            return version <= if (base > Long.MAX_VALUE - MAX_STEP) Long.MAX_VALUE else base + MAX_STEP
+        }
     }
 }
 

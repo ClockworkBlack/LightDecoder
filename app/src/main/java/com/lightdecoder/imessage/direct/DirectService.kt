@@ -38,8 +38,9 @@ class DirectService : Service() {
                 val r = DirectWire.SendRequest.fromJson(request)
                 // Only files of the app's own (its outbox), never the library's state or anything outside: DirectPaths.
                 for (a in r.attachments) DirectPaths.require(this, a.path, getString(R.string.imessage_direct_attachment_unreadable))
-                // A link preview's picture the same; one that is not the app's goes without its picture.
-                val link = r.link?.let { l -> if (l.imagePath != null && !DirectPaths.isAllowed(l.imagePath, DirectPaths.forApp(this))) l.copy(imagePath = null) else l }
+                // A link preview's picture only from where the main process keeps them (the iMessage media
+                // folder); one from anywhere else goes without its picture.
+                val link = r.link?.let { l -> if (l.imagePath != null && !DirectPaths.isAllowed(l.imagePath, DirectPaths.forImessageMedia(this))) l.copy(imagePath = null) else l }
                 engine.send(r.target, r.text, r.replyGuid, r.replyPart, r.effect, r.attachments, r.voice, r.app, r.runs, r.scheduledMs, r.mentions, link).toJson()
             }
             DirectWire.EXTENSION -> {
@@ -85,16 +86,17 @@ class DirectService : Service() {
             }
             DirectWire.GROUP_PHOTO -> {
                 val r = DirectWire.GroupPhotoRequest.fromJson(request)
-                // Only a picture the main process put where group photos are kept.
-                val path = r.path?.takeIf { GroupPhotos.isOurs(this, java.io.File(it)) }
+                // Only the square picture the main process made to send, where group photos are kept (not
+                // their index, nor a group's photo kept there).
+                val path = r.path?.takeIf { GroupPhotos.isNew(this, java.io.File(it), GroupPhotos.OUTGOING) }
                 if (r.path != null && path == null) throw DirectEngine.ImessageError(getString(R.string.imessage_group_photo_unreadable))
                 DirectWire.guid(engine.groupPhoto(r.target, path, r.groupVersion))
             }
             DirectWire.DOWNLOAD -> {
+                val r = DirectWire.DownloadRequest.fromJson(request)
                 // Written only into the app's own media folders, never over the library's state or outside the app.
-                val path = request.getString("path")
-                DirectPaths.require(this, path, getString(R.string.imessage_direct_attachment_not_saved))
-                DirectWire.downloaded(engine.download(request.getString("descriptor"), path))
+                DirectPaths.require(this, r.path, getString(R.string.imessage_direct_attachment_not_saved))
+                DirectWire.downloaded(engine.download(r.descriptor, r.path, r.maxBytes, r.automaticMs))
             }
             DirectWire.BACKGROUND -> {
                 val r = DirectWire.BackgroundRequest.fromJson(request)

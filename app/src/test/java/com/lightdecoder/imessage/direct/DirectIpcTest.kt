@@ -70,6 +70,28 @@ class DirectIpcTest {
 
     @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
     @Test
+    fun anErrorOnTheOtherSideComesBackAsAFailureNotTheEndOfItsProcess() {
+        val server = DirectIpc.Server { what, _ ->
+            when (what) {
+                DirectWire.UPDATE -> throw StackOverflowError("deep")
+                DirectWire.DOWNLOAD -> throw OutOfMemoryError("huge")
+                else -> DirectWire.ok()
+            }
+        }
+        bind(server)
+        val client = DirectIpc.Client(app, DirectSinkService::class.java)
+        for (what in listOf(DirectWire.UPDATE, DirectWire.DOWNLOAD)) {
+            val a = await(GlobalScope.async(Dispatchers.IO) { client.call(what, JSONObject(), 5_000) })
+            assertTrue(a.toString(), DirectWire.errorOf(a) != null && DirectWire.errorOf(a) != DirectIpc.Client.NO_ANSWER)
+        }
+        // And it goes on answering.
+        assertEquals(true, await(GlobalScope.async(Dispatchers.IO) { client.call(DirectWire.READ, JSONObject(), 5_000) }).optBoolean("ok"))
+        client.close()
+        server.close()
+    }
+
+    @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+    @Test
     fun noAnswerInTimeIsAnErrorNotAHang() {
         val never = CompletableDeferred<Unit>()
         val server = DirectIpc.Server { _, _ -> never.await(); JSONObject() }

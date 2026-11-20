@@ -37,25 +37,26 @@ class DirectSinkService : Service() {
          * The answer to the [DirectWire.UPDATE] [request], stored with [store]: [DirectWire.ok], a
          * plain error when storing failed for now (the storage full or busy: it is handed over
          * again), or [DirectWire.rejected] when it cannot be read or storing it failed otherwise,
-         * as it would every time.
+         * as it would every time. Nothing an update does takes the main process down: an error too
+         * (memory run out on it, a stack run out on what it holds) is that update rejected.
          */
         fun take(request: JSONObject, store: (DirectArchive.Update) -> Unit): JSONObject {
             val update = try {
                 DirectWire.decode(request)
-            } catch (e: Exception) {
-                Log.w(TAG, "update not readable", e)
+            } catch (e: Throwable) {
+                Log.w(TAG, "update not readable (${e::class.java.simpleName})")
                 return DirectWire.rejected(e)
             }
             return try {
                 store(update)
                 DirectWire.ok()
-            } catch (e: Exception) {
-                Log.w(TAG, "update ${update::class.simpleName} not stored", e)
+            } catch (e: Throwable) {
+                Log.w(TAG, "update ${update::class.simpleName} not stored (${e::class.java.simpleName})")
                 if (isForNow(e)) DirectWire.failure(e) else DirectWire.rejected(e)
             }
         }
 
-        private fun isForNow(e: Exception): Boolean =
+        private fun isForNow(e: Throwable): Boolean =
             e is SQLiteFullException || e is SQLiteDatabaseLockedException || e is SQLiteDiskIOException || e is SQLiteCantOpenDatabaseException
     }
 }

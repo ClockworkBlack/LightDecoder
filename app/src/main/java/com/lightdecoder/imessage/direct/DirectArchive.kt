@@ -15,6 +15,7 @@ import uniffi.rust_bridge.LinkMeta
 import uniffi.rust_bridge.MessageAttachment
 import uniffi.rust_bridge.MessageInst
 import uniffi.rust_bridge.MessagePart
+import uniffi.rust_bridge.MmcsFile
 import uniffi.rust_bridge.PartExtension
 import uniffi.rust_bridge.PushChatMessage
 import uniffi.rust_bridge.ReactMessageType
@@ -180,8 +181,10 @@ object DirectArchive {
          * address without its scheme; [fromMe] when it is the user, from another device. Taken only
          * from someone in the message's chat (and, when Apple said in which chat it was:
          * [conversationId], [groupGuid], in that one). A sticker as a tapback (iOS 18) is
-         * [STICKER_TAPBACK], its picture written aside under the key [sticker] (by the ":imessage"
-         * process, [IMessageExtra.tapbackStickerKey]) when it came with one.
+         * [STICKER_TAPBACK], its picture kept under the key [sticker] ([IMessageExtra.tapbackStickerKey])
+         * when it came with one: written aside by the ":imessage" process when it came inside the
+         * message, else on Apple's file servers, where the library's description of it ([stickerFile])
+         * says, fetched by the main process only once it took the tapback.
          */
         data class Reaction(
             val messageId: String,
@@ -193,13 +196,16 @@ object DirectArchive {
             val conversationId: String = "",
             val groupGuid: String? = null,
             val sticker: String? = null,
+            val stickerFile: String = "",
         ) : Update()
 
         /**
          * Someone put a sticker on message [messageId] (dragged it onto its bubble, iOS 17): the
          * message that did ([stickerGuid]), by [participantId] (their address without its scheme;
-         * [fromMe]: the user, on another device), its picture written aside by the ":imessage"
-         * process under [IMessageExtra.stickerKey]. Taken as a tapback is: from someone in the chat, in it.
+         * [fromMe]: the user, on another device), its picture kept under [IMessageExtra.stickerKey]:
+         * written aside by the ":imessage" process when it came inside the message, else fetched from
+         * where [file] (the library's description of it) says by the main process once it took it.
+         * Taken as a tapback is: from someone in the chat, in it.
          */
         data class Sticker(
             val messageId: String,
@@ -209,6 +215,7 @@ object DirectArchive {
             val atMs: Long,
             val conversationId: String = "",
             val groupGuid: String? = null,
+            val file: String = "",
         ) : Update()
 
         /**
@@ -294,9 +301,11 @@ object DirectArchive {
         /**
          * A group's photo was set or taken off ([PushChatMessage.IconChange]), as of the group's
          * [version] (an older one than the photo's is ignored): the group of [groupGuid] (stored
-         * as [conversationId]), the square picture to show from now on at [path] (written by the
-         * ":imessage" process where the group photos are kept, [GroupPhotos]; null: none), and the
-         * row saying who did it ([row], "Bob changed the group photo.").
+         * as [conversationId]), the photo to show from now on: on Apple's file servers, where the
+         * library's description of it ([file]) says, fetched by the main process only once it took
+         * the change (the group stored, its sender in it); or a square picture already made at [path]
+         * (a new one where the group photos are kept, [GroupPhotos.isNew]); neither: none. And the row
+         * saying who did it ([row], "Bob changed the group photo.").
          */
         data class GroupPhoto(
             val conversationId: String,
@@ -304,7 +313,11 @@ object DirectArchive {
             val version: Long,
             val path: String?,
             val row: Upsert,
-        ) : Update()
+            val file: String = "",
+        ) : Update() {
+            /** Whether the photo was taken off. */
+            val removed: Boolean get() = path == null && file.isEmpty()
+        }
 
         /**
          * An event from Apple the ":imessage" process did not take: [what] kind of event it was and
@@ -399,7 +412,8 @@ object DirectArchive {
                     // A sticker as a tapback: its picture, when it came with one, is kept by who put it there (one each, as tapbacks are).
                     val sticker = (r.reaction as? Reaction.Sticker)?.takeIf { r.enable && stickerAttachment(m) != null }
                         ?.let { IMessageExtra.tapbackStickerKey(m.v1.toUuid, if (fromMe) TAPBACK_ME else Handles.display(sender)) }
-                    Update.Reaction(messageId(m.v1.toUuid), Handles.display(sender), emojiOf(r.reaction), r.enable, fromMe, at, chat, guid, sticker)
+                    val file = if (sticker != null) stickerFile(m, describe) else ""
+                    Update.Reaction(messageId(m.v1.toUuid), Handles.display(sender), emojiOf(r.reaction), r.enable, fromMe, at, chat, guid, sticker, file)
                 }
                 is ReactMessageType.Extension -> appUpdate(inst, m.v1.toUuid, r, me, nameOf, texts, describe, now)
             }
@@ -447,13 +461,18 @@ object DirectArchive {
                     member = m.v1.newParticipants.any { it in me }, membersChanged = true, groupVersion = groupVersionOf(m.v1.groupVersion),
                 ) ?: event
             }
-            // The row alone, with the group's version: the photo itself is fetched by the ":imessage"
-            // process, which then makes the change a [groupPhoto] (DirectEngine; this is what is left
-            // when it could not be fetched).
+            // A group's (by its guid): the change, with where the photo is on Apple's file servers, which
+            // the main process fetches once it took the change ([groupPhoto]). Else (no guid, or a photo
+            // the library cannot describe) the row alone, with the group's version.
             is PushChatMessage.IconChange -> {
                 val conversation = inst.conversation ?: return Update.Ignore
+                val photo = m.v1.file
+                val file = photo?.let { groupPhotoFile(it, describe) }.orEmpty()
+                if (!conversation.senderGuid.isNullOrBlank() && (photo == null || file.isNotEmpty())) {
+                    return groupPhoto(inst, me, nameOf, texts, path = null, file = file, now = now)
+                }
                 val who = actor(sender, fromMe, nameOf, texts) ?: return Update.Ignore
-                val text = if (m.v1.file != null) texts.changedPhoto(who) else texts.removedPhoto(who)
+                val text = if (photo != null) texts.changedPhoto(who) else texts.removedPhoto(who)
                 val event = groupEvent(inst, conversation, conversation.participants, conversation.cvName, me, nameOf, text, now = now)
                 (event as? Update.Upsert)?.copy(groupVersion = groupVersionOf(m.v1.groupVersion)) ?: event
             }
@@ -470,13 +489,19 @@ object DirectArchive {
         }
     }
 
-    /** What is not taken from an event Apple could not verify (as OpenBubbles): what changes or removes what is stored, and a group's events. */
+    /**
+     * What is not taken from an event Apple could not verify (as OpenBubbles): what changes or removes
+     * what is stored, and a group's events. Of an iMessage app's updates and the stickers put on
+     * messages too: a vote would count for whoever it claims to be from, a poll's change rewrite its
+     * card, a sticker be fetched and shown as theirs.
+     */
     private fun droppedUnverified(m: PushChatMessage): Boolean =
         m is PushChatMessage.Delivered || m is PushChatMessage.Read || m is PushChatMessage.Edit ||
             m is PushChatMessage.Unsend || m is PushChatMessage.Typing || m is PushChatMessage.RenameMessage ||
             m is PushChatMessage.ChangeParticipants || m is PushChatMessage.IconChange || m is PushChatMessage.Error ||
             m is PushChatMessage.PermanentDelete || m is PushChatMessage.SetTranscriptBackground ||
-            m is PushChatMessage.MarkUnread || m is PushChatMessage.PeerCacheInvalidate
+            m is PushChatMessage.MarkUnread || m is PushChatMessage.PeerCacheInvalidate ||
+            (m is PushChatMessage.React && m.v1.reaction.let { r -> r is ReactMessageType.Extension || (r as? ReactMessageType.React)?.reaction is Reaction.Sticker })
 
     /** The longest GUID taken from Apple's events (Apple's are UUIDs). */
     private const val MAX_GUID_CHARS = 64
@@ -597,7 +622,10 @@ object DirectArchive {
         if (ext.spec.balloon == null) {
             if (ext.isMeta || stickerAttachment(inst.message) == null) return Update.Ignore
             val (chat, guid) = chatOf(inst, me)
-            return Update.Sticker(messageId(rootGuid), inst.id, if (fromMe) TAPBACK_ME else Handles.display(sender), fromMe, timestampOf(inst, now), chat, guid)
+            return Update.Sticker(
+                messageId(rootGuid), inst.id, if (fromMe) TAPBACK_ME else Handles.display(sender), fromMe, timestampOf(inst, now), chat, guid,
+                stickerFile(inst.message, describe),
+            )
         }
         if (Polls.isPoll(app)) {
             if (ext.isMeta) {
@@ -915,11 +943,13 @@ object DirectArchive {
 
     /**
      * A group's photo change from Apple ([PushChatMessage.IconChange]) as the archive takes it: the
-     * group (by its guid), the picture the ":imessage" process saved for it at [path] (null: the
-     * photo was taken off), as of the group's version, and the row saying who did it ("Bob changed
-     * the group photo.", as an iPhone puts it). Ignored for one nobody can take it from (from no one,
-     * or one Apple could not verify) and for anything that is not a group's (no guid). Whether the
-     * sender is in the group is the main process's to tell (DirectLink).
+     * group (by its guid), the photo: the library's description of where it is on Apple's file
+     * servers ([file], fetched by the main process once it took the change) or a picture already
+     * made at [path] (neither: the photo was taken off), as of the group's version, and the row
+     * saying who did it ("Bob changed the group photo.", as an iPhone puts it). Ignored for one
+     * nobody can take it from (from no one, or one Apple could not verify) and for anything that is
+     * not a group's (no guid). Whether the sender is in the group, and whether its version is one to
+     * take, is the main process's to tell (DirectLink).
      */
     fun groupPhoto(
         inst: MessageInst,
@@ -928,6 +958,7 @@ object DirectArchive {
         texts: Texts,
         path: String?,
         now: Long = System.currentTimeMillis(),
+        file: String = "",
     ): Update {
         val m = (inst.message as? PushChatMessage.IconChange)?.v1 ?: return Update.Ignore
         val sender = inst.sender ?: return Update.Ignore
@@ -935,12 +966,36 @@ object DirectArchive {
         val conversation = inst.conversation ?: return Update.Ignore
         val guid = conversation.senderGuid?.takeIf { it.isNotBlank() } ?: return Update.Ignore
         val who = actor(sender, sender in me, nameOf, texts) ?: return Update.Ignore
-        val text = if (path != null) texts.changedPhoto(who) else texts.removedPhoto(who)
+        val text = if (path != null || file.isNotEmpty()) texts.changedPhoto(who) else texts.removedPhoto(who)
         val version = groupVersionOf(m.groupVersion)
         val row = groupEvent(inst, conversation, conversation.participants, conversation.cvName, me, nameOf, text, now = now) as? Update.Upsert
             ?: return Update.Ignore
-        return Update.GroupPhoto(groupConversationId(guid), guid, version, path, row.copy(groupVersion = version))
+        return Update.GroupPhoto(groupConversationId(guid), guid, version, path, row.copy(groupVersion = version), file)
     }
+
+    /** The longest description of a file kept with a change (a sticker's, a group photo's: the library's are a few hundred characters). */
+    const val MAX_FILE_CHARS = 8 * 1024
+
+    /**
+     * The library's description ([describe], `saveAttachment`) of the sticker [m] puts on a message,
+     * when its picture is on Apple's file servers, for the main process to fetch it once it took the
+     * change; "" when it came inside the message (the ":imessage" process writes it aside), has none,
+     * or cannot be described.
+     */
+    fun stickerFile(m: PushChatMessage, describe: (MessageAttachment) -> String): String {
+        val attachment = stickerAttachment(m)?.takeIf { it.aType is AttachmentType.Mmcs } ?: return ""
+        return describe(attachment).takeIf { it.length <= MAX_FILE_CHARS }.orEmpty()
+    }
+
+    /** The library's description of a group's photo on Apple's file servers ([file]), as an attachment's is made; "" when it cannot be described. */
+    fun groupPhotoFile(file: MmcsFile, describe: (MessageAttachment) -> String): String =
+        describe(MessageAttachment(AttachmentType.Mmcs(listOf(file)), 0UL, GROUP_PHOTO_UTI, GROUP_PHOTO_MIME, GROUP_PHOTO_NAME, false))
+            .takeIf { it.length <= MAX_FILE_CHARS }.orEmpty()
+
+    /** How a group's photo is described as a file: a JPEG, as Apple keeps it ("GroupPhotoImage"). */
+    private const val GROUP_PHOTO_UTI = "public.jpeg"
+    private const val GROUP_PHOTO_MIME = "image/jpeg"
+    private const val GROUP_PHOTO_NAME = "GroupPhotoImage.jpg"
 
     private fun actor(sender: String?, fromMe: Boolean, nameOf: (String) -> String, texts: Texts): String? = when {
         sender == null -> null

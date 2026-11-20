@@ -11,8 +11,8 @@ object JunkReports {
 
     /**
      * Whether "Report Junk" is offered for a chat: one person ([others] is 1), not a group, still open
-     * ([readOnly], [deleted]), who is not a known contact ([knownContact]: no contact's name or picture
-     * for their address), in a chat the user never wrote in ([wroteIn]), with something of theirs to
+     * ([readOnly], [deleted]), who is not a known contact ([knownContact]: no contact's name for their
+     * address; a picture alone makes nobody known), in a chat the user never wrote in ([wroteIn]), with something of theirs to
      * report ([somethingToReport]).
      */
     fun offered(

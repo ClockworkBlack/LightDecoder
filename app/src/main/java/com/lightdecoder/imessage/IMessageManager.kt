@@ -694,14 +694,18 @@ class IMessageManager private constructor(
 
     /**
      * Removes the chat from this phone only; it comes back, from that
-     * moment on, if someone writes in it again. The pictures kept with its
-     * messages that are no attachments (links' previews, stickers) go too.
+     * moment on, if someone writes in it again. What is kept of it outside
+     * the archive goes too: the pictures kept with its messages that are no
+     * attachments (links' previews, stickers), a group's photo and version,
+     * its own "Send Read Receipts" ([com.lightdecoder.imessage.direct.DirectLink.forgetConversation]).
+     * Report Junk and a Messages conversation deleted with its iMessage chats
+     * come here too.
      */
     override suspend fun deleteConversation(conversationId: String): Unit = withContext(Dispatchers.IO) {
         val newest = runCatching { repo.messages(conversationId).maxOfOrNull { it.timestampMs } }.getOrNull()
         IMessagePrefs.setClearedBefore(appContext, conversationId, maxOf(newest ?: 0L, System.currentTimeMillis()))
         MessageNotifier.cancel(appContext, conversationId, ChatService.IMESSAGE)
-        runCatching { direct.forgetConversationPictures(conversationId) }
+        runCatching { direct.forgetConversation(conversationId) }
         repo.deleteConversationLocal(conversationId)
     }
 

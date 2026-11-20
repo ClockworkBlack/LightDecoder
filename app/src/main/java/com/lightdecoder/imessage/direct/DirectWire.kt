@@ -541,8 +541,30 @@ object DirectWire {
     /** Tell each of [groups] that the user's devices changed. */
     fun peers(groups: List<PeerGroup>): JSONObject = JSONObject().put("groups", JSONArray().apply { groups.forEach { put(it.toJson()) } })
 
-    /** Fetch the attachment [descriptor] (as the library saved it) into the file [path]. */
-    fun download(descriptor: String, path: String): JSONObject = JSONObject().put("descriptor", descriptor).put("path", path)
+    /**
+     * Fetch the attachment [descriptor] (as the library saved it) into the file [path]: never more than
+     * [maxBytes]; with [automaticMs], one fetched without anyone asking (a sticker, a group's photo), only
+     * from Apple's own file servers ([DirectMedia.isAppleFileServer]) and in that long at most.
+     */
+    fun download(descriptor: String, path: String, maxBytes: Long? = null, automaticMs: Long? = null): JSONObject =
+        JSONObject().put("descriptor", descriptor).put("path", path)
+            .apply { maxBytes?.let { put("maxBytes", it) } }
+            .apply { automaticMs?.let { put("automaticMs", it) } }
+
+    /** A [DOWNLOAD]'s request, as [download] makes it: [maxBytes] within [DirectMedia.MAX_DOWNLOAD_BYTES], [automaticMs] within [MAX_AUTOMATIC_MS] (null: one the user asked for). */
+    data class DownloadRequest(val descriptor: String, val path: String, val maxBytes: Long, val automaticMs: Long?) {
+        companion object {
+            fun fromJson(o: JSONObject) = DownloadRequest(
+                o.getString("descriptor"),
+                o.getString("path"),
+                o.optLong("maxBytes", DirectMedia.MAX_DOWNLOAD_BYTES).takeIf { it > 0 }?.coerceAtMost(DirectMedia.MAX_DOWNLOAD_BYTES) ?: DirectMedia.MAX_DOWNLOAD_BYTES,
+                if (o.has("automaticMs") && !o.isNull("automaticMs")) o.optLong("automaticMs").coerceIn(1L, MAX_AUTOMATIC_MS) else null,
+            )
+        }
+    }
+
+    /** The longest a download nobody asked for may take. */
+    const val MAX_AUTOMATIC_MS = 2 * 60_000L
 
     /** A send's answer: the GUID, Apple's timestamp and the attachment parts, or an error. */
     fun sent(guid: String, timestampMs: Long, parts: List<SentPart> = emptyList()): JSONObject =
@@ -614,9 +636,11 @@ object DirectWire {
             .put("atMs", u.atMs).put("conversationId", u.conversationId)
             .apply { u.groupGuid?.let { put("groupGuid", it) } }
             .apply { u.sticker?.let { put("sticker", it) } }
+            .apply { if (u.stickerFile.isNotEmpty()) put("stickerFile", u.stickerFile) }
         is DirectArchive.Update.Sticker -> JSONObject().put("kind", "sticker").put("messageId", u.messageId).put("stickerGuid", u.stickerGuid)
             .put("participantId", u.participantId).put("fromMe", u.fromMe).put("atMs", u.atMs).put("conversationId", u.conversationId)
             .apply { u.groupGuid?.let { put("groupGuid", it) } }
+            .apply { if (u.file.isNotEmpty()) put("file", u.file) }
         is DirectArchive.Update.PollVote -> JSONObject().put("kind", "pollVote").put("messageId", u.messageId).put("voter", u.voter)
             .put("fromMe", u.fromMe).put("options", JSONArray(u.options)).put("atMs", u.atMs).put("conversationId", u.conversationId)
             .apply { u.groupGuid?.let { put("groupGuid", it) } }
@@ -640,6 +664,7 @@ object DirectWire {
         is DirectArchive.Update.GroupPhoto -> JSONObject().put("kind", "groupPhoto").put("conversationId", u.conversationId)
             .put("groupGuid", u.groupGuid).put("version", u.version).put("path", u.path ?: JSONObject.NULL)
             .put("row", encode(u.row))
+            .apply { if (u.file.isNotEmpty()) put("file", u.file) }
         is DirectArchive.Update.Dropped -> JSONObject().put("kind", "dropped").put("what", u.what).put("why", u.why)
         DirectArchive.Update.Ignore -> JSONObject().put("kind", "ignore")
     }
@@ -731,10 +756,12 @@ object DirectWire {
             o.getString("messageId"), o.optString("participantId"), o.getString("emoji"), o.optBoolean("enable"),
             o.optBoolean("fromMe"), o.optLong("atMs"), o.optString("conversationId"), o.optString("groupGuid").takeIf { it.isNotEmpty() },
             o.optStringOrNull("sticker")?.takeIf { it.isNotEmpty() },
+            fileOf(o, "stickerFile"),
         )
         "sticker" -> DirectArchive.Update.Sticker(
             o.getString("messageId"), o.getString("stickerGuid"), o.optString("participantId"), o.optBoolean("fromMe"), o.optLong("atMs"),
             o.optString("conversationId"), o.optString("groupGuid").takeIf { it.isNotEmpty() },
+            fileOf(o, "file"),
         )
         "pollVote" -> DirectArchive.Update.PollVote(
             o.getString("messageId"), o.optString("voter"), o.optBoolean("fromMe"),
@@ -775,7 +802,9 @@ object DirectWire {
             if (row == null || guid == null) {
                 DirectArchive.Update.Ignore
             } else {
-                DirectArchive.Update.GroupPhoto(o.optString("conversationId"), guid, o.optLong("version"), o.optStringOrNull("path")?.ifEmpty { null }, row)
+                DirectArchive.Update.GroupPhoto(
+                    o.optString("conversationId"), guid, o.optLong("version"), o.optStringOrNull("path")?.ifEmpty { null }, row, fileOf(o, "file"),
+                )
             }
         }
         "dropped" -> DirectArchive.Update.Dropped(o.optString("what"), o.optString("why"))
@@ -784,6 +813,10 @@ object DirectWire {
 
     private fun JSONObject.optStringOrNull(key: String): String? =
         if (!has(key) || isNull(key)) null else getString(key)
+
+    /** A file's description ([DirectArchive.MAX_FILE_CHARS] at most) under [key] of [o], or "" for none. */
+    private fun fileOf(o: JSONObject, key: String): String =
+        o.optStringOrNull(key)?.takeIf { it.length <= DirectArchive.MAX_FILE_CHARS }.orEmpty()
 
     private fun JSONObject.objects(key: String): List<JSONObject> {
         val a = optJSONArray(key) ?: return emptyList()

@@ -192,4 +192,85 @@ class PollsTest {
         assertEquals(7, Polls.countOf("data:,abc?src=p&c=7"))
         assertEquals(Polls.FIRST_COUNT, Polls.countOf("data:,abc"))
     }
+
+    // --- a change of someone's poll, and what could break the reading --------------------------------
+
+    @Test
+    fun theCountIsAParameterOfItsOwnOfSixDigitsAtMost() {
+        assertEquals(3, Polls.countOf("data:,abc?src=p&c=3"))
+        assertEquals(3, Polls.countOf("data:,abc?c=3&src=p"))
+        assertEquals(999_999, Polls.countOf("data:,abc?src=p&c=999999"))
+        // Seven digits are no count that can be read (not its first six), nor is one followed by more.
+        assertEquals(Polls.FIRST_COUNT, Polls.countOf("data:,abc?src=p&c=1000000"))
+        assertEquals(Polls.FIRST_COUNT, Polls.countOf("data:,abc?src=p&c=12abc"))
+        assertEquals(Polls.FIRST_COUNT, Polls.countOf("data:,abc?src=p&cc=5"))
+        assertEquals(Polls.FIRST_COUNT, Polls.countOf("data:,abc?src=p&xc=5"))
+        // Its own count at the end: "Add Choice" never goes past what reads back.
+        val poll = Polls.decode(cardUrl(sample, Polls.MAX_COUNT))!!
+        assertEquals(Polls.MAX_COUNT, poll.count)
+        assertNull(Polls.addChoice(poll, "Curry", "+1"))
+        assertEquals(Polls.MAX_COUNT, Polls.addChoice(poll.copy(count = Polls.MAX_COUNT - 1), "Curry", "+1")!!.count)
+    }
+
+    @Test
+    fun aChangeOnlyAddsChoicesAndItsCountGoesUpByAFewAtMost() {
+        val stored = Polls.decode(cardUrl(sample, 3))!!
+        val added = Polls.addChoice(stored, "Curry", "+15550000009", "NEW-1")!!
+        assertEquals(added, Polls.merged(stored, added))
+        // A few changes missed: the choices they added come too, as many as the count went up.
+        val two = Polls.addChoice(added, "Soup", "+15550000009", "NEW-2")!!
+        assertEquals(listOf("Pizza", "Tacos", "Sushi", "Curry", "Soup"), Polls.merged(stored, two)!!.options.map { it.text })
+        val skipped = two.copy(count = stored.count + 1)
+        assertEquals("one count up adds one choice", listOf("Pizza", "Tacos", "Sushi", "Curry"), Polls.merged(stored, skipped)!!.options.map { it.text })
+        // The same count, an older one, or one far ahead (it would freeze the poll: nothing later could follow): none.
+        assertNull(Polls.merged(stored, added.copy(count = stored.count)))
+        assertNull(Polls.merged(stored, added.copy(count = stored.count - 1)))
+        assertNull(Polls.merged(stored, added.copy(count = stored.count + Polls.MAX_COUNT_STEP + 1)))
+        assertNull(Polls.merged(stored, added.copy(count = 999_999)))
+        assertEquals(stored.count + Polls.MAX_COUNT_STEP, Polls.merged(stored, added.copy(count = stored.count + Polls.MAX_COUNT_STEP))!!.count)
+        // Nothing new in it: no change to take.
+        assertNull(Polls.merged(stored, stored.copy(count = stored.count + 1)))
+        // Someone else's words for the choices there, another order, another question, a choice taken out: the
+        // stored ones stay, as they were (a vote never moves to other words); only the new choice is added.
+        val rewritten = added.copy(
+            title = "Lunch?",
+            options = listOf(
+                stored.options[1].copy(text = "Pizza"), stored.options[0].copy(text = "Tacos"), added.options.last(),
+            ),
+        )
+        val merged = Polls.merged(stored, rewritten)!!
+        assertEquals("Dinner?", merged.title)
+        assertEquals(listOf(o1 to "Pizza", o2 to "Tacos", o3 to "Sushi", "NEW-1" to "Curry"), merged.options.map { it.id to it.text })
+        // A new choice with the words of one there already (any case) is none.
+        assertNull(Polls.merged(stored, stored.copy(options = stored.options + Polls.Option("NEW-3", "PIZZA"), count = stored.count + 1)))
+        // Never more than a poll's choices.
+        val full = stored.copy(options = (0 until Polls.MAX_OPTIONS).map { Polls.Option("ID$it", "C$it") })
+        assertNull(Polls.merged(full, full.copy(options = full.options + Polls.Option("X", "One more"), count = full.count + 1)))
+    }
+
+    @Test
+    fun aPollNestingDeeperThanAnyPollIsNotReadAtAll() {
+        // Thousands deep: org.json would run its stack out reading it.
+        val deep = """{"item":{"orderedPollOptions":[{"optionIdentifier":"X","text":"a","x":""" + "[".repeat(5_000) + "]".repeat(5_000) + "}]},\"version\":1}"
+        val start = System.nanoTime()
+        assertNull(Polls.decode(cardUrl(deep)))
+        assertNull(Polls.decodeVotes(cardUrl(deep)))
+        assertTrue((System.nanoTime() - start) / 1_000_000 < 5_000)
+        // As deep as allowed is read; one deeper is not.
+        fun nested(levels: Int) = """{"item":{"orderedPollOptions":[{"optionIdentifier":"X","text":"a","x":""" + "[".repeat(levels) + "]".repeat(levels) + "}]}}"
+        assertNotNull(Polls.decode(cardUrl(nested(Polls.MAX_NESTING - 4))))
+        assertNull(Polls.decode(cardUrl(nested(Polls.MAX_NESTING))))
+        // Brackets inside strings are words, not nesting.
+        assertTrue(Polls.plainJsonWithin("""{"a":"[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[","b":"\"{{{{"}""", 2))
+        // What org.json reads beyond plain JSON, where brackets could hide from the count, is refused:
+        // a quote inside a word without quotes, single quotes, comments, other signs.
+        assertFalse(Polls.plainJsonWithin("""[a", [[[[[[[[ ]]]]]]]] ,"]""", 4))
+        assertFalse(Polls.plainJsonWithin("""{'a':'[[[['}""", 4))
+        assertFalse(Polls.plainJsonWithin("""{"a":1 /* [[[[ */}""", 4))
+        assertFalse(Polls.plainJsonWithin("""{"a":1 # [[[[""", 4))
+        assertFalse(Polls.plainJsonWithin("""{"a";1}""", 4))
+        assertFalse(Polls.plainJsonWithin("""{"a":"unterminated}""", 4))
+        assertFalse(Polls.plainJsonWithin("""{"a":1}}""", 4))
+        assertTrue(Polls.plainJsonWithin(sample, 4))
+    }
 }

@@ -101,16 +101,103 @@ object Polls {
             return null
         }
         if (bytes.isEmpty() || bytes.size > MAX_JSON_BYTES) return null
+        val json = String(bytes, Charsets.UTF_8)
+        // org.json reads nested objects and arrays by calling itself: thousands deep, a thread's stack
+        // runs out (StackOverflowError, which nothing else here would catch). Only plain JSON, so
+        // deep, is handed to it.
+        if (!plainJsonWithin(json, MAX_NESTING)) return null
         return try {
-            JSONObject(String(bytes, Charsets.UTF_8))
+            JSONObject(json)
         } catch (e: JSONException) {
+            null
+        } catch (e: RuntimeException) {
             null
         }
     }
 
-    /** The count ("c") in a poll's address, or [FIRST_COUNT] when it has none. */
+    /** The deepest a poll's JSON may nest objects and arrays (Apple's and OpenBubbles' go four deep). */
+    const val MAX_NESTING = 32
+
+    /**
+     * Whether [json] is plain JSON (strings in double quotes; outside them only JSON's own signs,
+     * numbers, `true`, `false` and `null`) nesting objects and arrays no deeper than [max]. Read in
+     * one pass, without calling itself. org.json takes more than plain JSON (single quotes, words
+     * without quotes that may hold a quote, comments), in which a bracket could hide from a count like
+     * this one: anything of the kind is refused (a string starts only where a value or a name can:
+     * first, or after `[`, `{`, `,` or `:`), so what org.json then reads nests exactly as deep as
+     * counted here.
+     */
+    internal fun plainJsonWithin(json: String, max: Int): Boolean {
+        var depth = 0
+        var inString = false
+        var escaped = false
+        // The last sign outside strings and spaces: a string may start only after one of "[{,:" (or first).
+        var last = ' '
+        for (c in json) {
+            if (inString) {
+                when {
+                    escaped -> escaped = false
+                    c == '\\' -> escaped = true
+                    c == '"' -> {
+                        inString = false
+                        last = '"'
+                    }
+                }
+                continue
+            }
+            when (c) {
+                ' ', '\t', '\n', '\r' -> continue
+                '"' -> {
+                    if (last != ' ' && last != '[' && last != '{' && last != ',' && last != ':') return false
+                    inString = true
+                    continue
+                }
+                '{', '[' -> if (++depth > max) return false
+                '}', ']' -> if (--depth < 0) return false
+                ',', ':', '-', '+', '.' -> Unit
+                in '0'..'9', in 'a'..'z', in 'A'..'Z' -> Unit
+                else -> return false
+            }
+            last = c
+        }
+        return !inString
+    }
+
+    /** The highest count ("c") a poll can have here: what [countOf] reads (six digits). */
+    const val MAX_COUNT = 999_999
+
+    /** The count's form in a card's address: "c=" and one to six digits, a parameter of its own. */
+    private val COUNT = Regex("[?&]c=(\\d{1,6})(?:&|$)")
+
+    /** The count ("c") in a poll's address, or [FIRST_COUNT] when it has none (or none of six digits at most). */
     fun countOf(url: String): Int =
-        Regex("(?:^|&)c=(\\d{1,6})").find(url.substringAfter('?', ""))?.groupValues?.get(1)?.toIntOrNull() ?: FIRST_COUNT
+        COUNT.find("?" + url.substringAfter('?', "").substringBefore('#'))?.groupValues?.get(1)?.toIntOrNull() ?: FIRST_COUNT
+
+    /**
+     * The most a poll's count may go up in one change it is sent again with: one for each choice
+     * added ("Add Choice" adds one), and a few more for changes that never came here.
+     */
+    const val MAX_COUNT_STEP = 5
+
+    /**
+     * The poll [stored] as it is after a change someone in its chat sent ([changed]: the card sent again,
+     * as "Add Choice" sends it), or null when the change is not one to take. A change only adds
+     * choices: the question and every choice there already stay as they are (another's words, or
+     * another order, never move a vote), and only choices with new identifiers are added, at the
+     * end, in the order they came. Its count is one more than the stored one, or a few more
+     * ([MAX_COUNT_STEP]) for changes missed, and at most as many choices are added as it went up;
+     * one older, as old, or far ahead is not taken (nor could one then hold back every later one).
+     */
+    fun merged(stored: Poll, changed: Poll): Poll? {
+        val step = changed.count.toLong() - stored.count
+        if (step < 1 || step > MAX_COUNT_STEP || changed.count > MAX_COUNT) return null
+        val known = stored.options.map { it.id }.toSet()
+        val texts = stored.options.map { it.text.lowercase() }.toMutableSet()
+        val added = changed.options.filter { it.id !in known && texts.add(it.text.lowercase()) }
+            .take(minOf(step.toInt(), MAX_OPTIONS - stored.options.size))
+        if (added.isEmpty()) return null
+        return stored.copy(options = stored.options + added, count = changed.count)
+    }
 
     /** The poll a card's address [url] holds, or null when it holds none that can be read. */
     fun decode(url: String): Poll? {
@@ -173,10 +260,15 @@ object Polls {
         return Poll(clean(question), creator, texts.map { Option(newId(), it, creator) }, FIRST_COUNT)
     }
 
-    /** [poll] with the choice [text] added by [creator] (its count one higher), or null when it cannot take it (blank, there already, too many). */
+    /**
+     * [poll] with the choice [text] added by [creator], its count one higher than the stored one, as
+     * OpenBubbles counts; null when it cannot take it (blank, there already, too many, or its count
+     * already at [MAX_COUNT]: one higher could not be read back).
+     */
     fun addChoice(poll: Poll, text: String, creator: String, id: String = newId()): Poll? {
         val t = clean(text)
         if (t.isBlank() || poll.options.size >= MAX_OPTIONS || poll.options.any { it.text.equals(t, ignoreCase = true) }) return null
+        if (poll.count >= MAX_COUNT) return null
         return poll.copy(options = poll.options + Option(id, t, creator), count = poll.count + 1)
     }
 

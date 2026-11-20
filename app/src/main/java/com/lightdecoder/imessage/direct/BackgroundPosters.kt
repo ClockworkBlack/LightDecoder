@@ -436,6 +436,8 @@ class IncomingBackgrounds(private val app: Context, private val natives: Natives
                 if (m.fileSize > MAX_POSTER_BYTES.toULong()) return dropped(tooLarge)
                 val file = natives.toMmcs(m) ?: return DirectArchive.Update.Ignore
                 if (file.size > MAX_POSTER_BYTES.toULong()) return dropped(tooLarge)
+                // Fetched without anyone asking: only from Apple's own file servers, never one the sender names.
+                if (!DirectMedia.isAppleFileServer(file.url)) return dropped("its poster is not on Apple's file servers")
                 val payload = fetch(file) ?: return dropped(tooLarge)
                 PosterArchive.problem(payload)?.let { problem ->
                     Log.w(TAG, "a chat background's poster not read: $problem")

@@ -64,4 +64,24 @@ class DirectMediaTest {
         assertEquals("attachment.png", DirectMedia.nameFor("image/png"))
         assertNull(DirectMedia.mimeOfName("noextension"))
     }
+
+    @Test
+    fun aFileFetchedWithoutAskingComesOnlyFromApplesFileServers() {
+        for (url in listOf(
+            "https://p42-content.icloud.com/M1A2B3", "https://p42-content.icloud.com:443/M1A2B3", "https://P42-CONTENT.ICLOUD.COM/x",
+            "https://cvws.icloud-content.com/B/abc?o=1", "https://mmcs.apple.com", "https://p1-content.icloud.com/a/b?c=d&e=f",
+        )) {
+            assertTrue(url, DirectMedia.isAppleFileServer(url))
+        }
+        for (url in listOf(
+            // Not https, not Apple's, only like it, or written to be read as another host.
+            "http://p42-content.icloud.com/x", "https://example.com/x", "https://icloud.com/x", "https://evilicloud.com/x",
+            "https://p42-content.icloud.com.evil.net/x", "https://evil.net/p42-content.icloud.com", "https://p42-content.icloud.com@evil.net/x",
+            "https://evil.net\\@p42-content.icloud.com/", "https://p42-content.icloud.com:8443/x", "https://127.0.0.1/x", "https://[::1]/x",
+            "https://p42-content.icloud.com/a b", "https://p42-content.icloud.com/a\\b", "", "u", "https://x", "file:///data/x",
+            "https://" + "a".repeat(3_000) + ".icloud.com/",
+        )) {
+            assertFalse(url, DirectMedia.isAppleFileServer(url))
+        }
+    }
 }

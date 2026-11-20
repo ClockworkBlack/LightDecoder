@@ -196,6 +196,10 @@ class DirectWireTest {
             Delivery.FAILED,
             Delivery.of(DirectSinkService.take(good) { throw android.database.sqlite.SQLiteDatabaseLockedException("busy") }),
         )
+        // An error while it is stored (a stack or the memory run out on what it holds): that update
+        // rejected, never the main process taken down with it.
+        assertEquals(Delivery.REJECTED, Delivery.of(DirectSinkService.take(good) { throw StackOverflowError("deep") }))
+        assertEquals(Delivery.REJECTED, Delivery.of(DirectSinkService.take(good) { throw OutOfMemoryError("huge") }))
     }
 
     @Test
@@ -443,6 +447,34 @@ class DirectWireTest {
         assertEquals(DirectArchive.Update.Ignore, DirectWire.decode(JSONObject(DirectWire.encode(photo).toString()).put("groupGuid", "")))
         // It crosses as it is (no message of its own to cut).
         assertEquals(DirectWire.encode(photo).toString(), DirectWire.encodeUpdate(photo).toString())
+        // One to fetch: where it is, as the library describes it; one far too long to be that, none.
+        val toFetch = photo.copy(path = null, file = "<plist>photo</plist>")
+        assertEquals(toFetch.copy(row = (trip(toFetch) as DirectArchive.Update.GroupPhoto).row), trip(toFetch))
+        assertFalse(toFetch.removed)
+        assertTrue(photo.copy(path = null).removed)
+        val tooLong = JSONObject(DirectWire.encode(toFetch).toString()).put("file", "x".repeat(DirectArchive.MAX_FILE_CHARS + 1))
+        assertEquals("", (DirectWire.decode(tooLong) as DirectArchive.Update.GroupPhoto).file)
+    }
+
+    @Test
+    fun aDownloadNobodyAskedForCrossesWithItsLimits() {
+        // One the user asked for: the attachment's own limit, no time of its own.
+        val asked = DirectWire.DownloadRequest.fromJson(JSONObject(DirectWire.download("<plist/>", "/data/x/imessage-media/a.jpg").toString()))
+        assertEquals(DirectWire.DownloadRequest("<plist/>", "/data/x/imessage-media/a.jpg", DirectMedia.MAX_DOWNLOAD_BYTES, null), asked)
+        // A sticker's: its size and time.
+        val sticker = DirectWire.DownloadRequest.fromJson(JSONObject(DirectWire.download("<plist/>", "/p", DirectEngine.STICKER_MAX_BYTES, 20_000).toString()))
+        assertEquals(DirectEngine.STICKER_MAX_BYTES, sticker.maxBytes)
+        assertEquals(20_000L, sticker.automaticMs)
+        // Never past the attachment's limit, nor a time past the longest.
+        val wild = DirectWire.DownloadRequest.fromJson(JSONObject(DirectWire.download("<plist/>", "/p", Long.MAX_VALUE, Long.MAX_VALUE).toString()))
+        assertEquals(DirectMedia.MAX_DOWNLOAD_BYTES, wild.maxBytes)
+        assertEquals(DirectWire.MAX_AUTOMATIC_MS, wild.automaticMs)
+        assertEquals(DirectMedia.MAX_DOWNLOAD_BYTES, DirectWire.DownloadRequest.fromJson(JSONObject(DirectWire.download("d", "/p", -5).toString())).maxBytes)
+        // A sticker's file crosses with its change.
+        val tapback = DirectArchive.Update.Reaction("imsg:G1", "+15550000002", DirectArchive.STICKER_TAPBACK, true, false, 7, "imsg:group:G", "G", "G1/tapback/+15550000002", "<plist>s</plist>")
+        assertEquals(tapback, trip(tapback))
+        val placed = DirectArchive.Update.Sticker("imsg:G1", "PS1", "+15550000002", false, 7, "imsg:group:G", "G", "<plist>s</plist>")
+        assertEquals(placed, trip(placed))
     }
 
     @Test
