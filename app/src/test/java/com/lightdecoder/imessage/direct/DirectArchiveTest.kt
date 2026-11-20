@@ -428,21 +428,24 @@ class DirectArchiveTest {
         val mine = map(inst("MV2", me, ext(game(), meta = false))) as DirectArchive.Update.Upsert
         assertTrue(mine.message.fromMe)
         assertEquals("out", mine.message.direction)
-        // A vote in a poll: a row saying who, in a group or one to one.
+        // A vote in a poll that cannot be read: nothing, and no row says anything of it (as on an iPhone).
         val polls = ExtensionApp("Polls", null, "com.apple.messages.MSMessageExtensionBalloonPlugin:0000000000:com.apple.messages.Polls", Balloon("data:,x", null, null, "Lunch?", true, null))
-        val vote = map(inst("V1", bob, ext(polls, meta = true, body = listOf(objectPart(""))), listOf(me, bob, carol), "G-9")) as DirectArchive.Update.Upsert
+        assertEquals(DirectArchive.Update.Ignore, map(inst("V1", bob, ext(polls, meta = true, body = listOf(objectPart(""))), listOf(me, bob, carol), "G-9")))
+        // Another app's update that is no card of its own: a row saying who, in a group or one to one.
+        val other = ExtensionApp("Tally", null, "com.example.tally", Balloon("data:,x", null, null, "Lunch?", true, null))
+        val vote = map(inst("V1", bob, ext(other, meta = true, body = listOf(objectPart(""))), listOf(me, bob, carol), "G-9")) as DirectArchive.Update.Upsert
         assertEquals("system", vote.message.direction)
         assertEquals("imsg:V1", vote.message.id)
         assertEquals("imsg:group:G-9", vote.message.conversationId)
-        assertEquals("Bob updated Polls.", vote.message.text)
-        assertEquals("You updated Polls.", (map(inst("V2", me, ext(polls, meta = true))) as DirectArchive.Update.Upsert).message.text)
+        assertEquals("Bob updated Tally.", vote.message.text)
+        assertEquals("You updated Tally.", (map(inst("V2", me, ext(other, meta = true))) as DirectArchive.Update.Upsert).message.text)
         val unnamed = ExtensionApp(IMessageExtra.UNNAMED_APP, null, "x", Balloon("data:,x", null, null, null, false, null))
         val oneToOne = map(inst("V3", bob, ext(unnamed, meta = true))) as DirectArchive.Update.Upsert
         assertEquals("imsg:$bob", oneToOne.message.conversationId)
         assertEquals("Bob updated an iMessage app.", oneToOne.message.text)
-        // Not a card (an app's note on a message): nothing to show.
+        // Not a card, and no sticker either (an app's note on a message): nothing to show.
         val noCard = ExtensionApp("Something", null, "x", null)
-        assertEquals(DirectArchive.Update.Ignore, map(inst("V4", bob, ext(noCard, meta = false))))
+        assertEquals(DirectArchive.Update.Ignore, map(inst("V4", bob, ext(noCard, meta = false, body = listOf(objectPart("x", 0))))))
     }
 
     @Test
@@ -774,5 +777,183 @@ class DirectArchiveTest {
             DirectArchive.Update.Edit("imsg:F1", "now shaking", 0, 1_700_000_005_000L, listOf(TextRun(4, 11, effect = TextEffectKind.SHAKE)), bob, false, "imsg:$bob"),
             edit,
         )
+    }
+
+    // --- message content (mentions, link pictures, stickers, polls) ------------------------------
+
+    private fun mention(uri: String, name: String, idx: Int = 0) = IndexedMessagePart(MessagePart.Mention(uri, name), idx.toULong(), null)
+
+    @Test
+    fun anIncomingMentionIsKeptOverItsTextAndOneOfTheUserIsMarked() {
+        val parts = listOf(text("Hey ", 0), mention("+15550000001", "Me"), text(" and ", 0), mention("+15550000004", "Dave"), text("!", 0))
+        val m = MessageInst("MN1", bob, ConversationData(listOf(me, bob, dave), null, "G-M", null), PushChatMessage.Message(normal(parts)), 1UL, null, false, false, null)
+        val u = map(m) as DirectArchive.Update.Upsert
+        assertEquals("Hey Me and Dave!", u.message.text)
+        val extra = IMessageExtra.parse(u.message.extra)
+        assertEquals(mapOf(0 to listOf(Mention(4, 6, "+15550000001", mine = true), Mention(11, 15, "+15550000004"))), extra.mentions)
+        assertTrue(extra.mentionsMe)
+        assertEquals(listOf(Mention(4, 6, "+15550000001", mine = true), Mention(11, 15, "+15550000004")), extra.textMentions(u.message.text))
+        // Someone else's mention only: not the user's.
+        val other = MessageInst("MN2", bob, ConversationData(listOf(me, bob, dave), null, "G-M", null), PushChatMessage.Message(normal(listOf(mention("+915550000001", "Raj")))), 1UL, null, false, false, null)
+        assertFalse(IMessageExtra.parse((map(other) as DirectArchive.Update.Upsert).message.extra).mentionsMe)
+        // An edit's mentions come with it.
+        val edit = map(inst("E9", bob, PushChatMessage.Edit(EditMessage("MN1", 0UL, listOf(text("Now "), mention("tel:+15550000001", "Me")))))) as DirectArchive.Update.Edit
+        assertEquals("Now Me", edit.text)
+        assertEquals(listOf(Mention(4, 6, "tel:+15550000001", mine = true)), edit.mentions)
+    }
+
+    @Test
+    fun anIncomingLinksPictureIsNamedByTheMessageWhenItCameWithOne() {
+        val picture = byteArrayOf(9, 9, 9)
+        fun linked(image: uniffi.rust_bridge.RichLinkImageAttachmentSubstitute?, attachments: List<ByteArray>) = MessageInst(
+            "L1", bob, ConversationData(listOf(me, bob), null, null, null),
+            PushChatMessage.Message(
+                normal(
+                    listOf(text("https://example.com/a")),
+                    link = LinkMeta(
+                        LpLinkMetadata(null, 1u, null, NsUrl("\$null", "https://example.com/a"), NsUrl("\$null", "https://example.com/a"), "A", "", image, null, null, null, null, null, null, null, null),
+                        attachments,
+                    ),
+                ),
+            ),
+            1UL, null, false, false, null,
+        )
+        val withPicture = linked(uniffi.rust_bridge.RichLinkImageAttachmentSubstitute("image/jpeg", 1UL), listOf(byteArrayOf(1), picture))
+        val link = IMessageExtra.parse((map(withPicture) as DirectArchive.Update.Upsert).message.extra).link!!
+        assertEquals(IMessageExtra.linkImageKey("L1"), link.image)
+        assertEquals("L1/link", link.image)
+        assertTrue(DirectArchive.linkImage((withPicture.message as PushChatMessage.Message).v1.linkMeta)!!.contentEquals(picture))
+        // No picture named, one named that is not there, or one too large: none.
+        for (odd in listOf(
+            linked(null, listOf(picture)),
+            linked(uniffi.rust_bridge.RichLinkImageAttachmentSubstitute("image/jpeg", 5UL), listOf(picture)),
+            linked(uniffi.rust_bridge.RichLinkImageAttachmentSubstitute("image/jpeg", 0UL), listOf(ByteArray(PreviewImages.MAX_SOURCE_BYTES + 1))),
+        )) {
+            assertEquals("", IMessageExtra.parse((map(odd) as DirectArchive.Update.Upsert).message.extra).link!!.image)
+        }
+        // A rich link's balloon is no app's card: the link shows, as its preview.
+        val balloon = ExtensionApp(IMessageExtra.UNNAMED_APP, null, IMessageExtra.LINK_BALLOON, Balloon("https://example.com/a", null, null, null, false, null))
+        val both = withPicture.copy(message = PushChatMessage.Message((withPicture.message as PushChatMessage.Message).v1.copy(app = balloon)))
+        val extra = IMessageExtra.parse((map(both) as DirectArchive.Update.Upsert).message.extra)
+        assertNull(extra.app)
+        assertEquals("A", extra.link!!.title)
+    }
+
+    private fun sticker(name: String = "sticker.heic") = IndexedMessagePart(
+        MessagePart.Attachment(
+            uniffi.rust_bridge.MessageAttachment(
+                uniffi.rust_bridge.AttachmentType.Mmcs(listOf(MmcsFile(byteArrayOf(1), "o", "https://x", byteArrayOf(2), 1234UL))),
+                0UL, "public.heic", "image/heic", name, false,
+            ),
+        ),
+        0UL, null,
+    )
+
+    @Test
+    fun aStickerAsATapbackKeepsItsPictureByWhoPutItThere() {
+        fun react(enable: Boolean, sender: String = bob, body: List<IndexedMessagePart> = listOf(sticker())) =
+            map(inst("ST1", sender, PushChatMessage.React(ReactMessage("M1", 0UL, ReactMessageType.React(Reaction.Sticker(null, body), enable), "", null))))
+        val on = react(true) as DirectArchive.Update.Reaction
+        assertEquals(DirectArchive.STICKER_TAPBACK, on.emoji)
+        assertTrue(on.enable)
+        assertEquals(IMessageExtra.tapbackStickerKey("M1", "+15550000002"), on.sticker)
+        assertNotNullAttachment(on)
+        // The user's own, from another device: kept as the user's.
+        assertEquals(IMessageExtra.tapbackStickerKey("M1", "me"), (react(true, sender = me) as DirectArchive.Update.Reaction).sticker)
+        // Taken back, or one with no picture: no picture to keep.
+        assertNull((react(false) as DirectArchive.Update.Reaction).sticker)
+        assertNull((react(true, body = listOf(text("x"))) as DirectArchive.Update.Reaction).sticker)
+        // A classic tapback has none.
+        assertNull((map(inst("R2", bob, PushChatMessage.React(ReactMessage("M1", 0UL, ReactMessageType.React(Reaction.Heart, true), "", null)))) as DirectArchive.Update.Reaction).sticker)
+    }
+
+    private fun assertNotNullAttachment(r: DirectArchive.Update.Reaction) {
+        val m = inst(r.messageId, bob, PushChatMessage.React(ReactMessage("M1", 0UL, ReactMessageType.React(Reaction.Sticker(null, listOf(sticker())), true), "", null))).message
+        assertEquals("sticker.heic", DirectArchive.stickerAttachment(m)!!.name)
+    }
+
+    @Test
+    fun aStickerDraggedOntoAMessageIsKeptWithItByItsOwnMessage() {
+        val spec = ExtensionApp("Stickers", null, "com.apple.Stickers.UserGenerated.MessagesExtension", null)
+        fun placed(sender: String, body: List<IndexedMessagePart> = listOf(sticker())) =
+            map(inst("PS1", sender, PushChatMessage.React(ReactMessage("M7", 0UL, ReactMessageType.Extension(spec, body, false), "", null)), listOf(me, bob, carol), "G-S"))
+        val u = placed(bob) as DirectArchive.Update.Sticker
+        assertEquals(DirectArchive.Update.Sticker("imsg:M7", "PS1", "+15550000002", false, 1_700_000_005_000L, "imsg:group:G-S", "G-S"), u)
+        assertEquals("M7/sticker/PS1", IMessageExtra.stickerKey("M7", "PS1"))
+        val mine = placed(me) as DirectArchive.Update.Sticker
+        assertTrue(mine.fromMe)
+        assertEquals("me", mine.participantId)
+        // Without a picture: nothing an iPhone shows.
+        assertEquals(DirectArchive.Update.Ignore, placed(bob, body = listOf(objectPart("x", 0))))
+        assertEquals("sticker.heic", DirectArchive.stickerAttachment(inst("PS1", bob, PushChatMessage.React(ReactMessage("M7", 0UL, ReactMessageType.Extension(spec, listOf(sticker()), false), "", null))).message)!!.name)
+    }
+
+    private val pollsBundle = "com.apple.messages.MSMessageExtensionBalloonPlugin:0000000000:com.apple.messages.Polls"
+
+    private fun pollCard(poll: Polls.Poll, session: String = "0F8FAD5B-D9CB-469F-A165-70867728950E") = Polls.card(poll, session).let { card ->
+        ExtensionApp(
+            "Polls", null, pollsBundle,
+            Balloon(card.url, card.session, BalloonLayout.TemplateLayout("", "", card.caption, "", "", card.subcaption, NsDictionaryClass.NS_DICTIONARY), card.ldText, true, null),
+        )
+    }
+
+    @Test
+    fun aPollsCardReadsAsItsQuestion() {
+        val poll = Polls.create("Dinner?", listOf("Pizza", "Tacos"), "+15550000002")!!
+        val m = MessageInst("P1", bob, ConversationData(listOf(me, bob, carol), null, "G-P", null), PushChatMessage.Message(normal(listOf(objectPart("Pizza, Tacos", 0)), app = pollCard(poll))), 1UL, null, false, false, null)
+        val u = map(m) as DirectArchive.Update.Upsert
+        // TestTexts words it by the default: its question.
+        assertEquals("Dinner?", u.message.text)
+        val app = IMessageExtra.parse(u.message.extra).app!!
+        assertTrue(Polls.isPoll(app))
+        assertEquals(poll, Polls.decode(app.url))
+        assertEquals("imsg:P1", app.root)
+    }
+
+    @Test
+    fun aVoteInAPollCountsOnItsCardForWhoeverSentIt() {
+        fun vote(sender: String, choices: List<String>, voterNamed: String = "+19999999999") = map(
+            inst(
+                "VT1", sender,
+                PushChatMessage.React(
+                    ReactMessage(
+                        "CARD1", null,
+                        ReactMessageType.Extension(
+                            ExtensionApp("Polls", null, pollsBundle, Balloon(Polls.votesUrl(choices, voterNamed), "CARD1", null, null, false, null)),
+                            listOf(objectPart("")), true,
+                        ),
+                        Polls.VOTE_NOTICE, null,
+                    ),
+                ),
+                listOf(me, bob, carol), "G-P",
+            ),
+        )
+        // Whom its JSON names does not count: who sent it does.
+        assertEquals(
+            DirectArchive.Update.PollVote("imsg:CARD1", bob, false, listOf("O1", "O2"), 1_700_000_005_000L, "imsg:group:G-P", "G-P"),
+            vote(bob, listOf("O1", "O2")),
+        )
+        val mine = vote(me, emptyList()) as DirectArchive.Update.PollVote
+        assertTrue(mine.fromMe)
+        assertEquals(emptyList<String>(), mine.options)
+    }
+
+    @Test
+    fun aChoiceAddedToAPollIsItsNewStateForItsCard() {
+        val poll = Polls.addChoice(Polls.create("Dinner?", listOf("Pizza", "Tacos"), "+15550000002")!!, "Curry", "+15550000003")!!
+        val update = map(
+            inst(
+                "PC2", carol,
+                PushChatMessage.React(ReactMessage("P1", null, ReactMessageType.Extension(pollCard(poll), listOf(objectPart(Polls.ldText(poll), 0)), false), "", null)),
+                listOf(me, bob, carol), "G-P",
+            ),
+        ) as DirectArchive.Update.PollChange
+        assertEquals("imsg:P1", update.rootId)
+        assertEquals("imsg:PC2", update.row.message.id)
+        val app = IMessageExtra.parse(update.row.message.extra).app!!
+        assertEquals("imsg:P1", app.root)
+        assertEquals(3, Polls.decode(app.url)!!.options.size)
+        // Through the wire as it went.
+        assertEquals(update, DirectWire.decode(org.json.JSONObject(DirectWire.encode(update).toString())))
     }
 }

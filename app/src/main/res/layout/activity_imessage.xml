@@ -239,6 +239,36 @@
                         android:text="@string/imessage_reply_threads_in_chat_help"
                         android:textAppearance="?attr/textAppearanceBodySmall" />
 
+                    <!-- Link previews of links the user sends (DirectPrefs.linkPreviews, read in the main process, which fetches the page). -->
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switchLinkPreviews"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:minHeight="48dp"
+                        android:text="@string/imessage_link_previews" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/imessage_link_previews_help"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                    <!-- A mention notifies even with a chat's alerts hidden (DirectPrefs.notifyWhenMentioned, read in the main process). -->
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switchNotifyMentions"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:minHeight="48dp"
+                        android:text="@string/imessage_notify_mentions" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/imessage_notify_mentions_help"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+
                     <!-- iMessage games (DirectPrefs.gamesOn, read in the main process): OpenPigeon plays them. -->
                     <com.google.android.material.materialswitch.MaterialSwitch
                         android:id="@+id/switchGames"

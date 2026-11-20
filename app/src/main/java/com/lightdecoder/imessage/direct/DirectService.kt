@@ -18,8 +18,9 @@ import org.json.JSONObject
 /**
  * The ":imessage" process's service: keeps the iMessage session connected (in the foreground,
  * like the Google Messages link's service) so iMessages reach the Messages tab whether a screen is
- * open or not, answers the main process's requests ([DirectWire]: send, unsend, reach, edit,
- * react, typing, read, download, an iMessage app's update, a chat's background, Send Later taken back,
+ * open or not, answers the main process's requests ([DirectWire]: send (with mentions and a link's
+ * preview), unsend, reach, edit, react, typing, read, download, an iMessage app's update (a vote in a
+ * poll too), a chat's background, Send Later taken back,
  * a group's name, members and photo), and hands what Apple sends to the main process's
  * [DirectSinkService].
  */
@@ -36,7 +37,9 @@ class DirectService : Service() {
                 val r = DirectWire.SendRequest.fromJson(request)
                 // Only files of the app's own (its outbox), never the library's state or anything outside: DirectPaths.
                 for (a in r.attachments) DirectPaths.require(this, a.path, getString(R.string.imessage_direct_attachment_unreadable))
-                engine.send(r.target, r.text, r.replyGuid, r.replyPart, r.effect, r.attachments, r.voice, r.app, r.runs, r.scheduledMs).toJson()
+                // A link preview's picture the same; one that is not the app's goes without its picture.
+                val link = r.link?.let { l -> if (l.imagePath != null && !DirectPaths.isAllowed(l.imagePath, DirectPaths.forApp(this))) l.copy(imagePath = null) else l }
+                engine.send(r.target, r.text, r.replyGuid, r.replyPart, r.effect, r.attachments, r.voice, r.app, r.runs, r.scheduledMs, r.mentions, link).toJson()
             }
             DirectWire.EXTENSION -> {
                 val r = DirectWire.ExtensionRequest.fromJson(request)
@@ -53,7 +56,7 @@ class DirectService : Service() {
             }
             DirectWire.EDIT -> {
                 val r = DirectWire.EditRequest.fromJson(request)
-                engine.edit(r.target, r.guid, r.part, r.text, r.runs)
+                engine.edit(r.target, r.guid, r.part, r.text, r.runs, r.mentions)
                 DirectWire.ok()
             }
             DirectWire.REACT -> DirectWire.guid(

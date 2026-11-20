@@ -111,6 +111,17 @@ class DirectWordingTest {
             R.string.imessage_group_too_small, R.string.imessage_event_named, R.string.imessage_event_added,
             R.string.imessage_event_removed, R.string.imessage_event_left, R.string.imessage_event_photo_changed,
             R.string.imessage_event_photo_removed,
+            // Message content: mentions, link previews, stickers, polls.
+            R.string.imessage_mention_suggestion, R.string.imessage_mention_suggestions, R.string.imessage_notify_mentions,
+            R.string.imessage_notify_mentions_help, R.string.imessage_link_previews, R.string.imessage_link_previews_help,
+            R.string.imessage_link_preview_picture, R.string.imessage_sticker_by, R.string.imessage_sticker_tapback,
+            R.string.imessage_attach_poll, R.string.imessage_poll_new_title, R.string.imessage_poll_question_hint,
+            R.string.imessage_poll_choice_hint, R.string.imessage_poll_add_choice, R.string.imessage_poll_add_choice_hint,
+            R.string.imessage_poll_send, R.string.imessage_poll_needs_two, R.string.imessage_poll_requires,
+            R.string.imessage_poll_summary, R.string.imessage_poll_summary_untitled, R.string.imessage_poll_unreadable,
+            R.string.imessage_poll_choice_not_added, R.string.imessage_poll_too_many, R.string.imessage_poll_vote_failed,
+            R.string.imessage_poll_choice_failed, R.string.imessage_poll_you, R.string.imessage_poll_option_description,
+            R.string.imessage_poll_option_mine_description, R.string.imessage_poll_vote_action, R.string.imessage_poll_unvote_action,
         )
         for (res in direct) {
             val text = context.getString(res)
@@ -121,7 +132,14 @@ class DirectWordingTest {
         assertEquals("Hide Alerts", context.getString(R.string.chat_details_hide_alerts))
         assertEquals("Send Read Receipts", context.getString(R.string.chat_details_read_receipts))
         assertEquals("You removed the name from the conversation.", context.getString(R.string.imessage_event_name_removed, "You"))
+        assertEquals("Notify me when mentioned", context.getString(R.string.imessage_notify_mentions))
+        assertEquals("Link previews", context.getString(R.string.imessage_link_previews))
+        assertEquals("Poll: Dinner?", context.getString(R.string.imessage_poll_summary, "Dinner?"))
+        assertEquals("Add Choice", context.getString(R.string.imessage_poll_add_choice))
+        assertEquals("Mention Alice", context.getString(R.string.imessage_mention_suggestion, "Alice"))
         for (count in listOf(1, 2)) {
+            val votes = context.resources.getQuantityString(R.plurals.imessage_poll_votes, count, count)
+            assertFalse(votes, votes.contains("OpenBubbles"))
             val added = context.resources.getQuantityString(R.plurals.imessage_group_add_not_on_imessage, count, "Bob")
             assertFalse(added, added.contains("OpenBubbles"))
             val text = context.resources.getQuantityString(R.plurals.imessage_group_not_on_imessage, count, "Bob")

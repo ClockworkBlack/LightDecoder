@@ -127,6 +127,13 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         return memberPhotos[key]
     }
 
+    /** A poll's voter, or whoever put a sticker on a message, by name: the user ("You"), a member as the chat names them, else their address. */
+    private fun voterName(voter: String): String {
+        if (voter == com.lightdecoder.imessage.direct.Polls.ME) return getString(R.string.chat_you)
+        val person = participants.firstOrNull { !it.isMe && com.lightdecoder.imessage.IMessageAddress.same(it.number.ifBlank { it.id }, voter) }
+        return person?.name?.ifBlank { null } ?: com.lightdecoder.imessage.direct.Handles.display(voter)
+    }
+
     /** How many of the newest messages are shown; grows as the user scrolls up. */
     private var windowSize = PAGE
     private var growWindow = false
@@ -454,6 +461,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             it.voiceDuration = voicePlayer::durationOf
             it.voiceState = voicePlayer.state.value
             it.senderPhoto = ::senderPhoto
+            it.voterName = ::voterName
+            it.canVote = { row -> com.lightdecoder.imessage.direct.DirectLink.get(this).canVote(row, reachable = row.conversationId in directReachable) }
+            it.pictureFile = { key -> com.lightdecoder.imessage.direct.DirectLink.pictureFile(applicationContext, key) }
         }
         binding.messages.adapter = adapter
         updatePhoneStyle()
@@ -679,6 +689,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             it.voiceDuration = voicePlayer::durationOf
             it.voiceState = voicePlayer.state.value
             it.senderPhoto = ::senderPhoto
+            it.voterName = ::voterName
+            it.canVote = { row -> com.lightdecoder.imessage.direct.DirectLink.get(this).canVote(row, reachable = row.conversationId in directReachable) }
+            it.pictureFile = { key -> com.lightdecoder.imessage.direct.DirectLink.pictureFile(applicationContext, key) }
         }
         layoutManager = LinearLayoutManager(this).apply { stackFromEnd = true }
         binding.messages.layoutManager = layoutManager
@@ -1544,7 +1557,60 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 if (s.isNullOrEmpty()) typingStopped() else pingTyping()
             }
         })
+        // Mentions (iOS 17), in an iMessage group: "@" offers its members; a mention is one thing.
+        binding.input.addTextChangedListener(MentionWatcher(binding.input, ::mentionsOffered, ::showMentionSuggestions))
         updateSendEnabled()
+    }
+
+    // --- mentions (iOS 17) ---
+
+    /**
+     * Whether members can be mentioned from the composer: an iMessage group that goes through the
+     * iMessage library (a mention is sent as one there, as from an iPhone).
+     */
+    @VisibleForTesting
+    internal fun mentionsOffered(): Boolean =
+        manager.service == ChatService.IMESSAGE && conversation?.isGroup == true && sendsWithEffects()
+
+    /** The group's members to mention, as the chat names them. */
+    private fun mentionable(): List<com.lightdecoder.imessage.direct.Mentions.Member> =
+        participants.filter { !it.isMe }.mapNotNull { p ->
+            val address = p.number.ifBlank { p.id }.trim().takeIf { com.lightdecoder.imessage.IMessageAddress.key(it) != null } ?: return@mapNotNull null
+            com.lightdecoder.imessage.direct.Mentions.Member(address, p.name.ifBlank { p.formattedNumber.ifBlank { address } })
+        }
+
+    /** The members [query] (what is typed after "@") suggests, as chips above the composer (none: hidden), as on an iPhone. */
+    private fun showMentionSuggestions(query: com.lightdecoder.imessage.direct.Mentions.Query?) {
+        val strip = binding.mentionSuggestions
+        val chips = binding.mentionChips
+        chips.removeAllViews()
+        val found = query?.let { com.lightdecoder.imessage.direct.Mentions.suggestions(it.text, mentionable()) }.orEmpty()
+        if (query == null || found.isEmpty()) {
+            strip.visibility = View.GONE
+            return
+        }
+        for (member in found) {
+            val chip = com.google.android.material.chip.Chip(this).apply {
+                text = member.name
+                contentDescription = getString(R.string.imessage_mention_suggestion, member.name)
+                isCheckable = false
+                setOnClickListener { pickMention(query, member) }
+            }
+            chips.addView(chip, android.widget.LinearLayout.LayoutParams(android.view.ViewGroup.LayoutParams.WRAP_CONTENT, android.view.ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                marginEnd = (6 * resources.displayMetrics.density).toInt()
+            })
+        }
+        strip.visibility = View.VISIBLE
+    }
+
+    /** [member] mentioned in place of [query]: their name, bold in the accent, then the cursor after it. */
+    @VisibleForTesting
+    internal fun pickMention(query: com.lightdecoder.imessage.direct.Mentions.Query, member: com.lightdecoder.imessage.direct.Mentions.Member) {
+        val text = binding.input.text ?: return
+        val color = ContextCompat.getColor(this, if (phoneStyle) R.color.phone_blue else R.color.imessage_blue)
+        val at = MentionMarks.insert(text, query, member, color)
+        if (at >= 0) binding.input.setSelection(at.coerceAtMost(text.length))
+        showMentionSuggestions(null)
     }
 
     /** The composer's text selection menu: formatting and text effects where they can be sent ([sendsWithEffects]). */
@@ -2029,6 +2095,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private fun clearComposerForSend() {
         typingIn = null
         binding.input.setText("")
+        showMentionSuggestions(null)
     }
 
     /**
@@ -2399,7 +2466,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val photos = { pickMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) }
         val chat = gamesChat()
         // iPhone-style chats: the "+" is the one way to everything that can be added, stickers too.
-        if (chat == null && !phoneStyle) return photos()
+        if (chat == null && !phoneStyle && pollChat() == null) return photos()
         val choices = ArrayList<Pair<Int, () -> Unit>>()
         choices += R.string.imessage_attach_photos to photos
         if (chat != null) {
@@ -2409,10 +2476,137 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             }
         }
         if (phoneStyle) choices += R.string.imessage_attach_stickers to { showStickers() }
+        pollChat()?.let { pollChat -> choices += R.string.imessage_attach_poll to { askPoll(pollChat) } }
         confirmDialog?.dismiss()
         confirmDialog = MaterialAlertDialogBuilder(this)
             .setItems(choices.map { getString(it.first) }.toTypedArray()) { _, which -> choices[which].second() }
             .show()
+    }
+
+    /**
+     * The iMessage chat a poll would be sent to ("Poll" in the "+" choices, iOS 26): this iMessage
+     * chat, or the person's iMessage chat shown in this Messages conversation, when the library can
+     * reach it; else null.
+     */
+    private fun pollChat(): String? {
+        if (!directMode()) return null
+        return when (manager.service) {
+            ChatService.MESSAGES -> companionId?.takeIf { it in directReachable }
+            ChatService.IMESSAGE -> conversationId.takeIf { it in directReachable }
+            else -> null
+        }
+    }
+
+    /**
+     * "Poll": its question and choices (a field for another choice appears once the last one has
+     * words, up to [com.lightdecoder.imessage.direct.Polls.MAX_OPTIONS]), sent to [chat] as a new
+     * poll's card ([com.lightdecoder.imessage.direct.DirectLink.sendPoll]).
+     */
+    @VisibleForTesting
+    internal fun askPoll(chat: String) {
+        val dp = resources.displayMetrics.density
+        val column = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding((24 * dp).toInt(), (8 * dp).toInt(), (24 * dp).toInt(), 0)
+        }
+        val note = android.widget.TextView(this).apply {
+            setText(R.string.imessage_poll_requires)
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall)
+        }
+        column.addView(note)
+        fun field(hint: String): com.google.android.material.textfield.TextInputEditText {
+            val layout = com.google.android.material.textfield.TextInputLayout(this).apply { this.hint = hint }
+            val edit = com.google.android.material.textfield.TextInputEditText(layout.context).apply {
+                isSingleLine = true
+                filters = arrayOf(android.text.InputFilter.LengthFilter(com.lightdecoder.imessage.direct.Polls.MAX_TEXT_CHARS))
+            }
+            layout.addView(edit)
+            column.addView(layout)
+            return edit
+        }
+        val question = field(getString(R.string.imessage_poll_question_hint))
+        val choices = ArrayList<com.google.android.material.textfield.TextInputEditText>()
+        fun addChoice() {
+            val edit = field(getString(R.string.imessage_poll_choice_hint, choices.size + 1))
+            choices += edit
+            edit.addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                override fun afterTextChanged(s: Editable?) {
+                    if (edit === choices.last() && !s.isNullOrBlank() && choices.size < com.lightdecoder.imessage.direct.Polls.MAX_OPTIONS) addChoice()
+                }
+            })
+        }
+        addChoice()
+        addChoice()
+        confirmDialog?.dismiss()
+        val dialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.imessage_poll_new_title)
+            .setView(android.widget.ScrollView(this).apply { addView(column) })
+            .setPositiveButton(R.string.imessage_poll_send, null)
+            .setNegativeButton(android.R.string.cancel, null)
+            .create()
+        confirmDialog = dialog
+        dialog.show()
+        // Once shown it has its buttons: "Send" stays open while there are not two choices yet.
+        dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE)?.setOnClickListener {
+            val words = choices.map { it.text?.toString().orEmpty().trim() }.filter { it.isNotEmpty() }
+            if (words.distinct().size < 2) {
+                toast(getString(R.string.imessage_poll_needs_two))
+                return@setOnClickListener
+            }
+            dialog.dismiss()
+            sendPoll(chat, question.text?.toString().orEmpty(), words)
+        }
+        question.requestFocus()
+    }
+
+    /** A new poll in [chat] with [question] and [choices]. */
+    private fun sendPoll(chat: String, question: String, choices: List<String>) {
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(this)
+        scrollToBottomNext = true
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) { relayAttempt { direct.sendPoll(chat, question, choices) } }
+                .onFailure { toast(errorText(iMessageLink, it)) }
+        }
+    }
+
+    override fun onPollVote(row: MessageRow, optionId: String) {
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(this)
+        lifecycleScope.launch {
+            relayAttempt { direct.votePoll(row.id, optionId) }
+                .onFailure { toast(getString(R.string.imessage_poll_vote_failed, errorText(iMessageLink, it))) }
+        }
+    }
+
+    /** "Add Choice" on a poll's card: the new choice's words, then it is added for everyone ([com.lightdecoder.imessage.direct.DirectLink.addPollChoice]). */
+    override fun onPollAddChoice(row: MessageRow) {
+        val dp = resources.displayMetrics.density
+        val layout = com.google.android.material.textfield.TextInputLayout(this).apply {
+            hint = getString(R.string.imessage_poll_add_choice_hint)
+            setPadding((24 * dp).toInt(), (8 * dp).toInt(), (24 * dp).toInt(), 0)
+        }
+        val edit = com.google.android.material.textfield.TextInputEditText(layout.context).apply {
+            isSingleLine = true
+            filters = arrayOf(android.text.InputFilter.LengthFilter(com.lightdecoder.imessage.direct.Polls.MAX_TEXT_CHARS))
+        }
+        layout.addView(edit)
+        confirmDialog?.dismiss()
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(this)
+        confirmDialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.imessage_poll_add_choice)
+            .setView(layout)
+            .setPositiveButton(R.string.chat_details_add) { _, _ ->
+                val words = edit.text?.toString().orEmpty().trim()
+                if (words.isEmpty()) return@setPositiveButton
+                lifecycleScope.launch {
+                    relayAttempt { direct.addPollChoice(row.id, words) }
+                        .onFailure { toast(getString(R.string.imessage_poll_choice_failed, errorText(iMessageLink, it))) }
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+        edit.requestFocus()
     }
 
     /**
@@ -2436,6 +2630,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      */
     private fun send(effect: String? = null, textEffect: TextEffectKind? = null, scheduledAt: Long? = null) {
         val (text, formatted) = TextRuns.trimmed(binding.input.text?.toString().orEmpty(), composerRuns())
+        // Its mentions, over the text as it goes (trimmed as it is).
+        val mentions = if (mentionsOffered()) {
+            com.lightdecoder.imessage.direct.Mentions.trimmed(binding.input.text?.toString().orEmpty(), MentionMarks.mentions(binding.input.text ?: ""))
+        } else {
+            emptyList()
+        }
         val runs = if (textEffect != null && text.isNotEmpty()) TextRuns.apply(text, formatted, 0, text.length, TextRuns.Change.Effect(textEffect)) else formatted
         val files = attachments
         if (text.isEmpty() && files.isEmpty()) return
@@ -2519,7 +2719,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             val result = withContext(Dispatchers.IO) {
                 relayAttempt {
                     when {
-                        files.isEmpty() && link is com.lightdecoder.imessage.IMessageManager -> link.sendText(id, text, replyTo, effect, runs, scheduledAt)
+                        files.isEmpty() && link is com.lightdecoder.imessage.IMessageManager -> link.sendText(id, text, replyTo, effect, runs, scheduledAt, mentions)
                         files.isEmpty() -> link.sendText(id, text, replyTo)
                         link is com.lightdecoder.imessage.IMessageManager -> sendFiles(link, id, files, text, replyTo, effect, runs, scheduledAt)
                         else -> {
@@ -3386,6 +3586,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     override fun onReactionTap(row: MessageRow, reaction: ReactionDto) {
         if (row.isLocal) return
+        // A sticker is no tapback to put on or take back from here: who put it there, instead.
+        if (reaction.emoji == com.lightdecoder.imessage.direct.DirectArchive.STICKER_TAPBACK && backendFor(row).service == ChatService.IMESSAGE) {
+            onReactionDetails(row, reaction)
+            return
+        }
         react(row, reaction.emoji, remove = reaction.fromMe)
     }
 

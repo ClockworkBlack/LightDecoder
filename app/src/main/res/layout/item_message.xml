@@ -178,6 +178,46 @@
                     android:textAppearance="?attr/textAppearanceLabelSmall" />
             </LinearLayout>
 
+            <!--
+                A poll (iOS 26): its question, each choice with its votes (a tap votes or takes the
+                vote back), and "Add Choice". Choices are added in code (item_poll_option).
+            -->
+            <LinearLayout
+                android:id="@+id/pollCard"
+                android:layout_width="240dp"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/pollTitle"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="6dp"
+                    android:textAppearance="?attr/textAppearanceTitleSmall"
+                    android:textStyle="bold" />
+
+                <LinearLayout
+                    android:id="@+id/pollOptions"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical" />
+
+                <TextView
+                    android:id="@+id/pollAddChoice"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="?attr/selectableItemBackground"
+                    android:gravity="center_vertical"
+                    android:minHeight="40dp"
+                    android:paddingHorizontal="4dp"
+                    android:text="@string/imessage_poll_add_choice"
+                    android:textAppearance="?attr/textAppearanceLabelLarge"
+                    android:textStyle="bold"
+                    android:visibility="gone" />
+            </LinearLayout>
+
             <!-- The text, with iOS 18's formatting; its text effects play on it. -->
             <com.lightdecoder.ui.chat.TextEffectView
                 android:id="@+id/body"
@@ -187,7 +227,7 @@
                 android:importantForAccessibility="no"
                 android:textAppearance="?attr/textAppearanceBodyLarge" />
 
-            <!-- An iMessage's link preview (no picture): the page's title, summary and site. Tapped, it opens. -->
+            <!-- An iMessage's link preview: the page's picture (when it has one), title, summary and site. Tapped, it opens. -->
             <LinearLayout
                 android:id="@+id/linkCard"
                 android:layout_width="wrap_content"
@@ -200,6 +240,16 @@
                 android:paddingHorizontal="8dp"
                 android:paddingVertical="6dp"
                 android:visibility="gone">
+
+                <ImageView
+                    android:id="@+id/linkImage"
+                    android:layout_width="match_parent"
+                    android:layout_height="120dp"
+                    android:layout_marginBottom="6dp"
+                    android:contentDescription="@string/imessage_link_preview_picture"
+                    android:importantForAccessibility="no"
+                    android:scaleType="centerCrop"
+                    android:visibility="gone" />
 
                 <TextView
                     android:id="@+id/linkTitle"

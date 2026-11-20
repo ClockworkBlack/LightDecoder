@@ -431,7 +431,7 @@ class PhoneStyleScreenTest {
     }
 
     @Test
-    fun thePlusOffersPicturesAndStickers() {
+    fun thePlusOffersPicturesStickersAndAPoll() {
         directMode()
         DirectPrefs.setGamesOn(two.app, false)
         try {
@@ -443,7 +443,11 @@ class PhoneStyleScreenTest {
                     ShadowLooper.idleMainLooper()
                     val list = (ShadowDialog.getLatestDialog() as AlertDialog).listView
                     assertEquals(
-                        listOf(activity.getString(R.string.imessage_attach_photos), activity.getString(R.string.imessage_attach_stickers)),
+                        listOf(
+                            activity.getString(R.string.imessage_attach_photos), activity.getString(R.string.imessage_attach_stickers),
+                            // A chat the iMessage library reaches can have a poll (iOS 26).
+                            activity.getString(R.string.imessage_attach_poll),
+                        ),
                         (0 until list.adapter.count).map { list.adapter.getItem(it).toString() },
                     )
                 }

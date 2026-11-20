@@ -476,4 +476,56 @@
         <item quantity="one">%1$s is not on iMessage, so they can\'t be added.</item>
         <item quantity="other">%1$s are not on iMessage, so they can\'t be added.</item>
     </plurals>
+
+    <!-- Mentions (iOS 17): "@" and a member's name in a group's composer. -->
+    <!-- %1$s: the member, by name. What TalkBack says of a suggestion, and what a tap does. -->
+    <string name="imessage_mention_suggestion">Mention %1$s</string>
+    <string name="imessage_mention_suggestions">People to mention</string>
+    <!-- The iMessage screen's setting, as an iPhone's "Notify Me". -->
+    <string name="imessage_notify_mentions">Notify me when mentioned</string>
+    <string name="imessage_notify_mentions_help">When this is on, you are notified when someone in a group mentions you, even in a conversation whose alerts are hidden.</string>
+
+    <!-- Link previews of the links you send. -->
+    <string name="imessage_link_previews">Link previews</string>
+    <string name="imessage_link_previews_help">When this is on, a link you send goes with a preview of its page (its title, summary and picture), as from an iPhone. This phone fetches the page just before the message goes, without your cookies.</string>
+    <!-- What TalkBack says of a link preview's picture. -->
+    <string name="imessage_link_preview_picture">Picture of the linked page</string>
+
+    <!-- Stickers on messages (iOS 17 and 18). -->
+    <!-- %1$s: who put it there. -->
+    <string name="imessage_sticker_by">Sticker from %1$s</string>
+    <string name="imessage_sticker_tapback">Sticker</string>
+
+    <!-- Polls (iOS 26). -->
+    <string name="imessage_attach_poll">Poll</string>
+    <string name="imessage_poll_new_title">New Poll</string>
+    <string name="imessage_poll_question_hint">Question (optional)</string>
+    <!-- %1$d: the choice's number. -->
+    <string name="imessage_poll_choice_hint">Choice %1$d</string>
+    <string name="imessage_poll_add_choice">Add Choice</string>
+    <string name="imessage_poll_add_choice_hint">New choice</string>
+    <string name="imessage_poll_send">Send</string>
+    <string name="imessage_poll_needs_two">A poll needs at least two choices.</string>
+    <string name="imessage_poll_requires">Polls show on iPhones with iOS 26 or later.</string>
+    <!-- What a poll stands for in the conversation list and notifications. %1$s: its question. -->
+    <string name="imessage_poll_summary">Poll: %1$s</string>
+    <string name="imessage_poll_summary_untitled">Poll</string>
+    <string name="imessage_poll_unreadable">This poll can\'t be voted in here.</string>
+    <string name="imessage_poll_choice_not_added">That choice is already in the poll, or empty.</string>
+    <!-- %1$d: the most choices a poll can have. -->
+    <string name="imessage_poll_too_many">A poll can have at most %1$d choices.</string>
+    <!-- %1$s: why, in words. -->
+    <string name="imessage_poll_vote_failed">Your vote did not go through: %1$s</string>
+    <string name="imessage_poll_choice_failed">The choice was not added: %1$s</string>
+    <string name="imessage_poll_you">You</string>
+    <plurals name="imessage_poll_votes">
+        <item quantity="one">%d vote</item>
+        <item quantity="other">%d votes</item>
+    </plurals>
+    <!-- What TalkBack says of a choice. %1$s: the choice; %2$s: how many voted ("2 votes"). -->
+    <string name="imessage_poll_option_description">%1$s, %2$s</string>
+    <!-- The same for one the user chose. -->
+    <string name="imessage_poll_option_mine_description">%1$s, %2$s, your vote</string>
+    <string name="imessage_poll_vote_action">Vote</string>
+    <string name="imessage_poll_unvote_action">Take back your vote</string>
 </resources>

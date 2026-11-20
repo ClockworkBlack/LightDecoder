@@ -382,12 +382,16 @@ class IMessageManager private constructor(
         effect: String?,
         runs: List<com.lightdecoder.imessage.direct.TextRun> = emptyList(),
         scheduledAt: Long? = null,
+        mentions: List<com.lightdecoder.imessage.direct.Mention> = emptyList(),
     ): String {
         val (body, formatted) = com.lightdecoder.imessage.direct.TextRuns.trimmed(text, runs)
         if (body.isEmpty()) throw RelayException(RelayException.INVALID_ARGUMENT, "empty message")
         // Straight to Apple through the library: a real iMessage with its own GUID (Unsend works),
-        // replies inline, and Apple's answer decides sent or failed.
-        if (direct.canSend(conversationId)) return direct.sendText(conversationId, body, replyToId, effect, formatted, scheduledAt)
+        // replies inline, and Apple's answer decides sent or failed. Mentions go only that way too.
+        if (direct.canSend(conversationId)) {
+            val named = com.lightdecoder.imessage.direct.Mentions.trimmed(text, mentions)
+            return direct.sendText(conversationId, body, replyToId, effect, formatted, scheduledAt, named)
+        }
         // Send Later is Apple's: only through the library.
         if (scheduledAt != null) throw RelayException(IMessageErrors.NO_REPLY_BUTTON, "Send Later goes through the iMessage library only")
         requireEnabled()
@@ -494,10 +498,13 @@ class IMessageManager private constructor(
         deliver(tmpId, row.conversationId, row.text)
     }
 
-    /** Drops a message that did not go, with the copy of its file kept for sending it. */
+    /** Drops a message that did not go, with the copy of its file kept for sending it (and its link preview's picture). */
     override fun discardFailed(tmpId: String) {
         repo.applyDeletion(MessageRow.tmpMessageId(tmpId))
         repo.outboxFileFor(tmpId).delete()
+        com.lightdecoder.imessage.direct.DirectLink.pictureFile(
+            appContext, com.lightdecoder.imessage.direct.IMessageExtra.linkImageKey(MessageRow.tmpMessageId(tmpId)),
+        ).delete()
     }
 
     /**

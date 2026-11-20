@@ -444,4 +444,70 @@ class DirectWireTest {
         // It crosses as it is (no message of its own to cut).
         assertEquals(DirectWire.encode(photo).toString(), DirectWire.encodeUpdate(photo).toString())
     }
+
+    @Test
+    fun mentionsALinksPreviewAndTheNewChangesSurviveTheTrip() {
+        val target = DirectWire.Target(listOf("tel:+15550000002", "tel:+15550000003"), "Trip", "G-1", "tel:+15550000001")
+        val mentions = listOf(Mention(3, 6, "+15550000002"), Mention(11, 16, "carol@example.com"))
+        val link = DirectWire.LinkPreviewRequest(
+            "https://www.example.com/story", "https://example.com/s", "A story", "About it",
+            "https://example.com/cover.jpg", "/data/user/0/app/files/imessage-media/x.jpg", "image/jpeg",
+        )
+        val sent = DirectWire.SendRequest.fromJson(JSONObject(DirectWire.send(target, "Hi Bob and Carol", null, mentions = mentions, link = link).toString()))
+        assertEquals(mentions, sent.mentions)
+        assertEquals(link, sent.link)
+        // Without either: none.
+        val plain = DirectWire.SendRequest.fromJson(JSONObject(DirectWire.send(target, "hi", null).toString()))
+        assertTrue(plain.mentions.isEmpty())
+        assertNull(plain.link)
+        // A preview whose address is no web page's is none; a picture's address that is none is left out.
+        val odd = DirectWire.send(target, "x", null, link = link.copy(url = "javascript:alert(1)", originalUrl = "javascript:alert(1)")).toString()
+        assertNull(DirectWire.SendRequest.fromJson(JSONObject(odd)).link)
+        val noPicture = DirectWire.send(target, "x", null, link = link.copy(imageUrl = "file:///etc/passwd")).toString()
+        assertNull(DirectWire.SendRequest.fromJson(JSONObject(noPicture)).link!!.imageUrl)
+        // An edit's mentions.
+        val edit = DirectWire.EditRequest.fromJson(JSONObject(DirectWire.edit(target, "G", 0, "Hi Bob", emptyList(), listOf(Mention(3, 6, "+15550000002"))).toString()))
+        assertEquals(listOf(Mention(3, 6, "+15550000002")), edit.mentions)
+        // The changes from Apple.
+        val kinds = listOf(
+            DirectArchive.Update.Reaction("imsg:G1", "+15550000002", DirectArchive.STICKER_TAPBACK, true, false, 7_000, "imsg:group:G", "G", sticker = "G1/tapback/+15550000002"),
+            DirectArchive.Update.Edit("imsg:G1", "Now Me", 0, 5, emptyList(), "tel:+15550000002", false, "", null, listOf(Mention(4, 6, "+15550000001", mine = true))),
+            DirectArchive.Update.Sticker("imsg:G1", "ST-1", "+15550000002", false, 9_000, "imsg:group:G", "G"),
+            DirectArchive.Update.Sticker("imsg:G1", "ST-2", "me", true, 9_500),
+            DirectArchive.Update.PollVote("imsg:CARD", "tel:+15550000002", false, listOf("O1", "O2"), 10_000, "imsg:group:G", "G"),
+            DirectArchive.Update.PollVote("imsg:CARD", "tel:+15550000001", true, emptyList(), 11_000),
+        )
+        for (k in kinds) assertEquals(k, trip(k))
+        // A poll's change, its card and all; without its card or its first card's id, nothing.
+        val row = DirectArchive.Update.Upsert(
+            ConversationDto(id = "imsg:group:G", name = "Trip", isGroup = true, type = DirectArchive.TRANSPORT),
+            MessageDto(
+                id = "imsg:PC", conversationId = "imsg:group:G", senderId = "tel:+15550000002", timestampMs = 1, direction = "in",
+                transport = DirectArchive.TRANSPORT, text = "Dinner?", parts = listOf(PartDto(partId = "0", kind = "text", text = "Dinner?")),
+                extra = IMessageExtra(app = Polls.card(Polls.create("Dinner?", listOf("A", "B"), "+1")!!, "S", "imsg:P")).toJson(),
+            ),
+        )
+        assertEquals(DirectArchive.Update.PollChange("imsg:P", row), trip(DirectArchive.Update.PollChange("imsg:P", row)))
+        assertEquals(DirectArchive.Update.Ignore, DirectWire.decode(JSONObject().put("kind", "pollChange").put("rootId", "imsg:P")))
+        assertEquals(DirectArchive.Update.Ignore, DirectWire.decode(JSONObject().put("kind", "pollChange").put("row", DirectWire.encode(row))))
+        // A vote naming more choices than a poll has: no more than it can have.
+        val many = JSONObject(DirectWire.encode(DirectArchive.Update.PollVote("imsg:CARD", "tel:+1", false, (0 until 80).map { "O$it" }, 1)).toString())
+        assertEquals(Polls.MAX_OPTIONS, (DirectWire.decode(many) as DirectArchive.Update.PollVote).options.size)
+    }
+
+    @Test
+    fun aPollsChangeTooLargeToCrossIsMadeSmallerAsAMessageIs() {
+        val row = DirectArchive.Update.Upsert(
+            ConversationDto(id = "imsg:group:G", name = "Trip", isGroup = true, type = DirectArchive.TRANSPORT),
+            MessageDto(
+                id = "imsg:PC", conversationId = "imsg:group:G", senderId = "tel:+15550000002", timestampMs = 1, direction = "in",
+                transport = DirectArchive.TRANSPORT, text = "x".repeat(DirectWire.MAX_UPDATE_CHARS),
+                parts = listOf(PartDto(partId = "0", kind = "text", text = "y".repeat(DirectWire.MAX_UPDATE_CHARS))),
+            ),
+        )
+        val json = DirectWire.encodeUpdate(DirectArchive.Update.PollChange("imsg:P", row))
+        assertTrue(json.toString().length <= DirectWire.MAX_UPDATE_CHARS)
+        assertEquals("pollChange", json.getString("kind"))
+        assertTrue(DirectWire.decode(json) is DirectArchive.Update.PollChange)
+    }
 }

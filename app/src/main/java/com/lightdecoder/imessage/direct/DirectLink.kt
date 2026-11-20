@@ -40,6 +40,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import uniffi.rust_bridge.Reaction
 
@@ -271,16 +272,20 @@ class DirectLink private constructor(
         effect: String? = null,
         runs: List<TextRun> = emptyList(),
         scheduledAt: Long? = null,
+        mentions: List<Mention> = emptyList(),
     ): String {
         // The message ends the typing indicator on their side: no "stopped typing" after it.
         if (scheduledAt == null) typingThrottle.sent(conversationId)
         val tmpId = UUID.randomUUID().toString()
         val formatted = TextRuns.normalize(text, runs)
+        val named = Mentions.normalize(text, mentions)
         repo.insertLocalOutgoing(
             tmpId, conversationId, text, null, null, null, replyToId, scheduledAt ?: System.currentTimeMillis(),
-            IMessageExtra(effect = effect, runs = runsOf(formatted), scheduledAt = scheduledAt ?: 0).toJson(),
+            IMessageExtra(effect = effect, runs = runsOf(formatted), scheduledAt = scheduledAt ?: 0, mentions = mentionsOf(named)).toJson(),
         )
-        inTurn(conversationId) { deliver(tmpId, conversationId, text, replyToId, effect = effect, runs = formatted, scheduledAt = scheduledAt) }
+        inTurn(conversationId) {
+            deliver(tmpId, conversationId, text, replyToId, effect = effect, runs = formatted, scheduledAt = scheduledAt, mentions = named)
+        }
         return tmpId
     }
 
@@ -325,7 +330,7 @@ class DirectLink private constructor(
      * [app]'s balloon, with the picture [jpeg] if it has one. As a text: a local copy now
      * ("tmp:<tmpId>"), the sent card once Apple confirms it; the card is the root of its session.
      */
-    fun sendAppCard(conversationId: String, app: IMessageExtra.App, jpeg: ByteArray?): String {
+    fun sendAppCard(conversationId: String, app: IMessageExtra.App, jpeg: ByteArray?, text: String = app.copy(root = "").summary()): String {
         val tmpId = UUID.randomUUID().toString()
         val media = jpeg?.let { bytes ->
             val file = repo.outboxFileFor(tmpId)
@@ -336,10 +341,10 @@ class DirectLink private constructor(
         typingThrottle.sent(conversationId)
         val card = app.copy(root = "")
         repo.insertLocalOutgoing(
-            tmpId, conversationId, card.summary(), media?.file?.path, media?.mime, media?.name, null,
+            tmpId, conversationId, text, media?.file?.path, media?.mime, media?.name, null,
             System.currentTimeMillis(), IMessageExtra(app = card).toJson(),
         )
-        inTurn(conversationId) { deliver(tmpId, conversationId, card.summary(), null, media, appCard = card) }
+        inTurn(conversationId) { deliver(tmpId, conversationId, text, null, media, appCard = card) }
         return tmpId
     }
 
@@ -555,7 +560,10 @@ class DirectLink private constructor(
         // Send Later whose time has passed meanwhile: it goes now.
         val scheduledAt = extra.scheduledAt.takeIf { SendLater.check(it, System.currentTimeMillis()) == SendLater.Check.OK }
         inTurn(row.conversationId) {
-            deliver(tmpId, row.conversationId, row.text, row.replyToId.ifEmpty { null }, media, extra.effect, extra.app, extra.textRuns(row.text), scheduledAt)
+            deliver(
+                tmpId, row.conversationId, row.text, row.replyToId.ifEmpty { null }, media, extra.effect, extra.app, extra.textRuns(row.text), scheduledAt,
+                extra.textMentions(row.text),
+            )
         }
         return true
     }
@@ -603,10 +611,14 @@ class DirectLink private constructor(
         appCard: IMessageExtra.App? = null,
         runs: List<TextRun> = emptyList(),
         scheduledAt: Long? = null,
+        mentions: List<Mention> = emptyList(),
     ) {
         try {
             repo.setLocalState(tmpId, LocalState.SENDING)
             val target = targetOf(conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
+            // A text with a link goes with the page's preview, as from an iPhone: fetched first (a few
+            // seconds at most; without one it goes as it is), and shown on the copy here meanwhile.
+            val preview = if (appCard == null && media == null) linkPreviewFor(tmpId, text) else null
             // An inline reply needs the GUID Apple knows the answered message by: messages the
             // library sent or received have it (imsg:<GUID>); older Blue Bubbles rows do not, and
             // a reply to one goes as a message of its own.
@@ -619,6 +631,8 @@ class DirectLink private constructor(
                 app = appCard,
                 runs = if (appCard != null) emptyList() else runs,
                 scheduledMs = scheduledAt,
+                mentions = if (appCard != null) emptyList() else mentions,
+                link = preview?.request,
             )
             // A file is uploaded first: that takes longer than a text.
             val reply = requests.call(DirectWire.SEND, request, if (media == null) SEND_TIMEOUT_MS else MEDIA_SEND_TIMEOUT_MS)
@@ -635,6 +649,8 @@ class DirectLink private constructor(
             }
             // The file sent is the message's from now on: where a download of it would be kept.
             val kept = media?.let { m -> mediaParts.firstOrNull()?.let { part -> part to keepSent(m.file, part) } }
+            // The preview's picture is the sent message's, as one that came with it would be.
+            val link = preview?.let { p -> p.link.copy(image = p.keepFor(sent.guid)) }
             val stored = MessageDto(
                 id = messageId,
                 conversationId = conversationId,
@@ -655,6 +671,8 @@ class DirectLink private constructor(
                     voice = media?.voice == true, effect = effect, app = appCard?.copy(root = messageId),
                     runs = if (appCard != null) emptyMap() else runsOf(runs),
                     scheduledAt = scheduledAt ?: 0,
+                    mentions = if (appCard != null) emptyMap() else mentionsOf(mentions),
+                    link = link,
                 ).toJson(),
             )
             // A receipt (or a reaction) can come from Apple before the send's answer did: what
@@ -672,6 +690,8 @@ class DirectLink private constructor(
                     (if (media != null) " with ${if (media.voice) "a voice message" else media.mime.substringBefore('/')}" else "") +
                     (if (effect != null) ", with an effect" else "") +
                     (if (runs.isNotEmpty()) ", formatted" else "") +
+                    (if (mentions.isNotEmpty()) ", with ${mentions.size} mention(s)" else "") +
+                    (if (preview != null) ", with a link preview" + (if (link?.image.isNullOrEmpty()) "" else " and its picture") else "") +
                     (if (scheduledAt != null) ", Send Later" else "") +
                     (if (appCard != null) ", an iMessage app's card" else ""),
             )
@@ -682,6 +702,125 @@ class DirectLink private constructor(
             // it is sent again (MessageStatus.outcomeUnknown), as for any send that may have gone.
             repo.setLocalState(tmpId, LocalState.FAILED, if (e is DirectEngine.Unconfirmed) Outbox.UNCONFIRMED else DirectEngine.readable(e))
         }
+    }
+
+    // --- link previews (sent) ----------------------------------------------------------------------
+
+    /** How link previews reach the network ([LinkPreviews]); tests answer in its place. */
+    @Volatile
+    internal var linkFetcher: LinkPreviews.Fetcher = LinkPreviews.HttpFetcher()
+
+    /** The rules a link preview's fetch follows; tests let their own server in. */
+    @Volatile
+    internal var linkPolicy: LinkPreviews.Policy = LinkPreviews.Policy()
+
+    /**
+     * A preview made for a message being sent: what goes to Apple ([request]), what its copies here
+     * show ([link]), and its picture, kept under the local copy's key until the message is sent.
+     */
+    private inner class SentPreview(val request: DirectWire.LinkPreviewRequest, val link: IMessageExtra.Link, private val picture: File?) {
+        /** The picture as the sent message [guid]'s from now on (moved to its key): that key, or "" with none. */
+        fun keepFor(guid: String): String {
+            val from = picture?.takeIf { it.isFile } ?: return ""
+            val key = IMessageExtra.linkImageKey(guid)
+            val to = pictureFile(key)
+            return try {
+                if (!from.renameTo(to)) {
+                    from.copyTo(to, overwrite = true)
+                    from.delete()
+                }
+                key
+            } catch (e: java.io.IOException) {
+                Log.w(TAG, "link preview picture not kept", e)
+                from.delete()
+                ""
+            }
+        }
+    }
+
+    /**
+     * The preview of the first web address in [text], fetched now ([LinkPreviews.fetch], with the
+     * iMessage screen's "Link previews" on), its picture made small ([PreviewImages.jpeg]) and kept
+     * under local copy [tmpId]'s key, and shown on that copy at once; null when there is none (no
+     * address, the setting off, nothing to show, not in time). Never logs the address.
+     */
+    private suspend fun linkPreviewFor(tmpId: String, text: String): SentPreview? {
+        if (!DirectPrefs.linkPreviews(app)) return null
+        val url = LinkPreviews.firstUrl(text) ?: return null
+        val fetched = try {
+            withTimeoutOrNull(LinkPreviews.BUDGET_MS + LINK_PREVIEW_SLACK_MS) {
+                kotlinx.coroutines.runInterruptible(Dispatchers.IO) { LinkPreviews.fetch(url, linkFetcher, linkPolicy) }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "link preview not made (${e::class.java.simpleName})")
+            null
+        }
+        if (fetched == null) {
+            IMessageLog.add(app, "link preview: none made (the page had none, could not be fetched, or took too long); sent without one")
+            return null
+        }
+        val key = IMessageExtra.linkImageKey(MessageRow.tmpMessageId(tmpId))
+        val picture = fetched.image?.let { PreviewImages.jpeg(it, PreviewImages.LINK_SIDE) }?.let { jpeg ->
+            val file = pictureFile(key)
+            try {
+                MediaCache.writeAtomically(file, jpeg)
+                file
+            } catch (e: java.io.IOException) {
+                Log.w(TAG, "link preview picture not written", e)
+                null
+            }
+        }
+        val page = fetched.page
+        val request = DirectWire.LinkPreviewRequest(
+            url = page.url, originalUrl = fetched.originalUrl, title = page.title, summary = page.summary,
+            imageUrl = page.imageUrl.takeIf { picture != null }, imagePath = picture?.path, imageMime = if (picture != null) DirectEngine.APP_IMAGE_MIME else "",
+        )
+        val link = IMessageExtra.Link(fetched.originalUrl, page.title, page.summary, LinkPreviews.hostOf(fetched.originalUrl), if (picture != null) key else "")
+        // The copy here shows it while the message goes.
+        try {
+            val row = repo.message(MessageRow.tmpMessageId(tmpId))
+            if (row != null) repo.editText(row.id, row.text, 0, IMessageExtra.parse(row.extra).copy(link = link).toJson())
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "link preview not shown on the local copy", e)
+        }
+        IMessageLog.add(app, "link preview: made" + if (picture != null) ", with its picture" else ", without a picture")
+        return SentPreview(request, link, picture)
+    }
+
+    /** The file a picture kept under [key] is in (a link's preview, a sticker), in the iMessage media folder. */
+    private fun pictureFile(key: String): File = repo.mediaFileFor(key, IMessageExtra.extensionOf(key))
+
+    /** The picture the ":imessage" process wrote aside under [key] becomes the one kept under it (the change it came with was taken). */
+    private fun claimPicture(key: String) {
+        if (key.isEmpty()) return
+        val file = pictureFile(key)
+        val pending = DirectMedia.pendingInlineFile(file)
+        if (pending.isFile && !pending.renameTo(file)) pending.delete()
+    }
+
+    /** The picture written aside under [key] goes: the change it came with was not taken. */
+    private fun dropPicture(key: String) {
+        if (key.isNotEmpty()) DirectMedia.pendingInlineFile(pictureFile(key)).delete()
+    }
+
+    /** The picture kept under [key] goes, and one written aside for it. */
+    private fun deletePicture(key: String) {
+        if (key.isEmpty()) return
+        val file = pictureFile(key)
+        file.delete()
+        DirectMedia.pendingInlineFile(file).delete()
+    }
+
+    /** The pictures kept with [row] that are no attachment of it (its link's, the stickers on it) go: the message is gone. */
+    private fun forgetPictures(row: MessageRow) {
+        val extra = IMessageExtra.parse(row.extra)
+        extra.link?.image?.let(::deletePicture)
+        val guid = DirectArchive.guidOf(row.id) ?: return
+        extra.stickers.forEach { deletePicture(IMessageExtra.stickerKey(guid, it.id)) }
+        row.reactions.filter { it.emoji == DirectArchive.STICKER_TAPBACK }.flatMap { it.participantIds }
+            .forEach { deletePicture(IMessageExtra.tapbackStickerKey(guid, it)) }
     }
 
     // --- attachments -------------------------------------------------------------------------------
@@ -857,6 +996,8 @@ class DirectLink private constructor(
             if (part.mediaId.isEmpty()) continue
             DirectMedia.pendingInlineFile(repo.mediaFileFor(part.mediaId, DirectMedia.extensionFor(part.mime, part.fileName))).delete()
         }
+        // Its link preview's picture, written aside the same way.
+        IMessageExtra.parse(message.extra).link?.image?.let(::dropPicture)
     }
 
     private fun isCaf(mime: String, fileName: String): Boolean = mime == CafAudio.MIME || fileName.endsWith(".caf", ignoreCase = true)
@@ -932,8 +1073,10 @@ class DirectLink private constructor(
         val target = targetOf(row.conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
         // Once asked, Apple's answer is waited for and stored even if the screen that asked closes.
         val formatted = TextRuns.normalize(text, runs)
+        // The members it mentioned whose names the edit left as they were still are.
+        val mentioned = Mentions.afterEdit(row.text, text, IMessageExtra.parse(row.extra).textMentions(row.text))
         withContext(NonCancellable) {
-            val reply = requests.call(DirectWire.EDIT, DirectWire.edit(target, guid, 0, text, formatted), SEND_TIMEOUT_MS)
+            val reply = requests.call(DirectWire.EDIT, DirectWire.edit(target, guid, 0, text, formatted, mentioned), SEND_TIMEOUT_MS)
             DirectWire.errorOf(reply)?.let { throw DirectEngine.ImessageError(it) }
             synchronized(this@DirectLink) {
                 // Read again: a tapback or a receipt may have come in while Apple was asked, or it
@@ -941,7 +1084,10 @@ class DirectLink private constructor(
                 val current = repo.message(messageId) ?: return@withContext
                 val extra = IMessageExtra.parse(current.extra)
                 if (current.direction == "system" || 0 in extra.unsent) return@withContext
-                val next = extra.copy(parts = extra.parts + (0 to text), edits = extra.edits + 1, runs = extra.withRuns(0, formatted))
+                val next = extra.copy(
+                    parts = extra.parts + (0 to text), edits = extra.edits + 1, runs = extra.withRuns(0, formatted),
+                    mentions = extra.withMentions(0, mentioned),
+                )
                 repo.editText(messageId, next.text(), System.currentTimeMillis(), next.toJson(), snippetOf(next.text(), current.extra))
             }
         }
@@ -1198,6 +1344,9 @@ class DirectLink private constructor(
             is DirectArchive.Update.Receipt -> receipt(update)
             is DirectArchive.Update.Edit -> edit(update)
             is DirectArchive.Update.Reaction -> reaction(update)
+            is DirectArchive.Update.Sticker -> placedSticker(update)
+            is DirectArchive.Update.PollVote -> pollVote(update)
+            is DirectArchive.Update.PollChange -> pollChange(update)
             is DirectArchive.Update.Unsent -> unsent(update)
             is DirectArchive.Update.Typing -> {
                 // A group down to one other person is still that group, as for its messages ([upsert]).
@@ -1293,6 +1442,8 @@ class DirectLink private constructor(
             transport = IMessageManager.TRANSPORT,
         )
         val message = existing?.let { merged(fresh, it) } ?: fresh
+        // Its link preview's picture is in place before the message is, so that its card shows with it.
+        IMessageExtra.parse(update.message.extra).link?.image?.let(::claimPicture)
         val result = repo.upsertMessage(message, snippetOf(message.text, message.extra))
         claimInlineFiles(update.message)
         if (incoming) manager.noteTyping(conversation.id, message.senderId, "", typing = false)
@@ -1409,7 +1560,9 @@ class DirectLink private constructor(
         if (repo.conversation(row.conversationId)?.unread != true) return
         // A game is open in an extension app, which asked for quiet.
         if (appEvents?.silences(row.conversationId) == true) return
-        MessageNotifier.onIncoming(app, repo, message.copy(text = IMessageExtra.shownText(row.text, row.extra, inkedLabel())))
+        // Mentioned: heard of even with the chat's alerts hidden, as an iPhone's "Notify Me" does.
+        val mentioned = IMessageExtra.parse(row.extra).mentionsMe && DirectPrefs.notifyWhenMentioned(app)
+        MessageNotifier.onIncoming(app, repo, message.copy(text = IMessageExtra.shownText(row.text, row.extra, inkedLabel())), mentioned)
     }
 
     /**
@@ -1440,13 +1593,15 @@ class DirectLink private constructor(
 
     /** A message taken out ([DirectArchive.Update.Remove]); a Send Later one only while it is still waiting for its time. */
     private fun remove(update: DirectArchive.Update.Remove) {
+        val row = repo.message(update.messageId)
         if (update.scheduledOnly) {
-            val row = repo.message(update.messageId) ?: return
+            if (row == null) return
             if (!SendLater.pending(row, System.currentTimeMillis())) {
                 refused("a deletion of a Send Later message", row.conversationId, "for a message not waiting for its time")
                 return
             }
         }
+        row?.let(::forgetPictures)
         repo.applyDeletion(update.messageId)
     }
 
@@ -1500,13 +1655,27 @@ class DirectLink private constructor(
     private fun reaction(update: DirectArchive.Update.Reaction) {
         val row = repo.message(update.messageId) ?: return hold(update.messageId, update)
         if (!update.fromMe && !isMember(row.conversationId, update.participantId)) {
+            update.sticker?.let(::dropPicture)
             return refused("a tapback", row.conversationId, "from someone not in the chat")
         }
-        if (!inChatOf(row, update.conversationId, update.groupGuid)) return refused("a tapback", row.conversationId, "from another chat")
+        if (!inChatOf(row, update.conversationId, update.groupGuid)) {
+            update.sticker?.let(::dropPicture)
+            return refused("a tapback", row.conversationId, "from another chat")
+        }
         val who = if (update.fromMe) ME else update.participantId
         // Apple's journal hands a tapback over again after a restart: one already shown is not announced again.
         val known = row.reactions.any { it.emoji == update.emoji && who in it.participantIds }
+        // A sticker as a tapback shows as its picture (kept by who put it there, one each): in place
+        // before the tapback is, so that it shows with it. Another tapback in its place, or the
+        // sticker taken back, and it goes.
+        val stickerKey = DirectArchive.guidOf(row.id)?.let { IMessageExtra.tapbackStickerKey(it, who) }
+        val sticker = stickerKey != null && update.enable && update.emoji == DirectArchive.STICKER_TAPBACK && update.sticker == stickerKey
+        if (sticker) claimPicture(stickerKey!!)
         repo.applyReaction(update.messageId, who, update.emoji, update.enable, update.fromMe, update.atMs)
+        if (stickerKey != null && !sticker && (update.enable || update.emoji == DirectArchive.STICKER_TAPBACK)) {
+            update.sticker?.let(::dropPicture)
+            deletePicture(stickerKey)
+        }
         if (update.fromMe || !update.enable || known || !row.isOutgoing || row.direction != "out") return
         if (appEvents?.silences(row.conversationId) == true) return
         val quoted = tapbackText(IMessageExtra.shownText(row.text, row.extra, inkedLabel())).takeIf { it.isNotBlank() }?.let { app.getString(R.string.imessage_tapback_quote, it) }
@@ -1527,6 +1696,110 @@ class DirectLink private constructor(
     }
 
     /**
+     * Someone put a sticker on a message (dragged onto its bubble): kept with the message (its
+     * picture under its own key), as an iPhone shows it on the bubble. Taken as a tapback is: only
+     * from someone in the message's chat (or the user, on another device), in that chat; the same
+     * sticker again changes nothing, and a message keeps its latest [IMessageExtra.MAX_STICKERS].
+     */
+    private fun placedSticker(update: DirectArchive.Update.Sticker) {
+        val guid = DirectArchive.guidOf(update.messageId) ?: return
+        val key = IMessageExtra.stickerKey(guid, update.stickerGuid)
+        // Apple's GUIDs are UUIDs: anything else is no sticker's message.
+        if (update.stickerGuid.isBlank() || update.stickerGuid.length > MAX_GUID_CHARS) return dropPicture(key)
+        val row = repo.message(update.messageId) ?: return hold(update.messageId, update)
+        fun refuse(why: String) {
+            dropPicture(key)
+            refused("a sticker", row.conversationId, why)
+        }
+        if (row.direction == "system") return dropPicture(key)
+        if (!update.fromMe && !isMember(row.conversationId, update.participantId)) return refuse("from someone not in the chat")
+        if (!inChatOf(row, update.conversationId, update.groupGuid)) return refuse("from another chat")
+        val extra = IMessageExtra.parse(row.extra)
+        claimPicture(key)
+        if (extra.stickers.any { it.id == update.stickerGuid }) return
+        val sticker = IMessageExtra.PlacedSticker(update.stickerGuid, if (update.fromMe) ME else update.participantId, update.atMs)
+        val kept = (extra.stickers + sticker).sortedBy { it.atMs }.takeLast(IMessageExtra.MAX_STICKERS)
+        // Those that no longer fit go, with their pictures (this one too, when it is the oldest).
+        (extra.stickers + sticker).filter { it !in kept }.forEach { deletePicture(IMessageExtra.stickerKey(guid, it.id)) }
+        if (sticker !in kept) return
+        repo.editText(row.id, row.text, row.editedAtMs, extra.copy(stickers = kept).toJson(), snippetOf(row.text, row.extra))
+    }
+
+    /**
+     * The archive's chat an event names ([DirectArchive.Update.PollVote]'s): the group when it is
+     * stored, else the person's stored chat (a Blue Bubbles one too), else as it is named; null for none.
+     */
+    private fun chatNamed(conversationId: String, groupGuid: String?): String? {
+        groupGuid?.let(DirectArchive::groupConversationId)?.takeIf { repo.conversation(it)?.isGroup == true }?.let { return it }
+        if (conversationId.isEmpty()) return null
+        if (DirectArchive.isGroup(conversationId)) return conversationId
+        return manager.conversationWith(Handles.display(conversationId.removePrefix(DirectArchive.PREFIX))) ?: conversationId
+    }
+
+    /**
+     * The stored card of the poll a vote or change names by [messageId]: that message when it is a
+     * poll's card, else, in the chat named ([chatNamed]), the card whose session that message is a
+     * later card of ([IMessageExtra.pollCards]) or started ([IMessageExtra.App.root]).
+     */
+    private fun pollCard(messageId: String, chat: String?): MessageRow? {
+        repo.message(messageId)?.takeIf { Polls.isPoll(IMessageExtra.parse(it.extra).app) && it.direction != "system" }?.let { return it }
+        val guid = DirectArchive.guidOf(messageId) ?: return null
+        if (chat == null) return null
+        return repo.messagesWithExtra(chat, guid).firstOrNull { r ->
+            val e = IMessageExtra.parse(r.extra)
+            r.direction != "system" && Polls.isPoll(e.app) && (guid in e.pollCards || e.app?.root == messageId)
+        }
+    }
+
+    /**
+     * A vote in a poll: counted on the poll's card (the voter's latest choice replaces their earlier
+     * one), with no row of its own, as on an iPhone. Taken only from someone in the poll's chat (or
+     * the user, on another device), in that chat; for whoever sent it. One for a card not stored yet
+     * waits for it ([hold]).
+     */
+    private fun pollVote(update: DirectArchive.Update.PollVote) {
+        val card = pollCard(update.messageId, chatNamed(update.conversationId, update.groupGuid)) ?: return hold(update.messageId, update)
+        if (!update.fromMe && !isMember(card.conversationId, update.voter)) return refused("a vote", card.conversationId, "from someone not in the chat")
+        if (!inChatOf(card, update.conversationId, update.groupGuid)) return refused("a vote", card.conversationId, "from another chat")
+        val extra = IMessageExtra.parse(card.extra)
+        if (extra.app?.let { Polls.decode(it.url) } == null) return
+        val ballot = Polls.Ballot(Polls.voterKey(update.voter, update.fromMe), update.options, update.atMs)
+        val votes = Polls.withBallot(extra.pollVotes, ballot)
+        if (votes == extra.pollVotes) return
+        repo.editText(card.id, card.text, card.editedAtMs, extra.copy(pollVotes = votes).toJson(), snippetOf(card.text, card.extra))
+    }
+
+    /**
+     * A poll's card sent again with its new state (a choice added): where its card is stored, that
+     * card shows the new state (votes and all), as an iPhone updates a poll in place; else the new
+     * card is stored as the poll's. Only from someone in the chat (or the user, on another device),
+     * in it, and never an older state over a newer one.
+     */
+    private fun pollChange(update: DirectArchive.Update.PollChange) {
+        val row = update.row.message
+        val changed = IMessageExtra.parse(row.extra).app?.takeIf { Polls.isPoll(it) && Polls.decode(it.url) != null }
+        val groupId = update.row.groupGuid?.let(DirectArchive::groupConversationId)?.takeIf { repo.conversation(it)?.isGroup == true }
+        val chat = archiveIdOf(update.row.conversation, groupId)
+        val card = pollCard(update.rootId, chat)
+        if (card == null || changed == null) return upsert(update.row)
+        if (card.conversationId != chat) return refused("a poll's change", card.conversationId, "from another chat")
+        if (!row.fromMe && !isMember(card.conversationId, row.senderId)) return refused("a poll's change", card.conversationId, "from someone not in the chat")
+        val guid = DirectArchive.guidOf(row.id) ?: return
+        val extra = IMessageExtra.parse(card.extra)
+        val shown = extra.app
+        if (guid in extra.pollCards || (shown != null && Polls.countOf(shown.url) > Polls.countOf(changed.url))) return
+        val next = extra.copy(
+            app = changed.copy(root = shown?.root?.ifEmpty { null } ?: card.id),
+            pollCards = (extra.pollCards + guid).takeLast(IMessageExtra.MAX_POLL_CARDS),
+        )
+        val text = row.text.ifBlank { card.text }
+        repo.editText(card.id, text, card.editedAtMs, next.toJson(), snippetOf(text, card.extra))
+        // Votes on the new card that came before it.
+        replayHeld(row.id)
+        IMessageLog.add(app, "${IMessageLog.chatRef(card.conversationId)}: a poll's new state shown on its card (through the iMessage library)")
+    }
+
+    /**
      * The sender edited a part: the message's text is rebuilt from its parts, marked edited. The
      * same edit handed over again (Apple's journal does that after a restart) counts once. Taken
      * only from the message's own sender, in its chat, within Apple's 15 minutes of it being sent
@@ -1544,7 +1817,8 @@ class DirectLink private constructor(
         if (!inWindow(row.timestampMs, update.atMs, EditRule.WINDOW_MS)) return refused("an edit", row.conversationId, "after Apple's 15 minutes")
         if (extra.edits >= IMessageExtra.MAX_EDITS) return refused("an edit", row.conversationId, "past Apple's ${IMessageExtra.MAX_EDITS} edits")
         val runs = extra.withRuns(update.part, TextRuns.normalize(update.text, update.runs))
-        val next = extra.copy(parts = parts + (update.part to update.text), edits = extra.edits + 1, runs = runs)
+        val mentions = extra.withMentions(update.part, Mentions.normalize(update.text, update.mentions))
+        val next = extra.copy(parts = parts + (update.part to update.text), edits = extra.edits + 1, runs = runs, mentions = mentions)
         repo.editText(row.id, next.text(), update.atMs, next.toJson(), snippetOf(next.text(), row.extra))
     }
 
@@ -1572,11 +1846,12 @@ class DirectLink private constructor(
             } else {
                 app.getString(R.string.imessage_unsent, row.senderName.ifBlank { update.senderName.ifBlank { nameOf(row.senderId) } })
             }
+            forgetPictures(row)
             repo.replaceWithPlaceholder(row.id, text)
             return
         }
         if (partId in media) repo.removeMediaPart(row.id, partId)
-        val next = extra.copy(parts = textLeft, unsent = extra.unsent + update.part, runs = extra.runs - update.part)
+        val next = extra.copy(parts = textLeft, unsent = extra.unsent + update.part, runs = extra.runs - update.part, mentions = extra.mentions - update.part)
         repo.editText(row.id, next.text(), row.editedAtMs, next.toJson(), snippetOf(next.text(), row.extra))
     }
 
@@ -2153,6 +2428,115 @@ class DirectLink private constructor(
         )
     }
 
+    // --- polls (iOS 26) ----------------------------------------------------------------------------
+
+    /** Whether the user can vote in (or add a choice to) the poll card [row] through the library: a poll Apple knows by its GUID, in a chat it reaches. */
+    fun canVote(row: MessageRow, reachable: Boolean? = null): Boolean =
+        active && !row.isLocal && row.direction != "system" && DirectArchive.isImessage(row.id) &&
+            IMessageExtra.parse(row.extra).app?.let { Polls.isPoll(it) && Polls.decode(it.url) != null } == true &&
+            (reachable ?: canSend(row.conversationId))
+
+    /** The poll card [messageId], its poll and its card's balloon; throws why it cannot be voted in. */
+    private fun pollFor(messageId: String): Triple<MessageRow, Polls.Poll, IMessageExtra.App> {
+        val row = repo.message(messageId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_not_stored))
+        val card = IMessageExtra.parse(row.extra).app?.takeIf(Polls::isPoll)
+        val poll = card?.let { Polls.decode(it.url) }
+        if (card == null || poll == null || row.isLocal || DirectArchive.guidOf(row.id) == null) throw DirectEngine.ImessageError(app.getString(R.string.imessage_poll_unreadable))
+        return Triple(row, poll, card)
+    }
+
+    /**
+     * The user's vote on choice [optionId] of the poll card [messageId]: chosen, or taken back when it
+     * was (several can be chosen, as on an iPhone). Shown at once; sent as OpenBubbles sends one (an
+     * update of the session that is no card of its own, to the poll's latest card, naming all the
+     * user's choices); put back as it was if Apple does not take it. Throws
+     * [DirectEngine.ImessageError] saying why when it does not go through.
+     */
+    suspend fun votePoll(messageId: String, optionId: String) {
+        val (row, poll, _) = pollFor(messageId)
+        if (poll.options.none { it.id == optionId }) throw DirectEngine.ImessageError(app.getString(R.string.imessage_poll_unreadable))
+        val target = targetOf(row.conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
+        val now = System.currentTimeMillis()
+        // Shown at once, under the lock every archive write here takes; what it was, to put it back.
+        val (before, chosen, cardGuid) = synchronized(this) {
+            val current = repo.message(messageId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_not_stored))
+            val extra = IMessageExtra.parse(current.extra)
+            val was = Polls.choicesOf(extra.pollVotes, Polls.ME)
+            val next = Polls.toggle(was, optionId).filter { id -> poll.options.any { it.id == id } }
+            val votes = Polls.withBallot(extra.pollVotes, Polls.Ballot(Polls.ME, next, now))
+            repo.editText(current.id, current.text, current.editedAtMs, extra.copy(pollVotes = votes).toJson(), snippetOf(current.text, current.extra))
+            Triple(was, next, extra.pollCards.lastOrNull() ?: DirectArchive.guidOf(current.id)!!)
+        }
+        withContext(NonCancellable) {
+            try {
+                val vote = Polls.vote(chosen, Handles.display(target.from), cardGuid)
+                failOn(requests.call(DirectWire.EXTENSION, DirectWire.extension(target, cardGuid, true, vote, null), SEND_TIMEOUT_MS))
+            } catch (e: Exception) {
+                synchronized(this@DirectLink) {
+                    // Put back only while it is still this one: a vote chosen since (here or on another device) stays.
+                    val current = repo.message(messageId) ?: return@synchronized
+                    val extra = IMessageExtra.parse(current.extra)
+                    val mine = extra.pollVotes.firstOrNull { it.voter == Polls.ME }
+                    if (mine != null && mine.atMs == now && mine.options == chosen) {
+                        val votes = Polls.withBallot(extra.pollVotes, Polls.Ballot(Polls.ME, before, now))
+                        repo.editText(current.id, current.text, current.editedAtMs, extra.copy(pollVotes = votes).toJson(), snippetOf(current.text, current.extra))
+                    }
+                }
+                throw e
+            }
+        }
+        IMessageLog.add(app, "${IMessageLog.chatRef(row.conversationId)}: a vote in a poll sent through the iMessage library (Apple confirmed)")
+    }
+
+    /**
+     * Adds the choice [text] to the poll card [messageId] ("Add Choice"), as OpenBubbles does: the
+     * poll's card sent again to its session with the choice added and its count one higher. Once
+     * Apple confirmed it, the card here shows it too. Throws [DirectEngine.ImessageError] saying why
+     * when it does not go through (no room, already there, not sent).
+     */
+    suspend fun addPollChoice(messageId: String, text: String) {
+        val (row, poll, card) = pollFor(messageId)
+        val first = targetOf(row.conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
+        val next = Polls.addChoice(poll, text, Handles.display(first.from))
+            ?: throw DirectEngine.ImessageError(
+                if (poll.options.size >= Polls.MAX_OPTIONS) app.getString(R.string.imessage_poll_too_many, Polls.MAX_OPTIONS) else app.getString(R.string.imessage_poll_choice_not_added),
+            )
+        val root = card.root.ifEmpty { row.id }
+        val rootGuid = DirectArchive.guidOf(root) ?: DirectArchive.guidOf(row.id)!!
+        // Its session as it came (Apple's), else the poll's first card's GUID, as OpenBubbles sends one; a UUID either way (the library takes no other).
+        val session = card.session.takeIf(Polls::isUuid) ?: rootGuid.takeIf(Polls::isUuid) ?: UUID.randomUUID().toString().uppercase()
+        val balloon = Polls.card(next, session, root)
+        inTurnAwait(row.conversationId) {
+            val target = targetOf(row.conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
+            val reply = requests.call(DirectWire.EXTENSION, DirectWire.extension(target, rootGuid, false, balloon, null), SEND_TIMEOUT_MS)
+            failOn(reply)
+            val sent = DirectWire.SendReply.fromJson(reply)
+            synchronized(this) {
+                val current = repo.message(messageId) ?: return@synchronized
+                val extra = IMessageExtra.parse(current.extra)
+                // A newer state came meanwhile (someone else's choice): it stays, and the card gets this one when it comes back.
+                val shown = extra.app?.takeIf(Polls::isPoll)
+                if (shown != null && Polls.countOf(shown.url) >= next.count) return@synchronized
+                val updated = extra.copy(app = balloon, pollCards = (extra.pollCards + sent.guid).distinct().takeLast(IMessageExtra.MAX_POLL_CARDS))
+                repo.editText(current.id, current.text, current.editedAtMs, updated.toJson(), snippetOf(current.text, current.extra))
+            }
+            IMessageLog.add(app, "${IMessageLog.chatRef(row.conversationId)}: a choice added to a poll through the iMessage library (Apple confirmed)")
+        }
+    }
+
+    /**
+     * Starts a poll in [conversationId] (iOS 26): [question] (may be empty) and its [choices] (two at
+     * least), sent as an iMessage app's new card, as OpenBubbles sends one. As a text: a local copy
+     * now ("tmp:<tmpId>"), the sent card once Apple confirms it. Throws [DirectEngine.ImessageError]
+     * when it cannot be made.
+     */
+    fun sendPoll(conversationId: String, question: String, choices: List<String>): String {
+        val target = targetOf(conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
+        val poll = Polls.create(question, choices, Handles.display(target.from)) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_poll_needs_two))
+        val card = Polls.card(poll, UUID.randomUUID().toString().uppercase())
+        return sendAppCard(conversationId, card, null, DirectTexts(app).poll(poll.title))
+    }
+
     // --- a chat's own "Send Read Receipts" ----------------------------------------------------------
 
     /** Whether the other person of [conversationId] is told when the user read it: the chat's own choice, else the iMessage screen's setting. */
@@ -2174,6 +2558,9 @@ class DirectLink private constructor(
 
     /** A message's formatting kept with it: [runs] (over its text, part 0) by part. */
     private fun runsOf(runs: List<TextRun>): Map<Int, List<TextRun>> = if (runs.isEmpty()) emptyMap() else mapOf(0 to runs)
+
+    /** A message's mentions kept with it: [mentions] (over its text, part 0) by part. */
+    private fun mentionsOf(mentions: List<Mention>): Map<Int, List<Mention>> = if (mentions.isEmpty()) emptyMap() else mapOf(0 to mentions)
 
     /** A message's text by part: as stored with it, or, for one that has none stored, its text as part 0. */
     private fun partsOf(row: MessageRow, extra: IMessageExtra): Map<Int, String> =
@@ -2276,7 +2663,8 @@ class DirectLink private constructor(
                     parts
                 },
                 editedAtMs = if (changed) stored.editedAtMs else fresh.editedAtMs,
-                extra = if (changed) stored.extra else fresh.extra,
+                // What was gathered on it since it first came stays: a poll's votes and newer state, the stickers on it.
+                extra = if (changed) stored.extra else IMessageExtra.parse(fresh.extra).keepingGathered(IMessageExtra.parse(stored.extra)).toJson(),
             )
         }
 
@@ -2351,6 +2739,16 @@ class DirectLink private constructor(
 
         /** A send waits for Apple's confirmation (up to 45 s) plus the session coming up. */
         private const val SEND_TIMEOUT_MS = 90_000L
+
+        /** The longest GUID taken for a sticker's message (Apple's are UUIDs). */
+        private const val MAX_GUID_CHARS = 64
+
+        /** A link preview's fetch is given this long past its own budget before the message goes without it. */
+        private const val LINK_PREVIEW_SLACK_MS = 2_000L
+
+        /** The file a picture kept with an iMessage under [key] is in ([IMessageExtra.linkImageKey], a sticker's): whether there or not. */
+        fun pictureFile(context: Context, key: String): File =
+            MediaCache.fileFor(context, key, IMessageExtra.extensionOf(key), ChatService.IMESSAGE)
 
         /** A send with a file also waits for the file to go up to Apple (up to 100 MB). */
         private const val MEDIA_SEND_TIMEOUT_MS = 10 * 60_000L

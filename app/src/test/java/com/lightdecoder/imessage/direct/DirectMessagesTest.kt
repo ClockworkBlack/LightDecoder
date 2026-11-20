@@ -204,4 +204,104 @@ class DirectMessagesTest {
         assertEquals(game.url, ext.spec.balloon!!.url)
         assertEquals(move.parts, ext.body)
     }
+
+    @Test
+    fun aTextWithMentionsIsOnePartWithItsMentionsAndTheAttachmentsAfterIt() {
+        val text = "Hi Bob and Carol"
+        val out = DirectMessages.outgoing(
+            text, listOf(picture), listOf(TextRun(0, 2, bold = true)),
+            listOf(Mention(3, 6, "tel:+15550000002"), Mention(11, 16, "mailto:carol@example.com")),
+        )
+        val parts = out.parts.map { it.part }
+        assertEquals(MessagePart.Text("Hi", TextFormat.Flags(TextFlags(true, false, false, false))), parts[0])
+        assertEquals(MessagePart.Text(" ", TextFormat.Flags(TextFlags(false, false, false, false))), parts[1])
+        assertEquals(MessagePart.Mention("+15550000002", "Bob"), parts[2])
+        assertEquals(MessagePart.Text(" and ", TextFormat.Flags(TextFlags(false, false, false, false))), parts[3])
+        assertEquals(MessagePart.Mention("carol@example.com", "Carol"), parts[4])
+        assertTrue(parts[5] is MessagePart.Attachment)
+        // The text and its mentions are part 0, the picture part 1: what the archive, edits and replies number them by.
+        assertEquals(listOf(0, 0, 0, 0, 0, 1), DirectArchive.partIndexes(out.parts))
+        assertEquals(listOf("p1"), out.attachments.map { it.partId })
+        assertEquals(mapOf(0 to text), DirectArchive.partTexts(out.parts))
+        assertEquals("0:0:${text.length}", DirectWire.replyPart(text))
+        // Back from the parts: the same mentions, and the formatting over the same text.
+        assertEquals(mapOf(0 to listOf(Mention(3, 6, "+15550000002"), Mention(11, 16, "carol@example.com"))), Mentions.fromParts(out.parts, emptySet()))
+        assertEquals(mapOf(0 to listOf(TextRun(0, 2, bold = true))), TextRuns.fromParts(out.parts))
+        // An edit keeps them the same way.
+        val edit = DirectMessages.editParts("Hi Bob!", emptyList(), listOf(Mention(3, 6, "+15550000002")))
+        assertEquals(listOf<MessagePart>(MessagePart.Text("Hi ", TextFormat.Flags(TextFlags(false, false, false, false))), MessagePart.Mention("+15550000002", "Bob"), MessagePart.Text("!", TextFormat.Flags(TextFlags(false, false, false, false)))), edit.map { it.part })
+    }
+
+    @Test
+    fun aLinksPreviewIsBuiltAsOpenBubblesBuildsOne() {
+        val jpeg = byteArrayOf(1, 2, 3)
+        val link = DirectWire.LinkPreviewRequest(
+            url = "https://www.example.com/story", originalUrl = "https://example.com/s", title = "A story", summary = "About it",
+            imageUrl = "https://example.com/cover.jpg", imagePath = "/unused", imageMime = "image/jpeg",
+        )
+        val meta = DirectMessages.linkMeta(link, jpeg)
+        val d = meta.data
+        assertEquals(uniffi.rust_bridge.NsUrl("\$null", "https://example.com/s"), d.originalUrl)
+        assertEquals(uniffi.rust_bridge.NsUrl("\$null", "https://www.example.com/story"), d.url)
+        assertEquals("A story", d.title)
+        assertEquals("About it", d.summary)
+        assertEquals(1u.toUByte(), d.version)
+        // The picture: the first attachment, named by its index, described in an NSArray of one.
+        assertEquals(1, meta.attachments.size)
+        assertTrue(meta.attachments[0].contentEquals(jpeg))
+        assertEquals(uniffi.rust_bridge.RichLinkImageAttachmentSubstitute("image/jpeg", 0UL), d.image)
+        assertEquals(uniffi.rust_bridge.LpImageMetadata("{0, 0}", uniffi.rust_bridge.NsUrl("\$null", "https://example.com/cover.jpg"), 1u), d.imageMetadata)
+        assertEquals(uniffi.rust_bridge.NsArrayLpImageMetadata(listOf(d.imageMetadata!!), uniffi.rust_bridge.NsArrayClass.NS_ARRAY), d.images)
+        assertNull(d.icon)
+        assertNull(d.iconMetadata)
+        // What the archive reads of it, as one that came: the same picture.
+        assertTrue(DirectArchive.linkImage(meta)!!.contentEquals(jpeg))
+        // Without a picture: none described, no attachment; a blank title or summary goes as none.
+        val bare = DirectMessages.linkMeta(link.copy(title = "", summary = ""), null)
+        assertTrue(bare.attachments.isEmpty())
+        assertNull(bare.data.image)
+        assertNull(bare.data.images)
+        assertNull(bare.data.title)
+        assertNull(bare.data.summary)
+        assertNull(DirectArchive.linkImage(bare))
+    }
+
+    @Test
+    fun aVoteInAPollGoesAsOpenBubblesSendsOne() {
+        val card1 = "8F0B2A6C-1D2E-4F30-9A1B-2C3D4E5F6A7B"
+        val vote = Polls.vote(listOf("OPT-1"), "+15550000001", card1)
+        val parts = DirectMessages.appParts(vote, emptyList(), move = true)
+        val update = DirectMessages.appUpdate(card1, vote, parts.parts, isMeta = true)
+        assertEquals(card1, update.toUuid)
+        assertEquals(Polls.VOTE_NOTICE, update.toText)
+        val ext = update.reaction as uniffi.rust_bridge.ReactMessageType.Extension
+        assertTrue(ext.isMeta)
+        assertEquals("Polls", ext.spec.name)
+        assertNull(ext.spec.appId)
+        assertEquals(Polls.BUNDLE_ID, ext.spec.bundleId)
+        val b = ext.spec.balloon!!
+        assertEquals(vote.url, b.url)
+        assertEquals(card1, b.session)
+        // A session that is no UUID would take the library down: none is sent then.
+        val odd = DirectMessages.appUpdate("CARD-1", Polls.vote(listOf("OPT-1"), "+1", "CARD-1"), parts.parts, isMeta = true)
+        assertNull((odd.reaction as uniffi.rust_bridge.ReactMessageType.Extension).spec.balloon!!.session)
+        assertTrue(Polls.isUuid(card1))
+        assertFalse(Polls.isUuid("1-1-1-1-1"))
+        // No layout, summary or icon, and not live, as OpenBubbles sends a vote.
+        assertNull(b.layout)
+        assertNull(b.ldText)
+        assertFalse(b.isLive)
+        assertNull(b.icon)
+        assertEquals(listOf<MessagePart>(MessagePart.Object("")), ext.body.map { it.part })
+        // A choice added is the poll's card again, to its first card: live, with its layout.
+        val poll = Polls.create("Q", listOf("A", "B"), "+15550000001")!!
+        val card = Polls.card(poll, "0F8FAD5B-D9CB-469F-A165-70867728950E")
+        val again = DirectMessages.appUpdate("ROOT", card, DirectMessages.appParts(card, emptyList(), move = true).parts, isMeta = false)
+        val e = again.reaction as uniffi.rust_bridge.ReactMessageType.Extension
+        assertFalse(e.isMeta)
+        assertEquals("", again.toText)
+        assertTrue(e.spec.balloon!!.isLive)
+        assertEquals(Polls.FALLBACK_CAPTION, (e.spec.balloon!!.layout as uniffi.rust_bridge.BalloonLayout.TemplateLayout).caption)
+        assertEquals(listOf<MessagePart>(MessagePart.Object("A, B")), e.body.map { it.part })
+    }
 }

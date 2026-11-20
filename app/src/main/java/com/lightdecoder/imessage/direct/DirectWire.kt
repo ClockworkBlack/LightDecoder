@@ -10,7 +10,7 @@ import org.json.JSONObject
  * app's main process (the Messages archive, [DirectLink]), as JSON in a Bundle. Pure and
  * tested (DirectWireTest), so both sides always agree.
  *
- * Main -> :imessage: [SEND], [UNSEND], [REACH], [EDIT], [REACT], [TYPING], [READ], [DOWNLOAD],
+ * Main -> :imessage: [SEND] (with its mentions and link preview), [UNSEND], [REACH], [EDIT], [REACT], [TYPING], [READ], [DOWNLOAD],
  * [EXTENSION], [BACKGROUND], [UNSCHEDULE], [RENAME], [MEMBERS], [GROUP_PHOTO] (requests, answered with the same
  * request id; a failure is answered with [error]). Never raw media bytes: files are passed by path, in the app's own storage.
  * :imessage -> main: [UPDATE] (an archive change from Apple), answered once it is stored; only
@@ -38,8 +38,9 @@ object DirectWire {
     const val DOWNLOAD = 8
 
     /**
-     * Sends an iMessage app's session update (a game's move) to the card that started the session:
-     * [extension], answered as a [SEND] is ([SendReply]: the move's GUID, its time, its picture's part).
+     * Sends an iMessage app's session update (a game's move, a vote in a poll, a choice added to one)
+     * to the card that started the session: [extension], answered as a [SEND] is ([SendReply]: the
+     * move's GUID, its time, its picture's part).
      */
     const val EXTENSION = 9
 
@@ -137,6 +138,45 @@ object DirectWire {
         }
     }
 
+    /**
+     * A link's preview to send with a message ([SendRequest.link]), fetched by the main process
+     * ([LinkPreviews]): the page's address ([url]) and the link as typed ([originalUrl]), its title
+     * and summary, and its picture's address with the picture itself at [imagePath] (a JPEG in the
+     * app's own storage, [imageMime]; none: no picture).
+     */
+    data class LinkPreviewRequest(
+        val url: String,
+        val originalUrl: String,
+        val title: String = "",
+        val summary: String = "",
+        val imageUrl: String? = null,
+        val imagePath: String? = null,
+        val imageMime: String = "",
+    ) {
+        fun toJson(): JSONObject = JSONObject().put("url", url).put("originalUrl", originalUrl).put("title", title).put("summary", summary)
+            .apply {
+                if (imageUrl != null) put("imageUrl", imageUrl)
+                if (imagePath != null) put("imagePath", imagePath)
+                if (imageMime.isNotEmpty()) put("imageMime", imageMime)
+            }
+
+        companion object {
+            /** Reads what [toJson] wrote; null without a web address. */
+            fun fromJson(o: JSONObject): LinkPreviewRequest? {
+                val url = o.optStringOrNull("url")?.takeIf { IMessageExtra.isWebAddress(it) && it.length <= LinkPreviews.MAX_URL_CHARS } ?: return null
+                return LinkPreviewRequest(
+                    url,
+                    o.optStringOrNull("originalUrl")?.takeIf { IMessageExtra.isWebAddress(it) && it.length <= LinkPreviews.MAX_URL_CHARS } ?: url,
+                    o.optString("title").take(LinkPreviews.MAX_TITLE_CHARS + 1),
+                    o.optString("summary").take(LinkPreviews.MAX_SUMMARY_CHARS + 1),
+                    o.optStringOrNull("imageUrl")?.takeIf { IMessageExtra.isWebAddress(it) && it.length <= LinkPreviews.MAX_URL_CHARS },
+                    o.optStringOrNull("imagePath")?.ifEmpty { null },
+                    o.optString("imageMime"),
+                )
+            }
+        }
+    }
+
     /** What a [SEND] request asks for, read by the ":imessage" process. */
     data class SendRequest(
         val target: Target,
@@ -151,6 +191,10 @@ object DirectWire {
         val runs: List<TextRun> = emptyList(),
         /** Send Later: when Apple is to send it (ms), null to send it now ([SendLater]). */
         val scheduledMs: Long? = null,
+        /** The members its text mentions ([Mentions]), over [text]. */
+        val mentions: List<Mention> = emptyList(),
+        /** The preview of the link in its text, if one was made ([LinkPreviews]). */
+        val link: LinkPreviewRequest? = null,
     ) {
         companion object {
             fun fromJson(o: JSONObject) = SendRequest(
@@ -164,6 +208,8 @@ object DirectWire {
                 o.optJSONObject("app")?.let(IMessageExtra.App::fromJson),
                 TextRuns.fromJsonArray(o.optJSONArray("runs")),
                 o.optLong("scheduledMs").takeIf { it > 0 },
+                Mentions.fromJsonArray(o.optJSONArray("mentions")),
+                o.optJSONObject("link")?.let(LinkPreviewRequest::fromJson),
             )
         }
     }
@@ -235,8 +281,15 @@ object DirectWire {
         }
     }
 
-    /** What an [EDIT] request asks for: part [part] of message [guid] now reads [text], formatted with [runs]. */
-    data class EditRequest(val target: Target, val guid: String, val part: Int, val text: String, val runs: List<TextRun>) {
+    /** What an [EDIT] request asks for: part [part] of message [guid] now reads [text], formatted with [runs], mentioning [mentions]. */
+    data class EditRequest(
+        val target: Target,
+        val guid: String,
+        val part: Int,
+        val text: String,
+        val runs: List<TextRun>,
+        val mentions: List<Mention> = emptyList(),
+    ) {
         companion object {
             fun fromJson(o: JSONObject) = EditRequest(
                 Target.fromJson(o.getJSONObject("target")),
@@ -244,6 +297,7 @@ object DirectWire {
                 o.optInt("part"),
                 o.getString("text"),
                 TextRuns.fromJsonArray(o.optJSONArray("runs")),
+                Mentions.fromJsonArray(o.optJSONArray("mentions")),
             )
         }
     }
@@ -274,7 +328,7 @@ object DirectWire {
      * effect id; [voice] marks a recorded audio message. [app] makes it an iMessage app's card
      * (a new game): the app's balloon, with its picture as the attachment. [runs] are the text's
      * formatting and text effects (iOS 18), over [text]. With [scheduledMs] Apple sends it then
-     * (Send Later, [SendLater]).
+     * (Send Later, [SendLater]). [mentions] name the members it mentions; [link] is its link's preview.
      */
     fun send(
         target: Target,
@@ -287,6 +341,8 @@ object DirectWire {
         app: IMessageExtra.App? = null,
         runs: List<TextRun> = emptyList(),
         scheduledMs: Long? = null,
+        mentions: List<Mention> = emptyList(),
+        link: LinkPreviewRequest? = null,
     ): JSONObject =
         JSONObject().put("target", target.toJson()).put("text", text)
             .put("replyGuid", replyGuid ?: JSONObject.NULL).put("replyPart", replyPart ?: JSONObject.NULL)
@@ -296,6 +352,8 @@ object DirectWire {
             .apply { if (app != null) put("app", app.toJson()) }
             .apply { if (runs.isNotEmpty()) put("runs", TextRuns.toJsonArray(runs)) }
             .apply { if (scheduledMs != null && scheduledMs > 0) put("scheduledMs", scheduledMs) }
+            .apply { if (mentions.isNotEmpty()) put("mentions", Mentions.toJsonArray(mentions)) }
+            .apply { if (link != null) put("link", link.toJson()) }
 
     /** The chat [target]'s background is now the picture at [path], or none ([path] null), as of [version] ([BackgroundRequest]). */
     fun background(target: Target, path: String?, version: Long, style: BackgroundStyle? = null): JSONObject =
@@ -322,10 +380,11 @@ object DirectWire {
 
     fun reach(recipient: String): JSONObject = JSONObject().put("recipient", recipient)
 
-    /** Part [part] of the user's message [guid] now reads [text], formatted with [runs] (none: plain). */
-    fun edit(target: Target, guid: String, part: Int, text: String, runs: List<TextRun> = emptyList()): JSONObject =
+    /** Part [part] of the user's message [guid] now reads [text], formatted with [runs] (none: plain), mentioning [mentions]. */
+    fun edit(target: Target, guid: String, part: Int, text: String, runs: List<TextRun> = emptyList(), mentions: List<Mention> = emptyList()): JSONObject =
         JSONObject().put("target", target.toJson()).put("guid", guid).put("part", part).put("text", text)
             .apply { if (runs.isNotEmpty()) put("runs", TextRuns.toJsonArray(runs)) }
+            .apply { if (mentions.isNotEmpty()) put("mentions", Mentions.toJsonArray(mentions)) }
 
     /**
      * The user's tapback [emoji] on part [part] of message [guid], put on ([enable]) or taken
@@ -421,12 +480,21 @@ object DirectWire {
         is DirectArchive.Update.Edit -> JSONObject().put("kind", "edit").put("messageId", u.messageId).put("text", u.text)
             .put("part", u.part).put("atMs", u.atMs)
             .apply { if (u.runs.isNotEmpty()) put("runs", TextRuns.toJsonArray(u.runs)) }
+            .apply { if (u.mentions.isNotEmpty()) put("mentions", Mentions.toJsonArray(u.mentions)) }
             .put("sender", u.sender).put("fromMe", u.fromMe).put("conversationId", u.conversationId)
             .apply { u.groupGuid?.let { put("groupGuid", it) } }
         is DirectArchive.Update.Reaction -> JSONObject().put("kind", "reaction").put("messageId", u.messageId)
             .put("participantId", u.participantId).put("emoji", u.emoji).put("enable", u.enable).put("fromMe", u.fromMe)
             .put("atMs", u.atMs).put("conversationId", u.conversationId)
             .apply { u.groupGuid?.let { put("groupGuid", it) } }
+            .apply { u.sticker?.let { put("sticker", it) } }
+        is DirectArchive.Update.Sticker -> JSONObject().put("kind", "sticker").put("messageId", u.messageId).put("stickerGuid", u.stickerGuid)
+            .put("participantId", u.participantId).put("fromMe", u.fromMe).put("atMs", u.atMs).put("conversationId", u.conversationId)
+            .apply { u.groupGuid?.let { put("groupGuid", it) } }
+        is DirectArchive.Update.PollVote -> JSONObject().put("kind", "pollVote").put("messageId", u.messageId).put("voter", u.voter)
+            .put("fromMe", u.fromMe).put("options", JSONArray(u.options)).put("atMs", u.atMs).put("conversationId", u.conversationId)
+            .apply { u.groupGuid?.let { put("groupGuid", it) } }
+        is DirectArchive.Update.PollChange -> JSONObject().put("kind", "pollChange").put("rootId", u.rootId).put("row", encode(u.row))
         is DirectArchive.Update.Unsent -> JSONObject().put("kind", "unsent").put("messageId", u.messageId).put("part", u.part)
             .put("fromMe", u.fromMe).put("senderName", u.senderName)
             .put("sender", u.sender).put("atMs", u.atMs).put("conversationId", u.conversationId)
@@ -468,9 +536,12 @@ object DirectWire {
         var update = u
         while (true) {
             val json = encode(update)
-            val upsert = update as? DirectArchive.Update.Upsert ?: return json
+            // A poll's new card is its message: made smaller the same way.
+            val change = update as? DirectArchive.Update.PollChange
+            val upsert = change?.row ?: update as? DirectArchive.Update.Upsert ?: return json
             if (json.toString().length <= MAX_UPDATE_CHARS) return json
-            update = smaller(upsert) ?: return encode(DirectArchive.Update.Ignore)
+            val cut = smaller(upsert) ?: return encode(DirectArchive.Update.Ignore)
+            update = change?.copy(row = cut) ?: cut
         }
     }
 
@@ -481,8 +552,8 @@ object DirectWire {
             return u.copy(message = m.copy(parts = m.parts.map { if (it === largest) it.copy(key = ByteArray(0)) else it }))
         }
         val extra = IMessageExtra.parse(m.extra)
-        // The formatting goes with the parts it is laid over.
-        if (extra.parts.isNotEmpty()) return u.copy(message = m.copy(extra = extra.copy(parts = emptyMap(), runs = emptyMap()).toJson()))
+        // The formatting and the mentions go with the parts they are laid over.
+        if (extra.parts.isNotEmpty()) return u.copy(message = m.copy(extra = extra.copy(parts = emptyMap(), runs = emptyMap(), mentions = emptyMap()).toJson()))
         val longestPart = m.parts.filter { !it.isMedia }.maxByOrNull { it.text.length }
         val longest = listOf(m.text.length, m.extra.length, longestPart?.text?.length ?: 0).max()
         if (longest < MIN_CUT_CHARS) return null
@@ -526,11 +597,27 @@ object DirectWire {
         "edit" -> DirectArchive.Update.Edit(
             o.getString("messageId"), o.getString("text"), o.optInt("part"), o.optLong("atMs"), TextRuns.fromJsonArray(o.optJSONArray("runs")),
             o.optString("sender"), o.optBoolean("fromMe"), o.optString("conversationId"), o.optString("groupGuid").takeIf { it.isNotEmpty() },
+            Mentions.fromJsonArray(o.optJSONArray("mentions")),
         )
         "reaction" -> DirectArchive.Update.Reaction(
             o.getString("messageId"), o.optString("participantId"), o.getString("emoji"), o.optBoolean("enable"),
             o.optBoolean("fromMe"), o.optLong("atMs"), o.optString("conversationId"), o.optString("groupGuid").takeIf { it.isNotEmpty() },
+            o.optStringOrNull("sticker")?.takeIf { it.isNotEmpty() },
         )
+        "sticker" -> DirectArchive.Update.Sticker(
+            o.getString("messageId"), o.getString("stickerGuid"), o.optString("participantId"), o.optBoolean("fromMe"), o.optLong("atMs"),
+            o.optString("conversationId"), o.optString("groupGuid").takeIf { it.isNotEmpty() },
+        )
+        "pollVote" -> DirectArchive.Update.PollVote(
+            o.getString("messageId"), o.optString("voter"), o.optBoolean("fromMe"),
+            o.optJSONArray("options")?.let { a -> (0 until minOf(a.length(), Polls.MAX_OPTIONS)).map { a.optString(it) }.filter { it.isNotBlank() } }.orEmpty(),
+            o.optLong("atMs"), o.optString("conversationId"), o.optString("groupGuid").takeIf { it.isNotEmpty() },
+        )
+        "pollChange" -> {
+            val row = o.optJSONObject("row")?.let { decode(it) as? DirectArchive.Update.Upsert }
+            val root = o.optStringOrNull("rootId")?.takeIf { it.isNotBlank() }
+            if (row == null || root == null) DirectArchive.Update.Ignore else DirectArchive.Update.PollChange(root, row)
+        }
         "unsent" -> DirectArchive.Update.Unsent(
             o.getString("messageId"), o.optInt("part"), o.optBoolean("fromMe"), o.optString("senderName"),
             o.optString("sender"), o.optLong("atMs"), o.optString("conversationId"), o.optString("groupGuid").takeIf { it.isNotEmpty() },

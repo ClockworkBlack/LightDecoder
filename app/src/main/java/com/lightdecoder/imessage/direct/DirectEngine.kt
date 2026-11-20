@@ -215,6 +215,7 @@ class DirectEngine private constructor(private val app: Context) {
                 else -> DirectArchive.map(inst, me, Handles::display, texts, ::describe)
             }
             if (mapped is DirectArchive.Update.Upsert) keepInlineFiles(inst)
+            keepPictures(inst, mapped)
             mapped
         } catch (e: CancellationException) {
             throw e
@@ -260,6 +261,68 @@ class DirectEngine private constructor(private val app: Context) {
             } catch (e: java.io.IOException) {
                 Log.w(TAG, "attachment not written", e)
             }
+        }
+    }
+
+    /**
+     * The pictures a change names that are no attachment of a message: a link preview's (it came
+     * inside the message: drawn again as a JPEG, [PreviewImages.jpeg]) and a sticker's put on a
+     * message (as a tapback, or dragged onto it: fetched from Apple's file servers, never more than
+     * [STICKER_MAX_BYTES], drawn again as a PNG). Each is written aside under its key
+     * ([DirectMedia.pendingInlineFile]), as a small attachment is: the main process moves it into
+     * place only once it took the change.
+     */
+    private suspend fun keepPictures(inst: MessageInst, update: DirectArchive.Update) {
+        when (update) {
+            is DirectArchive.Update.Upsert -> {
+                val key = IMessageExtra.parse(update.message.extra).link?.image?.takeIf { it.isNotEmpty() } ?: return
+                val bytes = DirectArchive.linkImage((inst.message as? PushChatMessage.Message)?.v1?.linkMeta) ?: return
+                writePending(key, PreviewImages.jpeg(bytes, PreviewImages.LINK_SIDE))
+            }
+            is DirectArchive.Update.Reaction -> update.sticker?.let { key -> writePending(key, fetchSticker(inst)) }
+            is DirectArchive.Update.Sticker -> {
+                val guid = DirectArchive.guidOf(update.messageId) ?: return
+                writePending(IMessageExtra.stickerKey(guid, update.stickerGuid), fetchSticker(inst))
+            }
+            else -> Unit
+        }
+    }
+
+    /** The sticker [inst] puts on a message, as a PNG to show ([PreviewImages.png]); null when it has none or it cannot be fetched or read. */
+    private suspend fun fetchSticker(inst: MessageInst): ByteArray? {
+        val attachment = DirectArchive.stickerAttachment(inst.message) ?: return null
+        val bytes = when (val type = attachment.aType) {
+            is AttachmentType.Inline -> type.v1.takeIf { it.isNotEmpty() && it.size <= STICKER_MAX_BYTES }
+            is AttachmentType.Mmcs -> {
+                val file = type.v1.maxByOrNull { it.size } ?: return null
+                if (file.size > STICKER_MAX_BYTES.toULong()) return null
+                // Named as the media cache's partial files, so one left by a crash is cleaned up.
+                val partial = File(MediaCache.mediaDir(app, ChatService.IMESSAGE).apply { mkdirs() }, "sticker-${java.util.UUID.randomUUID()}${MediaCache.PART_SUFFIX}")
+                try {
+                    withTimeoutOrNull(STICKER_TIMEOUT_MS) { downloadCapped(requireSession(), file, partial.path, STICKER_MAX_BYTES) }
+                        ?: return null.also { Log.w(TAG, "a sticker was not fetched in time") }
+                    partial.takeIf { it.isFile && it.length() in 1..STICKER_MAX_BYTES }?.readBytes()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "a sticker was not fetched (${e::class.java.simpleName})")
+                    null
+                } finally {
+                    partial.delete()
+                }
+            }
+        } ?: return null
+        return PreviewImages.png(bytes, PreviewImages.STICKER_SIDE)
+    }
+
+    /** [bytes] written aside under [key] in the iMessage media folder, for the main process to move into place; nothing for none. */
+    private fun writePending(key: String, bytes: ByteArray?) {
+        if (bytes == null) return
+        val file = MediaCache.fileFor(app, key, IMessageExtra.extensionOf(key), ChatService.IMESSAGE)
+        try {
+            MediaCache.writeAtomically(DirectMedia.pendingInlineFile(file), bytes)
+        } catch (e: java.io.IOException) {
+            Log.w(TAG, "a picture was not written", e)
         }
     }
 
@@ -504,7 +567,9 @@ class DirectEngine private constructor(private val app: Context) {
      * it: [text], then [attachments] (each uploaded first), an inline reply to [replyGuid] (part
      * [replyPart]), sent with [effect] (Apple's effect id), [voice] when it is a recorded audio
      * message. With [app] it is that iMessage app's new card (a new game): its balloon, with
-     * [attachments] as its picture. [runs] format the text (bold, a text effect, ...; [TextRuns]).
+     * [attachments] as its picture. [runs] format the text (bold, a text effect, ...; [TextRuns]),
+     * [mentions] name the members it mentions ([Mentions]), and [link] is its link's preview, sent
+     * as an iPhone sends one ([DirectMessages.linkMeta]).
      */
     suspend fun send(
         target: DirectWire.Target,
@@ -517,15 +582,22 @@ class DirectEngine private constructor(private val app: Context) {
         app: IMessageExtra.App? = null,
         runs: List<TextRun> = emptyList(),
         scheduledMs: Long? = null,
+        mentions: List<Mention> = emptyList(),
+        link: DirectWire.LinkPreviewRequest? = null,
     ): DirectWire.SendReply {
         val s = requireSession()
         val (conversation, from) = conversationOf(target)
         val uploaded = attachments.map { upload(s, it) }
-        val outgoing = if (app != null) DirectMessages.appParts(app, uploaded, move = false) else DirectMessages.outgoing(text, uploaded, runs)
+        val outgoing = if (app != null) DirectMessages.appParts(app, uploaded, move = false) else DirectMessages.outgoing(text, uploaded, runs, mentions)
+        // The preview's picture, as the main process made it (a small JPEG): never more than a preview's.
+        val linkMeta = link?.takeIf { app == null }?.let { l ->
+            val image = l.imagePath?.let(::File)?.takeIf { it.isFile && it.length() in 1..LinkPreviews.MAX_IMAGE_BYTES }?.readBytes()
+            DirectMessages.linkMeta(l, image)
+        }
         val message = NormalMessage(
             outgoing.parts,
             effect, replyGuid, replyGuid?.let { replyPart ?: "0:0:0" }, MessageType.IMessage,
-            null, app?.let { DirectMessages.extensionApp(it) }, null, voice,
+            null, app?.let { DirectMessages.extensionApp(it) }, linkMeta, voice,
             // Send Later: Apple's servers send it then ([SendLater]).
             scheduledMs?.let { ScheduleMode(it.toULong(), true) }, null,
         )
@@ -704,12 +776,12 @@ class DirectEngine private constructor(private val app: Context) {
         sendAndConfirm(s, inst, Sent.UNSEND)
     }
 
-    /** Part [part] of the user's message [guid] now reads [text], formatted with [runs]; the main process checked the limits. */
-    suspend fun edit(target: DirectWire.Target, guid: String, part: Int, text: String, runs: List<TextRun> = emptyList()) {
+    /** Part [part] of the user's message [guid] now reads [text], formatted with [runs], mentioning [mentions]; the main process checked the limits. */
+    suspend fun edit(target: DirectWire.Target, guid: String, part: Int, text: String, runs: List<TextRun> = emptyList(), mentions: List<Mention> = emptyList()) {
         val s = requireSession()
         val (conversation, from) = conversationOf(target)
         val inst = uniffi.rust_bridge.newMsg(
-            conversation, from, PushChatMessage.Edit(EditMessage(guid, part.toULong(), DirectMessages.editParts(text, runs))),
+            conversation, from, PushChatMessage.Edit(EditMessage(guid, part.toULong(), DirectMessages.editParts(text, runs, mentions))),
         ).copy(sentTimestamp = System.currentTimeMillis().toULong())
         sendAndConfirm(s, inst, Sent.EDIT)
     }
@@ -937,6 +1009,12 @@ class DirectEngine private constructor(private val app: Context) {
         private const val POSTER_MIME = "application/zip"
         private const val POSTER_UTI = "public.zip-archive"
         private const val POSTER_NAME = "transcriptBackground.zip"
+
+        /** The largest sticker fetched to show on a message (an iPhone's is a small HEIC or PNG). */
+        const val STICKER_MAX_BYTES = 2L * 1024 * 1024
+
+        /** How long a sticker's fetch may hold up the next event from Apple. */
+        private const val STICKER_TIMEOUT_MS = 20_000L
 
         /** How a group photo is uploaded (a square JPEG; Apple keeps it as the transfer "GroupPhotoImage"). */
         private const val GROUP_PHOTO_UTI = "public.jpeg"

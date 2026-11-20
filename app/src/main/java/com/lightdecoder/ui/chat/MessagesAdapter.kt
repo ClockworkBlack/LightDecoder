@@ -24,7 +24,9 @@ import com.lightdecoder.databinding.ItemMediaPartBinding
 import com.lightdecoder.databinding.ItemMessageBinding
 import com.lightdecoder.databinding.ItemMessageSystemBinding
 import com.lightdecoder.databinding.ItemThreadHeaderBinding
+import com.lightdecoder.imessage.direct.DirectArchive
 import com.lightdecoder.imessage.direct.IMessageExtra
+import com.lightdecoder.imessage.direct.Polls
 import com.lightdecoder.relay.ReactionDto
 
 /**
@@ -75,6 +77,15 @@ class MessagesAdapter(
     /** The picture of whoever sent a message, for the avatar beside it in a group ([AvatarPhotos]); null for their initials. */
     var senderPhoto: (MessageRow) -> java.io.File? = { null }
 
+    /** A poll's voter by name ([Polls.Ballot.voter]: [Polls.ME] for the user, else their address). */
+    var voterName: (String) -> String = { it }
+
+    /** Whether the user can vote in a poll's card (the iMessage library reaches its chat). */
+    var canVote: (MessageRow) -> Boolean = { false }
+
+    /** The file a picture kept with an iMessage is in, by its key ([IMessageExtra.linkImageKey], a sticker's). */
+    var pictureFile: (String) -> java.io.File? = { null }
+
     interface Callbacks {
         fun onMessageLongPress(row: MessageRow)
         fun onFailedTap(row: MessageRow)
@@ -113,6 +124,12 @@ class MessagesAdapter(
          * "Reply" or "N Replies", or a reply's faded copy: the thread rooted at [rootId] opens.
          */
         fun onOpenThread(rootId: String) = Unit
+
+        /** A poll's choice tapped: the user's vote on it, or taken back ([Polls.toggle]). */
+        fun onPollVote(row: MessageRow, optionId: String) = Unit
+
+        /** A poll's "Add Choice" tapped. */
+        fun onPollAddChoice(row: MessageRow) = Unit
     }
 
     /** Messages whose invisible ink was tapped away, by id: their text shows. */
@@ -291,6 +308,8 @@ class MessagesAdapter(
         val textColor = if (outgoing) onOwn else if (phone) holder.phoneOnIncoming else holder.onIncoming
         val extra = if (row.extra.isEmpty()) NO_EXTRA else IMessageExtra.parse(row.extra)
         val app = extra.app
+        // A poll (iOS 26) draws its own card: its question, choices and votes.
+        val poll = app?.takeIf(Polls::isPoll)?.let { pollOf(it.url) }
         // A picture or sticker on its own has no bubble: it sits on the conversation itself
         // (as on an iPhone), with its time under it in the conversation's own colours.
         val bare = isBare(item) && app == null
@@ -344,9 +363,17 @@ class MessagesAdapter(
         b.body.visibility = if (row.text.isNotEmpty() && app == null) View.VISIBLE else View.GONE
         // Bold, italic, ... and text effects; none under invisible ink (its shape alone shows).
         val runs = if (inked || app != null) emptyList() else extra.textRuns(row.text)
-        b.body.text = if (inked) IMessageBubbles.inked(row.text) else BubbleText.styled(row.text, runs)
+        // Mentions: the names bold in the accent (white on the user's own), one of the user on a soft highlight.
+        val mentions = if (inked || app != null) emptyList() else extra.textMentions(row.text)
+        val accent = if (outgoing) textColor else if (phone) holder.phoneBlue else holder.readTint
+        b.body.text = if (inked) {
+            IMessageBubbles.inked(row.text)
+        } else {
+            MentionMarks.highlight(BubbleText.styled(row.text, runs), mentions, accent, (accent and 0x00FFFFFF) or MENTION_ME_ALPHA)
+        }
         val textEffects = runs.mapNotNull { it.effect }.distinct()
-        bindAppCard(holder, app, textColor, metaColor)
+        bindAppCard(holder, app.takeIf { poll == null }, textColor, metaColor)
+        bindPollCard(holder, row, poll, extra, textColor, metaColor, accent)
         bindLinkCard(holder, extra.link.takeIf { app == null }, textColor, metaColor)
         val effect = IMessageBubbles.effectCaption(context, extra)
         b.effect.visibility = if (effect == null) View.GONE else View.VISIBLE
@@ -434,7 +461,7 @@ class MessagesAdapter(
         }
         ViewCompat.replaceAccessibilityAction(b.failedText, AccessibilityActionCompat.ACTION_CLICK, failedTapLabel, null)
 
-        bindReactions(holder, row)
+        bindReactions(holder, row, extra)
         placeReactions(holder, outgoing)
 
         // Long press anywhere on the bubble (the text view takes its own touches for links).
@@ -461,6 +488,8 @@ class MessagesAdapter(
         val tap = when {
             tick == Tick.FAILED -> View.OnClickListener { callbacks.onFailedTap(row) }
             inked -> reveal
+            // A poll's choices take their own taps.
+            poll != null -> null
             app != null -> View.OnClickListener { callbacks.onAppCardTap(row) }
             textEffects.isNotEmpty() -> playText
             else -> openThread
@@ -483,6 +512,7 @@ class MessagesAdapter(
         }
         val tapLabel = failedTapLabel ?: when {
             inked -> context.getString(R.string.imessage_invisible_ink_hidden)
+            poll != null -> null
             app != null -> app.shownName.ifBlank { context.getString(R.string.imessage_app_unnamed) }
             textEffects.isNotEmpty() -> context.getString(R.string.imessage_text_effect_replay_action)
             openThread != null -> context.getString(R.string.imessage_thread_open)
@@ -595,6 +625,126 @@ class MessagesAdapter(
         line(b.appName, lines.appName, metaColor)
     }
 
+    /**
+     * A poll's card (iOS 26, [Polls]; none: hidden): its question, then each choice with how many
+     * voted for it and who (their initials), the user's own marked, a bar as long as its share of
+     * the votes; a tap on a choice votes for it or takes the vote back ([Callbacks.onPollVote]), and
+     * "Add Choice" under them adds one ([Callbacks.onPollAddChoice]), where the user can vote.
+     */
+    private fun bindPollCard(
+        holder: MessageHolder,
+        row: MessageRow,
+        poll: Polls.Poll?,
+        extra: IMessageExtra,
+        textColor: Int,
+        metaColor: Int,
+        accent: Int,
+    ) {
+        val b = holder.binding
+        val box = b.pollOptions
+        box.removeAllViews()
+        if (poll == null) {
+            b.pollCard.visibility = View.GONE
+            b.pollAddChoice.setOnClickListener(null)
+            return
+        }
+        val context = b.root.context
+        b.pollCard.visibility = View.VISIBLE
+        b.pollTitle.text = poll.title.ifBlank { context.getString(R.string.imessage_poll_summary_untitled) }
+        b.pollTitle.setTextColor(textColor)
+        val votable = canVote(row)
+        val tally = Polls.tally(poll, extra.pollVotes)
+        val most = tally.maxOfOrNull { it.count }?.coerceAtLeast(1) ?: 1
+        val mine = Polls.choicesOf(extra.pollVotes, Polls.ME).toSet()
+        val inflater = LayoutInflater.from(context)
+        for (t in tally) {
+            val line = inflater.inflate(R.layout.item_poll_option, box, false)
+            val chosen = t.option.id in mine
+            val mark = line.findViewById<TextView>(R.id.pollOptionMark)
+            mark.text = if (chosen) "✓" else ""
+            mark.setTextColor(if (chosen) Avatars.textColorOn(accent) else accent)
+            mark.background = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.OVAL
+                setColor(if (chosen) accent else Color.TRANSPARENT)
+                setStroke(holder.dp(2f), accent)
+            }
+            line.findViewById<TextView>(R.id.pollOptionText).apply {
+                text = t.option.text
+                setTextColor(textColor)
+            }
+            line.findViewById<TextView>(R.id.pollOptionCount).apply {
+                text = if (t.count > 0) t.count.toString() else ""
+                setTextColor(metaColor)
+            }
+            val voters = line.findViewById<android.widget.LinearLayout>(R.id.pollOptionVoters)
+            for (voter in t.voters.take(MAX_VOTER_FACES)) {
+                val face = inflater.inflate(R.layout.item_poll_voter, voters, false) as TextView
+                Avatars.bind(face, voterName(voter), voter, "")
+                voters.addView(face)
+            }
+            // How much of the most votes it has: a bar behind it.
+            line.findViewById<View>(R.id.pollOptionBar).apply {
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    cornerRadius = holder.dp(POLL_RADIUS_DP).toFloat()
+                    setColor((accent and 0x00FFFFFF) or POLL_BAR_ALPHA)
+                }
+                pivotX = 0f
+                scaleX = t.count.toFloat() / most
+                visibility = if (t.count > 0) View.VISIBLE else View.INVISIBLE
+            }
+            val votes = context.resources.getQuantityString(R.plurals.imessage_poll_votes, t.count, t.count)
+            line.contentDescription = context.getString(
+                if (chosen) R.string.imessage_poll_option_mine_description else R.string.imessage_poll_option_description, t.option.text, votes,
+            )
+            line.alpha = if (votable) 1f else DISABLED_ALPHA
+            if (votable) {
+                line.setOnClickListener { callbacks.onPollVote(row, t.option.id) }
+                ViewCompat.replaceAccessibilityAction(
+                    line, AccessibilityActionCompat.ACTION_CLICK,
+                    context.getString(if (chosen) R.string.imessage_poll_unvote_action else R.string.imessage_poll_vote_action), null,
+                )
+            } else {
+                line.setOnClickListener(null)
+                line.isClickable = false
+            }
+            line.setOnLongClickListener {
+                callbacks.onMessageLongPress(row)
+                true
+            }
+            box.addView(line)
+        }
+        val canAdd = votable && poll.options.size < Polls.MAX_OPTIONS
+        b.pollAddChoice.visibility = if (canAdd) View.VISIBLE else View.GONE
+        b.pollAddChoice.setTextColor(accent)
+        b.pollAddChoice.setOnClickListener(if (canAdd) View.OnClickListener { callbacks.onPollAddChoice(row) } else null)
+    }
+
+    /** Polls read from their cards' addresses, by address (a card is bound again and again). */
+    private val polls = android.util.LruCache<String, Polls.Poll>(32)
+
+    private fun pollOf(url: String): Polls.Poll? = polls.get(url) ?: Polls.decode(url)?.also { polls.put(url, it) }
+
+    /** Pictures kept with messages (a link's, a sticker's), by file, size and time, decoded once. */
+    private val pictures = object : android.util.LruCache<String, android.graphics.Bitmap>(PICTURE_CACHE_KB) {
+        override fun sizeOf(key: String, value: android.graphics.Bitmap) = (value.byteCount / 1024).coerceAtLeast(1)
+    }
+
+    /** The picture in [file], at most [maxSide] on its longest side; null when there is none (yet) or it cannot be read. */
+    private fun picture(file: java.io.File, maxSide: Int): android.graphics.Bitmap? {
+        if (!file.isFile) return null
+        val key = "${file.path}|${file.length()}|${file.lastModified()}|$maxSide"
+        pictures.get(key)?.let { return it }
+        val decoded = try {
+            if (file.length() > MAX_PICTURE_BYTES) null else MediaLoader.decodePreview(file.readBytes(), maxSide)
+        } catch (e: Exception) {
+            null
+        } catch (e: OutOfMemoryError) {
+            null
+        } ?: return null
+        pictures.put(key, decoded)
+        return decoded
+    }
+
     /** A link's preview card under the text ([link], none: hidden); a tap opens the page (a web page only). */
     private fun bindLinkCard(holder: MessageHolder, link: IMessageExtra.Link?, textColor: Int, metaColor: Int) {
         val b = holder.binding
@@ -605,6 +755,25 @@ class MessagesAdapter(
         }
         val lines = IMessageBubbles.linkLines(link)
         b.linkCard.visibility = View.VISIBLE
+        // Its page's picture above its lines, as on an iPhone (none: the lines alone).
+        val picture = link.image.takeIf { it.isNotEmpty() }?.let(pictureFile)?.let { picture(it, LINK_PICTURE_SIDE) }
+        val card = b.linkCard.layoutParams as android.widget.LinearLayout.LayoutParams
+        if (picture != null) {
+            val width = holder.dp(LINK_CARD_WIDTH_DP)
+            card.width = width
+            b.linkImage.visibility = View.VISIBLE
+            b.linkImage.setImageBitmap(picture)
+            val inner = width - b.linkCard.paddingStart - b.linkCard.paddingEnd
+            val image = b.linkImage.layoutParams
+            image.height = (inner.toLong() * picture.height / picture.width.coerceAtLeast(1)).toInt()
+                .coerceIn(holder.dp(LINK_PICTURE_MIN_DP), holder.dp(LINK_PICTURE_MAX_DP))
+            b.linkImage.layoutParams = image
+        } else {
+            card.width = android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+            b.linkImage.visibility = View.GONE
+            b.linkImage.setImageDrawable(null)
+        }
+        b.linkCard.layoutParams = card
         b.linkTitle.text = lines.title
         b.linkTitle.setTextColor(textColor)
         b.linkSummary.text = lines.summary
@@ -941,11 +1110,16 @@ class MessagesAdapter(
         }
     }
 
-    private fun bindReactions(holder: MessageHolder, row: MessageRow) {
+    private fun bindReactions(holder: MessageHolder, row: MessageRow, extra: IMessageExtra = NO_EXTRA) {
         val box = holder.binding.reactions
         box.removeAllViews()
         val shown = row.reactions.filter { it.emoji.isNotEmpty() }
-        if (shown.isEmpty()) {
+        val guid = DirectArchive.guidOf(row.id)
+        // Stickers dragged onto it (iOS 17), on its corner as on an iPhone: each one's picture, when it came.
+        val stickers = if (guid == null) emptyList() else extra.stickers.mapNotNull { st ->
+            pictureFile(IMessageExtra.stickerKey(guid, st.id))?.let { picture(it, STICKER_SIDE_PX) }?.let { st to it }
+        }
+        if (shown.isEmpty() && stickers.isEmpty()) {
             box.visibility = View.GONE
             return
         }
@@ -956,6 +1130,27 @@ class MessagesAdapter(
             val chip = inflater.inflate(R.layout.item_reaction, box, false) as TextView
             val count = reaction.participantIds.size.coerceAtLeast(1)
             chip.text = if (count > 1) "${reaction.emoji} $count" else reaction.emoji
+            // A sticker as a tapback: the latest one's picture in place of the emoji, as on an iPhone.
+            val sticker = if (reaction.emoji == DirectArchive.STICKER_TAPBACK && guid != null) {
+                reaction.participantIds.asReversed().firstNotNullOfOrNull { who ->
+                    pictureFile(IMessageExtra.tapbackStickerKey(guid, who))?.let { picture(it, STICKER_SIDE_PX) }
+                }
+            } else {
+                null
+            }
+            if (sticker != null) {
+                val side = holder.dp(STICKER_PILL_DP)
+                val drawable = android.graphics.drawable.BitmapDrawable(chip.resources, sticker).apply {
+                    val w = if (sticker.width >= sticker.height) side else side * sticker.width / sticker.height.coerceAtLeast(1)
+                    val h = if (sticker.height >= sticker.width) side else side * sticker.height / sticker.width.coerceAtLeast(1)
+                    setBounds(0, 0, w.coerceAtLeast(1), h.coerceAtLeast(1))
+                }
+                chip.text = if (count > 1) count.toString() else ""
+                chip.setCompoundDrawablesRelative(drawable, null, null, null)
+                chip.compoundDrawablePadding = if (count > 1) holder.dp(2f) else 0
+            } else {
+                chip.setCompoundDrawablesRelative(null, null, null, null)
+            }
             // A 48dp touch target around a smaller pill (the inset drawables keep the pill's size).
             // A background with padding replaces the view's own: the inset's top and bottom
             // centre the label in the pill, and the layout's side padding is put back.
@@ -972,7 +1167,8 @@ class MessagesAdapter(
             if (phoneStyle) chip.setTextColor(if (reaction.fromMe) holder.onBlue else holder.phoneOnIncoming)
             chip.setPaddingRelative(padStart, chip.paddingTop, padEnd, chip.paddingBottom)
             chip.contentDescription = box.context.resources.getQuantityString(
-                if (reaction.fromMe) R.plurals.chat_reaction_mine else R.plurals.chat_reaction, count, reaction.emoji, count,
+                if (reaction.fromMe) R.plurals.chat_reaction_mine else R.plurals.chat_reaction, count,
+                if (sticker != null) box.context.getString(R.string.imessage_sticker_tapback) else reaction.emoji, count,
             )
             chip.isEnabled = !row.isLocal
             chip.alpha = if (chip.isEnabled) 1f else DISABLED_ALPHA
@@ -991,6 +1187,21 @@ class MessagesAdapter(
                 true
             }
             box.addView(chip)
+        }
+        for ((st, bitmap) in stickers) {
+            val view = ImageView(box.context)
+            val side = holder.dp(PLACED_STICKER_DP)
+            view.layoutParams = android.view.ViewGroup.MarginLayoutParams(side, side).apply { marginEnd = holder.dp(2f) }
+            view.scaleType = ImageView.ScaleType.FIT_CENTER
+            view.setImageBitmap(bitmap)
+            view.contentDescription = box.context.getString(
+                R.string.imessage_sticker_by, if (st.by == Polls.ME) box.context.getString(R.string.chat_you) else voterName(st.by),
+            )
+            view.setOnLongClickListener {
+                callbacks.onMessageLongPress(row)
+                true
+            }
+            box.addView(view)
         }
     }
 
@@ -1074,6 +1285,29 @@ class MessagesAdapter(
 
         /** Longest side of a picture in a bubble (decoded at this size or the bubble's width, shown up to it). */
         const val MEDIA_MAX_SIDE_DP = 480
+
+        /** A mention of the user: the accent at this alpha behind its name. */
+        const val MENTION_ME_ALPHA = 0x40000000
+
+        /** A link card with its page's picture: this wide, the picture this tall at most and at least. */
+        const val LINK_CARD_WIDTH_DP = 240f
+        const val LINK_PICTURE_MAX_DP = 200f
+        const val LINK_PICTURE_MIN_DP = 80f
+        const val LINK_PICTURE_SIDE = 600
+
+        /** Stickers: on a tapback's pill, and dragged onto a bubble. */
+        const val STICKER_PILL_DP = 22f
+        const val PLACED_STICKER_DP = 40f
+        const val STICKER_SIDE_PX = 160
+
+        /** A poll's choice: the bar behind it at this alpha of the accent, its corners; at most this many voters' faces. */
+        const val POLL_BAR_ALPHA = 0x33000000
+        const val POLL_RADIUS_DP = 12f
+        const val MAX_VOTER_FACES = 3
+
+        /** The pictures kept with messages decoded at once, and the largest one read. */
+        const val PICTURE_CACHE_KB = 4 * 1024
+        const val MAX_PICTURE_BYTES = 4L * 1024 * 1024
 
         /** How far the time under a bubble-less picture sits in from its edge. */
         val META_INSET = (4 * android.content.res.Resources.getSystem().displayMetrics.density).toInt()

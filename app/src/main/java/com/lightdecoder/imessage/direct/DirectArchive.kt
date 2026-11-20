@@ -171,13 +171,17 @@ object DirectArchive {
             val fromMe: Boolean = false,
             val conversationId: String = "",
             val groupGuid: String? = null,
+            /** The members the new text mentions ([Mentions]), over [text]. */
+            val mentions: List<Mention> = emptyList(),
         ) : Update()
 
         /**
          * Someone put a tapback on a message ([enable]) or took it back. [participantId] is their
          * address without its scheme; [fromMe] when it is the user, from another device. Taken only
          * from someone in the message's chat (and, when Apple said in which chat it was:
-         * [conversationId], [groupGuid], in that one).
+         * [conversationId], [groupGuid], in that one). A sticker as a tapback (iOS 18) is
+         * [STICKER_TAPBACK], its picture written aside under the key [sticker] (by the ":imessage"
+         * process, [IMessageExtra.tapbackStickerKey]) when it came with one.
          */
         data class Reaction(
             val messageId: String,
@@ -188,7 +192,46 @@ object DirectArchive {
             val atMs: Long,
             val conversationId: String = "",
             val groupGuid: String? = null,
+            val sticker: String? = null,
         ) : Update()
+
+        /**
+         * Someone put a sticker on message [messageId] (dragged it onto its bubble, iOS 17): the
+         * message that did ([stickerGuid]), by [participantId] (their address without its scheme;
+         * [fromMe]: the user, on another device), its picture written aside by the ":imessage"
+         * process under [IMessageExtra.stickerKey]. Taken as a tapback is: from someone in the chat, in it.
+         */
+        data class Sticker(
+            val messageId: String,
+            val stickerGuid: String,
+            val participantId: String,
+            val fromMe: Boolean,
+            val atMs: Long,
+            val conversationId: String = "",
+            val groupGuid: String? = null,
+        ) : Update()
+
+        /**
+         * A vote in a poll (iOS 26, [Polls]): [voter] (their address; [fromMe]: the user, on another
+         * device) chose [options] on the poll's card [messageId] (that card, or a later one of its
+         * session), as of [atMs]; none: took their vote back. Taken only from someone in the chat, in it.
+         */
+        data class PollVote(
+            val messageId: String,
+            val voter: String,
+            val fromMe: Boolean,
+            val options: List<String>,
+            val atMs: Long,
+            val conversationId: String = "",
+            val groupGuid: String? = null,
+        ) : Update()
+
+        /**
+         * A poll's card sent again with its new state (a choice added): the session that card
+         * [rootId] started. Where that card is stored, it shows the new state in its place (as an
+         * iPhone updates a poll); else [row] is stored as the poll's card.
+         */
+        data class PollChange(val rootId: String, val row: Upsert) : Update()
 
         /**
          * The sender unsent part [part] of a message ([fromMe]: the user, from another device), at
@@ -287,6 +330,9 @@ object DirectArchive {
 
         /** Someone took the chat's background off. */
         fun removedBackground(who: String): String
+
+        /** What a poll's card stands for as a message (the list's snippet, a notification): "Poll: [question]". */
+        fun poll(question: String): String = question.ifBlank { Polls.NAME }
     }
 
     /**
@@ -320,13 +366,20 @@ object DirectArchive {
                 // Send Later from another of the user's devices: Apple sends it then (two weeks ahead at most).
                 val scheduled = n.scheduled?.takeIf { it.schedule && fromMe }?.ms?.toLong()
                     ?.coerceAtMost(now + SendLater.MAX_AHEAD_MS + MAX_FUTURE_MS) ?: 0L
-                val body = Body(n.parts, n.effect, n.voice, linkOf(n.linkMeta), appOf(n.app, messageId(inst.id)), n.subject, n.replyGuid, scheduled)
-                message(inst, body, me, nameOf, describe, now)
+                // A rich link's balloon is no app's card: its preview is the link's.
+                val app = n.app?.takeUnless { it.bundleId == IMessageExtra.LINK_BALLOON }
+                // Its picture, written aside by the ":imessage" process (DirectEngine) under the message's key.
+                val link = linkOf(n.linkMeta)?.let { l -> if (linkImage(n.linkMeta) != null) l.copy(image = IMessageExtra.linkImageKey(inst.id)) else l }
+                val body = Body(n.parts, n.effect, n.voice, link, appOf(app, messageId(inst.id)), n.subject, n.replyGuid, scheduled)
+                message(inst, body, me, nameOf, texts, describe, now)
             }
             is PushChatMessage.React -> when (val r = m.v1.reaction) {
                 is ReactMessageType.React -> {
                     val (chat, guid) = chatOf(inst, me)
-                    Update.Reaction(messageId(m.v1.toUuid), Handles.display(sender), emojiOf(r.reaction), r.enable, fromMe, at, chat, guid)
+                    // A sticker as a tapback: its picture, when it came with one, is kept by who put it there (one each, as tapbacks are).
+                    val sticker = (r.reaction as? Reaction.Sticker)?.takeIf { r.enable && stickerAttachment(m) != null }
+                        ?.let { IMessageExtra.tapbackStickerKey(m.v1.toUuid, if (fromMe) TAPBACK_ME else Handles.display(sender)) }
+                    Update.Reaction(messageId(m.v1.toUuid), Handles.display(sender), emojiOf(r.reaction), r.enable, fromMe, at, chat, guid, sticker)
                 }
                 is ReactMessageType.Extension -> appUpdate(inst, m.v1.toUuid, r, me, nameOf, texts, describe, now)
             }
@@ -337,7 +390,10 @@ object DirectArchive {
             is PushChatMessage.Edit -> {
                 val (chat, guid) = chatOf(inst, me)
                 m.v1.newParts.map { it.part }.let { parts ->
-                    Update.Edit(messageId(m.v1.tuuid), textOf(parts), m.v1.editPart.toInt(), at, TextRuns.fromEdit(parts), sender, fromMe, chat, guid)
+                    Update.Edit(
+                        messageId(m.v1.tuuid), textOf(parts), m.v1.editPart.toInt(), at, TextRuns.fromEdit(parts), sender, fromMe, chat, guid,
+                        Mentions.fromEdit(parts, me),
+                    )
                 }
             }
             // From one of the user's own devices: a Delivered says nothing; a Read means they read it there.
@@ -433,6 +489,7 @@ object DirectArchive {
         n: Body,
         me: Set<String>,
         nameOf: (String) -> String,
+        texts: Texts,
         describe: (MessageAttachment) -> String,
         now: Long,
     ): Update {
@@ -442,20 +499,23 @@ object DirectArchive {
         val participants = (conversation.participants + listOfNotNull(sender)).distinct()
         val id = conversationId(participants, me, conversation.senderGuid)
         val conv = conversationDto(id, participants, conversation.cvName, me, nameOf)
-        val texts = partTexts(n.parts)
-        // An app's card has no words of its own on the wire: what it shows stands for them.
-        val text = n.app?.summary()?.takeIf { it.isNotEmpty() } ?: IMessageExtra(parts = texts).text()
+        val partTexts = partTexts(n.parts)
+        // An app's card has no words of its own on the wire: what it shows stands for them (a
+        // poll: its question, as an iPhone names one).
+        val poll = n.app?.takeIf(Polls::isPoll)?.let { Polls.decode(it.url) }
+        val text = poll?.let { texts.poll(it.title) } ?: n.app?.summary()?.takeIf { it.isNotEmpty() } ?: IMessageExtra(parts = partTexts).text()
         val attachments = attachments(n.parts)
         val extra = IMessageExtra(
-            parts = texts,
+            parts = partTexts,
             effect = n.effect?.takeIf { it.isNotBlank() },
             voice = n.voice,
             link = n.link,
             app = n.app,
             sticker = attachments.any { it.sticker },
             // An app's card shows its own lines, not the text that stands for them.
-            runs = if (n.app == null) TextRuns.fromParts(n.parts).filterKeys { it in texts } else emptyMap(),
+            runs = if (n.app == null) TextRuns.fromParts(n.parts).filterKeys { it in partTexts } else emptyMap(),
             scheduledAt = n.scheduledAt,
+            mentions = if (n.app == null) Mentions.fromParts(n.parts, me).filterKeys { it in partTexts } else emptyMap(),
         )
         val msg = MessageDto(
             id = messageId(inst.id),
@@ -487,8 +547,10 @@ object DirectArchive {
     /**
      * An iMessage app's update to the card that started its session (message [rootGuid]). A move
      * (a game's turn) is a card of its own, a new message with the app's new state and picture,
-     * as an iPhone shows it; a vote in a poll and the like ([ReactMessageType.Extension.isMeta])
-     * is a row of the conversation's own saying who did it.
+     * as an iPhone shows it; an update that is no card of its own ([ReactMessageType.Extension.isMeta])
+     * is a row of the conversation's own saying who did it. A poll's are its own: a vote counts
+     * on its card ([Update.PollVote]), a choice added changes it ([Update.PollChange]), and no row
+     * says either. Without a card at all it is a sticker dragged onto a message ([Update.Sticker]).
      */
     private fun appUpdate(
         inst: MessageInst,
@@ -501,16 +563,63 @@ object DirectArchive {
         now: Long,
     ): Update {
         val conversation = inst.conversation ?: return Update.Ignore
-        val sender = inst.sender
+        val sender = inst.sender ?: return Update.Ignore
+        val fromMe = sender in me
         val app = appOf(ext.spec, messageId(rootGuid)) ?: return Update.Ignore
+        // Without a card: a sticker dragged onto the message (iOS 17), else nothing an iPhone shows.
+        if (ext.spec.balloon == null) {
+            if (ext.isMeta || stickerAttachment(inst.message) == null) return Update.Ignore
+            val (chat, guid) = chatOf(inst, me)
+            return Update.Sticker(messageId(rootGuid), inst.id, if (fromMe) TAPBACK_ME else Handles.display(sender), fromMe, timestampOf(inst, now), chat, guid)
+        }
+        if (Polls.isPoll(app)) {
+            if (ext.isMeta) {
+                // A vote: who sent it chose these (whom its JSON names does not count); one that
+                // cannot be read changes nothing, and no row says anything of it (as on an iPhone).
+                val choices = Polls.decodeVotes(app.url) ?: return Update.Ignore
+                val (chat, guid) = chatOf(inst, me)
+                return Update.PollVote(messageId(rootGuid), sender, fromMe, choices, timestampOf(inst, now), chat, guid)
+            }
+            // A choice added: the poll's new state, in place of its card where it is stored.
+            val row = message(inst, Body(ext.body, null, false, null, app, null, null), me, nameOf, texts, describe, now) as? Update.Upsert
+                ?: return Update.Ignore
+            return Update.PollChange(messageId(rootGuid), row)
+        }
         if (ext.isMeta) {
-            val who = actor(sender, sender != null && sender in me, nameOf, texts) ?: return Update.Ignore
-            val members = (conversation.participants + listOfNotNull(sender)).distinct()
+            val who = actor(sender, fromMe, nameOf, texts) ?: return Update.Ignore
+            val members = (conversation.participants + sender).distinct()
             return eventRow(inst, conversation, members, conversation.cvName, me, nameOf, texts.updated(who, app.shownName), now)
         }
-        // Without a card it is nothing an iPhone shows.
-        if (ext.spec.balloon == null) return Update.Ignore
-        return message(inst, Body(ext.body, null, false, null, app, null, null), me, nameOf, describe, now)
+        return message(inst, Body(ext.body, null, false, null, app, null, null), me, nameOf, texts, describe, now)
+    }
+
+    /** Who a sticker or a tapback of the user's own is kept by (the archive's id for the user, as DirectLink keeps tapbacks). */
+    const val TAPBACK_ME = "me"
+
+    /**
+     * The sticker that [m] puts on a message, if it is one: a sticker as a tapback (iOS 18) put on,
+     * or a sticker dragged onto a bubble (an app's update without a card); its picture, the first of
+     * its attachments. Null for anything else.
+     */
+    fun stickerAttachment(m: PushChatMessage): MessageAttachment? {
+        val react = (m as? PushChatMessage.React)?.v1 ?: return null
+        val body = when (val r = react.reaction) {
+            is ReactMessageType.React -> (r.reaction as? Reaction.Sticker)?.takeIf { r.enable }?.body
+            is ReactMessageType.Extension -> r.body.takeIf { !r.isMeta && r.spec.balloon == null }
+        } ?: return null
+        return attachments(body).firstOrNull { it.mime.startsWith("image/") }?.source
+    }
+
+    /**
+     * The picture of a link's preview, as it came inside the message: the attachment its metadata
+     * names ([uniffi.rust_bridge.RichLinkImageAttachmentSubstitute]), if there is one and it is no
+     * larger than [PreviewImages.MAX_SOURCE_BYTES]; null otherwise.
+     */
+    fun linkImage(meta: LinkMeta?): ByteArray? {
+        val index = meta?.data?.image?.richLinkImageAttachmentSubstituteIndex ?: return null
+        if (index > Int.MAX_VALUE.toULong()) return null
+        val bytes = meta.attachments.getOrNull(index.toInt()) ?: return null
+        return bytes.takeIf { it.isNotEmpty() && it.size <= PreviewImages.MAX_SOURCE_BYTES }
     }
 
     /**

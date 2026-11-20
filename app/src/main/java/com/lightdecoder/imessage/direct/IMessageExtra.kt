@@ -24,6 +24,12 @@ import org.json.JSONObject
  *   (Big, Shake, ...), by part index: the formatted stretches of each part's text ([TextRuns])
  * @param scheduledAt Send Later: when Apple sends it (ms; 0: sent at once). Until then the user's
  *   message shows "Send Later · <time>" ([SendLater.pending]), as on an iPhone
+ * @param mentions the mentions in its text ("@" and a member's name, iOS 17), by part index: who
+ *   each names, over each part's text ([Mentions]); one of the user is marked
+ * @param pollVotes a poll's card ([Polls]): each person's votes, the latest of each
+ * @param pollCards a poll's card: the GUIDs of the cards its session sent since (a choice added), whose
+ *   votes are this card's too
+ * @param stickers stickers people put on the message (iOS 17), each by the message that put it there
  *
  * Pure. Tested in IMessageExtraTest.
  */
@@ -38,15 +44,41 @@ data class IMessageExtra(
     val unsent: Set<Int> = emptySet(),
     val runs: Map<Int, List<TextRun>> = emptyMap(),
     val scheduledAt: Long = 0,
+    val mentions: Map<Int, List<Mention>> = emptyMap(),
+    val pollVotes: List<Polls.Ballot> = emptyList(),
+    val pollCards: List<String> = emptyList(),
+    val stickers: List<PlacedSticker> = emptyList(),
 ) {
-    /** A link preview: the address, the page's title and summary, and the site it is on. */
-    data class Link(val url: String, val title: String = "", val summary: String = "", val site: String = "") {
+    /**
+     * A link preview: the address, the page's title and summary, and the site it is on; [image] is
+     * the key its picture is kept under in the iMessage media folder ([linkImageKey]),
+     * empty when it has none.
+     */
+    data class Link(val url: String, val title: String = "", val summary: String = "", val site: String = "", val image: String = "") {
         /**
          * Whether a tap may open it: a web page only. The sender chooses the address, so one of any
          * other kind (a phone number to call, another app's link) behind a title of their choosing
          * is not opened.
          */
         val opensInBrowser: Boolean get() = isWebAddress(url)
+    }
+
+    /**
+     * A sticker someone put on the message (dragged onto its bubble, iOS 17): the GUID of the message
+     * that put it there ([id]), who did ([by]: [Polls.ME] for the user, else their address, bare), and when.
+     * Its picture is kept under [stickerKey].
+     */
+    data class PlacedSticker(val id: String, val by: String, val atMs: Long) {
+        fun toJson(): JSONObject = JSONObject().put("id", id).put("by", by).put("t", atMs)
+
+        companion object {
+            fun fromJson(o: JSONObject): PlacedSticker? {
+                val id = o.text("id")
+                val by = o.text("by")
+                if (id.isBlank() || id.length > 64 || by.isBlank() || by.length > Mentions.MAX_HANDLE_CHARS) return null
+                return PlacedSticker(id, by, o.optLong("t"))
+            }
+        }
     }
 
     /**
@@ -141,6 +173,47 @@ data class IMessageExtra(
         return out
     }
 
+    /**
+     * The mentions of a message whose text (as shown) is [text], over that text, as [textRuns] moves
+     * runs. Empty when the stored parts no longer make up [text].
+     */
+    fun textMentions(text: String): List<Mention> {
+        if (mentions.isEmpty() || text.isEmpty()) return emptyList()
+        if (parts.isEmpty()) return if (mentions.keys == setOf(0)) Mentions.normalize(text, mentions.getValue(0)) else emptyList()
+        if (text() != text) return emptyList()
+        val out = ArrayList<Mention>()
+        var at = 0
+        for ((idx, t) in parts.toSortedMap()) {
+            if (t.isEmpty()) continue
+            mentions[idx]?.let { m -> Mentions.normalize(t, m).forEach { out += it.copy(start = it.start + at, end = it.end + at) } }
+            at += t.length + 1
+        }
+        return out
+    }
+
+    /** [mentions] with part [idx]'s set to [partMentions] (none: taken off). */
+    fun withMentions(idx: Int, partMentions: List<Mention>): Map<Int, List<Mention>> =
+        if (partMentions.isEmpty()) mentions - idx else mentions + (idx to partMentions)
+
+    /** Whether the message mentions the user (as the ":imessage" process marked it). */
+    val mentionsMe: Boolean get() = mentions.values.any { list -> list.any { it.mine } }
+
+    /**
+     * This copy of a message (Apple's, handed over again) with what was gathered on [stored] since
+     * it first came: the poll's votes and later cards, a poll's newer state (a choice added since),
+     * and the stickers put on it. Anything else is this copy's.
+     */
+    fun keepingGathered(stored: IMessageExtra): IMessageExtra {
+        val newerPoll = stored.app?.takeIf { s -> Polls.isPoll(s) && app != null && Polls.isPoll(app) && Polls.countOf(s.url) >= Polls.countOf(app.url) }
+        return copy(
+            pollVotes = stored.pollVotes.ifEmpty { pollVotes },
+            pollCards = (stored.pollCards + pollCards).distinct().take(MAX_POLL_CARDS),
+            stickers = (stored.stickers + stickers).distinctBy { it.id }.take(MAX_STICKERS),
+            app = newerPoll?.copy(root = app?.root ?: newerPoll.root) ?: app,
+            link = link?.let { l -> if (l.image.isEmpty() && stored.link?.url == l.url) l.copy(image = stored.link.image) else l },
+        )
+    }
+
     /** Which text effects the message's text has, in the order they first come. */
     fun textEffects(): List<TextEffectKind> =
         runs.toSortedMap().values.flatten().mapNotNull { it.effect }.distinct()
@@ -157,13 +230,21 @@ data class IMessageExtra(
         if (!effect.isNullOrEmpty()) o.put("effect", effect)
         if (voice) o.put("voice", true)
         link?.let {
-            o.put("link", JSONObject().put("url", it.url).put("title", it.title).put("summary", it.summary).put("site", it.site))
+            o.put(
+                "link",
+                JSONObject().put("url", it.url).put("title", it.title).put("summary", it.summary).put("site", it.site)
+                    .apply { if (it.image.isNotEmpty()) put("image", it.image) },
+            )
         }
         app?.let { o.put("app", it.toJson()) }
         if (sticker) o.put("sticker", true)
         if (unsent.isNotEmpty()) o.put("unsent", JSONArray(unsent.sorted()))
         if (runs.values.any { it.isNotEmpty() }) o.put("runs", TextRuns.toJson(runs))
         if (scheduledAt > 0) o.put("scheduledAt", scheduledAt)
+        if (mentions.values.any { it.isNotEmpty() }) o.put("mentions", Mentions.toJson(mentions))
+        if (pollVotes.isNotEmpty()) o.put("pollVotes", Polls.ballotsToJson(pollVotes))
+        if (pollCards.isNotEmpty()) o.put("pollCards", JSONArray(pollCards))
+        if (stickers.isNotEmpty()) o.put("stickers", JSONArray().apply { stickers.forEach { put(it.toJson()) } })
         return if (o.length() == 0) "" else o.toString()
     }
 
@@ -176,6 +257,25 @@ data class IMessageExtra(
 
         /** The name the library gives an app Apple did not name. */
         const val UNNAMED_APP = "None"
+
+        /** The bundle of a rich link's balloon, which is no app's card. */
+        const val LINK_BALLOON = "com.apple.messages.URLBalloonProvider"
+
+        /** The most later cards a poll keeps ([pollCards]) and stickers a message keeps ([stickers]). */
+        const val MAX_POLL_CARDS = 20
+        const val MAX_STICKERS = 20
+
+        /** The key the link preview picture of message [guid] is kept under (in the iMessage media folder, a JPEG). */
+        fun linkImageKey(guid: String): String = "$guid/link"
+
+        /** The key the sticker [participant] put as a tapback on message [guid] is kept under (a PNG). */
+        fun tapbackStickerKey(guid: String, participant: String): String = "$guid/tapback/$participant"
+
+        /** The key of the sticker message [stickerGuid] put on message [guid] (a PNG). */
+        fun stickerKey(guid: String, stickerGuid: String): String = "$guid/sticker/$stickerGuid"
+
+        /** The file extension of a key's picture: a link's a JPEG, a sticker's a PNG. */
+        fun extensionOf(key: String): String = if (key.endsWith("/link")) "jpg" else "png"
 
         /** Apple's effects, by id, with the string resource of the name an iPhone shows ("Sent with Slam"). */
         val EFFECTS: List<Pair<String, Int>> = listOf(
@@ -236,7 +336,7 @@ data class IMessageExtra(
                     effect = o.text("effect").ifEmpty { null },
                     voice = o.optBoolean("voice"),
                     link = o.optJSONObject("link")?.let {
-                        Link(it.text("url"), it.text("title"), it.text("summary"), it.text("site"))
+                        Link(it.text("url"), it.text("title"), it.text("summary"), it.text("site"), it.text("image"))
                     },
                     app = o.optJSONObject("app")?.let(App::fromJson),
                     sticker = o.optBoolean("sticker"),
@@ -245,6 +345,14 @@ data class IMessageExtra(
                     }.orEmpty(),
                     runs = TextRuns.fromJson(o.optJSONObject("runs")),
                     scheduledAt = o.optLong("scheduledAt"),
+                    mentions = Mentions.fromJson(o.optJSONObject("mentions")),
+                    pollVotes = Polls.ballotsFromJson(o.optJSONArray("pollVotes")),
+                    pollCards = o.optJSONArray("pollCards")?.let { a ->
+                        (0 until minOf(a.length(), MAX_POLL_CARDS)).map { a.optString(it) }.filter { it.isNotBlank() && it.length <= 64 }
+                    }.orEmpty(),
+                    stickers = o.optJSONArray("stickers")?.let { a ->
+                        (0 until minOf(a.length(), MAX_STICKERS)).mapNotNull { a.optJSONObject(it)?.let(PlacedSticker::fromJson) }
+                    }.orEmpty(),
                 )
             } catch (e: JSONException) {
                 IMessageExtra()

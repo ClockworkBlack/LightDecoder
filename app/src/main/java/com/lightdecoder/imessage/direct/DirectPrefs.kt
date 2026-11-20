@@ -127,6 +127,42 @@ object DirectPrefs {
         }
     }
 
+    private fun mentionsQuietMarker(context: Context) = File(context.filesDir, "imessage/mentions-quiet")
+
+    /**
+     * Whether a message that mentions the user notifies even in a chat whose alerts are hidden, as an
+     * iPhone's "Notify Me" does. On by default. A file, like [gamesOn]: the setup screen sets it, the
+     * main process (the notifications) reads it.
+     */
+    fun notifyWhenMentioned(context: Context): Boolean = !mentionsQuietMarker(context).isFile
+
+    /** Turns "Notify me when mentioned" on or off (see [notifyWhenMentioned]). */
+    fun setNotifyWhenMentioned(context: Context, on: Boolean) = setMarker(mentionsQuietMarker(context), !on)
+
+    private fun linkPreviewsOffMarker(context: Context) = File(context.filesDir, "imessage/link-previews-off")
+
+    /**
+     * Whether a link the user sends goes with its page's preview ([LinkPreviews], fetched from this
+     * phone before it goes). On by default, as on an iPhone. A file, like [gamesOn]: the setup screen
+     * sets it, the main process (which fetches the page) reads it.
+     */
+    fun linkPreviews(context: Context): Boolean = !linkPreviewsOffMarker(context).isFile
+
+    /** Turns link previews on or off (see [linkPreviews]). */
+    fun setLinkPreviews(context: Context, on: Boolean) = setMarker(linkPreviewsOffMarker(context), !on)
+
+    /** Puts [f] there ([present]) or takes it away, as a setting's marker. */
+    private fun setMarker(f: File, present: Boolean) {
+        runCatching {
+            if (present) {
+                f.parentFile?.mkdirs()
+                if (!f.isFile) f.writeText("1")
+            } else {
+                f.delete()
+            }
+        }
+    }
+
     private fun marker(context: Context) = File(context.filesDir, "imessage/registered")
 
     private fun shownMarker(context: Context) = File(context.filesDir, "imessage/blue-bubbles-turned-on")

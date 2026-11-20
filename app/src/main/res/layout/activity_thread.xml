@@ -310,6 +310,23 @@
             app:tint="?attr/colorPrimary" />
     </LinearLayout>
 
+    <!-- iMessage groups: the members whose names start with what is typed after "@", to mention one (iOS 17). -->
+    <HorizontalScrollView
+        android:id="@+id/mentionSuggestions"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:contentDescription="@string/imessage_mention_suggestions"
+        android:paddingHorizontal="8dp"
+        android:scrollbars="none"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:id="@+id/mentionChips"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal" />
+    </HorizontalScrollView>
+
     <TextView
         android:id="@+id/readOnlyText"
         android:layout_width="match_parent"

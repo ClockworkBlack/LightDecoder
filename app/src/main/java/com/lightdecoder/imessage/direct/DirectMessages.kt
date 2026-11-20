@@ -13,14 +13,21 @@ import uniffi.rust_bridge.CertifiedContext
 import uniffi.rust_bridge.ConversationData
 import uniffi.rust_bridge.ExtensionApp
 import uniffi.rust_bridge.IndexedMessagePart
+import uniffi.rust_bridge.LinkMeta
+import uniffi.rust_bridge.LpImageMetadata
+import uniffi.rust_bridge.LpLinkMetadata
 import uniffi.rust_bridge.MessageAttachment
 import uniffi.rust_bridge.MessageInst
 import uniffi.rust_bridge.MessagePart
 import uniffi.rust_bridge.MessageType
+import uniffi.rust_bridge.NsArrayClass
+import uniffi.rust_bridge.NsArrayLpImageMetadata
 import uniffi.rust_bridge.NsDictionaryClass
+import uniffi.rust_bridge.NsUrl
 import uniffi.rust_bridge.PushChatMessage
 import uniffi.rust_bridge.ReactMessage
 import uniffi.rust_bridge.ReactMessageType
+import uniffi.rust_bridge.RichLinkImageAttachmentSubstitute
 
 /**
  * The ":imessage" process's rules for what goes to Apple, as OpenBubbles 2.0.0 follows them.
@@ -100,10 +107,11 @@ object DirectMessages {
      * the text first (none when it is empty), then the attachments. Numbered as rustpush numbers
      * them ([DirectArchive.partIndexes]): with text, it is part 0 and the attachments 1 to n. With
      * [runs] (bold, a text effect, ...), the text is one `Text` part per stretch of one style
-     * ([TextRuns.toParts]), all of them part 0, as an iPhone sends formatted text.
+     * ([TextRuns.toParts]), all of them part 0, as an iPhone sends formatted text; with [mentions],
+     * each mention a `Mention` part between them ([Mentions.toParts]), part 0 too.
      */
-    fun outgoing(text: String, attachments: List<MessageAttachment>, runs: List<TextRun> = emptyList()): Outgoing {
-        val parts = TextRuns.toParts(text, runs).map { IndexedMessagePart(it, null, null) } +
+    fun outgoing(text: String, attachments: List<MessageAttachment>, runs: List<TextRun> = emptyList(), mentions: List<Mention> = emptyList()): Outgoing {
+        val parts = Mentions.toParts(text, runs, mentions).map { IndexedMessagePart(it, null, null) } +
             attachments.map { IndexedMessagePart(MessagePart.Attachment(it), null, null) }
         val indexes = DirectArchive.partIndexes(parts)
         val sent = parts.indices.mapNotNull { i ->
@@ -115,10 +123,46 @@ object DirectMessages {
         return Outgoing(parts, sent)
     }
 
-    /** The new parts of an edited part reading [text] with [runs] (plain: one `Text` part). */
-    fun editParts(text: String, runs: List<TextRun> = emptyList()): List<IndexedMessagePart> =
-        TextRuns.toParts(text, runs).ifEmpty { listOf(MessagePart.Text(text, TextRuns.format(TextStyle.PLAIN))) }
+    /** The new parts of an edited part reading [text] with [runs] and [mentions] (plain: one `Text` part). */
+    fun editParts(text: String, runs: List<TextRun> = emptyList(), mentions: List<Mention> = emptyList()): List<IndexedMessagePart> =
+        Mentions.toParts(text, runs, mentions).ifEmpty { listOf(MessagePart.Text(text, TextRuns.format(TextStyle.PLAIN))) }
             .map { IndexedMessagePart(it, null, null) }
+
+    /**
+     * A link's rich preview as an iPhone sends it ("LPLinkMetadata"), built as OpenBubbles builds
+     * one: the addresses as they are ([LinkPreviewRequest.originalUrl] typed, [LinkPreviewRequest.url]
+     * the page's own) with the `$null` base, the title and summary, and the picture ([image], a JPEG)
+     * as the preview's first attachment, named by its index ([RichLinkImageAttachmentSubstitute]) and
+     * described in an `NSArray` of one.
+     */
+    fun linkMeta(link: DirectWire.LinkPreviewRequest, image: ByteArray?): LinkMeta {
+        val attachments = ArrayList<ByteArray>()
+        var imageMeta: LpImageMetadata? = null
+        var substitute: RichLinkImageAttachmentSubstitute? = null
+        val imageUrl = link.imageUrl
+        if (image != null && image.isNotEmpty() && !imageUrl.isNullOrBlank()) {
+            imageMeta = LpImageMetadata(LINK_IMAGE_SIZE, NsUrl(NS_NULL, imageUrl), 1u)
+            substitute = RichLinkImageAttachmentSubstitute(link.imageMime.ifBlank { DirectEngine.APP_IMAGE_MIME }, attachments.size.toULong())
+            attachments += image
+        }
+        return LinkMeta(
+            LpLinkMetadata(
+                imageMeta, 1u, null,
+                NsUrl(NS_NULL, link.originalUrl.ifBlank { link.url }), NsUrl(NS_NULL, link.url),
+                link.title.ifBlank { null }, link.summary.ifBlank { null },
+                substitute, null,
+                imageMeta?.let { NsArrayLpImageMetadata(listOf(it), NsArrayClass.NS_ARRAY) }, null,
+                null, null, null, null, null,
+            ),
+            attachments,
+        )
+    }
+
+    /** The base of every address in a link's preview, as OpenBubbles sends it. */
+    const val NS_NULL = "\$null"
+
+    /** The size a preview's picture is described with, as OpenBubbles sends it (the iPhone reads it from the picture). */
+    const val LINK_IMAGE_SIZE = "{0, 0}"
 
     /**
      * The parts of an iMessage app's card or move, as OpenBubbles builds them: the app's summary
@@ -167,8 +211,16 @@ object DirectMessages {
      * An iMessage app's update (a game's move) to the session message [rootGuid] started: a
      * tapback-like message to it, carrying [app]'s new balloon and the [parts] ([appParts]).
      */
-    fun appUpdate(rootGuid: String, app: IMessageExtra.App, parts: List<IndexedMessagePart>, isMeta: Boolean): ReactMessage =
-        ReactMessage(rootGuid, null, ReactMessageType.Extension(extensionApp(app), parts, isMeta), "", null)
+    fun appUpdate(rootGuid: String, app: IMessageExtra.App, parts: List<IndexedMessagePart>, isMeta: Boolean): ReactMessage {
+        // A vote in a poll, as OpenBubbles sends one: the votes in its address, no layout, summary or
+        // icon, and the notice the user's other devices show.
+        if (isMeta && Polls.isPoll(app)) {
+            // Its session as the library takes one (a UUID), else none.
+            val vote = ExtensionApp(app.name, app.appId?.toULong(), app.bundleId, Balloon(app.url, app.session.takeIf(Polls::isUuid), null, null, false, null))
+            return ReactMessage(rootGuid, null, ReactMessageType.Extension(vote, parts, true), Polls.VOTE_NOTICE, null)
+        }
+        return ReactMessage(rootGuid, null, ReactMessageType.Extension(extensionApp(app), parts, isMeta), "", null)
+    }
 
     /**
      * The library's conversation for [target], sent from [from]: its members with the user, the

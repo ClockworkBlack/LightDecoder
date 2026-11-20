@@ -96,6 +96,11 @@ class DirectSetupActivity : AppCompatActivity() {
         // Off by default; the chat screen (main process) reads it when it comes back in front.
         binding.switchReplyThreads.isChecked = DirectPrefs.replyThreadsInChat(this)
         binding.switchReplyThreads.setOnCheckedChangeListener { _, on -> DirectPrefs.setReplyThreadsInChat(this, on) }
+        // Read in the main process (it fetches the page, and posts the notifications): files, as above.
+        binding.switchLinkPreviews.isChecked = DirectPrefs.linkPreviews(this)
+        binding.switchLinkPreviews.setOnCheckedChangeListener { _, on -> DirectPrefs.setLinkPreviews(this, on) }
+        binding.switchNotifyMentions.isChecked = DirectPrefs.notifyWhenMentioned(this)
+        binding.switchNotifyMentions.setOnCheckedChangeListener { _, on -> DirectPrefs.setNotifyWhenMentioned(this, on) }
         binding.getGames.setOnClickListener { MadridHost.openStore(this, MadridApps.OPENPIGEON) }
         // The service's status notice: turned off in its channel's settings, iMessage keeps running.
         binding.hideStatus.setOnClickListener { openStatusSettings() }

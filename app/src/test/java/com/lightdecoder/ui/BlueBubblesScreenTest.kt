@@ -1725,13 +1725,13 @@ class BlueBubblesScreenTest {
         ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
             scenario.waitFor("her game") { shownTexts(it).contains("Your move") }
             scenario.onActivity { activity ->
-                // An iPhone-style chat's "+" offers pictures and stickers: no Games among them.
+                // An iPhone-style chat's "+" offers pictures, stickers and a poll: no Games among them.
                 activity.findViewById<View>(R.id.attach).performClick()
                 org.robolectric.shadows.ShadowLooper.idleMainLooper()
                 val choice = latestDialog()
                 assertEquals(
                     "no Games choice",
-                    listOf("Photos and videos", "Stickers"),
+                    listOf("Photos and videos", "Stickers", "Poll"),
                     (0 until choice.listView.adapter.count).map { choice.listView.adapter.getItem(it).toString() },
                 )
                 choice.listView.performItemClick(null, 0, 0)
@@ -1759,9 +1759,9 @@ class BlueBubblesScreenTest {
                 org.robolectric.shadows.ShadowLooper.idleMainLooper()
                 val choice = latestDialog()
                 val list = choice.listView
-                // (Stickers too: in an iPhone-style chat the "+" is the way to them.)
+                // (Stickers too: in an iPhone-style chat the "+" is the way to them; and a poll, in a chat the library reaches.)
                 assertEquals(
-                    listOf("Photos and videos", "Games", "Stickers"),
+                    listOf("Photos and videos", "Games", "Stickers", "Poll"),
                     (0 until list.adapter.count).map { list.adapter.getItem(it).toString() },
                 )
                 assertEquals(null, shadowOf(activity).nextStartedActivityForResult)

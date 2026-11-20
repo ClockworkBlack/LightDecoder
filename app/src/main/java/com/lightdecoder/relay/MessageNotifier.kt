@@ -33,7 +33,8 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * On by default for both services (each has its switch in its link's
  * settings, and its own channel in Android's settings).
- * Never for history, for the user's own messages, for a muted conversation,
+ * Never for history, for the user's own messages, for a muted conversation (unless
+ * the message mentions the user, who asked to be told of that),
  * or for the conversation on screen.
  *
  * The notification shows message text, which is its purpose; nothing about
@@ -106,15 +107,17 @@ object MessageNotifier {
 
     /**
      * Called for every new live message stored in [repo]; decides whether to
-     * notify. The service is [repo]'s.
+     * notify. The service is [repo]'s. [mentioned]: the message mentions the
+     * user, who asked to hear of that even in a muted conversation (an
+     * iPhone's "Notify Me"): its mute does not keep it quiet.
      */
-    fun onIncoming(context: Context, repo: ArchiveRepository, message: MessageDto) {
+    fun onIncoming(context: Context, repo: ArchiveRepository, message: MessageDto, mentioned: Boolean = false) {
         val service = repo.service
         if (!enabled(context, service)) return
         if (message.isOld || message.fromMe || message.direction != "in") return
         if (message.conversationId == visibleConversationId(service)) return
         val conversation = repo.conversation(message.conversationId)
-        if (conversation?.muted == true) return
+        if (conversation?.muted == true && !mentioned) return
         if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) return
 
         val sender = message.senderName.ifBlank { conversation?.name.orEmpty() }

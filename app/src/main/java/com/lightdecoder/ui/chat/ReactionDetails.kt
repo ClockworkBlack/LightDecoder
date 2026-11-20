@@ -105,10 +105,21 @@ object ReactionDetails {
                 // Read as one: "Alice, ❤️, Today, 4:21 PM".
                 isFocusable = true
             }
-            val emoji = TextView(context).apply {
-                text = entry.emoji
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 26f)
-                importantForAccessibility = TextView.IMPORTANT_FOR_ACCESSIBILITY_NO
+            // A sticker as a tapback: its picture, as on an iPhone (kept by who put it there).
+            val sticker = stickerOf(context, row, entry)
+            val emoji: android.view.View = if (sticker != null) {
+                android.widget.ImageView(context).apply {
+                    setImageBitmap(sticker)
+                    layoutParams = LinearLayout.LayoutParams((36 * dp).toInt(), (36 * dp).toInt())
+                    scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+                    importantForAccessibility = android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                }
+            } else {
+                TextView(context).apply {
+                    text = entry.emoji
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 26f)
+                    importantForAccessibility = TextView.IMPORTANT_FOR_ACCESSIBILITY_NO
+                }
             }
             val words = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
@@ -127,7 +138,9 @@ object ReactionDetails {
             })
             line.addView(emoji)
             line.addView(words)
-            line.contentDescription = context.getString(R.string.reaction_details_line, entry.name, entry.emoji, time)
+            line.contentDescription = context.getString(
+                R.string.reaction_details_line, entry.name, if (sticker != null) context.getString(R.string.imessage_sticker_tapback) else entry.emoji, time,
+            )
             column.addView(line)
         }
         column.addView(TextView(context).apply {
@@ -141,6 +154,23 @@ object ReactionDetails {
             .setView(ScrollView(context).apply { addView(column) })
             .setPositiveButton(R.string.reaction_details_close, null)
             .show()
+    }
+
+    /** The picture of the sticker [entry]'s person put on [row] as a tapback (an iMessage's), or null for none here. */
+    private fun stickerOf(context: Context, row: MessageRow, entry: Entry): android.graphics.Bitmap? {
+        if (entry.emoji != com.lightdecoder.imessage.direct.DirectArchive.STICKER_TAPBACK) return null
+        val guid = com.lightdecoder.imessage.direct.DirectArchive.guidOf(row.id) ?: return null
+        val file = com.lightdecoder.imessage.direct.DirectLink.pictureFile(
+            context, com.lightdecoder.imessage.direct.IMessageExtra.tapbackStickerKey(guid, entry.participantId),
+        )
+        if (!file.isFile || file.length() > 4L * 1024 * 1024) return null
+        return try {
+            MediaLoader.decodePreview(file.readBytes(), (72 * context.resources.displayMetrics.density).toInt())
+        } catch (e: Exception) {
+            null
+        } catch (e: OutOfMemoryError) {
+            null
+        }
     }
 
     private fun themeAttr(context: Context, attr: Int): Int {

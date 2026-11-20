@@ -21,4 +21,6 @@ class DirectTexts(context: Context) : DirectArchive.Texts {
         if (app.isBlank()) res.getString(R.string.imessage_event_app_updated_unnamed, who) else res.getString(R.string.imessage_event_app_updated, who, app)
     override fun changedBackground(who: String): String = res.getString(R.string.imessage_event_background_changed, who)
     override fun removedBackground(who: String): String = res.getString(R.string.imessage_event_background_removed, who)
+    override fun poll(question: String): String =
+        if (question.isBlank()) res.getString(R.string.imessage_poll_summary_untitled) else res.getString(R.string.imessage_poll_summary, question)
 }

@@ -1,0 +1,325 @@
+package com.lightdecoder.imessage.direct
+
+import java.io.IOException
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
+import java.util.Collections
+import kotlin.concurrent.thread
+import org.junit.After
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * Link previews of what the user sends ([LinkPreviews]): the first link in a message, the page's
+ * OpenGraph (malformed and huge pages too), redirects and their limits, what is never fetched,
+ * and the picture. No real network: an injected [LinkPreviews.Fetcher], and one test server of
+ * the test's own on this machine for the real fetcher.
+ */
+class LinkPreviewsTest {
+
+    private val html = "text/html; charset=utf-8"
+    private val public = InetAddress.getByAddress(byteArrayOf(93, 184.toByte(), 216.toByte(), 34))
+
+    /** A fetch policy for [fetcher]'s made-up hosts: all of them public addresses. */
+    private val policy = LinkPreviews.Policy(resolve = { listOf(public) })
+
+    /** Answers by address from [pages], recording every request. */
+    private class Fake(val pages: Map<String, LinkPreviews.Response>) : LinkPreviews.Fetcher {
+        val asked: MutableList<String> = Collections.synchronizedList(ArrayList())
+        override fun fetch(url: String, accept: String, maxBytes: Int, deadlineMs: Long): LinkPreviews.Response {
+            asked += url
+            val r = pages[url] ?: throw IOException("no such page")
+            return if (r.body.size > maxBytes) LinkPreviews.Response(r.code, r.location, r.contentType, r.body.copyOf(maxBytes), truncated = true) else r
+        }
+    }
+
+    private fun page(body: String, type: String? = html) = LinkPreviews.Response(200, null, type, body.toByteArray())
+    private fun redirect(to: String, code: Int = 301) = LinkPreviews.Response(code, to, null, ByteArray(0))
+
+    private val og = """<!doctype html><html><head>
+        <meta property="og:title" content="A &amp; B &#8212; &quot;the&quot; story">
+        <meta property='og:description' content='All about it'>
+        <meta property="og:site_name" content="Example News">
+        <meta property="og:image" content="/img/cover.jpg">
+        <meta property="og:url" content="https://www.example.com/story">
+        <title>Ignored title</title></head><body>hi</body></html>"""
+
+    @Test
+    fun theFirstWebAddressInAMessageIsTheOneWithoutASentencesEnd() {
+        assertEquals("https://example.com/a", LinkPreviews.firstUrl("see https://example.com/a. And http://other.org"))
+        assertEquals("https://example.com/p", LinkPreviews.firstUrl("(https://example.com/p)"))
+        assertEquals("https://en.wikipedia.org/wiki/Foo_(bar)", LinkPreviews.firstUrl("read https://en.wikipedia.org/wiki/Foo_(bar)!"))
+        assertEquals("http://example.com/x?y=1&z=2", LinkPreviews.firstUrl("HTTP: http://example.com/x?y=1&z=2"))
+        assertNull(LinkPreviews.firstUrl("ftp://example.com/file and javascript:alert(1)"))
+        assertNull(LinkPreviews.firstUrl("no link here, just example.com"))
+        assertNull(LinkPreviews.firstUrl("https://" + "a".repeat(LinkPreviews.MAX_URL_CHARS) + ".com"))
+        assertNull(LinkPreviews.firstUrl("https://user:pass@example.com/"))
+    }
+
+    @Test
+    fun aPagesOpenGraphIsItsPreview() {
+        val p = LinkPreviews.parse(og, "https://example.com/s?id=1")!!
+        assertEquals("A & B — \"the\" story", p.title)
+        assertEquals("All about it", p.summary)
+        assertEquals("Example News", p.site)
+        assertEquals("https://example.com/img/cover.jpg", p.imageUrl)
+        assertEquals("https://www.example.com/story", p.url)
+    }
+
+    @Test
+    fun withoutOpenGraphTwitterThenTheTitleAndDescriptionDo() {
+        val twitter = """<meta name="twitter:title" content="Tw"><meta name="twitter:description" content="Desc"><meta name="twitter:image" content="https://cdn.example.com/t.png">"""
+        val t = LinkPreviews.parse(twitter, "https://example.com/")!!
+        assertEquals("Tw", t.title)
+        assertEquals("Desc", t.summary)
+        assertEquals("https://cdn.example.com/t.png", t.imageUrl)
+        assertEquals("example.com", t.site)
+        val plain = LinkPreviews.parse("<html><head><title>  Just\n a   title </title><meta name=description content=Plain></head></html>", "https://www.example.org/a")!!
+        assertEquals("Just a title", plain.title)
+        assertEquals("Plain", plain.summary)
+        assertEquals("example.org", plain.site)
+        assertNull(plain.imageUrl)
+        // Nothing to show: no preview.
+        assertNull(LinkPreviews.parse("<html><body>nothing</body></html>", "https://example.com/"))
+    }
+
+    @Test
+    fun aMalformedOrHugePageGivesWhatCanBeReadAndNoMore() {
+        // Unclosed tags, attributes in any order and case, a picture by another scheme.
+        val messy = """<HEAD><META CONTENT="Messy" PROPERTY="OG:TITLE"<meta property="og:image" content="javascript:alert(1)"><title>x"""
+        val m = LinkPreviews.parse(messy, "https://example.com/")!!
+        assertEquals("Messy", m.title)
+        assertNull("only a web picture", m.imageUrl)
+        // A long title is cut, with no tags or control characters in it.
+        val long = LinkPreviews.parse("<meta property=\"og:title\" content=\"&lt;b&gt;${"word ".repeat(300)}\u0007\">", "https://example.com/")!!
+        assertTrue(long.title.length <= LinkPreviews.MAX_TITLE_CHARS + 1)
+        assertFalse(long.title.contains('<'))
+        assertFalse(long.title.contains('\u0007'))
+        assertTrue(long.title.startsWith("word word"))
+        // One longer than a tag is read up to: no title at all, rather than all of it.
+        assertNull(LinkPreviews.parse("<meta property=\"og:title\" content=\"${"x".repeat(5000)}\">", "https://example.com/"))
+        // Entities that are no characters stay as they are.
+        assertEquals("&#0; &bogus; &#xD800;", LinkPreviews.parse("<title>&#0; &bogus; &#xD800;</title>", "https://example.com/")!!.title)
+        // A page of half a megabyte of nothing reads quickly, and finds nothing.
+        val start = System.nanoTime()
+        assertNull(LinkPreviews.parse("<div ".repeat(100_000), "https://example.com/"))
+        assertTrue((System.nanoTime() - start) / 1_000_000 < 5_000)
+    }
+
+    @Test
+    fun aPreviewIsTheFetchedPageAndItsPicture() {
+        val picture = byteArrayOf(1, 2, 3, 4)
+        val fake = Fake(
+            mapOf(
+                "https://example.com/s" to page(og),
+                "https://example.com/img/cover.jpg" to LinkPreviews.Response(200, null, "image/jpeg", picture),
+            ),
+        )
+        val preview = LinkPreviews.fetch("https://example.com/s", fake, policy)!!
+        assertEquals("https://example.com/s", preview.originalUrl)
+        assertEquals("A & B — \"the\" story", preview.page.title)
+        assertArrayEquals(picture, preview.image)
+        assertEquals("image/jpeg", preview.imageMime)
+        assertEquals(listOf("https://example.com/s", "https://example.com/img/cover.jpg"), fake.asked)
+    }
+
+    @Test
+    fun aPictureThatIsNoPictureOrTooLargeIsLeftOut() {
+        val notImage = Fake(mapOf("https://example.com/s" to page(og), "https://example.com/img/cover.jpg" to page("<html>", "text/html")))
+        val a = LinkPreviews.fetch("https://example.com/s", notImage, policy)!!
+        assertNull(a.image)
+        assertEquals("All about it", a.page.summary)
+        val huge = Fake(
+            mapOf(
+                "https://example.com/s" to page(og),
+                "https://example.com/img/cover.jpg" to LinkPreviews.Response(200, null, "image/png", ByteArray(LinkPreviews.MAX_IMAGE_BYTES + 10)),
+            ),
+        )
+        assertNull(LinkPreviews.fetch("https://example.com/s", huge, policy)!!.image)
+    }
+
+    @Test
+    fun redirectsAreFollowedThreeTimesAtMostAndOnlyToWebAddresses() {
+        val three = Fake(
+            mapOf(
+                "https://a.example.com/" to redirect("https://b.example.com/x"),
+                "https://b.example.com/x" to redirect("/y", 302),
+                "https://b.example.com/y" to redirect("https://c.example.com/z", 307),
+                "https://c.example.com/z" to page("<title>Arrived</title>"),
+            ),
+        )
+        val p = LinkPreviews.fetch("https://a.example.com/", three, policy)!!
+        assertEquals("Arrived", p.page.title)
+        assertEquals("https://c.example.com/z", p.page.url)
+        val four = Fake(
+            mapOf(
+                "https://a.example.com/" to redirect("https://b.example.com/"),
+                "https://b.example.com/" to redirect("https://c.example.com/"),
+                "https://c.example.com/" to redirect("https://d.example.com/"),
+                "https://d.example.com/" to redirect("https://e.example.com/"),
+                "https://e.example.com/" to page("<title>Too far</title>"),
+            ),
+        )
+        assertNull(LinkPreviews.fetch("https://a.example.com/", four, policy))
+        assertEquals(4, four.asked.size)
+        for (to in listOf("file:///data/data/x", "javascript:alert(1)", "intent://x#Intent;end", "ftp://example.com/")) {
+            val odd = Fake(mapOf("https://a.example.com/" to redirect(to), to to page("<title>no</title>")))
+            assertNull(to, LinkPreviews.fetch("https://a.example.com/", odd, policy))
+            assertEquals(to, listOf("https://a.example.com/"), odd.asked)
+        }
+        // A redirect with nowhere to go.
+        assertNull(LinkPreviews.fetch("https://a.example.com/", Fake(mapOf("https://a.example.com/" to LinkPreviews.Response(302, null, null, ByteArray(0)))), policy))
+    }
+
+    @Test
+    fun anHttpAddressIsAskedForOverHttps() {
+        val fake = Fake(mapOf("https://example.com/plain" to page("<title>Secure</title>")))
+        assertEquals("Secure", LinkPreviews.fetch("http://example.com/plain", fake, policy)!!.page.title)
+        assertEquals(listOf("https://example.com/plain"), fake.asked)
+        // Its own port 80 is https' own.
+        assertEquals("https://example.com/", LinkPreviews.allowed("http://example.com:80", policy))
+        assertEquals("https://example.com:8080/a?b=c", LinkPreviews.allowed("http://example.com:8080/a?b=c#frag", policy))
+    }
+
+    @Test
+    fun onlyAnHtmlPageIsRead() {
+        val fake = Fake(mapOf("https://example.com/f" to page("<title>x</title>", "application/json"), "https://example.com/g" to page("<title>x</title>", null)))
+        assertNull(LinkPreviews.fetch("https://example.com/f", fake, policy))
+        assertNull(LinkPreviews.fetch("https://example.com/g", fake, policy))
+        val error = Fake(mapOf("https://example.com/h" to LinkPreviews.Response(404, null, html, "<title>Not found</title>".toByteArray())))
+        assertNull(LinkPreviews.fetch("https://example.com/h", error, policy))
+        // A page larger than allowed is read only as far as the limit: what is in it before still counts.
+        val big = "<title>Big</title>" + " ".repeat(LinkPreviews.MAX_PAGE_BYTES * 2) + "<meta property=\"og:title\" content=\"Too late\">"
+        assertEquals("Big", LinkPreviews.fetch("https://example.com/big", Fake(mapOf("https://example.com/big" to page(big))), policy)!!.page.title)
+    }
+
+    @Test
+    fun noHostOnThisPhoneOrItsNetworkIsEverFetched() {
+        val strict = LinkPreviews.Policy()
+        for (url in listOf(
+            "https://localhost/", "https://127.0.0.1/", "https://10.0.0.1/", "https://192.168.1.1/", "https://172.16.5.4/",
+            "https://169.254.169.254/latest/meta-data", "https://[::1]/", "https://[fd00::1]/", "https://router/", "https://printer.local/",
+            "https://0.0.0.0/", "https://100.64.0.1/",
+        )) {
+            assertNull(url, LinkPreviews.allowed(url, strict))
+        }
+        // A public name that stands for a private address: refused too.
+        val rebound = LinkPreviews.Policy(resolve = { listOf(InetAddress.getByAddress(byteArrayOf(192.toByte(), 168.toByte(), 0, 1))) })
+        assertNull(LinkPreviews.allowed("https://evil.example.com/", rebound))
+        val fake = Fake(mapOf("https://evil.example.com/" to page("<title>x</title>")))
+        assertNull(LinkPreviews.fetch("https://evil.example.com/", fake, rebound))
+        assertTrue("nothing asked", fake.asked.isEmpty())
+        // A public page that redirects into the network: stopped there.
+        val inward = Fake(mapOf("https://example.com/" to redirect("https://192.168.0.1/admin")))
+        assertNull(LinkPreviews.fetch("https://example.com/", inward, policy))
+        assertEquals(listOf("https://example.com/"), inward.asked)
+        // A name that cannot be looked up is no preview.
+        assertNull(LinkPreviews.allowed("https://example.com/", LinkPreviews.Policy(resolve = { throw java.net.UnknownHostException("x") })))
+        assertNotNull(LinkPreviews.allowed("https://example.com/", policy))
+    }
+
+    @Test
+    fun theWholeFetchStopsWhenItsTimeIsUp() {
+        var now = 0L
+        val slow = object : LinkPreviews.Fetcher {
+            override fun fetch(url: String, accept: String, maxBytes: Int, deadlineMs: Long): LinkPreviews.Response {
+                now += 3_000
+                return redirect("https://example.com/next${now}")
+            }
+        }
+        val timed = LinkPreviews.Policy(resolve = { listOf(public) }, now = { now })
+        assertNull(LinkPreviews.fetch("https://example.com/", slow, timed))
+        assertTrue(now <= LinkPreviews.BUDGET_MS + 3_000)
+    }
+
+    // --- the real fetcher, against a server of this test's own -----------------------------------
+
+    private var server: ServerSocket? = null
+    private val requests: MutableList<String> = Collections.synchronizedList(ArrayList())
+
+    @After
+    fun stop() {
+        server?.close()
+    }
+
+    /** A tiny HTTP server on this machine answering [answer] for each request's path (its request kept in [requests]). */
+    private fun serve(answer: (String) -> ByteArray): Int {
+        val socket = ServerSocket(0, 10, InetAddress.getLoopbackAddress())
+        server = socket
+        thread(isDaemon = true) {
+            while (!socket.isClosed) {
+                val client: Socket = try {
+                    socket.accept()
+                } catch (e: IOException) {
+                    break
+                }
+                thread(isDaemon = true) {
+                    client.use { c ->
+                        val head = StringBuilder()
+                        val input = c.getInputStream()
+                        while (!head.endsWith("\r\n\r\n")) {
+                            val b = input.read()
+                            if (b < 0) break
+                            head.append(b.toChar())
+                        }
+                        requests += head.toString()
+                        val path = head.lineSequence().first().split(' ').getOrElse(1) { "/" }
+                        try {
+                            c.getOutputStream().apply {
+                                write(answer(path))
+                                flush()
+                            }
+                        } catch (e: IOException) {
+                            // The fetcher stopped reading (the page was large enough).
+                        }
+                    }
+                }
+            }
+        }
+        return socket.localPort
+    }
+
+    private fun http(status: String, headers: String, body: ByteArray = ByteArray(0)): ByteArray =
+        ("HTTP/1.1 $status\r\n$headers" + "Content-Length: ${body.size}\r\nConnection: close\r\n\r\n").toByteArray() + body
+
+    @Test
+    fun theRealFetcherFollowsARedirectReadsThePageAndSendsNoCookieOrReferrer() {
+        val port = serve { path ->
+            when (path) {
+                "/start" -> http("301 Moved Permanently", "Location: /page\r\n")
+                "/page" -> http("200 OK", "Content-Type: text/html; charset=utf-8\r\nSet-Cookie: id=1\r\n", og.replace("/img/cover.jpg", "http://127.0.0.1:${server!!.localPort}/pic").toByteArray())
+                "/pic" -> http("200 OK", "Content-Type: image/png\r\n", byteArrayOf(9, 8, 7))
+                else -> http("404 Not Found", "")
+            }
+        }
+        val local = LinkPreviews.Policy(upgradeToHttps = false, allowLocalHosts = true)
+        val preview = LinkPreviews.fetch("http://127.0.0.1:$port/start", LinkPreviews.HttpFetcher(), local)!!
+        assertEquals("A & B — \"the\" story", preview.page.title)
+        assertArrayEquals(byteArrayOf(9, 8, 7), preview.image)
+        assertEquals("image/png", preview.imageMime)
+        val asked = requests.toList()
+        assertEquals(3, asked.size)
+        for (r in asked) {
+            assertFalse(r, r.contains("Cookie:", ignoreCase = true))
+            assertFalse(r, r.contains("Referer:", ignoreCase = true))
+            assertTrue(r, r.contains("User-Agent: ${LinkPreviews.USER_AGENT}"))
+        }
+    }
+
+    @Test
+    fun theRealFetcherReadsAHugePageOnlyAsFarAsTheLimit() {
+        val body = ("<title>Huge</title>" + "x".repeat(LinkPreviews.MAX_PAGE_BYTES * 3)).toByteArray()
+        val port = serve { http("200 OK", "Content-Type: text/html\r\n", body) }
+        val fetched = LinkPreviews.HttpFetcher().fetch("http://127.0.0.1:$port/", "text/html", LinkPreviews.MAX_PAGE_BYTES, System.currentTimeMillis() + 5_000)
+        assertEquals(LinkPreviews.MAX_PAGE_BYTES, fetched.body.size)
+        assertTrue(fetched.truncated)
+        val local = LinkPreviews.Policy(upgradeToHttps = false, allowLocalHosts = true)
+        assertEquals("Huge", LinkPreviews.fetch("http://127.0.0.1:$port/", LinkPreviews.HttpFetcher(), local)!!.page.title)
+    }
+}
