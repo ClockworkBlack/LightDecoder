@@ -1036,7 +1036,7 @@ class BlueBubblesScreenTest {
             // Nothing opened OpenBubbles.
             scenario.onActivity { activity -> assertEquals(null, shadowOf(activity).nextStartedActivity) }
             assertFalse(com.lightdecoder.imessage.IMessageLog.read(two.app).any { it.contains("OpenBubbles opened") })
-            // She edits hers: "Edited" by its time as well, and a tap says when.
+            // She edits hers: "Edited" by it as well, and a tap shows what it read before, from when (iOS 16).
             val editedAt = System.currentTimeMillis()
             com.lightdecoder.imessage.direct.DirectLink.get(two.app)
                 .apply(com.lightdecoder.imessage.direct.DirectArchive.Update.Edit("imsg:H1", "Hers, changed", 0, editedAt, sender = "tel:+15551234567"))
@@ -1045,10 +1045,19 @@ class BlueBubblesScreenTest {
                 bubbleOf(activity, "Hers, changed")?.findViewById<View>(R.id.edited)?.visibility == View.VISIBLE
             }
             scenario.onActivity { activity -> bubbleOf(activity, "Hers, changed")!!.findViewById<View>(R.id.edited).performClick() }
-            assertEquals(
-                two.app.getString(R.string.imessage_edited_at, com.lightdecoder.ui.chat.TimeFormat.clock(two.app, editedAt)),
-                org.robolectric.shadows.ShadowToast.getTextOfLatestToast(),
-            )
+            scenario.waitFor("what it read before") { activity ->
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                bubbleOf(activity, "Hers, changed")?.findViewById<View>(R.id.editHistory)?.visibility == View.VISIBLE
+            }
+            scenario.onActivity { activity ->
+                val box = bubbleOf(activity, "Hers, changed")!!.findViewById<android.view.ViewGroup>(R.id.editHistory)
+                assertEquals(1, box.childCount)
+                assertEquals("Hers", (box.getChildAt(0) as android.widget.TextView).text.toString())
+                assertEquals(
+                    two.app.getString(R.string.imessage_edit_history_version, com.lightdecoder.ui.chat.TimeFormat.clock(two.app, now - 120_000), "Hers"),
+                    box.getChildAt(0).contentDescription.toString(),
+                )
+            }
         }
     }
 
@@ -1434,6 +1443,12 @@ class BlueBubblesScreenTest {
         ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
             scenario.waitFor("the message cut short") { shownTexts(it).contains("Cut short") }
             scenario.onActivity { activity -> activity.onFailedTap(rowOf(activity, "Cut short")) }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            // Not delivered, as an iPhone says it: what can be done, with a word that it may have gone.
+            val sheet = ShadowDialog.getLatestDialog() as com.google.android.material.bottomsheet.BottomSheetDialog
+            assertEquals(View.VISIBLE, sheet.findViewById<View>(R.id.notDeliveredNote)!!.visibility)
+            assertTrue("nothing sent from the sheet alone", asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).isEmpty())
+            assertTrue(sheet.findViewById<View>(R.id.actionTryAgain)!!.performClick())
             org.robolectric.shadows.ShadowLooper.idleMainLooper()
             val question = latestDialog()
             assertEquals(two.app.getString(R.string.imessage_resend_body_direct), question.findViewById<android.widget.TextView>(android.R.id.message)?.text?.toString())

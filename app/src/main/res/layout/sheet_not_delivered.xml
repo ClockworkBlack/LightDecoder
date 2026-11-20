@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A tap on an iMessage that was not delivered, as an iPhone offers it: Try Again, Send as Text Message (a Messages conversation), Delete. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingBottom="16dp">
+
+    <TextView
+        android:id="@+id/notDeliveredTitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:paddingHorizontal="24dp"
+        android:paddingTop="20dp"
+        android:paddingBottom="4dp"
+        android:text="@string/imessage_not_delivered_title"
+        android:textAppearance="?attr/textAppearanceTitleMedium" />
+
+    <!-- Apple did not confirm it: it may have gone all the same. -->
+    <TextView
+        android:id="@+id/notDeliveredNote"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:paddingHorizontal="24dp"
+        android:paddingBottom="4dp"
+        android:text="@string/imessage_not_delivered_maybe_sent"
+        android:textAppearance="?attr/textAppearanceBodyMedium"
+        android:textColor="?attr/colorOnSurfaceVariant"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/actionTryAgain"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?attr/selectableItemBackground"
+        android:clickable="true"
+        android:focusable="true"
+        android:gravity="center"
+        android:minHeight="52dp"
+        android:paddingHorizontal="24dp"
+        android:text="@string/imessage_not_delivered_try_again"
+        android:textAppearance="?attr/textAppearanceBodyLarge"
+        android:textColor="@color/phone_blue" />
+
+    <TextView
+        android:id="@+id/actionSendAsText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?attr/selectableItemBackground"
+        android:clickable="true"
+        android:focusable="true"
+        android:gravity="center"
+        android:minHeight="52dp"
+        android:paddingHorizontal="24dp"
+        android:text="@string/imessage_not_delivered_as_text"
+        android:textAppearance="?attr/textAppearanceBodyLarge"
+        android:textColor="@color/phone_blue"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/actionDeleteFailed"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?attr/selectableItemBackground"
+        android:clickable="true"
+        android:focusable="true"
+        android:gravity="center"
+        android:minHeight="52dp"
+        android:paddingHorizontal="24dp"
+        android:text="@string/imessage_not_delivered_delete"
+        android:textAppearance="?attr/textAppearanceBodyLarge"
+        android:textColor="@color/phone_red" />
+</LinearLayout>

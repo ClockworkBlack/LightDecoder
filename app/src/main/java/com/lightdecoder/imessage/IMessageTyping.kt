@@ -1,5 +1,8 @@
 package com.lightdecoder.imessage
 
+/** Someone typing in a chat: their address as the archive keeps it ([participantId]) and their [name]. */
+data class Typist(val participantId: String, val name: String)
+
 /**
  * Who is typing where, as the iMessage library hears it: conversation id -> participant -> name.
  * An iPhone says when someone starts and when they stop; someone it never says stopped for (their
@@ -38,6 +41,10 @@ internal class TypingBoard(private val expiryMs: Long = EXPIRY_MS) {
     /** Conversation id -> the names of who is typing in it. */
     @Synchronized
     fun shown(): Map<String, Set<String>> = typers.mapValues { (_, people) -> people.values.mapTo(LinkedHashSet()) { it.first } }
+
+    /** Conversation id -> who is typing in it, in the order they started. */
+    @Synchronized
+    fun typists(): Map<String, List<Typist>> = typers.mapValues { (_, people) -> people.map { (id, v) -> Typist(id, v.first) } }
 
     private fun forgetOld(nowMs: Long) {
         val chats = typers.values.iterator()

@@ -30,6 +30,8 @@ import org.json.JSONObject
  * @param pollCards a poll's card: the GUIDs of the cards its session sent since (a choice added), whose
  *   votes are this card's too
  * @param stickers stickers people put on the message (iOS 17), each by the message that put it there
+ * @param history an edited message's earlier texts (iOS 16's edit history), oldest first, each with
+ *   when it became the text; the latest [MAX_HISTORY] of them, each at most [MAX_HISTORY_TEXT_CHARS]
  *
  * Pure. Tested in IMessageExtraTest.
  */
@@ -48,7 +50,35 @@ data class IMessageExtra(
     val pollVotes: List<Polls.Ballot> = emptyList(),
     val pollCards: List<String> = emptyList(),
     val stickers: List<PlacedSticker> = emptyList(),
+    val history: List<Version> = emptyList(),
 ) {
+    /**
+     * An earlier text of an edited message: what it read ([text]), from [atMs] on (when it was sent,
+     * or edited to read that).
+     */
+    data class Version(val text: String, val atMs: Long) {
+        fun toJson(): JSONObject = JSONObject().put("text", text).put("t", atMs)
+
+        companion object {
+            fun fromJson(o: JSONObject): Version? {
+                val text = o.text("text").takeIf { it.isNotEmpty() } ?: return null
+                return Version(capped(text), o.optLong("t"))
+            }
+        }
+    }
+
+    /**
+     * [history] once the message's text until now, [previous] (its text since [sinceMs]), is edited
+     * away: that version kept after the others (the same one again, as Apple hands an edit over
+     * again after a restart, is kept once), the latest [MAX_HISTORY] of them.
+     */
+    fun withEarlier(previous: String, sinceMs: Long): List<Version> {
+        if (previous.isEmpty()) return history
+        val version = Version(capped(previous), sinceMs)
+        if (history.lastOrNull() == version) return history
+        return (history + version).takeLast(MAX_HISTORY)
+    }
+
     /**
      * A link preview: the address, the page's title and summary, and the site it is on; [image] is
      * the key its picture is kept under in the iMessage media folder ([linkImageKey]),
@@ -245,12 +275,27 @@ data class IMessageExtra(
         if (pollVotes.isNotEmpty()) o.put("pollVotes", Polls.ballotsToJson(pollVotes))
         if (pollCards.isNotEmpty()) o.put("pollCards", JSONArray(pollCards))
         if (stickers.isNotEmpty()) o.put("stickers", JSONArray().apply { stickers.forEach { put(it.toJson()) } })
+        if (history.isNotEmpty()) o.put("history", JSONArray().apply { history.forEach { put(it.toJson()) } })
         return if (o.length() == 0) "" else o.toString()
     }
 
     companion object {
         /** An iPhone lets a message be edited this many times. */
         const val MAX_EDITS = 5
+
+        /** The most earlier texts an edited message keeps ([history]): as many as an iPhone's five edits leave. */
+        const val MAX_HISTORY = 5
+
+        /** The most of an earlier text kept; a longer one is cut, with "…". */
+        const val MAX_HISTORY_TEXT_CHARS = 2_000
+
+        /** [text] at most [MAX_HISTORY_TEXT_CHARS] long, never ending in half a character pair. */
+        internal fun capped(text: String): String {
+            if (text.length <= MAX_HISTORY_TEXT_CHARS) return text
+            var end = MAX_HISTORY_TEXT_CHARS - 1
+            if (Character.isHighSurrogate(text[end - 1])) end--
+            return text.substring(0, end) + "…"
+        }
 
         /** Apple's id of the invisible ink effect: the text stays hidden until tapped. */
         const val INVISIBLE_INK = "com.apple.MobileSMS.expressivesend.invisibleink"
@@ -352,6 +397,9 @@ data class IMessageExtra(
                     }.orEmpty(),
                     stickers = o.optJSONArray("stickers")?.let { a ->
                         (0 until minOf(a.length(), MAX_STICKERS)).mapNotNull { a.optJSONObject(it)?.let(PlacedSticker::fromJson) }
+                    }.orEmpty(),
+                    history = o.optJSONArray("history")?.let { a ->
+                        (maxOf(0, a.length() - MAX_HISTORY) until a.length()).mapNotNull { a.optJSONObject(it)?.let(Version::fromJson) }
                     }.orEmpty(),
                 )
             } catch (e: JSONException) {

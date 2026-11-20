@@ -21,7 +21,8 @@ import org.json.JSONObject
  * open or not, answers the main process's requests ([DirectWire]: send (with mentions and a link's
  * preview), unsend, reach, edit, react, typing, read, download, an iMessage app's update (a vote in a
  * poll too), a chat's background, Send Later taken back,
- * a group's name, members and photo), and hands what Apple sends to the main process's
+ * a group's name, members and photo, a chat marked unread, a junk report, the people of recent chats
+ * told of the user's new device), and hands what Apple sends to the main process's
  * [DirectSinkService].
  */
 class DirectService : Service() {
@@ -105,6 +106,20 @@ class DirectService : Service() {
             }
             DirectWire.UNSCHEDULE -> {
                 engine.unschedule(target(request), request.getString("guid"))
+                DirectWire.ok()
+            }
+            DirectWire.MARK_UNREAD -> {
+                val r = DirectWire.MarkUnreadRequest.fromJson(request)
+                engine.markUnread(r.target, r.guid)
+                DirectWire.ok()
+            }
+            DirectWire.REPORT_JUNK -> {
+                val r = DirectWire.ReportJunkRequest.fromJson(request)
+                engine.reportJunk(r.target, r.messages)
+                DirectWire.ok()
+            }
+            DirectWire.PEERS -> {
+                engine.invalidatePeers(DirectWire.PeersRequest.fromJson(request).groups)
                 DirectWire.ok()
             }
             else -> DirectWire.error("Unknown request $what")

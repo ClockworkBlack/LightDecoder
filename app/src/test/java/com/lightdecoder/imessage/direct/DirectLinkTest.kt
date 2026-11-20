@@ -999,7 +999,8 @@ class DirectLinkTest {
         val asked = Collections.synchronizedList(ArrayList<Pair<Int, JSONObject>>())
         val link = fakeLink(asked)
         link.apply(incoming("B0", bob, "hi"))
-        sentHere("E5", "on my wya", ts = System.currentTimeMillis() - 60_000)
+        val sentAt = System.currentTimeMillis() - 60_000
+        sentHere("E5", "on my wya", ts = sentAt)
         link.apply(DirectArchive.Update.Reaction("imsg:E5", "+15559876543", "❤️", true, false, 5))
         runBlocking { link.edit("imsg:E5", "on my way") }
         val (what, request) = asked.single()
@@ -1011,7 +1012,11 @@ class DirectLinkTest {
         val row = repo.message("imsg:E5")!!
         assertEquals("on my way", row.text)
         assertTrue(row.editedAtMs > 0)
-        assertEquals(IMessageExtra(parts = mapOf(0 to "on my way"), edits = 1), IMessageExtra.parse(row.extra))
+        // What it read before is kept, from when it was sent, for "Edited" to show (iOS 16).
+        assertEquals(
+            IMessageExtra(parts = mapOf(0 to "on my way"), edits = 1, history = listOf(IMessageExtra.Version("on my wya", sentAt))),
+            IMessageExtra.parse(row.extra),
+        )
         assertEquals("the tapback stays", "❤️", row.reactions.single().emoji)
         assertEquals(DirectArchive.STATUS_SENT, row.status)
     }

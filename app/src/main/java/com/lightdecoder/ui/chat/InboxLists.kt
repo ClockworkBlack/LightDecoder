@@ -41,10 +41,11 @@ internal object InboxLists {
     /**
      * The Messages rows with the iMessage chats folded in: a chat whose
      * person has a Messages conversation is shown as that conversation
-     * (its newest message, time and unread mark taken over when newer),
-     * as on an iPhone; the rest are rows of their own.
+     * (its newest message, time and unread mark taken over when newer, and
+     * pinned or with its alerts hidden when either is), as on an iPhone;
+     * the rest are rows of their own.
      */
-    private fun foldIn(
+    internal fun foldIn(
         own: List<ConversationItem>,
         iMessages: List<ConversationItem>,
         pairs: Map<String, com.lightdecoder.imessage.IMessageLinks.Pair>,
@@ -66,6 +67,8 @@ internal object InboxLists {
             item.copy(
                 row = item.row.copy(
                     unread = item.row.unread || chats.any { it.row.unread },
+                    pinned = item.row.pinned || chats.any { it.row.pinned },
+                    muted = item.row.muted || chats.any { it.row.muted },
                     lastMessageTs = maxOf(item.row.lastMessageTs, im.row.lastMessageTs),
                     snippet = if (newer) im.row.snippet else item.row.snippet,
                     snippetFromMe = if (newer) im.row.snippetFromMe else item.row.snippetFromMe,

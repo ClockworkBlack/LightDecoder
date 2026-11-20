@@ -39,6 +39,20 @@
         android:textStyle="bold"
         android:visibility="gone" />
 
+    <!--
+        iPhone-style chats: a message that was not delivered, a red "!" beside it (centred on its
+        bubble by [ReplyRowLayout]); a tap on it offers Try Again, as the bubble does.
+    -->
+    <ImageView
+        android:id="@+id/failedMark"
+        android:layout_width="24dp"
+        android:layout_height="24dp"
+        android:layout_gravity="top|end"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:contentDescription="@string/imessage_not_delivered_mark"
+        android:src="@drawable/ic_phone_not_delivered"
+        android:visibility="gone" />
+
     <com.lightdecoder.ui.chat.BubbleLayout
         android:id="@+id/column"
         android:layout_width="wrap_content"
@@ -56,6 +70,17 @@
             android:maxLines="1"
             android:textAppearance="?attr/textAppearanceLabelMedium"
             android:textColor="?attr/colorPrimary"
+            android:visibility="gone" />
+
+        <!--
+            An edited message's earlier texts (iOS 16), oldest first, in faded small bubbles above it,
+            shown when its "Edited" is tapped (and hidden again on the next tap). Added in code.
+        -->
+        <LinearLayout
+            android:id="@+id/editHistory"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
             android:visibility="gone" />
 
         <LinearLayout

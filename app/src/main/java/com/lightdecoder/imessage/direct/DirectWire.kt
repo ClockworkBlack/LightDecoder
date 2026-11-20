@@ -11,8 +11,9 @@ import org.json.JSONObject
  * tested (DirectWireTest), so both sides always agree.
  *
  * Main -> :imessage: [SEND] (with its mentions and link preview), [UNSEND], [REACH], [EDIT], [REACT], [TYPING], [READ], [DOWNLOAD],
- * [EXTENSION], [BACKGROUND], [UNSCHEDULE], [RENAME], [MEMBERS], [GROUP_PHOTO] (requests, answered with the same
- * request id; a failure is answered with [error]). Never raw media bytes: files are passed by path, in the app's own storage.
+ * [EXTENSION], [BACKGROUND], [UNSCHEDULE], [RENAME], [MEMBERS], [GROUP_PHOTO], [MARK_UNREAD], [REPORT_JUNK], [PEERS]
+ * (requests, answered with the same request id; a failure is answered with [error]). Never raw media bytes: files are
+ * passed by path, in the app's own storage.
  * :imessage -> main: [UPDATE] (an archive change from Apple), answered once it is stored; only
  * then does the library forget the event.
  */
@@ -66,6 +67,22 @@ object DirectWire {
 
     /** Sets a group's photo to the picture at a path, or takes it off: [groupPhoto], answered with [guid] once Apple confirmed it. */
     const val GROUP_PHOTO = 15
+
+    /**
+     * Tells the user's other devices a chat is unread again ("Mark as Unread"): [markUnread], answered
+     * with [ok] at once (Apple does not answer it).
+     */
+    const val MARK_UNREAD = 16
+
+    /** Reports a chat's last messages to Apple as junk ("Report Junk"): [reportJunk], answered with [ok] once Apple took it. */
+    const val REPORT_JUNK = 17
+
+    /**
+     * Tells the people of the user's recent chats that the user's devices changed, so their phones
+     * look the user's devices up again ([peers]: who, by the address the user writes to them from),
+     * answered with [ok] at once.
+     */
+    const val PEERS = 18
 
     const val REPLY = 100
 
@@ -281,6 +298,105 @@ object DirectWire {
         }
     }
 
+    /**
+     * What a [MARK_UNREAD] request asks for: the chat [target] is unread again, from message [guid]
+     * (the newest one someone else sent in it, as an iPhone names it) on.
+     */
+    data class MarkUnreadRequest(val target: Target, val guid: String) {
+        companion object {
+            fun fromJson(o: JSONObject) = MarkUnreadRequest(
+                Target.fromJson(o.getJSONObject("target")),
+                o.getString("guid").also { if (it.isBlank() || it.length > MAX_GUID_CHARS) throw org.json.JSONException("no message") },
+            )
+        }
+    }
+
+    /**
+     * One message of a [REPORT_JUNK] request, as OpenBubbles reports one: its GUID, its sender's
+     * address as the library has it ("tel:+15551234567"), how many people the chat has besides the
+     * user, its text, when it was sent (seconds since 1970, a fraction allowed: OpenBubbles'
+     * `microsecondsSinceEpoch / 1000000`), and the library's descriptions of its attachments (from
+     * which Apple's copies of them are named). Read with limits: a message without a GUID or sender
+     * is none, its text and attachments are cut to [MAX_JUNK_TEXT_CHARS] and [MAX_JUNK_ATTACHMENTS].
+     */
+    data class JunkMessage(
+        val guid: String,
+        val sender: String,
+        val conversationSize: Int,
+        val text: String,
+        val timeOfMessage: Double,
+        val attachments: List<String> = emptyList(),
+    ) {
+        fun toJson(): JSONObject = JSONObject().put("guid", guid).put("sender", sender).put("size", conversationSize)
+            .put("text", text).put("at", timeOfMessage)
+            .apply { if (attachments.isNotEmpty()) put("attachments", JSONArray(attachments)) }
+
+        companion object {
+            fun fromJson(o: JSONObject): JunkMessage? {
+                val guid = o.optString("guid").takeIf { it.isNotBlank() && it.length <= MAX_GUID_CHARS } ?: return null
+                val sender = o.optString("sender").takeIf { it.isNotBlank() && it.length <= MAX_ADDRESS_CHARS } ?: return null
+                val at = o.optDouble("at", 0.0).takeIf { it.isFinite() && it > 0 } ?: 0.0
+                val attachments = o.optJSONArray("attachments")?.let { a ->
+                    (0 until minOf(a.length(), MAX_JUNK_ATTACHMENTS)).map { a.optString(it) }.filter { it.isNotBlank() && it.length <= MAX_DESCRIPTOR_CHARS }
+                }.orEmpty()
+                return JunkMessage(guid, sender, o.optInt("size", 1).coerceIn(1, MAX_PEERS), o.optString("text").take(MAX_JUNK_TEXT_CHARS), at, attachments)
+            }
+        }
+    }
+
+    /** What a [REPORT_JUNK] request asks for: [messages] (at most [MAX_JUNK_MESSAGES]) of the chat [target] reported to Apple as junk. */
+    data class ReportJunkRequest(val target: Target, val messages: List<JunkMessage>) {
+        companion object {
+            fun fromJson(o: JSONObject) = ReportJunkRequest(
+                Target.fromJson(o.getJSONObject("target")),
+                o.objects("messages").take(MAX_JUNK_MESSAGES).mapNotNull(JunkMessage::fromJson),
+            )
+        }
+    }
+
+    /**
+     * The people one of the user's addresses ([from]) writes to in the user's recent chats ([PEERS]):
+     * they are told the user's devices changed. [participants] are the library's addresses, [from] among them.
+     */
+    data class PeerGroup(val from: String, val participants: List<String>) {
+        fun toJson(): JSONObject = JSONObject().put("from", from).put("participants", JSONArray(participants))
+
+        companion object {
+            fun fromJson(o: JSONObject): PeerGroup? {
+                val from = o.optString("from").takeIf { it.isNotBlank() && it.length <= MAX_ADDRESS_CHARS } ?: return null
+                val people = o.optJSONArray("participants")?.let { a ->
+                    (0 until minOf(a.length(), MAX_PEERS)).map { a.optString(it) }.filter { it.isNotBlank() && it.length <= MAX_ADDRESS_CHARS }
+                }.orEmpty().distinct()
+                return PeerGroup(from, people).takeIf { people.any { it != from } }
+            }
+        }
+    }
+
+    /** What a [PEERS] request asks for: each of [groups] (at most [MAX_PEER_GROUPS]) is told. */
+    data class PeersRequest(val groups: List<PeerGroup>) {
+        companion object {
+            fun fromJson(o: JSONObject) = PeersRequest(o.objects("groups").take(MAX_PEER_GROUPS).mapNotNull(PeerGroup::fromJson))
+        }
+    }
+
+    /** The most messages a junk report carries (OpenBubbles reports the last five). */
+    const val MAX_JUNK_MESSAGES = 5
+
+    /** The most of a reported message's text that goes, and of its attachments. */
+    const val MAX_JUNK_TEXT_CHARS = 4_000
+    const val MAX_JUNK_ATTACHMENTS = 4
+
+    /** The longest attachment description taken (a small file that came inside its message is described with its bytes: those are left out). */
+    const val MAX_DESCRIPTOR_CHARS = 16_384
+
+    /** The most of the user's addresses told of new devices at once, and of the people each writes to. */
+    const val MAX_PEER_GROUPS = 8
+    const val MAX_PEERS = 300
+
+    /** The longest GUID and address taken from the other process. */
+    const val MAX_GUID_CHARS = 64
+    const val MAX_ADDRESS_CHARS = 320
+
     /** What an [EDIT] request asks for: part [part] of message [guid] now reads [text], formatted with [runs], mentioning [mentions]. */
     data class EditRequest(
         val target: Target,
@@ -415,6 +531,16 @@ object DirectWire {
     fun groupPhoto(target: Target, path: String?, groupVersion: Long): JSONObject =
         JSONObject().put("target", target.toJson()).put("path", path ?: JSONObject.NULL).put("groupVersion", groupVersion)
 
+    /** The chat [target] is unread again, from message [guid] (the newest one someone else sent in it) on. */
+    fun markUnread(target: Target, guid: String): JSONObject = JSONObject().put("target", target.toJson()).put("guid", guid)
+
+    /** Report [messages] of the chat [target] to Apple as junk. */
+    fun reportJunk(target: Target, messages: List<JunkMessage>): JSONObject =
+        JSONObject().put("target", target.toJson()).put("messages", JSONArray().apply { messages.forEach { put(it.toJson()) } })
+
+    /** Tell each of [groups] that the user's devices changed. */
+    fun peers(groups: List<PeerGroup>): JSONObject = JSONObject().put("groups", JSONArray().apply { groups.forEach { put(it.toJson()) } })
+
     /** Fetch the attachment [descriptor] (as the library saved it) into the file [path]. */
     fun download(descriptor: String, path: String): JSONObject = JSONObject().put("descriptor", descriptor).put("path", path)
 
@@ -502,6 +628,8 @@ object DirectWire {
         is DirectArchive.Update.Typing -> JSONObject().put("kind", "typing").put("conversationId", u.conversationId)
             .put("participantId", u.participantId).put("typing", u.typing).apply { u.groupGuid?.let { put("groupGuid", it) } }
         is DirectArchive.Update.ReadElsewhere -> JSONObject().put("kind", "readElsewhere").put("messageId", u.messageId)
+        is DirectArchive.Update.MarkUnread -> JSONObject().put("kind", "markUnread").put("messageId", u.messageId)
+        DirectArchive.Update.PeerCacheInvalidate -> JSONObject().put("kind", "peerCacheInvalidate")
         is DirectArchive.Update.Failed -> JSONObject().put("kind", "failed").put("messageId", u.messageId).put("error", u.error)
         is DirectArchive.Update.Background -> JSONObject().put("kind", "background").put("conversationId", u.conversationId)
             .put("version", u.version).put("path", u.path ?: JSONObject.NULL)
@@ -627,6 +755,9 @@ object DirectWire {
             o.optString("groupGuid").takeIf { it.isNotEmpty() },
         )
         "readElsewhere" -> DirectArchive.Update.ReadElsewhere(o.getString("messageId"))
+        "markUnread" -> o.optStringOrNull("messageId")?.takeIf { DirectArchive.isImessage(it) && it.length <= MAX_GUID_CHARS + DirectArchive.PREFIX.length }
+            ?.let { DirectArchive.Update.MarkUnread(it) } ?: DirectArchive.Update.Ignore
+        "peerCacheInvalidate" -> DirectArchive.Update.PeerCacheInvalidate
         "failed" -> DirectArchive.Update.Failed(o.getString("messageId"), o.optString("error"))
         "background" -> DirectArchive.Update.Background(
             o.getString("conversationId"),

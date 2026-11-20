@@ -257,6 +257,20 @@ object DirectArchive {
         /** The user read this message on another of their devices. */
         data class ReadElsewhere(val messageId: String) : Update()
 
+        /**
+         * The user marked the chat of message [messageId] unread on another of their devices (Apple's
+         * MarkUnread, naming the newest message someone else sent in it). Only from the user's own
+         * devices, verified: it is unread here too, without a notification.
+         */
+        data class MarkUnread(val messageId: String) : Update()
+
+        /**
+         * The user's devices changed (one was added: Apple's library says so of the user's own account).
+         * The people of the user's recent chats are to be told, so that their phones look the user's
+         * devices up again (OpenBubbles' `invalidatePeerCaches`; DirectLink works out whom).
+         */
+        object PeerCacheInvalidate : Update()
+
         /** Apple could not deliver one of the user's messages: [error] says why. */
         data class Failed(val messageId: String, val error: String) : Update()
 
@@ -350,9 +364,15 @@ object DirectArchive {
         describe: (MessageAttachment) -> String = { "" },
         now: Long = System.currentTimeMillis(),
     ): Update {
+        val m = inst.message
+        // The user's own devices changed: the library says so of the user's account itself, from nobody
+        // (or, should it name one, from one of the user's own addresses); never anyone else's word.
+        if (m is PushChatMessage.PeerCacheInvalidate) {
+            val own = inst.sender == null || inst.sender in me
+            return if (own && !inst.verificationFailed) Update.PeerCacheInvalidate else Update.Ignore
+        }
         // From nobody: nothing to take (an iPhone shows none either).
         val sender = inst.sender ?: return Update.Ignore
-        val m = inst.message
         // Apple could not verify who sent it. As OpenBubbles, nothing that changes or removes what
         // is stored, or a group, is taken from it; and it is never the user's: claiming one of the
         // user's own addresses, it is from nobody else either (a message would show as the other
@@ -401,6 +421,9 @@ object DirectArchive {
                 if (fromMe) Update.Ignore else Update.Receipt(listOf(messageId(inst.id)), STATUS_DELIVERED, sender)
             is PushChatMessage.Read ->
                 if (fromMe) Update.ReadElsewhere(messageId(inst.id)) else Update.Receipt(listOf(messageId(inst.id)), STATUS_READ, sender)
+            // "Mark as Unread" on one of the user's own devices (its id is the message it names); from anyone else, nothing.
+            is PushChatMessage.MarkUnread ->
+                if (fromMe && inst.id.isNotBlank() && inst.id.length <= MAX_GUID_CHARS) Update.MarkUnread(messageId(inst.id)) else Update.Ignore
             is PushChatMessage.Typing -> {
                 val conversation = inst.conversation
                 if (fromMe || conversation == null) return Update.Ignore
@@ -452,7 +475,11 @@ object DirectArchive {
         m is PushChatMessage.Delivered || m is PushChatMessage.Read || m is PushChatMessage.Edit ||
             m is PushChatMessage.Unsend || m is PushChatMessage.Typing || m is PushChatMessage.RenameMessage ||
             m is PushChatMessage.ChangeParticipants || m is PushChatMessage.IconChange || m is PushChatMessage.Error ||
-            m is PushChatMessage.PermanentDelete || m is PushChatMessage.SetTranscriptBackground
+            m is PushChatMessage.PermanentDelete || m is PushChatMessage.SetTranscriptBackground ||
+            m is PushChatMessage.MarkUnread || m is PushChatMessage.PeerCacheInvalidate
+
+    /** The longest GUID taken from Apple's events (Apple's are UUIDs). */
+    private const val MAX_GUID_CHARS = 64
 
     /**
      * How far ahead of this phone's clock an event's time is taken (a device's clock may be a little

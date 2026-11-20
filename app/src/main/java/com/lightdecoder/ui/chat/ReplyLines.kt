@@ -25,11 +25,26 @@ class ReplyRowLayout @JvmOverloads constructor(
 
     private var quote: View? = null
     private var column: View? = null
+    private var failedMark: View? = null
+    private var bubble: View? = null
 
     override fun onFinishInflate() {
         super.onFinishInflate()
         quote = findViewById(R.id.threadQuote)
         column = findViewById(R.id.column)
+        failedMark = findViewById(R.id.failedMark)
+        bubble = findViewById(R.id.bubble)
+    }
+
+    /** A message that was not delivered: its red "!" sits beside the bubble, at the middle of its height, as on an iPhone. */
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        super.onLayout(changed, left, top, right, bottom)
+        val mark = failedMark ?: return
+        val column = column ?: return
+        val bubble = bubble ?: return
+        if (mark.visibility == GONE || bubble.parent !== column) return
+        val middle = column.top + bubble.top + bubble.height / 2
+        mark.offsetTopAndBottom(middle - mark.height / 2 - mark.top)
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {

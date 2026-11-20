@@ -822,6 +822,70 @@ class DirectEngine private constructor(private val app: Context) {
     }
 
     /**
+     * "Mark as Unread": the user's other devices are told the chat [target] is unread again, as
+     * OpenBubbles' `markUnread` tells them: rustpush's [PushChatMessage.MarkUnread] to the user's own
+     * address alone (the chat named by its guid, as the user's devices know it), carrying the GUID
+     * of the message it is unread from ([guid]). Apple does not answer it.
+     */
+    suspend fun markUnread(target: DirectWire.Target, guid: String) {
+        val s = requireSession()
+        val (conversation, from) = conversationOf(target)
+        val toMe = conversation.copy(participants = listOf(from), afterGuid = null)
+        sendOnly(s, uniffi.rust_bridge.newMsg(toMe, from, PushChatMessage.MarkUnread).copy(id = guid))
+    }
+
+    /**
+     * "Report Junk": the chat [target]'s [messages] are reported to Apple as junk, as OpenBubbles'
+     * `markAsSpam` reports them (rustpush's `report_spam`, from the address the chat is carried on:
+     * one of the user's registered ones). Each goes with its text and the attachments the library
+     * can still describe. Throws [ImessageError] when Apple did not take the report.
+     */
+    suspend fun reportJunk(target: DirectWire.Target, messages: List<DirectWire.JunkMessage>) {
+        if (messages.isEmpty()) throw ImessageError(app.getString(R.string.imessage_junk_nothing))
+        val s = requireSession()
+        val (_, from) = conversationOf(target)
+        val reports = messages.mapNotNull { m ->
+            val sender = Handles.normalize(m.sender) ?: return@mapNotNull null
+            // One the library cannot read again goes without it: the rest of the report still goes.
+            val attachments = m.attachments.mapNotNull { descriptor ->
+                try {
+                    uniffi.rust_bridge.restoreAttachment(descriptor)
+                } catch (e: Exception) {
+                    null
+                }
+            }
+            uniffi.rust_bridge.ReportMessage(m.guid, sender, m.conversationSize.coerceAtLeast(1).toUInt(), DirectMessages.junkParts(m.text, attachments), m.timeOfMessage)
+        }
+        if (reports.isEmpty()) throw ImessageError(app.getString(R.string.imessage_junk_nothing))
+        call { uniffi.rust_bridge.reportMessages(s, from, reports) }
+    }
+
+    /**
+     * The user's devices changed: the people of [groups] (each the people one of the user's
+     * addresses writes to in the recent chats, as the main process found them) are told, as
+     * OpenBubbles' `invalidatePeerCaches` tells them: rustpush's [PushChatMessage.PeerCacheInvalidate]
+     * from that address. Apple does not answer it; one that does not go is only logged.
+     */
+    suspend fun invalidatePeers(groups: List<DirectWire.PeerGroup>) {
+        if (groups.isEmpty()) return
+        val s = requireSession()
+        val mine = myHandles.toSet()
+        for (group in groups) {
+            // Only from one of the user's own addresses.
+            val from = group.from.takeIf { it in mine } ?: continue
+            val people = (listOf(from) + group.participants).distinct()
+            if (people.none { it != from }) continue
+            try {
+                sendOnly(s, uniffi.rust_bridge.newMsg(ConversationData(people, null, null, null), from, PushChatMessage.PeerCacheInvalidate))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "the people of the recent chats were not told of the new device (${e::class.java.simpleName})")
+            }
+        }
+    }
+
+    /**
      * Fetches the attachment [descriptor] (as the library saved it, `saveAttachment`) into the
      * file [path], through a partial file of its own so a half-written file is never taken for
      * the whole. Two downloads of the same file (one asked again after the first took too long

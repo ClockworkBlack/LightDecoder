@@ -11,6 +11,7 @@
     <color name="phone_field_stroke">#FF3A3A3C</color>
     <color name="phone_plus">#FF2C2C2E</color>
     <color name="phone_on_plus">#FFE5E5EA</color>
+    <color name="phone_red">#FFFF453A</color>
     <color name="phone_typing_dot">#FF98989F</color>
     <color name="phone_thread_line">#FF48484A</color>
     <color name="phone_thread_scrim">#73000000</color>

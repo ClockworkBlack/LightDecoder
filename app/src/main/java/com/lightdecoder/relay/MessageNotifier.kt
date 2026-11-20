@@ -117,7 +117,7 @@ object MessageNotifier {
         if (message.isOld || message.fromMe || message.direction != "in") return
         if (message.conversationId == visibleConversationId(service)) return
         val conversation = repo.conversation(message.conversationId)
-        if (conversation?.muted == true && !mentioned) return
+        if ((conversation?.muted == true || mutedAsMerged(context, service, message.conversationId)) && !mentioned) return
         if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) return
 
         val sender = message.senderName.ifBlank { conversation?.name.orEmpty() }
@@ -125,6 +125,21 @@ object MessageNotifier {
         val line = Line(sender, bodyOf(context, message), message.timestampMs.takeIf { it > 0 } ?: System.currentTimeMillis(), false)
         val key = Key(service, message.conversationId)
         post(context, key, conversation, add(key, line), alert = true, photo = photoFor(context, repo, message.conversationId, conversation))
+    }
+
+    /**
+     * Whether iMessage chat [conversationId] is shown inside a Messages conversation whose alerts are
+     * hidden (Blue Bubbles): the two are one conversation, as on an iPhone, and stay quiet together.
+     * Never throws.
+     */
+    internal fun mutedAsMerged(context: Context, service: ChatService, conversationId: String): Boolean {
+        if (service != ChatService.IMESSAGE) return false
+        return try {
+            val messagesId = com.lightdecoder.ui.chat.BlueBubblesLinks.messagesFor(context.applicationContext, conversationId) ?: return false
+            com.lightdecoder.ui.chat.ScreenBackends.get(context, ChatService.MESSAGES).repo.conversation(messagesId)?.muted == true
+        } catch (e: RuntimeException) {
+            false
+        }
     }
 
     /**

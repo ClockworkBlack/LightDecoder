@@ -813,8 +813,23 @@ class DirectLink private constructor(
         DirectMedia.pendingInlineFile(file).delete()
     }
 
+    /**
+     * The pictures kept with [conversationId]'s messages that are no attachments of them (links'
+     * previews, stickers put on them) go: the chat is being deleted. Its attachments' files go with
+     * the archive's rows ([ArchiveRepository.deleteConversationLocal]); these are kept by key, which
+     * no row of the archive names as a file.
+     */
+    fun forgetConversationPictures(conversationId: String) {
+        val rows = repo.messagesHolding(
+            conversationId,
+            extraNeedles = listOf("\"image\"", "\"stickers\""),
+            reactionNeedles = listOf(DirectArchive.STICKER_TAPBACK),
+        )
+        for (row in rows) forgetPictures(row)
+    }
+
     /** The pictures kept with [row] that are no attachment of it (its link's, the stickers on it) go: the message is gone. */
-    private fun forgetPictures(row: MessageRow) {
+    internal fun forgetPictures(row: MessageRow) {
         val extra = IMessageExtra.parse(row.extra)
         extra.link?.image?.let(::deletePicture)
         val guid = DirectArchive.guidOf(row.id) ?: return
@@ -1087,6 +1102,8 @@ class DirectLink private constructor(
                 val next = extra.copy(
                     parts = extra.parts + (0 to text), edits = extra.edits + 1, runs = extra.withRuns(0, formatted),
                     mentions = extra.withMentions(0, mentioned),
+                    // What it read until now, as an iPhone keeps it for "Edited".
+                    history = extra.withEarlier(current.text, current.editedAtMs.takeIf { it > 0 } ?: current.timestampMs),
                 )
                 repo.editText(messageId, next.text(), System.currentTimeMillis(), next.toJson(), snippetOf(next.text(), current.extra))
             }
@@ -1359,6 +1376,8 @@ class DirectLink private constructor(
             is DirectArchive.Update.Dropped ->
                 IMessageLog.add(app, "an event from Apple was not taken (${loggableText(update.what, 40)}): ${loggableText(update.why, 160)}")
             is DirectArchive.Update.ReadElsewhere -> readElsewhere(update)
+            is DirectArchive.Update.MarkUnread -> markedUnreadElsewhere(update)
+            DirectArchive.Update.PeerCacheInvalidate -> devicesChanged()
             is DirectArchive.Update.Background -> background(update)
             is DirectArchive.Update.GroupPhoto -> groupPhoto(update)
             is DirectArchive.Update.Failed -> {
@@ -1818,7 +1837,11 @@ class DirectLink private constructor(
         if (extra.edits >= IMessageExtra.MAX_EDITS) return refused("an edit", row.conversationId, "past Apple's ${IMessageExtra.MAX_EDITS} edits")
         val runs = extra.withRuns(update.part, TextRuns.normalize(update.text, update.runs))
         val mentions = extra.withMentions(update.part, Mentions.normalize(update.text, update.mentions))
-        val next = extra.copy(parts = parts + (update.part to update.text), edits = extra.edits + 1, runs = runs, mentions = mentions)
+        val next = extra.copy(
+            parts = parts + (update.part to update.text), edits = extra.edits + 1, runs = runs, mentions = mentions,
+            // What it read until now, as an iPhone keeps it for "Edited".
+            history = extra.withEarlier(row.text, row.editedAtMs.takeIf { it > 0 } ?: row.timestampMs),
+        )
         repo.editText(row.id, next.text(), update.atMs, next.toJson(), snippetOf(next.text(), row.extra))
     }
 
@@ -2547,6 +2570,183 @@ class DirectLink private constructor(
         receiptChoices.set(conversationId, on)
     }
 
+    /**
+     * The user marked a chat unread on another of their devices (only ever taken from the user's own
+     * verified devices: [DirectArchive.map]): it is unread here too, as an iPhone shows it, with no
+     * notification. One for a message not stored yet waits for it ([hold]).
+     */
+    private fun markedUnreadElsewhere(update: DirectArchive.Update.MarkUnread) {
+        val row = repo.message(update.messageId) ?: return hold(update.messageId, update)
+        if (!repo.markConversationUnread(row.conversationId)) return
+        IMessageLog.add(app, "${IMessageLog.chatRef(row.conversationId)}: marked unread on another of the user's devices")
+    }
+
+    /**
+     * "Mark as Unread" ([conversationId], from the list or the chat's menu): unread here until it is
+     * read again, and, through the library, the user's other devices are told, as an iPhone tells
+     * them (Apple's MarkUnread naming the newest message someone else sent in it; none in a chat
+     * nobody else wrote in). Does not throw: a notice that does not go is only logged.
+     */
+    suspend fun markUnread(conversationId: String) {
+        runCatching { repo.markConversationUnread(conversationId) }
+        if (!active) return
+        val (guid, target) = try {
+            val guid = repo.latestIncomingMessageId(conversationId, DirectArchive.PREFIX)?.let(DirectArchive::guidOf) ?: return
+            guid to (targetOf(conversationId) ?: return)
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "unread mark not sent", e)
+            return
+        }
+        // Read again later, the read receipt for it goes again.
+        readSent.release(guid)
+        try {
+            withContext(NonCancellable) {
+                val error = DirectWire.errorOf(requests.call(DirectWire.MARK_UNREAD, DirectWire.markUnread(target, guid), NOTICE_TIMEOUT_MS))
+                if (error == null) {
+                    IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: marked unread, the user's other devices told through the iMessage library")
+                } else {
+                    Log.i(TAG, "unread mark not sent: ${com.lightdecoder.imessage.Redact.text(error)}")
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "unread mark not sent", e)
+        }
+    }
+
+    // --- the user's devices changed ---------------------------------------------------------------
+
+    /** When the people of the recent chats were last told the user's devices changed ([devicesChanged]). */
+    private val peerNotices = PeerNotices(app)
+
+    /**
+     * The user's devices changed (Apple's library said so of the user's own account): the people of
+     * the chats with something in them in the last [PeerInvalidation.RECENT_MS] are told, so that
+     * their phones look the user's devices up again (as OpenBubbles' `invalidatePeerCaches` does), at
+     * most once in [PeerInvalidation.EVERY_MS]. Asked of the ":imessage" process without waiting here.
+     */
+    private fun devicesChanged() {
+        val now = System.currentTimeMillis()
+        if (!peerNotices.due(now)) {
+            IMessageLog.add(app, "the user's devices changed again: the people of the recent chats were told less than 10 minutes ago")
+            return
+        }
+        val recent = runCatching { repo.conversations(null) }.getOrDefault(emptyList())
+            .filter { it.folderEnum != Folder.DELETED && PeerInvalidation.recent(it.lastMessageTs, now) }
+            .mapNotNull { runCatching { targetOf(it.id) }.getOrNull() }
+        val groups = PeerInvalidation.groups(recent)
+        if (groups.isEmpty()) return
+        peerNotices.told(now)
+        val people = groups.sumOf { g -> g.participants.count { it != g.from } }
+        scope.launch {
+            try {
+                val error = DirectWire.errorOf(requests.call(DirectWire.PEERS, DirectWire.peers(groups), NOTICE_TIMEOUT_MS))
+                IMessageLog.add(
+                    app,
+                    if (error == null) "the user's devices changed: $people people of ${recent.size} recent chat(s) told through the iMessage library"
+                    else "the user's devices changed: the people of the recent chats were not told (${loggableText(error, 120)})",
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "the people of the recent chats were not told", e)
+            }
+        }
+    }
+
+    // --- "Report Junk" ---------------------------------------------------------------------------
+
+    /**
+     * Whether "Report Junk" is offered for [conversationId], as an iPhone offers it: a chat with one
+     * person the library reaches, who is not among the user's contacts (no contact's name or picture
+     * for their address), and in which the user never wrote, with something of theirs to report
+     * ([JunkReports.offered]). Reads the archives: not on the main thread.
+     */
+    fun junkReportable(conversationId: String): Boolean {
+        if (!active || DirectArchive.isGroup(conversationId)) return false
+        return try {
+            val row = repo.conversation(conversationId) ?: return false
+            val others = repo.participants(conversationId).filter { !it.isMe }
+            val other = others.singleOrNull()
+            val address = other?.let { it.number.ifBlank { it.formattedNumber }.ifBlank { it.id } }.orEmpty()
+            val handle = Handles.normalize(address)
+            val known = other != null && handle != null && (knownName(other, handle) || com.lightdecoder.relay.ContactPhotos.get(app).forAddress(address) != null)
+            val incoming = repo.latestIncomingMessageId(conversationId, DirectArchive.PREFIX) != null
+            JunkReports.offered(
+                isGroup = row.isGroup, readOnly = row.readOnly, deleted = row.folderEnum == Folder.DELETED, others = others.size,
+                knownContact = known, wroteIn = repo.hasOutgoing(conversationId), somethingToReport = incoming,
+            ) && targetOf(conversationId) != null
+        } catch (e: RuntimeException) {
+            false
+        }
+    }
+
+    /** Whether [p] (whose address is [handle]) has a name of their own: a contact's, or one stored with them that is not their address. */
+    private fun knownName(p: com.lightdecoder.archive.ParticipantRow, handle: String): Boolean {
+        val address = Handles.display(handle)
+        val stored = p.name.trim()
+        if (stored.isNotEmpty() && !IMessageAddress.same(stored, address) && stored != p.number && stored != p.formattedNumber && stored != address) return true
+        return nameOf(handle) != address
+    }
+
+    /**
+     * "Report Junk" ([junkReportable]): the last [DirectWire.MAX_JUNK_MESSAGES] messages the person
+     * sent in [conversationId] are reported to Apple as junk, as OpenBubbles' `markAsSpam` reports
+     * them, then the chat is deleted here. Throws [DirectEngine.ImessageError] saying why when Apple
+     * did not take the report (the chat then stays).
+     */
+    suspend fun reportJunk(conversationId: String) {
+        if (!junkReportable(conversationId)) throw DirectEngine.ImessageError(app.getString(R.string.imessage_junk_not_offered))
+        val target = targetOf(conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
+        val rows = JunkReports.pick(repo.messages(conversationId, limit = JUNK_LOOKBACK))
+        val messages = rows.mapNotNull { JunkReports.message(it, target) }
+        if (messages.isEmpty()) throw DirectEngine.ImessageError(app.getString(R.string.imessage_junk_nothing))
+        withContext(NonCancellable) {
+            failOn(requests.call(DirectWire.REPORT_JUNK, DirectWire.reportJunk(target, messages), SEND_TIMEOUT_MS))
+            IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: ${messages.size} message(s) reported to Apple as junk through the iMessage library; the chat deleted here")
+            manager.deleteConversation(conversationId)
+        }
+    }
+
+    // --- a failed iMessage sent again -----------------------------------------------------------
+
+    /**
+     * Whether [row] is one of the user's iMessages Apple took and then could not deliver (it said so
+     * afterwards): not a local copy, which [retry] sends again, but the sent message itself.
+     */
+    fun undelivered(row: MessageRow): Boolean =
+        row.isOutgoing && row.direction == "out" && !row.isLocal && DirectArchive.isImessage(row.id) && DirectArchive.statusRank(row.status) < 0
+
+    /**
+     * "Try Again" on [messageId], one of the user's iMessages Apple could not deliver ([undelivered]):
+     * it is sent again, as a new message with its text, its file when that is still here, its effect
+     * and formatting, and the failed one goes. Returns the new local copy's id, or null when it could
+     * not go (gone, not the user's, not reachable).
+     */
+    fun sendAgain(messageId: String): String? {
+        val row = repo.message(messageId)?.takeIf(::undelivered) ?: return null
+        if (!canSend(row.conversationId)) return null
+        val extra = IMessageExtra.parse(row.extra)
+        val file = row.media.firstNotNullOfOrNull { m -> existing(m.localPath)?.let { it to m } }
+        val reply = row.replyToId.ifEmpty { null }
+        val tmpId = if (file != null) {
+            try {
+                sendMedia(row.conversationId, Uri.fromFile(file.first), row.text.ifEmpty { null }, reply, extra.voice, extra.effect, extra.textRuns(row.text))
+            } catch (e: DirectEngine.ImessageError) {
+                Log.w(TAG, "failed message not sent again: ${com.lightdecoder.imessage.Redact.text(e.message.orEmpty())}")
+                return null
+            }
+        } else {
+            if (row.text.isBlank()) return null
+            sendText(row.conversationId, row.text, reply, extra.effect, extra.textRuns(row.text), mentions = extra.textMentions(row.text))
+        }
+        synchronized(this) {
+            repo.message(messageId)?.let(::forgetPictures)
+            repo.applyDeletion(messageId)
+        }
+        IMessageLog.add(app, "${IMessageLog.chatRef(row.conversationId)}: a message Apple could not deliver was sent again")
+        return tmpId
+    }
+
     /** The user read [update]'s message on another device: the chat is read here too, unless something newer came since. */
     private fun readElsewhere(update: DirectArchive.Update.ReadElsewhere) {
         val row = repo.message(update.messageId) ?: return hold(update.messageId, update)
@@ -2742,6 +2942,9 @@ class DirectLink private constructor(
 
         /** The longest GUID taken for a sticker's message (Apple's are UUIDs). */
         private const val MAX_GUID_CHARS = 64
+
+        /** How many of a chat's newest messages are looked through for the ones a junk report carries. */
+        private const val JUNK_LOOKBACK = 50
 
         /** A link preview's fetch is given this long past its own budget before the message goes without it. */
         private const val LINK_PREVIEW_SLACK_MS = 2_000L

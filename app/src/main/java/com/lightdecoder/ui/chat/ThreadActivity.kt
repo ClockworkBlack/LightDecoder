@@ -226,6 +226,24 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     /** The thread view open now ([openThread]), if any. */
     @VisibleForTesting
     internal var threadPanel: ReplyThreadPanel? = null
+
+    /** iPhone-style chats: a drag to the side shows every message's time ([TimeReveal]). */
+    @VisibleForTesting
+    internal lateinit var timeReveal: TimeReveal
+
+    /**
+     * "Report Junk" is offered for this chat ([com.lightdecoder.imessage.direct.DirectLink.junkReportable]),
+     * as the last load found: the banner at the top says so, and the menu has it.
+     */
+    @VisibleForTesting
+    internal var junkOffered = false
+        private set
+
+    /**
+     * The user marked the conversation unread from its menu and is leaving it: nothing marks it read
+     * again on the way out ([markReadIfNeeded]).
+     */
+    private var leavingUnread = false
     /** What the next message carries: pictures (several at once), a video or a voice message. */
     private var attachments: List<Uri> = emptyList()
 
@@ -400,6 +418,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         // As on an iPhone, the name and picture at the top open the chat's details (an iMessage chat's,
         // or a Messages conversation's with the person's iMessage chat in it); elsewhere the menu.
         binding.phoneHeader.setOnClickListener { if (!openDetails()) binding.toolbar.showOverflowMenu() }
+        binding.junkReport.setOnClickListener { confirmReportJunk() }
         updateThreadsInChat()
         updatePhoneStyle()
         lifecycleScope.launch { voicePlayer.state.collect { adapter.updateVoiceViews(binding.messages, it) } }
@@ -464,6 +483,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             it.voterName = ::voterName
             it.canVote = { row -> com.lightdecoder.imessage.direct.DirectLink.get(this).canVote(row, reachable = row.conversationId in directReachable) }
             it.pictureFile = { key -> com.lightdecoder.imessage.direct.DirectLink.pictureFile(applicationContext, key) }
+            it.notDelivered = ::notDeliveredHere
         }
         binding.messages.adapter = adapter
         updatePhoneStyle()
@@ -504,6 +524,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             threadPanel = null
             threads = ReplyThreads.Threads.NONE
             knownRows = emptyMap()
+            timeReveal.reset()
+            junkOffered = false
+            renderJunk()
             closeOptionsMenu()
             // Leaving the thread: stop reading its messages; the next one's are new from its first read.
             readerInstance?.stop()
@@ -692,6 +715,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             it.voterName = ::voterName
             it.canVote = { row -> com.lightdecoder.imessage.direct.DirectLink.get(this).canVote(row, reachable = row.conversationId in directReachable) }
             it.pictureFile = { key -> com.lightdecoder.imessage.direct.DirectLink.pictureFile(applicationContext, key) }
+            it.notDelivered = ::notDeliveredHere
         }
         layoutManager = LinearLayoutManager(this).apply { stackFromEnd = true }
         binding.messages.layoutManager = layoutManager
@@ -711,6 +735,15 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         ItemTouchHelper(SwipeToReply()).attachToRecyclerView(binding.messages)
         // iPhone-style chats: the lines joining inline replies to what they answer.
         binding.messages.addItemDecoration(ReplyLines(this) { threadsInChat })
+        // iPhone-style chats: a drag to the left shows every message's time (a swipe to the right replies).
+        timeReveal = TimeReveal(
+            list = binding.messages,
+            enabled = { phoneStyle && threadPanel == null },
+            timeOf = { holder -> (holder as? MessagesAdapter.MessageHolder)?.shownTime?.ifEmpty { null } },
+            anchorOf = { holder -> (holder as? MessagesAdapter.MessageHolder)?.binding?.bubble },
+            color = { if (adapter.onPicture) android.graphics.Color.WHITE else ContextCompat.getColor(this, R.color.phone_meta) },
+            shadow = { adapter.onPicture },
+        ).attach()
     }
 
     /**
@@ -719,7 +752,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      * in the thread when let go; past [REPLY_TRIGGER_DP] it opens the reply
      * bar. The swipe never "completes" (a completed ItemTouchHelper swipe
      * leaves the bubble off screen, and the message would vanish from the
-     * thread).
+     * thread). In iPhone-style chats only to the right (to the left in a
+     * right-to-left language), as on an iPhone: the other way shows the
+     * messages' times ([TimeReveal]).
      */
     private inner class SwipeToReply : ItemTouchHelper.SimpleCallback(0, ItemTouchHelper.START or ItemTouchHelper.END) {
         private val density = resources.displayMetrics.density
@@ -731,7 +766,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
         override fun getSwipeDirs(recyclerView: RecyclerView, holder: RecyclerView.ViewHolder): Int {
             val item = adapter.currentList.getOrNull(holder.bindingAdapterPosition) as? ThreadItem.Message
-            return if (item != null && canReplyTo(item.row)) super.getSwipeDirs(recyclerView, holder) else 0
+            if (item == null || !canReplyTo(item.row)) return 0
+            return if (phoneStyle) ItemTouchHelper.END else super.getSwipeDirs(recyclerView, holder)
         }
 
         // Never reached: the bubble always comes back.
@@ -832,6 +868,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val photo: File? = null,
         /** A group's members' pictures ([memberPhotos]). */
         val memberPhotos: Map<String, File> = emptyMap(),
+        /** "Report Junk" is offered for this chat ([junkOffered]). */
+        val junk: Boolean = false,
+        /** The person's older iMessage chats shown here ([BlueBubblesLinks.alsoShown]) that are unread: read along with it. */
+        val othersUnread: List<String> = emptyList(),
     )
 
     /**
@@ -914,6 +954,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 background = background,
                 photo = AvatarPhotos.forConversation(applicationContext, link.service, id, conversation?.isGroup == true, people),
                 memberPhotos = if (conversation?.isGroup == true) AvatarPhotos.members(applicationContext, people) else emptyMap(),
+                junk = link.service == ChatService.IMESSAGE && direct != null && direct.active && direct.junkReportable(id),
+                othersUnread = if (imRepo == null) emptyList() else chats.drop(1).filter { runCatching { imRepo.conversation(it)?.unread == true }.getOrDefault(false) },
             )
         }
         if (grow) growPending = false
@@ -943,6 +985,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         historyComplete = snapshot.historyComplete
         avatarPhoto = snapshot.photo
         memberPhotos = snapshot.memberPhotos
+        if (junkOffered != snapshot.junk) {
+            junkOffered = snapshot.junk
+            invalidateOptionsMenu()
+        }
+        renderJunk()
         renderConversation()
         renderBackground(snapshot.background)
         watchSendLater(messages)
@@ -965,7 +1012,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         // (once per message, also of one that came while the conversation is open: it is never unread
         // then), else OpenBubbles' Mark As Read button is pressed.
         val companion = snapshot.companion
-        if (companion != null && started) {
+        // The person's older iMessage chats shown here are read with it too (they are one conversation).
+        if (started && !leavingUnread) {
+            val im = iMessageLink
+            for (chat in snapshot.othersUnread) runInBackground { im.markRead(chat) }
+        }
+        if (companion != null && started && !leavingUnread) {
             val newest = snapshot.companionRows.filter { !it.isOutgoing && it.direction == "in" }.maxByOrNull { it.timestampMs }?.id
             val direct = companion in snapshot.directReachable
             if (snapshot.companionUnread || (direct && newest != null && newest != companionReadId)) {
@@ -1361,8 +1413,35 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             visible.size == 2 -> getString(R.string.chat_typing_two, visible[0], visible[1])
             else -> getString(R.string.chat_typing_many)
         }
-        binding.typingDots.contentDescription = binding.typingText.text
+        // iPhone-style group chats: the picture (or initials) of who is typing beside the dots, the
+        // first of them when there are more, and TalkBack says how many more.
+        val typists = if (phoneStyle && names.isNotEmpty()) groupTypists() else emptyList()
+        val first = typists.firstOrNull()
+        binding.typingAvatar.visibility = if (first != null) View.VISIBLE else View.GONE
+        if (first != null) {
+            val name = first.name.ifBlank { com.lightdecoder.imessage.direct.Handles.display(first.participantId) }
+            Avatars.bind(binding.typingAvatar, name.ifBlank { "?" }, first.participantId, "", typistPhoto(first))
+        }
+        binding.typingDots.contentDescription = when {
+            first != null && typists.size > 1 -> resources.getQuantityString(
+                R.plurals.imessage_typing_first_and_others, typists.size - 1,
+                first.name.ifBlank { com.lightdecoder.imessage.direct.Handles.display(first.participantId) }, typists.size - 1,
+            )
+            first != null -> getString(R.string.chat_typing_one, first.name.ifBlank { com.lightdecoder.imessage.direct.Handles.display(first.participantId) })
+            else -> binding.typingText.text
+        }
     }
+
+    /** In a group chat, who is typing in it as the iMessage library heard them, in the order they started; none elsewhere. */
+    private fun groupTypists(): List<com.lightdecoder.imessage.Typist> {
+        if (conversation?.isGroup != true) return emptyList()
+        val im = manager as? com.lightdecoder.imessage.IMessageManager ?: return emptyList()
+        return im.typists.value[conversationId].orEmpty()
+    }
+
+    /** The picture of someone typing in a group: theirs, if one is kept ([memberPhotos]). */
+    private fun typistPhoto(typist: com.lightdecoder.imessage.Typist): File? =
+        com.lightdecoder.imessage.IMessageAddress.key(typist.participantId)?.let { memberPhotos[it] }
 
     /** Who is typing, as last drawn ([renderTyping]). */
     private var typingNames: Set<String> = emptySet()
@@ -1384,6 +1463,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         )
         if (want == phoneStyle) return false
         phoneStyle = want
+        if (!want) timeReveal.reset()
         adapter.phoneStyle = want
         adapter.notifyDataSetChanged()
         if (!want) threadPanel?.dismiss()
@@ -1510,7 +1590,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      * on screen. Offline, at least the local unread mark goes.
      */
     private fun markReadIfNeeded(force: Boolean = false) {
-        if (!started) return
+        // Marked unread from the menu, on its way out: it stays unread.
+        if (!started || leavingUnread) return
         val conv = conversation ?: return
         val newestIncoming = messages.lastOrNull { !it.isOutgoing && it.direction == "in" }?.id
         val now = System.currentTimeMillis()
@@ -3553,7 +3634,22 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     @androidx.annotation.VisibleForTesting
     internal var emojiSheet: BottomSheetDialog? = null
 
+    /**
+     * Whether [row] is one of the user's iMessages that was not delivered and that the iMessage
+     * library can do something about ("Not Delivered", as on an iPhone): through the library, in a
+     * chat it reaches, a local copy whose send failed or a message Apple could not deliver.
+     */
+    private fun notDeliveredHere(row: MessageRow): Boolean =
+        (row.isOutgoing || row.direction == "out") && backendFor(row) is com.lightdecoder.imessage.IMessageManager &&
+            row.conversationId in directReachable && directMode() &&
+            (MessageStatus.canRetryLocally(row) || com.lightdecoder.imessage.direct.DirectLink.get(this).undelivered(row))
+
     override fun onFailedTap(row: MessageRow) {
+        // Through the iMessage library, an iMessage that was not delivered: what can be done, as an iPhone offers it.
+        if (isShown(row) && notDeliveredHere(row)) {
+            showNotDelivered(row)
+            return
+        }
         // An iMessage that had no Reply button to go through: OpenBubbles sends it instead.
         val link = backendFor(row)
         if (link is com.lightdecoder.imessage.IMessageManager && row.isLocal) {
@@ -3857,6 +3953,122 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             .setNegativeButton(android.R.string.cancel, null)
             .show()
             .let(::trackConfirm)
+    }
+
+    // --- "Not Delivered" (iMessage through the library) -------------------------------------------
+
+    /**
+     * A tap on an iMessage that was not delivered ([notDeliveredHere]), as on an iPhone: "Try Again"
+     * (asked first when it may have gone already, as any send that may have), "Send as Text Message"
+     * in a Messages conversation that can send texts ([sendsAsTextHere]), and "Delete".
+     */
+    @VisibleForTesting
+    internal fun showNotDelivered(row: MessageRow) {
+        actionSheet?.dismiss()
+        val sheet = BottomSheetDialog(this)
+        val b = com.lightdecoder.databinding.SheetNotDeliveredBinding.inflate(layoutInflater)
+        b.notDeliveredNote.visibility = if (MessageStatus.outcomeUnknown(row)) View.VISIBLE else View.GONE
+        b.actionSendAsText.visibility = if (sendsAsTextHere(row)) View.VISIBLE else View.GONE
+        b.actionTryAgain.setOnClickListener {
+            sheet.dismiss()
+            if (isShown(row)) tryAgain(row)
+        }
+        b.actionSendAsText.setOnClickListener {
+            sheet.dismiss()
+            if (isShown(row)) sendAsText(row)
+        }
+        b.actionDeleteFailed.setOnClickListener {
+            sheet.dismiss()
+            if (isShown(row)) deleteNotDelivered(row)
+        }
+        sheet.setContentView(b.root)
+        sheet.setOnDismissListener { if (actionSheet === sheet) actionSheet = null }
+        actionSheet = sheet
+        sheet.show()
+    }
+
+    /** "Try Again": a local copy as any failed send ([retryOrAsk]); a message Apple could not deliver sent again as a new one. */
+    private fun tryAgain(row: MessageRow) {
+        if (MessageStatus.canRetryLocally(row)) {
+            retryOrAsk(row)
+            return
+        }
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(this)
+        lifecycleScope.launch {
+            val sent = withContext(Dispatchers.IO) { runCatching { direct.sendAgain(row.id) }.getOrNull() }
+            if (sent == null) toast(getString(R.string.imessage_not_delivered_again_failed)) else scrollToBottomNext = true
+        }
+    }
+
+    /**
+     * Whether "Send as Text Message" is offered for [row]: an iMessage of the person's shown in this
+     * Messages conversation, which can send a text to them (it is open, and its link is set up), with
+     * something to send (words, or its file still here).
+     */
+    private fun sendsAsTextHere(row: MessageRow): Boolean {
+        val conv = conversation ?: return false
+        if (manager.service != ChatService.MESSAGES || row.conversationId !in iMessageChats) return false
+        if (conv.isGroup || conv.readOnly || conv.folderEnum == Folder.DELETED || !manager.isPaired()) return false
+        return row.text.isNotBlank() || row.media.any { it.localPath.isNotEmpty() }
+    }
+
+    /**
+     * "Send as Text Message", the user's own choice: what the iMessage said (its words, and its file
+     * as a picture message where the file is still here) goes through this Messages conversation, as a
+     * text; the iMessage that was not delivered goes, here (its local copy is let go of; a message Apple
+     * could not deliver is deleted here).
+     */
+    @VisibleForTesting
+    internal fun sendAsText(row: MessageRow) {
+        if (!sendsAsTextHere(row)) return
+        val chat = conversationId
+        val texts = manager
+        val im = backendFor(row)
+        val cache = File(cacheDir, AS_TEXT_DIR)
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                relayAttempt {
+                    purgeOld(cache)
+                    val file = row.media.firstNotNullOfOrNull { m -> m.localPath.takeIf { it.isNotEmpty() }?.let(::File)?.takeIf { it.isFile && it.length() > 0 }?.let { it to m } }
+                    if (file != null) {
+                        // A copy of its own, by the file's name (its type goes by it), for the Messages link to take in when it is ready.
+                        val name = file.second.fileName.filter { it.isLetterOrDigit() || it in "._-" }.ifBlank { file.first.name }
+                        val copy = File(File(cache, java.util.UUID.randomUUID().toString()).apply { mkdirs() }, name)
+                        file.first.copyTo(copy, overwrite = true)
+                        texts.sendMedia(chat, Uri.fromFile(copy), row.text.ifBlank { null }, null)
+                    } else {
+                        texts.sendText(chat, row.text, null)
+                    }
+                    // It went as a text instead: the iMessage that was not delivered goes.
+                    if (row.isLocal) im.discardFailed(row.tmpId) else im.deleteMessage(row.id)
+                }
+            }
+            result
+                .onSuccess {
+                    com.lightdecoder.imessage.IMessageLog.add(
+                        this@ThreadActivity,
+                        "Messages conversation with ${com.lightdecoder.imessage.IMessageLog.chatRef(row.conversationId)}: " +
+                            "an iMessage that was not delivered went as a text message, at the user's choice",
+                    )
+                    scrollToBottomNext = true
+                }
+                .onFailure { toast(getString(R.string.imessage_not_delivered_as_text_failed, errorText(texts, it))) }
+        }
+    }
+
+    /** Files in [dir] left by earlier "Send as Text Message"s, a day old or more, go. */
+    private fun purgeOld(dir: File) {
+        val cutoff = System.currentTimeMillis() - HAND_OFF_KEEP_MS
+        dir.listFiles()?.filter { it.lastModified() < cutoff }?.forEach { it.deleteRecursively() }
+    }
+
+    /** "Delete": the iMessage that was not delivered goes from here (a local copy is let go of; a sent one is deleted here). */
+    private fun deleteNotDelivered(row: MessageRow) {
+        val link = backendFor(row)
+        lifecycleScope.launch {
+            relayAttempt { if (row.isLocal) link.discardFailed(row.tmpId) else link.deleteMessage(row.id) }
+                .onFailure { toast(errorText(link, it)) }
+        }
     }
 
     private fun copy(text: String) {
@@ -4446,6 +4658,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             setTitle(if (conv?.muted == true) R.string.chat_action_unmute else R.string.chat_action_mute)
         }
         menu.findItem(R.id.action_delete_conversation)?.isVisible = conv != null && !deleted
+        menu.findItem(R.id.action_mark_unread)?.isVisible = conv != null && !deleted
+        menu.findItem(R.id.action_report_junk)?.isVisible = junkOffered && conv != null && !deleted
         menu.findItem(R.id.action_notify_read)?.apply {
             // Where the service says when a message is read, and read notifications are on at all.
             isVisible = conv != null && !deleted && manager.service != ChatService.GMAIL && manager.service != ChatService.IMESSAGE &&
@@ -4475,17 +4689,22 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                     toast(getString(R.string.chat_call_no_app))
                 }
             }
+            // A Messages conversation with the person's iMessage chats in it is one conversation: they go with it ([MergedChats]).
             R.id.action_archive -> if (conv != null) {
                 val archive = conv.folderEnum != Folder.ARCHIVE
+                val companions = companions()
                 runAction(if (archive) R.string.chat_archived else R.string.chat_unarchived) {
-                    it.setArchived(conv.id, archive)
+                    MergedChats.setArchived(applicationContext, it, conv.id, archive, companions)
                 }
             }
             R.id.action_mute -> if (conv != null) {
+                val companions = companions()
                 runAction(if (conv.muted) R.string.chat_unmuted_done else R.string.chat_muted_done) {
-                    it.setMuted(conv.id, !conv.muted)
+                    MergedChats.setMuted(applicationContext, it, conv.id, !conv.muted, companions)
                 }
             }
+            R.id.action_mark_unread -> if (conv != null) markUnreadAndLeave(conv.id)
+            R.id.action_report_junk -> confirmReportJunk()
             R.id.action_not_spam -> if (conv != null) {
                 runAction(R.string.chat_not_spam_done) { it.markNotSpam(conv.id) }
             }
@@ -4549,11 +4768,74 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         )
     }
 
+    /**
+     * The iMessage chats shown in this Messages conversation ([iMessageChats]: the person's, and their
+     * older ones), which its menu's actions reach too ([MergedChats]); none for any other conversation.
+     */
+    private fun companions(): List<String> =
+        if (manager.service == ChatService.MESSAGES) iMessageChats.toList() else emptyList()
+
+    /**
+     * "Mark as Unread" from the menu: the conversation (with its iMessage chats) is unread again,
+     * through the iMessage library the user's other devices told too, and the list is shown, as
+     * nothing on the way out marks it read again.
+     */
+    @VisibleForTesting
+    internal fun markUnreadAndLeave(id: String) {
+        val link = manager
+        val companions = companions()
+        leavingUnread = true
+        runInBackground { MergedChats.markUnread(applicationContext, link, id, companions) }
+        toast(getString(R.string.chat_marked_unread))
+        openConversations()
+        finish()
+    }
+
+    // --- "Report Junk" -------------------------------------------------------------------------
+
+    /** The banner at the top of a chat "Report Junk" is offered for ([junkOffered]). */
+    private fun renderJunk() {
+        binding.junkBanner.visibility = if (junkOffered) View.VISIBLE else View.GONE
+    }
+
+    /** "Report Junk?" first, as on an iPhone: the sender's last messages go to Apple, and the chat is deleted here. */
+    @VisibleForTesting
+    internal fun confirmReportJunk() {
+        val id = conversation?.id ?: return
+        if (!junkOffered) return
+        val link = manager
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.imessage_junk_confirm_title)
+            .setMessage(R.string.imessage_junk_confirm_body)
+            .setPositiveButton(R.string.imessage_junk_report) { _, _ -> if (isCurrent(link, id)) reportJunk(id) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+            .let(::trackConfirm)
+    }
+
+    /** Reports chat [id] as junk through the iMessage library, then leaves it (it is deleted here); a refusal says why and keeps it. */
+    private fun reportJunk(id: String) {
+        val link = manager
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(this)
+        lifecycleScope.launch {
+            relayAttempt { withContext(Dispatchers.IO) { direct.reportJunk(id) } }
+                .onSuccess {
+                    toast(getString(R.string.imessage_junk_reported))
+                    if (isCurrent(link, id)) {
+                        openConversations()
+                        finish()
+                    }
+                }
+                .onFailure { toast(getString(R.string.imessage_junk_failed, errorText(link, it))) }
+        }
+    }
+
     /** Like [confirmDeleteMessage]: on the phone too with a pairing, else here only. */
     private fun confirmDeleteConversation() {
         val id = conversation?.id ?: return
         val link = manager
         val linked = link.isPaired()
+        val companions = companions()
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.chat_delete_conversation_title)
             .setMessage(
@@ -4567,7 +4849,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                     return@setPositiveButton
                 }
                 lifecycleScope.launch {
-                    relayAttempt { link.deleteConversation(id) }
+                    relayAttempt { MergedChats.delete(applicationContext, link, id, companions) }
                         .onSuccess { if (isCurrent(link, id)) finish() }
                         .onFailure { toast(errorText(link, it)) }
                 }
@@ -4618,6 +4900,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     companion object {
         private const val HAND_OFF_KEEP_MS = 24 * 60 * 60 * 1000L
+
+        /** Under the cache: the copies of files "Send as Text Message" hands to the Messages link. */
+        private const val AS_TEXT_DIR = "as-text"
         private const val STATE_WINDOW = "window"
         private const val STATE_ATTACHMENTS = "attachments"
 

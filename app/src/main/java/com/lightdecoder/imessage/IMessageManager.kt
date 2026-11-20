@@ -80,6 +80,10 @@ class IMessageManager private constructor(
     private val _typing = MutableStateFlow<Map<String, Set<String>>>(emptyMap())
     override val typing: StateFlow<Map<String, Set<String>>> = _typing.asStateFlow()
 
+    /** Who is typing where, by their address too (direct mode): a group shows the first one's picture beside the dots. */
+    private val _typists = MutableStateFlow<Map<String, List<Typist>>>(emptyMap())
+    val typists: StateFlow<Map<String, List<Typist>>> = _typists.asStateFlow()
+
     /** Who is typing where (direct mode). */
     private val typers = TypingBoard()
 
@@ -601,16 +605,21 @@ class IMessageManager private constructor(
      */
     fun noteTyping(conversationId: String, participantId: String, name: String, typing: Boolean) {
         synchronized(typers) {
-            if (typers.note(conversationId, participantId, name, typing, System.currentTimeMillis())) _typing.value = typers.shown()
+            if (typers.note(conversationId, participantId, name, typing, System.currentTimeMillis())) showTypists()
         }
         if (typing) {
             typingScope.launch {
                 delay(TypingBoard.EXPIRY_MS)
                 synchronized(typers) {
-                    if (typers.expire(System.currentTimeMillis())) _typing.value = typers.shown()
+                    if (typers.expire(System.currentTimeMillis())) showTypists()
                 }
             }
         }
+    }
+
+    private fun showTypists() {
+        _typists.value = typers.typists()
+        _typing.value = typers.shown()
     }
     override fun watchPresence(conversationId: String) = Unit
     override fun setAppVisible(visible: Boolean) {
@@ -659,6 +668,15 @@ class IMessageManager private constructor(
         if (!pressed) IMessageLog.add(appContext, "${IMessageLog.chatRef(conversationId)}: read here, but OpenBubbles offered no Mark As Read button (it stays unread there)")
     }
 
+    /**
+     * "Mark as Unread": unread here until it is read again; through the iMessage library the user's
+     * other devices are told too ([com.lightdecoder.imessage.direct.DirectLink.markUnread]). Does not throw.
+     */
+    suspend fun markUnread(conversationId: String): Unit = withContext(Dispatchers.IO) {
+        if (direct.active) return@withContext direct.markUnread(conversationId)
+        runCatching { repo.markConversationUnread(conversationId) }
+    }
+
     override suspend fun loadOlder(conversationId: String, count: Int): Int = 0
 
     /** Removes it from this phone only; OpenBubbles keeps it. It is not taken in again from OpenBubbles' notification. */
@@ -669,17 +687,21 @@ class IMessageManager private constructor(
             while (deletedSent.size > MAX_DELETED_SENT) deletedSent.poll()
         }
         if (!messageId.startsWith(MessageRow.TMP_PREFIX)) IMessagePrefs.addDeletedMessage(appContext, messageId)
+        // The pictures kept with it that are no attachment of it (its link's, the stickers on it) go with it.
+        row?.let { runCatching { direct.forgetPictures(it) } }
         repo.applyDeletion(messageId)
     }
 
     /**
      * Removes the chat from this phone only; it comes back, from that
-     * moment on, if someone writes in it again.
+     * moment on, if someone writes in it again. The pictures kept with its
+     * messages that are no attachments (links' previews, stickers) go too.
      */
     override suspend fun deleteConversation(conversationId: String): Unit = withContext(Dispatchers.IO) {
         val newest = runCatching { repo.messages(conversationId).maxOfOrNull { it.timestampMs } }.getOrNull()
         IMessagePrefs.setClearedBefore(appContext, conversationId, maxOf(newest ?: 0L, System.currentTimeMillis()))
         MessageNotifier.cancel(appContext, conversationId, ChatService.IMESSAGE)
+        runCatching { direct.forgetConversationPictures(conversationId) }
         repo.deleteConversationLocal(conversationId)
     }
 

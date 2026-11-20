@@ -321,7 +321,8 @@ class ChatDetailsActivity : AppCompatActivity() {
 
     /**
      * "Hide Alerts": the conversation is muted, or not; a Messages conversation with the person's
-     * iMessage chat in it, that chat too (its iMessages alert on their own).
+     * iMessage chats in it, those too (their iMessages alert on their own), as its menu and its long
+     * press in the list do ([MergedChats]).
      */
     private fun setHideAlerts(on: Boolean) {
         val link = manager
@@ -329,8 +330,8 @@ class ChatDetailsActivity : AppCompatActivity() {
         val companion = companionId
         lifecycleScope.launch {
             relayAttempt {
-                link.setMuted(id, on)
-                if (companion != null) ScreenBackends.get(this@ChatDetailsActivity, ChatService.IMESSAGE).setMuted(companion, on)
+                val companions = (listOfNotNull(companion) + withContext(Dispatchers.IO) { MergedChats.companions(applicationContext, link.service, id) }).distinct()
+                MergedChats.setMuted(this@ChatDetailsActivity, link, id, on, companions)
             }.onFailure { toast(ChatErrors.message(this@ChatDetailsActivity, link.service, it)) }
             load()
         }

@@ -283,7 +283,12 @@ class ChatBackgroundScreenTest {
             // A light gradient (Peach): drawn behind the messages, with the scrim.
             val peach = BackgroundPalettes.ALL.first { it.id == "peach" }.style
             aliceChanged("BG1", 1_000, null, peach)
-            scenario.waitFor("her gradient") { background(it).visibility == View.VISIBLE && drawableOf(it) is GradientBackgroundDrawable }
+            // The background is drawn as soon as the chat is read again, its row once the list built
+            // from that read is handed over (on a thread of its own): both are waited for.
+            scenario.waitFor("her gradient, and the row saying so") {
+                background(it).visibility == View.VISIBLE && drawableOf(it) is GradientBackgroundDrawable &&
+                    shownTexts(it).contains("Alice changed the chat background.")
+            }
             scenario.onActivity { activity ->
                 assertEquals("gradient:${peach.data}", background(activity).tag)
                 assertEquals(View.VISIBLE, activity.findViewById<View>(R.id.chatBackgroundScrim).visibility)

@@ -86,6 +86,13 @@ class MessagesAdapter(
     /** The file a picture kept with an iMessage is in, by its key ([IMessageExtra.linkImageKey], a sticker's). */
     var pictureFile: (String) -> java.io.File? = { null }
 
+    /**
+     * Which of the user's failed messages are iMessages that were not delivered, as an iPhone tells
+     * them (sent through the iMessage library, to a chat it reaches): "Not Delivered" under them and,
+     * in iPhone-style chats, a red "!" beside them; a tap offers what can be done ([Callbacks.onFailedTap]).
+     */
+    var notDelivered: (MessageRow) -> Boolean = { false }
+
     interface Callbacks {
         fun onMessageLongPress(row: MessageRow)
         fun onFailedTap(row: MessageRow)
@@ -135,6 +142,12 @@ class MessagesAdapter(
     /** Messages whose invisible ink was tapped away, by id: their text shows. */
     private val revealed = HashSet<String>()
 
+    /** Edited messages whose earlier versions are shown above them ([IMessageExtra.history]), by id. */
+    private val historyShown = HashSet<String>()
+
+    /** Whether [messageId]'s earlier versions are shown (its "Edited" was tapped). */
+    fun historyShown(messageId: String): Boolean = messageId in historyShown
+
     private val ids = StableIds()
 
     init {
@@ -177,6 +190,12 @@ class MessagesAdapter(
         /** The "Reply" accessibility action added at the last bind, removed before the next. */
         var replyActionId = View.NO_ID
 
+        /** The "Show / Hide earlier versions" accessibility action added at the last bind ([historyShown]). */
+        var historyActionId = View.NO_ID
+
+        /** Its message's time, as the last bind wrote it: what iPhone-style chats show beside it on a drag to the side ([TimeReveal]). */
+        var shownTime = ""
+
         /** The "Open link" accessibility actions added at the last bind ([BubbleLinks]). */
         var linkActionIds: List<Int> = emptyList()
 
@@ -196,6 +215,8 @@ class MessagesAdapter(
         val phoneOnIncoming = androidx.core.content.ContextCompat.getColor(view.context, R.color.phone_on_incoming)
         val phoneMeta = androidx.core.content.ContextCompat.getColor(view.context, R.color.phone_meta)
         val phoneScreen = androidx.core.content.ContextCompat.getColor(view.context, R.color.phone_screen)
+        val phoneRed = androidx.core.content.ContextCompat.getColor(view.context, R.color.phone_red)
+        val failedColor = binding.failedText.currentTextColor
 
         /** A reply's faded copy of what it answers: an outline, filled only over a picture ([onPicture]). */
         val quoteOutline by lazy {
@@ -392,26 +413,47 @@ class MessagesAdapter(
 
         // Time and delivery status.
         b.time.text = TimeFormat.clock(context, row.timestampMs)
-        // Changed since it was sent: "Edited" by the time, as on an iPhone; a tap says when.
+        holder.shownTime = b.time.text.toString()
+        // Changed since it was sent: "Edited" by the time, as on an iPhone. A tap shows what it read
+        // before (iOS 16) above it, in faded bubbles, and hides them again; with none kept it says when.
         val edited = row.editedAtMs > 0
+        val history = if (edited && !inked) extra.history else emptyList()
+        val historyOpen = history.isNotEmpty() && row.id in historyShown
         b.edited.visibility = if (edited) View.VISIBLE else View.GONE
         b.edited.setTextColor(metaColor)
+        val toggleHistory = View.OnClickListener {
+            if (!historyShown.add(row.id)) historyShown.remove(row.id)
+            val at = holder.bindingAdapterPosition
+            if (at != RecyclerView.NO_POSITION) notifyItemChanged(at)
+        }
         b.edited.setOnClickListener(
-            if (edited) {
-                View.OnClickListener {
+            when {
+                !edited -> null
+                history.isNotEmpty() -> toggleHistory
+                else -> View.OnClickListener {
                     Toast.makeText(context, context.getString(R.string.imessage_edited_at, TimeFormat.clock(context, row.editedAtMs)), Toast.LENGTH_SHORT).show()
                 }
-            } else {
-                null
             }
         )
         if (!edited) b.edited.isClickable = false
+        val historyLabel = if (history.isEmpty()) null else context.getString(if (historyOpen) R.string.imessage_edit_history_hide else R.string.imessage_edit_history_show)
+        ViewCompat.replaceAccessibilityAction(b.edited, AccessibilityActionCompat.ACTION_CLICK, historyLabel, null)
+        bindHistory(holder, if (historyOpen) history else emptyList(), outgoing, bubbleColor, toggleHistory)
+        // TalkBack reaches "Edited" through the bubble: the same, as an action of it.
+        if (holder.historyActionId != View.NO_ID) ViewCompat.removeAccessibilityAction(b.bubble, holder.historyActionId)
+        holder.historyActionId = if (historyLabel == null) View.NO_ID else ViewCompat.addAccessibilityAction(b.bubble, historyLabel) { _, _ ->
+            toggleHistory.onClick(b.bubble)
+            true
+        }
         placeEdited(holder)
         val tick = MessageStatus.tickFor(row)
         // A send that may have gone out all the same has its own words: "Not sent" would invite a resend.
         val unconfirmed = MessageStatus.outcomeUnknown(row)
+        // An iMessage that was not delivered, as an iPhone says it (and marks it, in iPhone-style chats).
+        val undelivered = tick == Tick.FAILED && notDelivered(row)
         val shownTick = if (tick in RECEIPT_TICKS && appleReceipts(row)) Tick.NONE else tick
-        bindTick(holder, shownTick, metaColor, unconfirmed)
+        bindTick(holder, shownTick, metaColor, unconfirmed, undelivered)
+        bindFailedMark(holder, row, undelivered && phone)
         // Send Later, before its time: when it goes, in place of a receipt (iOS 18).
         val scheduledAt = com.lightdecoder.imessage.direct.SendLater.scheduledAt(row)
             .takeIf { it > 0 && com.lightdecoder.imessage.direct.SendLater.pending(row, System.currentTimeMillis()) }
@@ -432,12 +474,15 @@ class MessagesAdapter(
             underBubble(b.edited, holder.phoneBlue)
             underBubble(b.effect, holder.phoneMeta)
             underBubble(b.sender, holder.phoneMeta)
+            // "Not Delivered" in an iPhone's red.
+            b.failedText.setTextColor(holder.phoneRed)
         } else {
             b.time.visibility = View.VISIBLE
             underBubble(b.receipt, holder.receiptColor)
             underBubble(b.effect, holder.effectColor)
             underBubble(b.sender, holder.senderColor)
             b.edited.setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)
+            b.failedText.setTextColor(holder.failedColor)
         }
         b.column.alpha = if (phone && tick == Tick.PENDING) PENDING_ALPHA else 1f
 
@@ -446,6 +491,7 @@ class MessagesAdapter(
         b.failedText.visibility = if (tick == Tick.FAILED) View.VISIBLE else View.GONE
         b.failedText.setText(
             when {
+                undelivered -> R.string.imessage_not_delivered
                 unconfirmed -> R.string.chat_failed_unconfirmed
                 retryable -> R.string.chat_failed_retry
                 else -> R.string.chat_failed_phone
@@ -455,6 +501,7 @@ class MessagesAdapter(
         // What a tap does, for TalkBack ("double-tap to send again or discard").
         val failedTapLabel = when {
             tick != Tick.FAILED -> null
+            undelivered -> context.getString(R.string.imessage_not_delivered_try_again)
             unconfirmed -> context.getString(R.string.chat_failed_unconfirmed_action)
             retryable -> context.getString(R.string.chat_action_retry)
             else -> null
@@ -951,8 +998,70 @@ class MessagesAdapter(
         column.cornerLeft = outgoing != rtl
     }
 
-    /** [unconfirmed]: a failed send that may have gone out ([MessageStatus.outcomeUnknown]). */
-    private fun bindTick(holder: MessageHolder, tick: Tick, metaColor: Int, unconfirmed: Boolean) {
+    /**
+     * An edited message's earlier [versions] above its bubble (none: hidden), oldest first, as an
+     * iPhone shows them once "Edited" is tapped: smaller bubbles of its colour, faded, on its side; a
+     * tap on one hides them again ([onTap]). TalkBack reads each as "Earlier version, <time>: <text>".
+     */
+    private fun bindHistory(holder: MessageHolder, versions: List<IMessageExtra.Version>, outgoing: Boolean, bubbleColor: Int, onTap: View.OnClickListener) {
+        val box = holder.binding.editHistory
+        box.removeAllViews()
+        if (versions.isEmpty()) {
+            box.visibility = View.GONE
+            return
+        }
+        box.visibility = View.VISIBLE
+        val context = box.context
+        val fill = (bubbleColor and 0x00FFFFFF) or (if (outgoing) HISTORY_OWN_ALPHA else HISTORY_ALPHA)
+        val textColor = if (phoneStyle) holder.phoneOnIncoming else holder.onIncoming
+        // In line with the bubble's own body, not its tail's room.
+        val gutter = if (phoneStyle) holder.phoneBubble.gutter else 0
+        for (version in versions) {
+            val view = TextView(context)
+            view.text = version.text
+            view.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, HISTORY_TEXT_SP)
+            view.setTextColor(textColor)
+            view.background = android.graphics.drawable.GradientDrawable().apply {
+                cornerRadius = holder.dp(HISTORY_RADIUS_DP).toFloat()
+                setColor(fill)
+            }
+            view.setPaddingRelative(holder.dp(11f), holder.dp(6f), holder.dp(11f), holder.dp(6f))
+            view.contentDescription = context.getString(R.string.imessage_edit_history_version, TimeFormat.clock(context, version.atMs), version.text)
+            view.setOnClickListener(onTap)
+            ViewCompat.replaceAccessibilityAction(view, AccessibilityActionCompat.ACTION_CLICK, context.getString(R.string.imessage_edit_history_hide), null)
+            box.addView(
+                view,
+                android.widget.LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    gravity = if (outgoing) Gravity.END else Gravity.START
+                    bottomMargin = holder.dp(HISTORY_GAP_DP)
+                    if (outgoing) marginEnd = gutter else marginStart = gutter
+                },
+            )
+        }
+    }
+
+    /**
+     * iPhone-style chats: the red "!" beside a message that was not delivered ([shown]), the bubble
+     * moved over for it, as on an iPhone; a tap on it is a tap on the message's failure.
+     */
+    private fun bindFailedMark(holder: MessageHolder, row: MessageRow, shown: Boolean) {
+        val b = holder.binding
+        b.failedMark.visibility = if (shown) View.VISIBLE else View.GONE
+        b.failedMark.setOnClickListener(if (shown) View.OnClickListener { callbacks.onFailedTap(row) } else null)
+        if (!shown) b.failedMark.isClickable = false
+        val column = b.column.layoutParams as FrameLayout.LayoutParams
+        val room = if (shown) holder.dp(FAILED_MARK_ROOM_DP) else 0
+        if (column.marginEnd != room) {
+            column.marginEnd = room
+            b.column.layoutParams = column
+        }
+    }
+
+    /**
+     * [unconfirmed]: a failed send that may have gone out ([MessageStatus.outcomeUnknown]);
+     * [undelivered]: an iMessage that was not delivered ([notDelivered]), said as an iPhone says it.
+     */
+    private fun bindTick(holder: MessageHolder, tick: Tick, metaColor: Int, unconfirmed: Boolean, undelivered: Boolean = false) {
         val icon = holder.binding.statusIcon
         val context = icon.context
         val (drawable, description) = when (tick) {
@@ -965,8 +1074,11 @@ class MessagesAdapter(
             Tick.SENT -> R.drawable.ic_msg_sent to R.string.chat_status_sent
             Tick.DELIVERED -> R.drawable.ic_msg_delivered to R.string.chat_status_delivered
             Tick.READ -> R.drawable.ic_msg_delivered to R.string.chat_status_read
-            Tick.FAILED -> R.drawable.ic_msg_failed to
-                if (unconfirmed) R.string.chat_failed_unconfirmed else R.string.chat_status_failed
+            Tick.FAILED -> R.drawable.ic_msg_failed to when {
+                undelivered -> R.string.imessage_not_delivered
+                unconfirmed -> R.string.chat_failed_unconfirmed
+                else -> R.string.chat_status_failed
+            }
         }
         icon.visibility = View.VISIBLE
         icon.setImageResource(drawable)
@@ -1299,6 +1411,16 @@ class MessagesAdapter(
         const val STICKER_PILL_DP = 22f
         const val PLACED_STICKER_DP = 40f
         const val STICKER_SIDE_PX = 160
+
+        /** An edited message's earlier versions: their faded fill (the user's own a little lighter), text, corners and the gap between them. */
+        const val HISTORY_ALPHA = 0x8C000000.toInt()
+        const val HISTORY_OWN_ALPHA = 0x40000000
+        const val HISTORY_TEXT_SP = 14f
+        const val HISTORY_RADIUS_DP = 14f
+        const val HISTORY_GAP_DP = 3f
+
+        /** The room beside a bubble for its red "!" (not delivered). */
+        const val FAILED_MARK_ROOM_DP = 30f
 
         /** A poll's choice: the bar behind it at this alpha of the accent, its corners; at most this many voters' faces. */
         const val POLL_BAR_ALPHA = 0x33000000

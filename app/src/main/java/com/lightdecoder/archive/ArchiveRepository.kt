@@ -53,6 +53,9 @@ class ArchiveRepository private constructor(
     /** When this instance last looked for partial files left by writes that never finished. */
     private val lastPartSweep = AtomicLong(0)
 
+    /** The user's own pins and "Mark as Unread" ([LocalMarks]), which a sync from the phone keeps. */
+    private val marks by lazy { LocalMarks(helper.appContext, helper.databaseName ?: "memory-${service.key}") }
+
     /**
      * Held while a media file is written and its path recorded
      * ([withMediaFileLock]), and while files that may have become unused are
@@ -107,10 +110,59 @@ class ArchiveRepository private constructor(
             it.getInt(0)
         }.firstOrNull() ?: 0
 
-    /** Clears the local unread flag (the phone is told separately). */
+    /** Clears the local unread flag (the phone is told separately), a "Mark as Unread" with it. */
     fun markConversationRead(conversationId: String) = write { b ->
+        marks.setUnread(conversationId, false)
         b.db.update("conversations", ContentValues().apply { put("unread", 0) }, "conversation_id = ?", arrayOf(conversationId))
         b.changed(Kind.CONVERSATIONS, conversationId)
+    }
+
+    /**
+     * "Mark as Unread": the conversation is unread here, and stays so (whatever the phone says of it
+     * meanwhile) until it is read again ([markConversationRead]). False if there is no such conversation.
+     */
+    fun markConversationUnread(conversationId: String): Boolean = write { b ->
+        val changed = b.db.update("conversations", ContentValues().apply { put("unread", 1) }, "conversation_id = ?", arrayOf(conversationId)) > 0
+        if (changed) {
+            marks.setUnread(conversationId, true)
+            b.changed(Kind.CONVERSATIONS, conversationId)
+        }
+        changed
+    }
+
+    /**
+     * "Pin" / "Unpin", here: the conversation is listed at the top (or not), the user's choice kept
+     * over what the phone reports of it from now on. False if there is no such conversation.
+     */
+    fun setConversationPinned(conversationId: String, pinned: Boolean): Boolean = write { b ->
+        val changed = b.db.update("conversations", ContentValues().apply { put("pinned", pinned.toInt()) }, "conversation_id = ?", arrayOf(conversationId)) > 0
+        if (changed) {
+            marks.setPinned(conversationId, pinned)
+            b.changed(Kind.CONVERSATIONS, conversationId)
+        }
+        changed
+    }
+
+    /** Whether the user ever wrote in [conversationId] (a message of theirs, sent or not, is stored in it). */
+    fun hasOutgoing(conversationId: String): Boolean = query(
+        "SELECT 1 FROM messages WHERE conversation_id = ? AND is_outgoing = 1 AND direction = 'out' LIMIT 1",
+        arrayOf(conversationId),
+    ) { true }.isNotEmpty()
+
+    /**
+     * Every message of [conversationId] whose extra data holds one of [extraNeedles] or whose reactions
+     * hold one of [reactionNeedles] (a caller checks what it really holds), newest first, at most [limit].
+     */
+    fun messagesHolding(conversationId: String, extraNeedles: List<String>, reactionNeedles: List<String> = emptyList(), limit: Int = 5_000): List<MessageRow> {
+        val tests = extraNeedles.filter { it.isNotEmpty() }.map { "instr(extra_json, ?) > 0" } +
+            reactionNeedles.filter { it.isNotEmpty() }.map { "instr(reactions_json, ?) > 0" }
+        if (tests.isEmpty()) return emptyList()
+        val args = arrayOf(conversationId) + extraNeedles.filter { it.isNotEmpty() } + reactionNeedles.filter { it.isNotEmpty() }
+        return query(
+            "SELECT * FROM messages WHERE conversation_id = ? AND (${tests.joinToString(" OR ")}) " +
+                "ORDER BY timestamp_ms DESC, rowid DESC LIMIT ${limit.coerceAtLeast(0)}",
+            args,
+        ) { it.toMessage() }
     }
 
     fun setConversationFolder(conversationId: String, folder: Folder) = write { b ->
@@ -840,6 +892,7 @@ class ArchiveRepository private constructor(
             TABLES.forEach { b.db.delete(it, null, null) }
             Kind.entries.forEach { b.changed(it, null) }
         }
+        marks.clear()
         mediaDir.deleteRecursively()
         outboxDir.deleteRecursively()
     }
@@ -898,8 +951,9 @@ class ArchiveRepository private constructor(
             put("is_rcs", dto.isRcs.toInt())
             put("folder", dto.folder)
             put("status_code", dto.statusCode)
-            put("unread", dto.unread.toInt())
-            put("pinned", dto.pinned.toInt())
+            // The user's own "Mark as Unread" and pin outlast what the phone says.
+            put("unread", (dto.unread || marks.unread(dto.id)).toInt())
+            put("pinned", (marks.pinned(dto.id) ?: dto.pinned).toInt())
             put("read_only", dto.readOnly.toInt())
             // Google Messages does not report mute, so there it is only ever turned
             // on from here; WhatsApp's bridge reports it either way.
@@ -984,6 +1038,7 @@ class ArchiveRepository private constructor(
             b.changed(Kind.CONVERSATIONS, conversationId)
             b.changed(Kind.MESSAGES, conversationId)
         }
+        marks.forget(conversationId)
     }
 
     /** Returns [SKIPPED] for a message that was not stored (deleted or malformed). */

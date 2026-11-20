@@ -82,6 +82,18 @@
         android:id="@+id/action_mute"
         android:title="@string/chat_action_mute"
         app:showAsAction="never" />
+    <!-- Unread again, and back to the list (as on an iPhone, through the iMessage library the user's other devices are told). -->
+    <item
+        android:id="@+id/action_mark_unread"
+        android:title="@string/chat_action_mark_unread"
+        android:visible="false"
+        app:showAsAction="never" />
+    <!-- A chat with someone not in the user's contacts, whom the user never wrote to: reported to Apple, then deleted here. -->
+    <item
+        android:id="@+id/action_report_junk"
+        android:title="@string/imessage_junk_report"
+        android:visible="false"
+        app:showAsAction="never" />
     <item
         android:id="@+id/action_delete_conversation"
         android:title="@string/chat_action_delete_conversation"

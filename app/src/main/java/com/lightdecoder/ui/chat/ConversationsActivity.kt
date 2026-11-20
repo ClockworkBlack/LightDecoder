@@ -746,11 +746,21 @@ class ConversationsActivity : AppCompatActivity() {
         )
     }
 
+    /**
+     * A row held down: what can be done to it. A Messages conversation with the person's iMessage
+     * chats in it is one conversation ([MergedChats]): pinning, reading, hiding alerts, archiving and
+     * deleting it does the same to them.
+     */
     private fun showActions(item: ConversationItem) {
         val row = item.row
         // The row is its service's: what is chosen acts on it, whatever tab is shown by then.
         val on = if (item.service == backend.service) backend else ScreenBackends.get(this, item.service)
         val actions = ArrayList<Pair<Int, () -> Unit>>()
+        if (row.folderEnum != Folder.DELETED) {
+            // As on an iPhone: Pin, and Mark as Unread (or Read), first.
+            actions += (if (row.pinned) R.string.chat_action_unpin else R.string.chat_action_pin) to { setPinned(on, row, !row.pinned) }
+            actions += (if (row.unread) R.string.chat_action_mark_read else R.string.chat_action_mark_unread) to { setUnread(on, row, !row.unread) }
+        }
         when (row.folderEnum) {
             Folder.INBOX -> actions += R.string.chat_action_archive to { setArchived(on, row, true) }
             Folder.ARCHIVE -> actions += R.string.chat_action_unarchive to { setArchived(on, row, false) }
@@ -765,15 +775,34 @@ class ConversationsActivity : AppCompatActivity() {
             actions += (if (row.muted) R.string.chat_action_unmute else R.string.chat_action_mute) to { setMuted(on, row, !row.muted) }
             actions += R.string.chat_action_delete to { confirmDelete(on, item) }
         }
-        MaterialAlertDialogBuilder(this)
+        actionsDialog = MaterialAlertDialogBuilder(this)
             .setTitle(item.title)
             .setItems(actions.map { getString(it.first) }.toTypedArray()) { _, which -> actions[which].second() }
             .show()
     }
 
+    /** The long press's choices, while they are up (for tests). */
+    @androidx.annotation.VisibleForTesting
+    internal var actionsDialog: androidx.appcompat.app.AlertDialog? = null
+
+    /** The iMessage chats inside [row] of [on] ([MergedChats.companions]); none for most. Runs on IO. */
+    private suspend fun companionsOf(on: ChatBackend, row: ConversationRow): List<String> =
+        withContext(Dispatchers.IO) { MergedChats.companions(applicationContext, on.service, row.id) }
+
+    private fun setPinned(on: ChatBackend, row: ConversationRow, pinned: Boolean) = runAction(
+        on, if (pinned) R.string.chat_pinned_done else R.string.chat_unpinned_done,
+    ) { MergedChats.setPinned(applicationContext, on, row.id, pinned, companionsOf(on, row)) }
+
+    private fun setUnread(on: ChatBackend, row: ConversationRow, unread: Boolean) = runAction(
+        on, if (unread) R.string.chat_marked_unread else R.string.chat_marked_read,
+    ) {
+        val companions = companionsOf(on, row)
+        if (unread) MergedChats.markUnread(applicationContext, on, row.id, companions) else MergedChats.markRead(applicationContext, on, row.id, companions)
+    }
+
     private fun setArchived(on: ChatBackend, row: ConversationRow, archived: Boolean) = runAction(
         on, if (archived) R.string.chat_archived else R.string.chat_unarchived,
-    ) { on.setArchived(row.id, archived) }
+    ) { MergedChats.setArchived(applicationContext, on, row.id, archived, companionsOf(on, row)) }
 
     private fun markNotSpam(on: ChatBackend, row: ConversationRow) =
         runAction(on, R.string.chat_not_spam_done) { on.markNotSpam(row.id) }
@@ -809,7 +838,7 @@ class ConversationsActivity : AppCompatActivity() {
 
     private fun setMuted(on: ChatBackend, row: ConversationRow, muted: Boolean) = runAction(
         on, if (muted) R.string.chat_muted_done else R.string.chat_unmuted_done,
-    ) { on.setMuted(row.id, muted) }
+    ) { MergedChats.setMuted(applicationContext, on, row.id, muted, companionsOf(on, row)) }
 
     /**
      * With a pairing it goes on the phone too; without one (an archive an
@@ -829,7 +858,7 @@ class ConversationsActivity : AppCompatActivity() {
                     confirmDelete(on, item)
                     return@setPositiveButton
                 }
-                runAction(on, R.string.chat_deleted) { on.deleteConversation(id) }
+                runAction(on, R.string.chat_deleted) { MergedChats.delete(applicationContext, on, id, companionsOf(on, item.row)) }
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()

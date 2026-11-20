@@ -122,6 +122,16 @@ class DirectWordingTest {
             R.string.imessage_poll_choice_not_added, R.string.imessage_poll_too_many, R.string.imessage_poll_vote_failed,
             R.string.imessage_poll_choice_failed, R.string.imessage_poll_you, R.string.imessage_poll_option_description,
             R.string.imessage_poll_option_mine_description, R.string.imessage_poll_vote_action, R.string.imessage_poll_unvote_action,
+            // The transcript, the list and sync: edit history, Not Delivered, Mark as Unread, Pin, Report Junk.
+            R.string.imessage_edit_history_show, R.string.imessage_edit_history_hide, R.string.imessage_edit_history_version,
+            R.string.imessage_not_delivered, R.string.imessage_not_delivered_mark, R.string.imessage_not_delivered_title,
+            R.string.imessage_not_delivered_maybe_sent, R.string.imessage_not_delivered_try_again, R.string.imessage_not_delivered_as_text,
+            R.string.imessage_not_delivered_delete, R.string.imessage_not_delivered_again_failed, R.string.imessage_not_delivered_as_text_failed,
+            R.string.chat_action_mark_unread, R.string.chat_action_mark_read, R.string.chat_action_pin, R.string.chat_action_unpin,
+            R.string.chat_marked_unread, R.string.chat_marked_read, R.string.chat_pinned_done, R.string.chat_unpinned_done,
+            R.string.imessage_junk_banner, R.string.imessage_junk_report, R.string.imessage_junk_confirm_title,
+            R.string.imessage_junk_confirm_body, R.string.imessage_junk_reported, R.string.imessage_junk_failed,
+            R.string.imessage_junk_nothing, R.string.imessage_junk_not_offered,
         )
         for (res in direct) {
             val text = context.getString(res)
@@ -148,7 +158,17 @@ class DirectWordingTest {
                 val words = context.resources.getQuantityString(plural, count, count)
                 assertFalse(words, words.contains("OpenBubbles"))
             }
+            val typing = context.resources.getQuantityString(R.plurals.imessage_typing_first_and_others, count, "Alice", count)
+            assertFalse(typing, typing.contains("OpenBubbles"))
         }
+        // As an iPhone words them.
+        assertEquals("Not Delivered", context.getString(R.string.imessage_not_delivered))
+        assertEquals("Try Again", context.getString(R.string.imessage_not_delivered_try_again))
+        assertEquals("Send as Text Message", context.getString(R.string.imessage_not_delivered_as_text))
+        assertEquals("Mark as Unread", context.getString(R.string.chat_action_mark_unread))
+        assertEquals("Report Junk", context.getString(R.string.imessage_junk_report))
+        assertEquals("This sender is not in your contacts.", context.getString(R.string.imessage_junk_banner))
+        assertEquals("Alice and 2 others are typing", context.resources.getQuantityString(R.plurals.imessage_typing_first_and_others, 2, "Alice", 2))
         assertEquals("1 Reply", context.resources.getQuantityString(R.plurals.imessage_thread_replies, 1, 1))
         assertEquals("3 Replies", context.resources.getQuantityString(R.plurals.imessage_thread_replies, 3, 3))
         assertEquals("Reply to Alice: Lunch?", context.getString(R.string.imessage_thread_quote_description, "Alice", "Lunch?"))

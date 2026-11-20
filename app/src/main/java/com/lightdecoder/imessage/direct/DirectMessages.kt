@@ -123,6 +123,15 @@ object DirectMessages {
         return Outgoing(parts, sent)
     }
 
+    /**
+     * A reported message's parts ("Report Junk"), as OpenBubbles builds them for one it has no
+     * attributed body of: its text as one plain `Text` part (none when it has none), then its
+     * [attachments], which Apple names in the report.
+     */
+    fun junkParts(text: String, attachments: List<MessageAttachment>): List<IndexedMessagePart> =
+        listOfNotNull(text.takeIf { it.isNotEmpty() }?.let { MessagePart.Text(it, TextRuns.format(TextStyle.PLAIN)) }).map { IndexedMessagePart(it, null, null) } +
+            attachments.map { IndexedMessagePart(MessagePart.Attachment(it), null, null) }
+
     /** The new parts of an edited part reading [text] with [runs] and [mentions] (plain: one `Text` part). */
     fun editParts(text: String, runs: List<TextRun> = emptyList(), mentions: List<Mention> = emptyList()): List<IndexedMessagePart> =
         Mentions.toParts(text, runs, mentions).ifEmpty { listOf(MessagePart.Text(text, TextRuns.format(TextStyle.PLAIN))) }
