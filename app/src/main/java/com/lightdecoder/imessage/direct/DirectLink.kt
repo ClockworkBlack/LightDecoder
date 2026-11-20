@@ -752,10 +752,22 @@ class DirectLink private constructor(
         }
     }
 
-    /** An iPhone's voice message in a file Android plays, with its type; null when its sound is in a codec that cannot be. */
+    /**
+     * An iPhone's voice message in a file Android plays, with its type; null when its sound is in a
+     * codec that cannot be, or the file cannot be remuxed here (damaged, or made to need more memory
+     * than there is): it is then kept as it came, and the screen says it cannot be played.
+     */
     private fun playable(part: MediaRow, caf: File): Pair<File, String>? {
         if (caf.length() > MAX_REMUX_BYTES) return null
-        val sound = CafAudio.remux(caf.readBytes()) ?: return null.also { Log.i(TAG, "voice message kept as it came: its codec cannot be played here") }
+        val sound = try {
+            CafAudio.remux(caf.readBytes())
+        } catch (e: OutOfMemoryError) {
+            Log.w(TAG, "voice message too large to remux here: kept as it came")
+            null
+        } catch (e: java.io.IOException) {
+            Log.w(TAG, "voice message could not be read for remuxing", e)
+            null
+        } ?: return null.also { Log.i(TAG, "voice message kept as it came: its codec cannot be played here") }
         val file = repo.mediaFileFor(part.mediaId + PLAYABLE, sound.extension)
         return try {
             MediaCache.writeAtomically(file, sound.bytes)

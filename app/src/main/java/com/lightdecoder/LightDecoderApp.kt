@@ -25,6 +25,9 @@ class LightDecoderApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // The iMessage log's chat tags are keyed with this install's secret: it needs to know where that is
+        // (stores the context only; nothing is read until a tag is made).
+        com.lightdecoder.imessage.IMessageLog.init(this)
         // The Discord tab's process: it gets its own WebView data folder and
         // nothing else. No link, archive or notification channel is set up
         // there, and the sign-in wipe below never runs on its data.

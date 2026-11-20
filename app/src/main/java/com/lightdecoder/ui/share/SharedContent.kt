@@ -26,9 +26,11 @@ data class SharedContent(val text: String, val streams: List<Uri>) {
         private const val KEEP_MS = 24 * 60 * 60 * 1000L
 
         /**
-         * Reads a share intent. Only content: uris of other apps are taken:
-         * a file: path, or a uri of this app's own provider, could name the
-         * app's private files, which nothing outside may make it send.
+         * Reads a share intent. Only content: uris of other apps are taken
+         * ([ExternalUris.isSafeExternal]): a file: path, or a uri of this
+         * app's own provider (however its authority is written: "0@…",
+         * percent-encoded), could name the app's private files, which nothing
+         * outside may make it send.
          */
         fun from(context: Context, intent: Intent?): SharedContent {
             if (intent == null) return SharedContent("", emptyList())
@@ -38,9 +40,8 @@ data class SharedContent(val text: String, val streams: List<Uri>) {
                     IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java).orEmpty().filterNotNull()
                 else -> return SharedContent("", emptyList())
             }
-            val own = context.packageName
             val taken = streams
-                .filter { it.scheme == ContentResolver.SCHEME_CONTENT && it.authority?.startsWith(own) != true }
+                .filter { it.scheme == ContentResolver.SCHEME_CONTENT && ExternalUris.isSafeExternal(context, it) }
                 .distinct()
                 .take(MAX_STREAMS)
             val text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()?.trim().orEmpty()
@@ -76,6 +77,17 @@ data class SharedContent(val text: String, val streams: List<Uri>) {
                     null
                 }
             }
+        }
+
+        /**
+         * Whether [uri] is one of [copyIn]'s copies (this app's provider, its "shared-in" folder):
+         * the only files a conversation takes from a share ([com.lightdecoder.relay.RelayIntents.threadWithShared]).
+         */
+        fun isOwnCopy(context: Context, uri: Uri): Boolean {
+            if (uri.scheme != ContentResolver.SCHEME_CONTENT || uri.encodedAuthority != "${context.packageName}.fileprovider") return false
+            val segments = uri.pathSegments
+            return segments.size >= 2 && segments[0] == DIR && segments.none { it == ".." || it == "." || it.isEmpty() } &&
+                uri.encodedPath?.contains("%2F", ignoreCase = true) != true && uri.encodedPath?.contains("%2E", ignoreCase = true) != true
         }
 
         /** Copies of earlier shares that are a day old: sent, or given up on. */

@@ -29,6 +29,22 @@ class DiscordPageTest {
     fun tearDown() = DiscordPage.resetForTesting()
 
     @Test
+    fun thePageReachesNothingElseOnThePhone() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val (page, _) = DiscordPage.obtain(activity)
+        com.lightdecoder.ui.discord.DiscordWebSettings.apply(page.settings)
+        val s = page.settings
+        assertTrue("Discord's web app runs", s.javaScriptEnabled)
+        assertTrue(s.domStorageEnabled)
+        assertFalse("no file: urls", s.allowFileAccess)
+        // Attachments still come in through the system picker (onShowFileChooser), which this does not touch.
+        assertFalse("no content: urls of other apps", s.allowContentAccess)
+        assertFalse(s.supportMultipleWindows())
+        assertFalse(s.javaScriptCanOpenWindowsAutomatically)
+        assertTrue(s.mediaPlaybackRequiresUserGesture)
+    }
+
+    @Test
     fun thePageIsKeptBetweenVisits() {
         val first = Robolectric.buildActivity(Activity::class.java).setup().get()
         val frame = FrameLayout(first)

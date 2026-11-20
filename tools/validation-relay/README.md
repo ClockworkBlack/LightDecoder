@@ -11,7 +11,9 @@ What the patch changes:
   (the original uses `try!`, `assert` and force-unwraps throughout).
 - Plain-HTTP access to `static.ess.apple.com` is allowed (App Transport Security exception), with
   an HTTPS fallback.
-- The registration secret is no longer written to the Event Log.
+- The registration code and secret are no longer written to the Event Log, and so never into the
+  shareable report: anyone with the code could ask this iPhone for validation data. The app still
+  shows the code where the user copies it from.
 - Structured log: every event also goes to `Documents/relay-log.jsonl`, one JSON object per line
   (`t`, `ms` since start, `lvl` I/W/E, `ev`, `msg`, plus fields). Crashes are caught into it (signal
   handlers write `CRASH ...` lines; uncaught exceptions with a stack), a run that did not end cleanly is

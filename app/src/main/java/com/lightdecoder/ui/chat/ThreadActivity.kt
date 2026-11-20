@@ -538,7 +538,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      */
     private fun takeShared(intent: Intent) {
         val text = intent.getStringExtra(RelayIntents.EXTRA_SHARED_TEXT)
-        val streams = intent.getStringArrayListExtra(RelayIntents.EXTRA_SHARED_STREAMS).orEmpty().filter { it.isNotEmpty() }
+        // Only the share screen's own copies (SharedContent.copyIn): never any other file of this app's.
+        val streams = intent.getStringArrayListExtra(RelayIntents.EXTRA_SHARED_STREAMS).orEmpty()
+            .filter { it.isNotEmpty() && com.lightdecoder.ui.share.SharedContent.isOwnCopy(this, Uri.parse(it)) }
         intent.removeExtra(RelayIntents.EXTRA_SHARED_TEXT)
         intent.removeExtra(RelayIntents.EXTRA_SHARED_STREAMS)
         if (!text.isNullOrEmpty()) {
@@ -3828,22 +3830,30 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
     }
 
-    /** Puts the person's number (or email address) on the clipboard, to start the chat with by hand. */
+    /**
+     * Puts the person's number (or email address) on the clipboard, to start the chat with by hand:
+     * marked sensitive ([com.lightdecoder.ui.SensitiveClip]), as it is someone's personal detail.
+     */
     private fun copyAddress(address: String) {
         val clipboard = getSystemService(android.content.ClipboardManager::class.java) ?: return
-        clipboard.setPrimaryClip(android.content.ClipData.newPlainText(getString(R.string.imessage_address_label), address))
+        clipboard.setPrimaryClip(com.lightdecoder.ui.SensitiveClip.of(getString(R.string.imessage_address_label), address))
     }
 
     // --- linking an iMessage chat by hand ---------------------------------------------------
 
-    /** The iMessage chats not inside any conversation; the one picked is shown inside this one from now on. */
+    /**
+     * The iMessage chats not inside any conversation; the one picked is shown inside this one from
+     * now on. One with this conversation's name (and no number of its own) comes first, marked: a
+     * name alone never links a chat, the user's pick does ([com.lightdecoder.imessage.IMessageLinks]).
+     */
     private fun chooseIMessageToLink() {
         val id = conversationId
         lifecycleScope.launch {
             val chats = withContext(Dispatchers.IO) {
-                BlueBubblesLinks.unpaired(applicationContext).map { row ->
+                BlueBubblesLinks.linkCandidates(applicationContext, id).map { (row, sameName) ->
                     val name = BlueBubblesLinks.iMessageName(applicationContext, row.id).ifBlank { getString(R.string.chat_untitled) }
-                    row.id to (if (row.snippet.isBlank()) name else "$name \u2014 ${row.snippet.take(40)}")
+                    val shown = if (sameName) getString(R.string.imessage_link_same_name, name) else name
+                    row.id to (if (row.snippet.isBlank()) shown else "$shown \u2014 ${row.snippet.take(40)}")
                 }
             }
             if (conversationId != id) return@launch

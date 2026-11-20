@@ -22,11 +22,23 @@ class IMessageLinksTest {
     }
 
     @Test
-    fun withoutANumberTheSameNameLinks() {
-        // OpenBubbles left the person's handle out, or the chat is with their Apple ID email.
+    fun aNameAloneNeverLinks() {
+        // OpenBubbles left the person's handle out, or the chat is with an Apple ID email: anyone can
+        // write from one under any name, so the same name is not taken for the same person.
         val p = pair(listOf(nina, bob), listOf(Chat("im-1", null, " nina "), Chat("im-2", "bob@icloud.com", "Bob")))
-        assertEquals(IMessageLinks.Pair("c-nina", How.NAME), p["im-1"])
-        assertEquals(IMessageLinks.Pair("c-bob", How.NAME), p["im-2"])
+        assertNull(p["im-1"])
+        assertNull(p["im-2"])
+        // The user links it by hand: then it holds.
+        assertEquals(IMessageLinks.Pair("c-bob", How.BY_HAND), pair(listOf(nina, bob), listOf(Chat("im-2", "bob@icloud.com", "Bob")), mapOf("im-2" to "c-bob"))["im-2"])
+    }
+
+    @Test
+    fun theSameNameIsOnlyOfferedFirstWhenLinkingByHand() {
+        val chats = listOf(Chat("im-1", null, " nina "), Chat("im-2", "nina@icloud.com", "Nina"), Chat("im-3", "#5557777777", "Nina"), Chat("im-4", null, "Bob"))
+        // No number of its own (or an email address): offered; a Nina with a number of her own is someone else.
+        assertEquals(listOf("im-1", "im-2"), IMessageLinks.sameName("Nina", chats).map { it.id })
+        assertEquals(emptyList<Chat>(), IMessageLinks.sameName("", chats))
+        assertEquals("a number for a name is no name", emptyList<Chat>(), IMessageLinks.sameName("+1 555 222 3333", listOf(Chat("im-5", null, "+1 555 222 3333"))))
     }
 
     @Test

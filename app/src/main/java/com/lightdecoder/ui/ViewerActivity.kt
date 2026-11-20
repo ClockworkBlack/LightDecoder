@@ -1,10 +1,8 @@
 package com.lightdecoder.ui
 
-import android.content.ContentResolver
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.media.MediaScannerConnection
 import android.net.Uri
@@ -156,36 +154,11 @@ class ViewerActivity : AppCompatActivity() {
     }
 
     /**
-     * A uri another app may hand over: a content uri whose provider is not
-     * this app's. Matched on this app's own authorities exactly, not on a
-     * "$packageName." prefix: the debug build's provider
-     * (com.lightdecoder.debug.fileprovider) is another app's to the release build.
+     * A uri another app may hand over: a content uri whose provider is not this app's, found as
+     * the content resolver finds it, whatever form its authority takes ("0@…", percent-encoded):
+     * [com.lightdecoder.ui.share.ExternalUris].
      */
-    private fun isSafeExternal(uri: Uri): Boolean {
-        if (!uri.scheme.equals(ContentResolver.SCHEME_CONTENT, ignoreCase = true)) return false
-        // getHost drops a "userId@" prefix, as the content resolver does.
-        val authority = uri.host?.takeIf { it.isNotEmpty() } ?: return false
-        val owner = runCatching { packageManager.resolveContentProvider(authority, 0)?.packageName }.getOrNull()
-        return owner != packageName && authority !in ownAuthorities()
-    }
-
-    /**
-     * Every authority this app's own providers answer to: those its package
-     * declares (the FileProvider and the ones libraries merge in), and the
-     * FileProvider's by name in case the package manager does not list it.
-     */
-    private fun ownAuthorities(): Set<String> {
-        val declared = runCatching {
-            val flags = PackageManager.GET_PROVIDERS or PackageManager.MATCH_DISABLED_COMPONENTS
-            val info = if (Build.VERSION.SDK_INT >= 33) {
-                packageManager.getPackageInfo(packageName, PackageManager.PackageInfoFlags.of(flags.toLong()))
-            } else {
-                @Suppress("DEPRECATION") packageManager.getPackageInfo(packageName, flags)
-            }
-            info.providers.orEmpty().flatMap { it.authority.orEmpty().split(';') }
-        }.getOrDefault(emptyList())
-        return (declared + "$packageName.fileprovider").map { it.trim() }.filter { it.isNotEmpty() }.toSet()
-    }
+    private fun isSafeExternal(uri: Uri): Boolean = com.lightdecoder.ui.share.ExternalUris.isSafeExternal(this, uri)
 
     private fun loadInboxItem(id: String) {
         val store = InboxStore.get(this)

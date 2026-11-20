@@ -32,10 +32,17 @@ class OpenBubblesNewChatTest {
         shadowOf(app).checkActivities(true)
     }
 
+    /** The real OpenBubbles: installed, and its certificate the pinned one. */
     private fun install() {
         val pm = shadowOf(app.packageManager)
         pm.installPackage(PackageInfo().apply { packageName = pkg })
         pm.addActivityIfNotPresent(main)
+        OpenBubbles.verifier = { _, p, _ -> p == pkg }
+    }
+
+    @org.junit.After
+    fun tearDown() {
+        OpenBubbles.resetForTesting()
     }
 
     private fun accept(filter: IntentFilter) {

@@ -108,12 +108,16 @@
     <string name="imessage_library_reimport">Import again…</string>
     <string name="imessage_import_result">Import</string>
     <string name="imessage_import_ok">%1$s: imported, and it is the OpenBubbles 2.0.0 build.</string>
-    <string name="imessage_import_unpinned">%1$s: imported. This copy is not pinned yet (SHA-256 %2$s).</string>
+    <string name="imessage_library_unsupported">OpenBubbles\' iMessage library can\'t be used on this phone (%1$s) yet: LightDecoder loads only files whose SHA-256 it knows, and it has no pinned %2$s for this kind of phone.</string>
     <string name="imessage_register_title">2. Register this phone\'s number</string>
     <string name="imessage_register_body">Enter the code shown by the relay app on your iPhone. LightDecoder then verifies this phone\'s number with Apple by one text message, as an iPhone does.</string>
     <string name="imessage_relay_code">Relay code</string>
     <string name="imessage_relay_host">Relay server</string>
     <string name="imessage_relay_code_missing">Enter the relay code from the relay app on your iPhone.</string>
+    <string name="imessage_relay_host_not_https">The relay server must be an https:// address. http:// and other kinds of address are not used: the relay code would cross the network readable.</string>
+    <string name="imessage_relay_host_bad_host">The relay server\'s address has no valid server name in it.</string>
+    <string name="imessage_relay_host_credentials">The relay server\'s address must not have a user name or password in it.</string>
+    <string name="imessage_relay_host_malformed">The relay server\'s address is not a plain web address (no spaces, ? or #).</string>
     <string name="imessage_register">Register</string>
     <string name="imessage_sms_title">Verify this phone\'s number</string>
     <string name="imessage_sms_explain">Apple verifies the number by a text message: LightDecoder sends one to Apple\'s gateway for your carrier and reads Apple\'s reply. Your carrier may charge for that one text. Android will ask to let LightDecoder send and receive SMS.</string>

@@ -129,6 +129,8 @@ android {
         viewBinding = true
         // The iMessage-app extension interface (src/main/aidl/com/bluebubbles/messaging).
         aidl = true
+        // BuildConfig.DEBUG: OpenBubbles' unpinned test builds are trusted in debug builds only (imessage/OpenBubbles).
+        buildConfig = true
     }
     testOptions {
         unitTests {

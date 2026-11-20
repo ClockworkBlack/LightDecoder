@@ -18,6 +18,10 @@ import java.util.concurrent.ConcurrentHashMap
  * app's process and are collected again from the notifications still
  * showing when the listener reconnects. They keep working after
  * OpenBubbles' notification is gone, until OpenBubbles withdraws them.
+ *
+ * Only buttons the real OpenBubbles made are kept ([IMessageManager.onNotification]), and each is
+ * checked again before it is pressed: its maker must still be OpenBubbles, signed as pinned
+ * ([OpenBubbles.isTrusted]); one that is not is dropped, as if withdrawn.
  */
 object IMessageReplies {
 
@@ -91,11 +95,19 @@ object IMessageReplies {
     private fun isRepeat(entry: Entry, text: String): Boolean =
         entry.messageGuid.isNotEmpty() && lastHandedOver == (entry.messageGuid to text)
 
+    /** Whether [intent] may be pressed: made by OpenBubbles, which is still the one signed as pinned. */
+    private fun pressable(context: Context, intent: PendingIntent): Boolean = OpenBubbles.isTrusted(context, intent.creatorPackage)
+
     /** Fills [text] into the chat's Reply button and presses it, as the notification shade would. */
     fun send(context: Context, chatGuid: String, text: String): Result {
         val entry = entries[chatGuid]
         val reply = entry?.reply ?: return Result.NO_REPLY_BUTTON
         if (isRepeat(entry, text)) return Result.REPEAT
+        if (!pressable(context, reply.intent)) {
+            // Not OpenBubbles' (any more): the user's text never goes to it.
+            entries.computeIfPresent(chatGuid) { _, e2 -> Entry(null, e2.markRead, e2.open, e2.unread, e2.messageGuid) }
+            return Result.WITHDRAWN
+        }
         val fill = Intent()
         val results = Bundle()
         for (input in reply.inputs) results.putCharSequence(input.resultKey, text)
@@ -122,6 +134,10 @@ object IMessageReplies {
         val entry = entries[chatGuid] ?: return false
         if (!entry.unread) return false
         val action = entry.markRead ?: return false
+        if (!pressable(context, action.intent)) {
+            entries.computeIfPresent(chatGuid) { _, e2 -> Entry(e2.reply, null, e2.open, e2.unread, e2.messageGuid) }
+            return false
+        }
         entries.computeIfPresent(chatGuid) { _, e -> Entry(e.reply, e.markRead, e.open, unread = false, messageGuid = e.messageGuid) }
         return try {
             action.intent.send(context, 0, null)
@@ -135,6 +151,11 @@ object IMessageReplies {
     /** Opens the chat in OpenBubbles through its notification's own tap. False if there is none. */
     fun open(context: Context, chatGuid: String): Boolean {
         val open = entries[chatGuid]?.open ?: return false
+        // It is sent with the right to open a screen lent to its maker: only OpenBubbles'.
+        if (!pressable(context, open)) {
+            entries.computeIfPresent(chatGuid) { _, e2 -> Entry(e2.reply, e2.markRead, null, e2.unread, e2.messageGuid) }
+            return false
+        }
         return try {
             open.send(context, 0, null, null, null, null, startFromHere())
             true

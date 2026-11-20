@@ -352,7 +352,7 @@ index fd5922c..750445a 100644
              print("Using saved registration code")
 -            manager.logItems.log("Using saved registration code \(manager.savedRegistrationCode)")
 -            manager.logItems.log("Using saved registration secret \(manager.savedRegistrationSecret)")
-+            manager.logItems.log("Using saved registration code \(manager.savedRegistrationCode)", event: "relay.registered", fields: ["saved": true])
++            manager.logItems.log("Using saved registration code (hidden)", event: "relay.registered", fields: ["saved": true])
 +            manager.logItems.log("Using saved registration secret (hidden)")
              registerCommand["data"] = ["code": manager.savedRegistrationCode, "secret": manager.savedRegistrationSecret]
          }
@@ -401,7 +401,7 @@ index fd5922c..750445a 100644
                      if manager.savedRegistrationCode != code {
 -                        manager.logItems.log("New registration code \(code)")
 -                        manager.logItems.log("secret \(data["secret"] as? String ?? "")")
-+                        manager.logItems.log("New registration code \(code)", event: "relay.registered", fields: ["saved": false])
++                        manager.logItems.log("New registration code (hidden)", event: "relay.registered", fields: ["saved": false])
 +                        manager.logItems.log("secret (hidden)")
                      }
                      manager.savedRegistrationCode = code

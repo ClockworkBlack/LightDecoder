@@ -1,9 +1,8 @@
 package com.lightdecoder.imessage.madrid
 
 import android.content.pm.PackageManager
-import android.os.Build
+import com.lightdecoder.imessage.AppSigning
 import com.lightdecoder.imessage.direct.IMessageExtra
-import java.security.MessageDigest
 
 /**
  * The iMessage-app extensions LightDecoder hosts: separately installed apps that play an iMessage
@@ -71,23 +70,14 @@ object MadridApps {
         NOT_INSTALLED,
     }
 
-    /** "AA:BB:…" as bytes; null when it is not colon-separated hex. */
-    fun hexToBytes(hex: String): ByteArray? {
-        val parts = hex.split(':')
-        if (parts.any { it.length != 2 }) return null
-        return try {
-            ByteArray(parts.size) { parts[it].toInt(16).toByte() }
-        } catch (e: NumberFormatException) {
-            null
-        }
-    }
+    /** "AA:BB:…" as bytes; null when it is not colon-separated hex ([AppSigning.hexToBytes]). */
+    fun hexToBytes(hex: String): ByteArray? = AppSigning.hexToBytes(hex)
 
     /** The SHA-256 of [cert] (a certificate's encoded bytes), as "AA:BB:…". */
-    fun fingerprint(cert: ByteArray): String =
-        MessageDigest.getInstance("SHA-256").digest(cert).joinToString(":") { "%02X".format(it.toInt() and 0xFF) }
+    fun fingerprint(cert: ByteArray): String = AppSigning.fingerprint(cert)
 
     /** Whether one of [certs] (certificates' encoded bytes) is the one [pin] names. */
-    fun matches(pin: String, certs: List<ByteArray>): Boolean = certs.any { fingerprint(it).equals(pin, ignoreCase = true) }
+    fun matches(pin: String, certs: List<ByteArray>): Boolean = AppSigning.matches(pin, certs)
 
     /** What a tap on an app's card does here. */
     sealed class Route {
@@ -144,15 +134,7 @@ object MadridApps {
     @Volatile
     internal var verifier: (PackageManager, MadridApp) -> Boolean = ::verify
 
-    private fun verify(pm: PackageManager, app: MadridApp): Boolean {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            val pin = hexToBytes(app.certSha256) ?: return false
-            return pm.hasSigningCertificate(app.pkg, pin, PackageManager.CERT_INPUT_SHA256)
-        }
-        @Suppress("DEPRECATION")
-        val signatures = pm.getPackageInfo(app.pkg, PackageManager.GET_SIGNATURES).signatures.orEmpty()
-        return matches(app.certSha256, signatures.map { it.toByteArray() })
-    }
+    private fun verify(pm: PackageManager, app: MadridApp): Boolean = AppSigning.isSignedWith(pm, app.pkg, app.certSha256)
 
     /** The extension apps installed and verified, for the composer's "Games". */
     fun installed(pm: PackageManager): List<MadridApp> = REGISTRY.filter { status(pm, it) == Status.VERIFIED }

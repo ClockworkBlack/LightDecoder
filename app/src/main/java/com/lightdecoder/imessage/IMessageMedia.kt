@@ -218,10 +218,14 @@ object IMessageMedia {
         if (noted.add(kind)) IMessageLog.add(context, line)
     }
 
-    /** OpenBubbles' pictures and videos saved between [fromSec] and [toSec]. */
+    /**
+     * OpenBubbles' pictures and videos saved between [fromSec] and [toSec]: only those of the real
+     * OpenBubbles ([OpenBubbles.isTrusted]); an app that only took its name gets nothing into a chat.
+     */
     private fun queryGallery(context: Context, fromSec: Long, toSec: Long): List<Saved> {
         if (Build.VERSION.SDK_INT < 29) return emptyList()
-        val owners = OpenBubbles.PACKAGES
+        val owners = OpenBubbles.PACKAGES.filter { OpenBubbles.isTrusted(context, it) }
+        if (owners.isEmpty()) return emptyList()
         val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL)
         val projection = arrayOf(
             MediaStore.Files.FileColumns._ID, MediaStore.Files.FileColumns.MIME_TYPE, MediaStore.Files.FileColumns.DATE_ADDED,

@@ -134,8 +134,9 @@ object DirectPrefs {
         f.readText().trim().takeIf { it.isNotEmpty() }?.let { it to f.lastModified() }
     }.getOrNull()
 
+    /** Kept without numbers or email addresses ([com.lightdecoder.imessage.Redact]): Apple's error text can name the registered ones. */
     fun setLastStatus(context: Context, text: String) {
-        runCatching { statusFile(context).apply { parentFile?.mkdirs() }.writeText(text) }
+        runCatching { statusFile(context).apply { parentFile?.mkdirs() }.writeText(com.lightdecoder.imessage.Redact.text(text)) }
     }
 
     /** Set once Apple reported a registration; the background service runs while it is. */

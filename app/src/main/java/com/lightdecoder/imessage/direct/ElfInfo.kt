@@ -8,8 +8,9 @@ import java.nio.ByteOrder
 
 /**
  * What a picked file is, read from its ELF headers without loading it: the CPU type, its soname,
- * and whether it exports libheif's decoder or the OpenBubbles bridge. Only used to give a clear
- * answer for files that are not pinned in [DirectLibrary.PINS]; it runs nothing from the file.
+ * and whether it exports libheif's decoder or the OpenBubbles bridge. Only used to word the refusal
+ * of a file that is not pinned in [DirectLibrary.PINS]: it never decides that a file is taken (only
+ * its SHA-256 does), and it runs nothing from the file.
  */
 data class ElfInfo(
     val abi: String,

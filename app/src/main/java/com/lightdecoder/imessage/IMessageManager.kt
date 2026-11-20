@@ -103,7 +103,10 @@ class IMessageManager private constructor(
         // The library is registered: iMessage needs neither the OpenBubbles app nor its notifications.
         direct.active -> RelayState(RelayState.Phase.CONNECTED)
         !IMessagePrefs.enabled(appContext) -> RelayState(RelayState.Phase.UNPAIRED)
-        !OpenBubbles.isInstalled(appContext) -> RelayState(RelayState.Phase.ERROR, IMessageErrors.NOT_INSTALLED)
+        !OpenBubbles.isInstalled(appContext) -> RelayState(
+            RelayState.Phase.ERROR,
+            if (OpenBubbles.impostor(appContext) != null) IMessageErrors.NOT_VERIFIED else IMessageErrors.NOT_INSTALLED,
+        )
         !MessengerNotificationListener.hasAccess(appContext) -> RelayState(RelayState.Phase.ERROR, IMessageErrors.NO_ACCESS)
         else -> RelayState(RelayState.Phase.CONNECTED)
     }
@@ -127,15 +130,20 @@ class IMessageManager private constructor(
         if (direct.active) {
             val library = com.lightdecoder.imessage.direct.DirectLibrary
             val where = if (library.isBundled(appContext)) "included in this build" else "imported"
+            // Apple's and the library's own words can name the registered number or Apple ID: not in the report.
             val status = com.lightdecoder.imessage.direct.DirectPrefs.lastStatus(appContext)
-                ?.let { (text, at) -> "$text (${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US).format(java.util.Date(at))})" }
+                ?.let { (text, at) -> "${Redact.text(text)} (${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US).format(java.util.Date(at))})" }
                 ?: "none yet"
             return "iMessage library $where (${library.processAbi()}); registered on this phone; last status: $status"
         }
         val pkg = OpenBubbles.installedPackage(appContext)
         val version = pkg?.let { runCatching { appContext.packageManager.getPackageInfo(it, 0).versionName }.getOrNull() }
-        return "OpenBubbles " + (if (pkg == null) "not installed" else "$pkg ${version.orEmpty()}".trimEnd()) +
-            "; notification access " + (if (MessengerNotificationListener.hasAccess(appContext)) "yes" else "NO")
+        val fake = if (pkg == null) OpenBubbles.impostor(appContext) else null
+        return "OpenBubbles " + when {
+            pkg != null -> "$pkg ${version.orEmpty()}".trimEnd()
+            fake != null -> "$fake NOT USED (not signed as OpenBubbles from the Play Store)"
+            else -> "not installed"
+        } + "; notification access " + (if (MessengerNotificationListener.hasAccess(appContext)) "yes" else "NO")
     }
 
     /** Turns Blue Bubbles on or off. Off forgets OpenBubbles' buttons and LightDecoder's iMessage notifications; the archive stays. */
@@ -165,6 +173,15 @@ class IMessageManager private constructor(
         // (if the app is still installed and registered too) would only add each message twice.
         if (direct.active) return
         val notification = sbn.notification ?: return
+        // Only the real OpenBubbles, of this user (its certificate is checked here, not another
+        // profile's copy): any app can take its package name and post "iMessages".
+        if (sbn.user != android.os.Process.myUserHandle() || !OpenBubbles.isTrusted(appContext, sbn.packageName)) {
+            noteUnused(
+                if (sbn.user != android.os.Process.myUserHandle()) "from another user or profile" else "the app posting it is not signed as OpenBubbles",
+                "package ${sbn.packageName}", live,
+            )
+            return
+        }
         val (chat, whyNot) = try {
             IMessageCapture.parseOrWhyNot(sbn.packageName, sbn.tag, notification, sbn.postTime)
         } catch (e: RuntimeException) {
@@ -180,11 +197,14 @@ class IMessageManager private constructor(
         }
         // Readable again: OpenBubbles' Hide Message Text is off.
         if (IMessagePrefs.hiddenTextAt(appContext) != 0L) IMessagePrefs.setHiddenTextAt(appContext, 0L)
-        val reply = try { IMessageCapture.replyAction(notification) } catch (e: RuntimeException) { null }
-        val markRead = try { IMessageCapture.markReadAction(notification) } catch (e: RuntimeException) { null }
+        // Only buttons OpenBubbles made itself: pressing another app's would hand it the user's text.
+        val from = sbn.packageName
+        val reply = try { IMessageCapture.replyAction(notification) } catch (e: RuntimeException) { null }?.takeIf { OpenBubbles.madeBy(it.intent, from) }
+        val markRead = try { IMessageCapture.markReadAction(notification) } catch (e: RuntimeException) { null }?.takeIf { OpenBubbles.madeBy(it.intent, from) }
+        val open = notification.contentIntent?.takeIf { OpenBubbles.madeBy(it, from) }
         val hadReply = IMessageReplies.canReply(chat.chatGuid)
         // The buttons first: by the time the messages show, they can be answered.
-        IMessageReplies.update(chat.chatGuid, reply, markRead, notification.contentIntent, chat.messageGuid)
+        IMessageReplies.update(chat.chatGuid, reply, markRead, open, chat.messageGuid)
         val ref = IMessageLog.chatRef(chat.chatGuid)
         if (hadReply && reply == null) IMessageLog.add(appContext, "$ref: OpenBubbles' notification has no Reply button now (messages to it open OpenBubbles)")
         try {
@@ -769,6 +789,9 @@ class IMessageManager private constructor(
 object IMessageErrors {
     /** OpenBubbles is not installed. */
     const val NOT_INSTALLED = "openbubbles_not_installed"
+
+    /** An app is installed under OpenBubbles' name, but it is not signed as OpenBubbles from the Play Store: not used. */
+    const val NOT_VERIFIED = "openbubbles_not_verified"
 
     /** LightDecoder may not read notifications, so nothing arrives from OpenBubbles. */
     const val NO_ACCESS = "no_notification_access"

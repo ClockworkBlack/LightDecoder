@@ -12,9 +12,14 @@ import java.security.MessageDigest
 /**
  * OpenBubbles' native libraries, which the user imports from their own copy of the OpenBubbles
  * app. LightDecoder never ships them (docs/imessage-openbubbles.md: they hold Apple keys and are
- * under OpenBubbles' terms). Each imported file must be one of [PINS], byte for byte: the Kotlin
- * bindings in `uniffi.rust_bridge` were generated from exactly these builds, and a different build
- * would fail its own checksum check on load anyway, only later and less clearly.
+ * under OpenBubbles' terms). Each imported file must be one of [PINS] for this phone's CPU type,
+ * byte for byte: anything else is refused, and the SHA-256 of each file is checked again right
+ * before it is loaded ([load]). The Kotlin bindings in `uniffi.rust_bridge` were generated from
+ * exactly these builds; a library that is not pinned never runs in the ":imessage" process.
+ *
+ * librust_bridge.so cannot be loaded without libheifdec.so: both pinned builds name it in
+ * DT_NEEDED and bind every symbol at load (BIND_NOW). So a CPU type whose libheifdec.so is not
+ * pinned ([unpinned]) cannot use the library until a pinned copy is added here.
  */
 object DirectLibrary {
 
@@ -32,15 +37,22 @@ object DirectLibrary {
         Pin(BRIDGE, "arm64-v8a", "b6dfe8ce44395ca48e041657dc990a534fdaa7acfda1c1d8f2e269d8e332c997"),
         Pin(BRIDGE, "armeabi-v7a", "7d62838458723fa2b6fa2a65e48b55f95455cca2fec7ab47ca765daed998e05e"),
         Pin(HEIF, "arm64-v8a", "bdabf750465540846ca40b032e64666fb9a5b96b554795e1d809dcfbcb5cb17c"),
-        // libheifdec.so for 32-bit ARM: not checked yet (see HEIF_PIN_NOTE).
+        // libheifdec.so for 32-bit ARM is not pinned (no copy checked yet): 32-bit phones cannot
+        // use the library until it is ([unpinned]), as librust_bridge.so needs it to load.
     )
 
+    /** The pinned build of [name] for [abi], or null when there is none. */
+    fun pinFor(name: String, abi: String): Pin? = PINS.firstOrNull { it.name == name && it.abi == abi }
+
     /**
-     * Until a libheifdec.so of a CPU type is pinned, an import of it is accepted when it is a
-     * library for this CPU that exports libheif's decoder (what librust_bridge.so links against),
-     * and its SHA-256 is shown so it can be pinned.
+     * The libraries with no pinned build for [abi]: empty where everything can be imported.
+     * Otherwise the library cannot be used on that CPU type at all (librust_bridge.so does not
+     * load without libheifdec.so), and the setup screen says so instead of asking for files.
      */
-    const val HEIF_PIN_NOTE = "libheifdec.so is not pinned yet for this phone"
+    fun unpinned(abi: String): List<String> = REQUIRED.filter { pinFor(it, abi) == null }
+
+    /** Why a library was not loaded: it is not the pinned build any more (or never was). */
+    class NotPinned(message: String) : DirectEngine.ImessageError(message)
 
     /** The CPU type this process runs as, in Android's ABI names. */
     fun processAbi(): String {
@@ -66,27 +78,35 @@ object DirectLibrary {
     /** Whether this APK carries the libraries for this phone: then nothing needs importing. */
     fun isBundled(context: Context): Boolean = processAbi() in bundledAbis(context)
 
-    /** The libraries still missing for this CPU type (empty: ready to load). */
-    fun missing(context: Context): List<String> =
-        if (isBundled(context)) emptyList() else REQUIRED.filter { !File(dir(context), it).isFile }
+    /**
+     * The libraries still missing for this CPU type (empty: ready to load). One that has no pinned
+     * build for it ([unpinned]) counts as missing whatever is on disk: it can never be loaded.
+     */
+    fun missing(context: Context): List<String> {
+        if (isBundled(context)) return emptyList()
+        val abi = processAbi()
+        return REQUIRED.filter { !File(dir(context), it).isFile || pinFor(it, abi) == null }
+    }
 
     fun isInstalled(context: Context): Boolean = missing(context).isEmpty()
 
     /** What an imported file turned out to be. */
     sealed class ImportResult {
-        data class Installed(val name: String, val pinned: Boolean, val sha256: String) : ImportResult()
+        /** One of [PINS] for this phone, byte for byte: kept as [name]. */
+        data class Installed(val name: String, val sha256: String) : ImportResult()
         data class Refused(val reason: String) : ImportResult()
     }
 
     /**
-     * Decides what to do with a file the user picked, from its SHA-256 and ELF header only.
-     * Pure, so the rules are tested without a phone.
+     * Decides what to do with a file the user picked, from its SHA-256 (and, only to say why a
+     * file is refused, its ELF header). Only a pinned build for [abi] is ever accepted. Pure, so
+     * the rules are tested without a phone.
      */
     fun classify(sha256: String, elf: ElfInfo?, abi: String): ImportResult {
         val pin = PINS.firstOrNull { it.sha256.equals(sha256, ignoreCase = true) }
         if (pin != null) {
             return if (pin.abi == abi) {
-                ImportResult.Installed(pin.name, pinned = true, sha256 = sha256)
+                ImportResult.Installed(pin.name, sha256 = sha256)
             } else {
                 ImportResult.Refused(
                     "This is OpenBubbles' ${pin.name} for ${pin.abi}, but this phone needs the $abi one " +
@@ -99,18 +119,60 @@ object DirectLibrary {
             return ImportResult.Refused("This library is for ${elf.abi}; this phone needs $abi.")
         }
         if (elf.soname == HEIF || (elf.soname == null && elf.exportsHeifDecoder)) {
-            if (PINS.none { it.name == HEIF && it.abi == abi } && elf.exportsHeifDecoder) {
-                return ImportResult.Installed(HEIF, pinned = false, sha256 = sha256)
-            }
+            if (pinFor(HEIF, abi) == null) return ImportResult.Refused(notPinnedForAbi(HEIF, abi))
             return ImportResult.Refused("This libheifdec.so is not the one from OpenBubbles 2.0.0.")
         }
         if (elf.exportsRustBridge) {
+            if (pinFor(BRIDGE, abi) == null) return ImportResult.Refused(notPinnedForAbi(BRIDGE, abi))
             return ImportResult.Refused(
                 "This librust_bridge.so is a different OpenBubbles build than 2.0.0, which is the one " +
                     "LightDecoder was built for. Use the file from OpenBubbles 2.0.0.",
             )
         }
         return ImportResult.Refused("This is not one of the OpenBubbles files LightDecoder needs ($BRIDGE, $HEIF).")
+    }
+
+    /** Why [name] for [abi] is refused whatever copy it is: no build of it is pinned for that CPU type. */
+    fun notPinnedForAbi(name: String, abi: String): String =
+        "LightDecoder has no pinned $name for $abi phones yet, so it cannot use OpenBubbles' library on this phone. " +
+            "Only files whose SHA-256 is known are loaded."
+
+    /**
+     * Whether the library files in [dir] are the pinned builds for [abi], read again now: null when
+     * they are, else why not. A file that is there but is not the pinned build is deleted, so it is
+     * asked for again. Never loads anything.
+     */
+    internal fun verify(dir: File, abi: String, pins: List<Pin> = PINS): String? {
+        for (name in REQUIRED) {
+            val pin = pins.firstOrNull { it.name == name && it.abi == abi } ?: return notPinnedForAbi(name, abi)
+            val file = File(dir, name)
+            if (!file.isFile) return "$name is not imported yet."
+            val sha = try {
+                sha256(file)
+            } catch (e: IOException) {
+                return "$name could not be read: ${e.message}"
+            }
+            if (!sha.equals(pin.sha256, ignoreCase = true)) {
+                file.setWritable(true)
+                file.delete()
+                return "$name is not the pinned OpenBubbles 2.0.0 build (SHA-256 $sha), so it was not loaded and was removed. " +
+                    "Import the file from OpenBubbles 2.0.0 again."
+            }
+        }
+        return null
+    }
+
+    internal fun sha256(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buf = ByteArray(1 shl 16)
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                digest.update(buf, 0, n)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
     /** Copies a picked file in, if [classify] accepts it. Never keeps a refused or partial file. */
@@ -159,21 +221,28 @@ object DirectLibrary {
      * Loads the libraries into this process, once. libheifdec.so goes first so that the Android
      * linker finds it (by its name) when librust_bridge.so asks for it; then the bindings are told
      * where librust_bridge.so is. Must run before anything in `uniffi.rust_bridge` is touched.
+     *
+     * Imported files are hashed again first ([verify]), and neither is loaded unless both are the
+     * pinned builds: a file changed or left by an older version is refused here with
+     * [NotPinned], which the setup screen shows. Both are loaded right after that check, so the
+     * bindings get the library already in memory.
      */
     @Synchronized
     fun load(context: Context) {
         if (loaded) return
         if (isBundled(context)) {
-            // In the APK: loaded by name, libheifdec first. The bindings then ask for
-            // "rust_bridge" by name too, and get the library already loaded.
+            // In the APK (whose signature covers them; checked against the same pins when it was
+            // built): loaded by name, libheifdec first. The bindings then ask for "rust_bridge"
+            // by name too, and get the library already loaded.
             System.loadLibrary("heifdec")
             System.loadLibrary("rust_bridge")
             loaded = true
             return
         }
         val dir = dir(context)
-        check(isInstalled(context)) { "The OpenBubbles libraries are not imported yet." }
+        verify(dir, processAbi())?.let { throw NotPinned(it) }
         System.load(File(dir, HEIF).absolutePath)
+        System.load(File(dir, BRIDGE).absolutePath)
         System.setProperty("uniffi.component.rust_bridge.libraryOverride", File(dir, BRIDGE).absolutePath)
         loaded = true
     }

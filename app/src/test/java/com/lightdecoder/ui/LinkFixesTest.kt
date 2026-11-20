@@ -305,6 +305,10 @@ class LinkFixesTest {
             Intent(Intent.ACTION_VIEW, Uri.parse("content://${app.packageName}.fileprovider/relay-media/private.png")),
             Intent(Intent.ACTION_SEND).setType("image/png")
                 .putExtra(Intent.EXTRA_STREAM, Uri.parse("content://0@${app.packageName}.fileprovider/relay-media/private.png")),
+            // The user id with its '@' percent-encoded: Uri's host keeps it, the content resolver does not.
+            Intent(Intent.ACTION_SEND).setType("image/png")
+                .putExtra(Intent.EXTRA_STREAM, Uri.parse("content://0%40${app.packageName}.fileprovider/relay-media/private.png")),
+            Intent(Intent.ACTION_VIEW, Uri.parse("content://${app.packageName}%2Efileprovider/relay-media/private.png")),
         )
         for (intent in external) {
             ShadowToast.reset()

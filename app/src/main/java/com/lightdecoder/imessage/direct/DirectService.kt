@@ -33,10 +33,13 @@ class DirectService : Service() {
         when (what) {
             DirectWire.SEND -> {
                 val r = DirectWire.SendRequest.fromJson(request)
+                // Only files of the app's own (its outbox), never the library's state or anything outside: DirectPaths.
+                for (a in r.attachments) DirectPaths.require(this, a.path, getString(R.string.imessage_direct_attachment_unreadable))
                 engine.send(r.target, r.text, r.replyGuid, r.replyPart, r.effect, r.attachments, r.voice, r.app, r.runs, r.scheduledMs).toJson()
             }
             DirectWire.EXTENSION -> {
                 val r = DirectWire.ExtensionRequest.fromJson(request)
+                r.imagePath?.let { DirectPaths.require(this, it, getString(R.string.imessage_direct_attachment_unreadable)) }
                 engine.extension(r.target, r.rootGuid, r.isMeta, r.app, r.imagePath).toJson()
             }
             DirectWire.UNSEND -> {
@@ -66,7 +69,12 @@ class DirectService : Service() {
                 engine.read(target(request), request.getString("guid"))
                 DirectWire.ok()
             }
-            DirectWire.DOWNLOAD -> DirectWire.downloaded(engine.download(request.getString("descriptor"), request.getString("path")))
+            DirectWire.DOWNLOAD -> {
+                // Written only into the app's own media folders, never over the library's state or outside the app.
+                val path = request.getString("path")
+                DirectPaths.require(this, path, getString(R.string.imessage_direct_attachment_not_saved))
+                DirectWire.downloaded(engine.download(request.getString("descriptor"), path))
+            }
             DirectWire.BACKGROUND -> {
                 val r = DirectWire.BackgroundRequest.fromJson(request)
                 // Only a picture the main process put where backgrounds are kept.

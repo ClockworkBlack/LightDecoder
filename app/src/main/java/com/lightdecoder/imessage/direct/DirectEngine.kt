@@ -372,8 +372,11 @@ class DirectEngine private constructor(private val app: Context) {
         scope.launch {
             lock.withLock {
                 try {
+                    // Only an https:// address of a real server (the setup screen checks it too; a stored one from before is checked here).
+                    val checked = RelayHost.check(relayHost)
+                    val host = checked.value ?: throw ImessageError(app.getString(RelayHost.messageRes(checked.problem)))
                     initLibrary()
-                    doRegister(relayCode.trim(), relayHost.trim().trimEnd('/'), phone)
+                    doRegister(relayCode.trim(), host, phone)
                 } catch (e: Throwable) {
                     fail(e)
                 }

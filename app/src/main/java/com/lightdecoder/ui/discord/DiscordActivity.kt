@@ -186,29 +186,10 @@ class DiscordActivity : AppCompatActivity() {
         })
     }
 
-    @SuppressLint("SetJavaScriptEnabled")
     private fun configure(web: WebView) {
         // The app's own dark or light surface behind the page: no white flash while it loads.
         web.setBackgroundColor(com.google.android.material.color.MaterialColors.getColor(web, com.google.android.material.R.attr.colorSurface))
-        web.settings.apply {
-            // Discord's web app is a JavaScript app that keeps its state in DOM storage.
-            javaScriptEnabled = true
-            domStorageEnabled = true
-
-            // The page cannot reach files on the phone or open extra windows.
-            allowFileAccess = false
-            setSupportMultipleWindows(false)
-            javaScriptCanOpenWindowsAutomatically = false
-            mediaPlaybackRequiresUserGesture = true
-            // Draws the parts of the page just off screen ahead of time: lists scroll and
-            // channels appear without blank patches (costs some memory, which the Fold has).
-            offscreenPreRaster = true
-            // Keep the cache Discord's files are served from (the default, said for clarity).
-            cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
-
-            // userAgentString is intentionally left at the WebView default.
-            // See docs/discord-web-view.md, "User agent".
-        }
+        DiscordWebSettings.apply(web.settings)
 
         // Cookies persist in this process's own WebView data folder. Third-party
         // cookies are off by default in WebView; the CAPTCHA and challenge frames
@@ -524,5 +505,37 @@ class DiscordActivity : AppCompatActivity() {
         }
         webView = null
         super.onDestroy()
+    }
+}
+
+/**
+ * The Discord page's settings: Discord's web app runs (JavaScript, DOM storage), and it reaches
+ * nothing else on the phone: no file: or content: urls (attachments come only through the system
+ * picker, onShowFileChooser, which this does not touch), no extra windows, no sound or video
+ * without a tap. As the other pages' (Messenger's, the Google sign-in's). Tested in DiscordPageTest.
+ */
+internal object DiscordWebSettings {
+    @SuppressLint("SetJavaScriptEnabled")
+    fun apply(settings: android.webkit.WebSettings) {
+        settings.apply {
+            // Discord's web app is a JavaScript app that keeps its state in DOM storage.
+            javaScriptEnabled = true
+            domStorageEnabled = true
+
+            // The page cannot reach files or other apps' content on the phone, or open extra windows.
+            allowFileAccess = false
+            allowContentAccess = false
+            setSupportMultipleWindows(false)
+            javaScriptCanOpenWindowsAutomatically = false
+            mediaPlaybackRequiresUserGesture = true
+            // Draws the parts of the page just off screen ahead of time: lists scroll and
+            // channels appear without blank patches (costs some memory, which the Fold has).
+            offscreenPreRaster = true
+            // Keep the cache Discord's files are served from (the default, said for clarity).
+            cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
+
+            // userAgentString is intentionally left at the WebView default.
+            // See docs/discord-web-view.md, "User agent".
+        }
     }
 }

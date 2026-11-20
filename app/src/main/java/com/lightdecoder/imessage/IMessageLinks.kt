@@ -12,10 +12,12 @@ import org.json.JSONObject
  * 2. The same phone number (the whole international number: [IMessageAddress.key]; by its
  *    national digits only where one side has no country code and none is known to read it in,
  *    [IMessageAddress.sameKey]), or the same email address.
- * 3. The same name, when it is unambiguous: one Messages conversation and
- *    one iMessage chat with that name, and the iMessage chat has no phone
- *    number of its own (OpenBubbles did not say, or the person writes from
- *    an Apple ID email address) that could link it instead.
+ *
+ * A name is never enough by itself: anyone can write from an Apple ID email address under any
+ * name (iMessage's shared name and photo), and a chat linked by name alone would show a stranger's
+ * messages as a contact's and send the contact's replies to the stranger. A chat with no number
+ * of its own, or with an email address, that has the same name as a conversation is only offered
+ * first when the user links one by hand ([sameName]): the user's tap is the confirmation.
  *
  * Each conversation and each chat is in at most one pair.
  */
@@ -25,7 +27,7 @@ object IMessageLinks {
     data class Chat(val id: String, val addressKey: String?, val name: String)
 
     enum class How {
-        BY_HAND, NUMBER, NAME,
+        BY_HAND, NUMBER,
 
         /** Another iMessage chat of the same person (same number or email): its history shows too; replies go to the first. */
         SAME_PERSON,
@@ -60,19 +62,7 @@ object IMessageLinks {
             out[im.id] = Pair(to, How.NUMBER)
             usedMessages += to
         }
-        // 3. By name, only where it cannot be mistaken.
-        val messagesByName = messages.filter { it.id !in usedMessages }.groupBy { nameKey(it.name) }
-        val iMessagesByName = iMessages.filter { free(it) }.groupBy { nameKey(it.name) }
-        for ((name, ims) in iMessagesByName) {
-            if (name == null) continue
-            val im = ims.singleOrNull() ?: continue
-            val m = messagesByName[name]?.singleOrNull() ?: continue
-            // A phone number of its own that no conversation has: someone else with the same name.
-            if (im.addressKey != null && !im.addressKey.contains('@')) continue
-            out[im.id] = Pair(m.id, How.NAME)
-            usedMessages += m.id
-        }
-        // 4. The same person's other chats (OpenBubbles registered again, or a chat per address):
+        // 3. The same person's other chats (OpenBubbles registered again, or a chat per address):
         //    shown in the same conversation, so no history goes missing.
         val byPerson = HashMap<String, String>()
         for (im in iMessages) {
@@ -85,6 +75,17 @@ object IMessageLinks {
             out[im.id] = Pair(to, How.SAME_PERSON)
         }
         return out
+    }
+
+    /**
+     * Of [iMessages] (chats not in any pair), the ones that may be the person of the Messages
+     * conversation named [name]: the same name, and no phone number of its own (one that has a
+     * number would have been linked by it). Never linked by this; the "link by hand" list shows
+     * them first, for the user to confirm.
+     */
+    fun sameName(name: String, iMessages: List<Chat>): List<Chat> {
+        val wanted = nameKey(name) ?: return emptyList()
+        return iMessages.filter { nameKey(it.name) == wanted && (it.addressKey == null || it.addressKey.contains('@')) }
     }
 
     /** The value under [key] ([IMessageAddress.key]), else under a key that is the same address written otherwise ([IMessageAddress.sameKey]). */

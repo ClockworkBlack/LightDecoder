@@ -79,6 +79,7 @@ class BlueBubblesScreenTest {
         IMessagePrefs.setEnabled(two.app, false)
         com.lightdecoder.imessage.direct.DirectPrefs.setGamesOn(two.app, true)
         com.lightdecoder.imessage.madrid.MadridApps.resetForTesting()
+        OpenBubbles.resetForTesting()
         com.lightdecoder.imessage.direct.DirectPrefs.setRegistered(two.app, false)
         com.lightdecoder.imessage.direct.DirectLink.resetForTesting()
         IMessageManager.resetForTesting()
@@ -93,8 +94,9 @@ class BlueBubblesScreenTest {
         )
     }
 
+    /** The real OpenBubbles from the Play Store: installed, and signed as pinned (Robolectric fakes no certificates). */
     private fun installOpenBubbles() {
-        shadowOf(two.app.packageManager).installPackage(PackageInfo().apply { packageName = OpenBubbles.PACKAGES.first() })
+        com.lightdecoder.imessage.OpenBubblesTestNotifications.trust(two.app)
     }
 
     private fun grantAccess() {
@@ -1552,6 +1554,33 @@ class BlueBubblesScreenTest {
                 assertTrue(com.lightdecoder.imessage.direct.DirectPrefs.sendReadReceipts(activity))
                 switch.performClick()
                 assertFalse(com.lightdecoder.imessage.direct.DirectPrefs.sendReadReceipts(activity))
+            }
+        }
+    }
+
+    @Test
+    fun theIMessageScreenTakesOnlyAnHttpsRelayServer() {
+        val prefs = com.lightdecoder.imessage.direct.DirectPrefs.prefs(two.app)
+        prefs.edit().clear().commit()
+        ActivityScenario.launch(com.lightdecoder.ui.imessage.DirectSetupActivity::class.java).use { scenario ->
+            for ((typed, why) in listOf(
+                "http://registration-relay.beeper.com" to R.string.imessage_relay_host_not_https,
+                "https://me:secret@relay.example.com" to R.string.imessage_relay_host_credentials,
+                "https://relay..example.com" to R.string.imessage_relay_host_bad_host,
+            )) {
+                scenario.onActivity { activity ->
+                    activity.findViewById<EditText>(R.id.relayCode).setText("ABCD-1234")
+                    activity.findViewById<EditText>(R.id.relayHost).setText(typed)
+                    // Whatever the library's state here (it is not imported in this test), the address is checked first.
+                    activity.findViewById<View>(R.id.register).apply { isEnabled = true }.performClick()
+                }
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                assertEquals(typed, two.app.getString(why), latestDialog().findViewById<android.widget.TextView>(android.R.id.message)?.text?.toString())
+                latestDialog().dismiss()
+                scenario.onActivity { activity -> assertEquals(two.app.getString(why), activity.findViewById<EditText>(R.id.relayHost).error?.toString()) }
+                // Nothing kept, nothing started.
+                assertNull(prefs.getString(com.lightdecoder.imessage.direct.DirectPrefs.KEY_HOST, null))
+                assertNull(prefs.getString(com.lightdecoder.imessage.direct.DirectPrefs.KEY_CODE, null))
             }
         }
     }

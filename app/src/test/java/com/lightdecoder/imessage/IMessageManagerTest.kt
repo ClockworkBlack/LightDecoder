@@ -65,6 +65,8 @@ class IMessageManagerTest {
         repo = ArchiveRepository.forTesting(db, ChatService.IMESSAGE)
         ArchiveRepository.installForTesting(repo)
         manager = IMessageManager.installForTesting(context, repo)
+        // The real OpenBubbles, as on a phone with it from the Play Store.
+        OpenBubblesTestNotifications.trust(context)
         IMessagePrefs.setEnabled(context, true)
         IMessagePrefs.setNotifyMessages(context, true)
         val filter = IntentFilter().apply {
@@ -81,6 +83,7 @@ class IMessageManagerTest {
         MessageNotifier.setVisibleConversationId(ChatService.IMESSAGE, null)
         IMessageManager.resetForTesting()
         ArchiveRepository.resetForTesting()
+        OpenBubbles.resetForTesting()
         db.close()
     }
 
@@ -279,6 +282,7 @@ class IMessageManagerTest {
 
     @Test
     fun theStateSaysWhatIsMissing() {
+        shadowOf(context.packageManager).removePackage(OpenBubblesTestNotifications.PACKAGE)
         manager.refreshState()
         assertEquals(IMessageErrors.NOT_INSTALLED, manager.state.value.code)
         shadowOf(context.packageManager).installPackage(

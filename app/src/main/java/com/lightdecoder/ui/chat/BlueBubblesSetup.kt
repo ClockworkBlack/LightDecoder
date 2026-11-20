@@ -14,7 +14,8 @@ import com.lightdecoder.messenger.MessengerNotificationListener
  * The "Blue Bubbles" checkbox in the Messages tab's menu.
  *
  * Ticking it checks what it needs, in order, and only turns it on once both
- * are there: the OpenBubbles app (offered from the Play Store), and
+ * are there: the OpenBubbles app (offered from the Play Store; a copy not
+ * signed as the Play Store's is named, never used), and
  * notification access for LightDecoder (the system setting is opened, and
  * Blue Bubbles comes on when the user comes back with it granted). With the
  * iMessage library set up it needs neither, and comes on at once.
@@ -38,6 +39,13 @@ internal class BlueBubblesSetup(
         when {
             // Through the iMessage library: neither the OpenBubbles app nor its notifications are needed.
             direct() -> enable()
+            // Installed under OpenBubbles' name but not signed as it: never used.
+            OpenBubbles.impostor(activity) != null -> MaterialAlertDialogBuilder(activity)
+                .setTitle(R.string.blue_bubbles_not_verified_title)
+                .setMessage(R.string.blue_bubbles_not_verified_body)
+                .setPositiveButton(R.string.blue_bubbles_get_app) { _, _ -> OpenBubbles.start(activity, OpenBubbles.storeIntent()) }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
             !OpenBubbles.isInstalled(activity) -> MaterialAlertDialogBuilder(activity)
                 .setTitle(R.string.blue_bubbles_need_app_title)
                 .setMessage(R.string.blue_bubbles_need_app_body)

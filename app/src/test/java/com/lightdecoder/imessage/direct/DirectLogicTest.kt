@@ -93,7 +93,7 @@ class DirectLogicTest {
     @Test
     fun thePinnedBridgeIsAccepted() {
         val r = DirectLibrary.classify(arm64Bridge.sha256.uppercase(), null, "arm64-v8a")
-        assertEquals(DirectLibrary.ImportResult.Installed(DirectLibrary.BRIDGE, true, arm64Bridge.sha256.uppercase()), r)
+        assertEquals(DirectLibrary.ImportResult.Installed(DirectLibrary.BRIDGE, arm64Bridge.sha256.uppercase()), r)
     }
 
     @Test
@@ -112,19 +112,91 @@ class DirectLogicTest {
     }
 
     @Test
-    fun anUnpinnedHeifDecoderIsAcceptedOnlyWhereNoneIsPinned() {
+    fun anUnpinnedHeifDecoderIsNeverAccepted() {
+        // No libheifdec.so is pinned for 32-bit ARM: one that looks right is still refused, saying why.
         val v7 = ElfInfo("armeabi-v7a", "libheifdec.so", exportsHeifDecoder = true, exportsRustBridge = false)
-        assertEquals(
-            DirectLibrary.ImportResult.Installed(DirectLibrary.HEIF, false, "ab".repeat(32)),
-            DirectLibrary.classify("ab".repeat(32), v7, "armeabi-v7a"),
-        )
+        val refused = DirectLibrary.classify("ab".repeat(32), v7, "armeabi-v7a")
+        assertTrue(refused is DirectLibrary.ImportResult.Refused)
+        assertTrue((refused as DirectLibrary.ImportResult.Refused).reason, "no pinned libheifdec.so for armeabi-v7a" in refused.reason)
+        // Without a soname, by what it exports: the same.
+        val bare = ElfInfo("armeabi-v7a", null, exportsHeifDecoder = true, exportsRustBridge = false)
+        assertTrue(DirectLibrary.classify("ab".repeat(32), bare, "armeabi-v7a") is DirectLibrary.ImportResult.Refused)
         val arm64 = ElfInfo("arm64-v8a", "libheifdec.so", exportsHeifDecoder = true, exportsRustBridge = false)
         assertTrue(DirectLibrary.classify("ab".repeat(32), arm64, "arm64-v8a") is DirectLibrary.ImportResult.Refused)
         val pinned = DirectLibrary.PINS.first { it.name == DirectLibrary.HEIF && it.abi == "arm64-v8a" }
         assertEquals(
-            DirectLibrary.ImportResult.Installed(DirectLibrary.HEIF, true, pinned.sha256),
+            DirectLibrary.ImportResult.Installed(DirectLibrary.HEIF, pinned.sha256),
             DirectLibrary.classify(pinned.sha256, arm64, "arm64-v8a"),
         )
+        // No CPU type takes anything but a pinned build.
+        for (abi in listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")) {
+            for (elf in listOf(
+                ElfInfo(abi, "libheifdec.so", exportsHeifDecoder = true, exportsRustBridge = false),
+                ElfInfo(abi, "librust_bridge.so", exportsHeifDecoder = false, exportsRustBridge = true),
+                ElfInfo(abi, null, exportsHeifDecoder = true, exportsRustBridge = true),
+                null,
+            )) {
+                assertTrue("$abi $elf", DirectLibrary.classify("ef".repeat(32), elf, abi) is DirectLibrary.ImportResult.Refused)
+            }
+        }
+    }
+
+    @Test
+    fun aCpuTypeWithoutPinnedFilesCannotUseTheLibrary() {
+        assertEquals(emptyList<String>(), DirectLibrary.unpinned("arm64-v8a"))
+        // librust_bridge.so needs libheifdec.so to load: without a pinned one the bridge alone is no use.
+        assertEquals(listOf(DirectLibrary.HEIF), DirectLibrary.unpinned("armeabi-v7a"))
+        assertEquals(DirectLibrary.REQUIRED, DirectLibrary.unpinned("x86_64"))
+        val v7Bridge = ElfInfo("armeabi-v7a", "librust_bridge.so", exportsHeifDecoder = false, exportsRustBridge = true)
+        assertTrue(DirectLibrary.classify("01".repeat(32), v7Bridge, "armeabi-v7a") is DirectLibrary.ImportResult.Refused)
+        val x86Bridge = ElfInfo("x86_64", "librust_bridge.so", exportsHeifDecoder = false, exportsRustBridge = true)
+        val r = DirectLibrary.classify("01".repeat(32), x86Bridge, "x86_64")
+        assertTrue((r as DirectLibrary.ImportResult.Refused).reason, "no pinned librust_bridge.so for x86_64" in r.reason)
+    }
+
+    @Test
+    fun anImportedFileThatIsNotPinnedIsNeverLoaded() {
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        // A build that carries the libraries for this CPU type loads those, from the APK.
+        org.junit.Assume.assumeFalse(DirectLibrary.isBundled(context))
+        val dir = DirectLibrary.dir(context).apply { mkdirs() }
+        try {
+            // As an earlier version could leave them: there, but not the pinned builds.
+            DirectLibrary.REQUIRED.forEach { java.io.File(dir, it).writeBytes(byteArrayOf(9, 9, 9)) }
+            val e = org.junit.Assert.assertThrows(DirectLibrary.NotPinned::class.java) { DirectLibrary.load(context) }
+            assertTrue(e.message, e.message!!.contains("pinned"))
+            assertFalse(DirectLibrary.loaded)
+            assertTrue("asked for again", DirectLibrary.missing(context).isNotEmpty())
+            assertEquals("the screens show why", e.message, DirectEngine.readable(e))
+        } finally {
+            DirectLibrary.remove(context)
+        }
+    }
+
+    @Test
+    fun theFilesAreHashedAgainBeforeTheyAreLoaded() {
+        val dir = java.io.File(System.getProperty("java.io.tmpdir"), "ld-libs-" + java.util.UUID.randomUUID()).apply { mkdirs() }
+        try {
+            val heif = java.io.File(dir, DirectLibrary.HEIF).apply { writeBytes(byteArrayOf(1, 2, 3)) }
+            val bridge = java.io.File(dir, DirectLibrary.BRIDGE).apply { writeBytes(byteArrayOf(4, 5, 6)) }
+            val pins = listOf(
+                DirectLibrary.Pin(DirectLibrary.HEIF, "arm64-v8a", DirectLibrary.sha256(heif)),
+                DirectLibrary.Pin(DirectLibrary.BRIDGE, "arm64-v8a", DirectLibrary.sha256(bridge).uppercase()),
+            )
+            assertNull("both are the pinned builds", DirectLibrary.verify(dir, "arm64-v8a", pins))
+            // Another CPU type has none of these pinned: nothing is loaded, and nothing deleted.
+            assertTrue(DirectLibrary.verify(dir, "armeabi-v7a", pins)!!.contains("no pinned"))
+            assertTrue(heif.isFile && bridge.isFile)
+            // Changed since it was imported (or kept from before the pins were enforced): refused and removed.
+            bridge.writeBytes(byteArrayOf(4, 5, 6, 7))
+            val why = DirectLibrary.verify(dir, "arm64-v8a", pins)!!
+            assertTrue(why, why.contains(DirectLibrary.BRIDGE) && why.contains("not the pinned"))
+            assertFalse("removed, so it is asked for again", bridge.exists())
+            assertTrue("the other one is fine", heif.isFile)
+            assertTrue(DirectLibrary.verify(dir, "arm64-v8a", pins)!!.contains("not imported"))
+        } finally {
+            dir.deleteRecursively()
+        }
     }
 
     @Test

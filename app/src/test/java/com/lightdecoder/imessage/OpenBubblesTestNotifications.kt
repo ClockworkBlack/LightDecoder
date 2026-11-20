@@ -43,6 +43,8 @@ internal object OpenBubblesTestNotifications {
         groupTitle: String? = null,
         withActions: Boolean = true,
         requestCode: Int = 1,
+        /** Which app made its buttons: OpenBubbles itself, unless a test says otherwise. */
+        buttonsBy: String = PACKAGE,
     ): Notification {
         val style = NotificationCompat.MessagingStyle(you)
         if (groupTitle != null) {
@@ -63,16 +65,35 @@ internal object OpenBubblesTestNotifications {
             .setShortcutId(chatGuid)
             .addExtras(extras)
         if (withActions) {
-            builder.addAction(markReadAction(context, requestCode))
-            builder.addAction(replyAction(context, requestCode))
+            builder.addAction(markReadAction(context, requestCode, buttonsBy))
+            builder.addAction(replyAction(context, requestCode, buttonsBy))
         }
         return builder.build()
     }
 
-    fun replyAction(context: Context, requestCode: Int = 1): NotificationCompat.Action {
-        val intent = PendingIntent.getBroadcast(
-            context, requestCode, Intent(REPLY_ACTION).setPackage(context.packageName),
-            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+    /**
+     * OpenBubbles installed here, and its certificate taken for the pinned one (Robolectric fakes
+     * no signing certificates): what a phone with the real OpenBubbles from the Play Store has.
+     */
+    fun trust(context: Context) {
+        val pm = org.robolectric.Shadows.shadowOf(context.packageManager)
+        if (runCatching { context.packageManager.getPackageInfo(PACKAGE, 0) }.isFailure) {
+            pm.installPackage(android.content.pm.PackageInfo().apply { packageName = PACKAGE })
+        }
+        OpenBubbles.verifier = { _, pkg, _ -> pkg == PACKAGE }
+    }
+
+    /** A button OpenBubbles made: its PendingIntent's maker is [PACKAGE] (Robolectric says the test app otherwise). */
+    private fun madeByOpenBubbles(intent: PendingIntent, creator: String): PendingIntent =
+        intent.also { org.robolectric.Shadows.shadowOf(it).setCreatorPackage(creator) }
+
+    fun replyAction(context: Context, requestCode: Int = 1, creator: String = PACKAGE): NotificationCompat.Action {
+        val intent = madeByOpenBubbles(
+            PendingIntent.getBroadcast(
+                context, requestCode, Intent(REPLY_ACTION).setPackage(context.packageName),
+                PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            ),
+            creator,
         )
         return NotificationCompat.Action.Builder(0, "Reply", intent)
             .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_REPLY)
@@ -81,10 +102,13 @@ internal object OpenBubblesTestNotifications {
             .build()
     }
 
-    fun markReadAction(context: Context, requestCode: Int = 1): NotificationCompat.Action {
-        val intent = PendingIntent.getBroadcast(
-            context, 100 + requestCode, Intent(MARK_READ_ACTION).setPackage(context.packageName),
-            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+    fun markReadAction(context: Context, requestCode: Int = 1, creator: String = PACKAGE): NotificationCompat.Action {
+        val intent = madeByOpenBubbles(
+            PendingIntent.getBroadcast(
+                context, 100 + requestCode, Intent(MARK_READ_ACTION).setPackage(context.packageName),
+                PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            ),
+            creator,
         )
         return NotificationCompat.Action.Builder(0, "Mark As Read", intent)
             .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_MARK_AS_READ)

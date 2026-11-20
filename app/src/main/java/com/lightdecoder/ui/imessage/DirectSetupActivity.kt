@@ -20,6 +20,7 @@ import com.lightdecoder.imessage.direct.DirectEngine
 import com.lightdecoder.imessage.direct.DirectEngine.Status
 import com.lightdecoder.imessage.direct.DirectLibrary
 import com.lightdecoder.imessage.direct.DirectPrefs
+import com.lightdecoder.imessage.direct.RelayHost
 import com.lightdecoder.imessage.direct.ServiceNotice
 import com.lightdecoder.imessage.direct.SmsPhoneVerifier
 import com.lightdecoder.imessage.madrid.MadridApps
@@ -48,9 +49,8 @@ class DirectSetupActivity : AppCompatActivity() {
             val results = withContext(Dispatchers.IO) { uris.map { DirectLibrary.import(this@DirectSetupActivity, it) } }
             val lines = results.map {
                 when (it) {
-                    is DirectLibrary.ImportResult.Installed ->
-                        if (it.pinned) getString(R.string.imessage_import_ok, it.name)
-                        else getString(R.string.imessage_import_unpinned, it.name, it.sha256)
+                    // Only the pinned builds are ever kept (DirectLibrary.classify).
+                    is DirectLibrary.ImportResult.Installed -> getString(R.string.imessage_import_ok, it.name)
                     is DirectLibrary.ImportResult.Refused -> it.reason
                 }
             }
@@ -148,6 +148,13 @@ class DirectSetupActivity : AppCompatActivity() {
             binding.importLibrary.visibility = android.view.View.GONE
             return
         }
+        val unpinned = DirectLibrary.unpinned(DirectLibrary.processAbi())
+        if (unpinned.isNotEmpty()) {
+            // No pinned build of a file for this CPU type: nothing that could be imported would be loaded.
+            binding.libraryBody.text = unsupportedText(unpinned)
+            binding.importLibrary.visibility = android.view.View.GONE
+            return
+        }
         val missing = DirectLibrary.missing(this)
         binding.libraryBody.text = if (missing.isEmpty()) {
             getString(R.string.imessage_library_ready, DirectLibrary.processAbi())
@@ -157,18 +164,28 @@ class DirectSetupActivity : AppCompatActivity() {
         binding.importLibrary.setText(if (missing.isEmpty()) R.string.imessage_library_reimport else R.string.imessage_library_import)
     }
 
+    /** The library cannot be used on this CPU type: [unpinned] have no pinned build for it. */
+    private fun unsupportedText(unpinned: List<String>): String =
+        getString(R.string.imessage_library_unsupported, DirectLibrary.processAbi(), unpinned.joinToString(", "))
+
     private fun onRegister() {
         val code = binding.relayCode.text?.toString().orEmpty().trim()
         if (code.isEmpty()) {
             showError(getString(R.string.imessage_relay_code_missing))
             return
         }
+        // Only an https:// address of a real server, with nothing secret in it (RelayHost).
+        val host = RelayHost.check(binding.relayHost.text?.toString().orEmpty().ifBlank { DirectEngine.DEFAULT_RELAY_HOST })
+        if (host.value == null) {
+            val why = getString(RelayHost.messageRes(host.problem))
+            binding.relayHost.error = why
+            showError(why)
+            return
+        }
+        binding.relayHost.error = null
         prefs.edit()
             .putString(DirectPrefs.KEY_CODE, code)
-            .putString(
-                DirectPrefs.KEY_HOST,
-                binding.relayHost.text?.toString().orEmpty().trim().ifEmpty { DirectEngine.DEFAULT_RELAY_HOST },
-            )
+            .putString(DirectPrefs.KEY_HOST, host.value)
             .apply()
         val needed = arrayOf(Manifest.permission.SEND_SMS, Manifest.permission.RECEIVE_SMS)
         if (needed.all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }) {
@@ -184,6 +201,7 @@ class DirectSetupActivity : AppCompatActivity() {
     }
 
     private fun startRegistration() {
+        // Checked again by the engine: a stored address from before this check is refused there too.
         engine.register(
             prefs.getString(DirectPrefs.KEY_CODE, "").orEmpty(),
             prefs.getString(DirectPrefs.KEY_HOST, DirectEngine.DEFAULT_RELAY_HOST).orEmpty(),
@@ -193,7 +211,11 @@ class DirectSetupActivity : AppCompatActivity() {
 
     private fun showStatus(status: Status) {
         val (color, title, body) = when (status) {
-            is Status.LibraryMissing -> Triple(GREY, getString(R.string.imessage_status_no_library), getString(R.string.imessage_status_no_library_body))
+            is Status.LibraryMissing -> Triple(
+                GREY, getString(R.string.imessage_status_no_library),
+                DirectLibrary.unpinned(DirectLibrary.processAbi()).takeIf { it.isNotEmpty() }?.let(::unsupportedText)
+                    ?: getString(R.string.imessage_status_no_library_body),
+            )
             is Status.NotRegistered -> Triple(GREY, getString(R.string.imessage_status_not_registered), getString(R.string.imessage_status_not_registered_body))
             is Status.Working -> Triple(AMBER, status.step + "…", getString(R.string.imessage_status_working_body))
             is Status.Registered -> Triple(GREEN, getString(R.string.imessage_status_registered), status.handles.joinToString(", ") { Handles.display(it) })

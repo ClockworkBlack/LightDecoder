@@ -224,6 +224,72 @@ class CafAudioTest {
         assertEquals(known.sorted(), known)
     }
 
+    // --- crafted files: no sound, never a crash ------------------------------------------------
+
+    /** A packet table that names [count] packets and holds no entries (as when the format fixes both sizes). */
+    private fun paktHead(count: Long, valid: Long = 0) =
+        chunk("pakt", ByteBuffer.allocate(24).order(ByteOrder.BIG_ENDIAN).putLong(count).putLong(valid).putInt(0).putInt(0).array())
+
+    @Test
+    fun aPacketTableNamingMorePacketsThanItHoldsIsNoSound() {
+        // Sizes in the table (the format fixes none): a count its entries cannot back is refused at once,
+        // before anything is made for it (it used to be millions of boxed sizes, and the phone ran out of memory).
+        val sound = ByteArray(4096) { (31 shl 3).toByte() }
+        for (count in listOf(Long.MAX_VALUE, Int.MAX_VALUE.toLong(), CafAudio.MAX_PACKETS + 1L, 4097L, 100L)) {
+            assertNull("opus $count", CafAudio.remux(caf(desc(48000.0, "opus", 0, 0, 960, 1, 0), paktHead(count), data(sound))))
+            assertNull("aac $count", CafAudio.remux(caf(desc(44100.0, "aac ", 2, 0, 1024, 1, 0), paktHead(count), data(sound))))
+        }
+    }
+
+    @Test
+    fun aPacketTableIsNeverTakenForMorePacketsThanTheSoundHasBytes() {
+        // Both sizes fixed: the table has no entries, only its count, which may say anything.
+        val sound = ByteArray(4096) { (31 shl 3).toByte() }
+        val started = System.nanoTime()
+        for (count in listOf(Long.MAX_VALUE, CafAudio.MAX_PACKETS.toLong(), 5000L)) {
+            // Not taken: the sound is cut by the fixed size instead, 4096 packets of one byte.
+            val out = CafAudio.remux(caf(desc(48000.0, "opus", 0, 1, 960, 1, 0), paktHead(count), data(sound)))
+            assertEquals(4096, packets(pages(out!!.bytes)).size - 2)
+        }
+        assertTrue("at once", System.nanoTime() - started < 10_000_000_000L)
+    }
+
+    @Test
+    fun aSoundCutIntoTooManyPacketsIsNoSound() {
+        // No table, one byte a packet: more packets than are taken.
+        val sound = ByteArray(CafAudio.MAX_PACKETS + 1) { (31 shl 3).toByte() }
+        assertNull(CafAudio.remux(caf(desc(44100.0, "aac ", 2, 1, 1024, 1, 0), data(sound))))
+        assertNull(CafAudio.remux(caf(desc(48000.0, "opus", 0, 1, 960, 1, 0), data(sound))))
+        // Exactly as many as are taken: still remuxed, in one go.
+        val most = CafAudio.remux(caf(desc(44100.0, "aac ", 2, 1, 1024, 1, 0), data(ByteArray(CafAudio.MAX_PACKETS))))
+        assertEquals(CafAudio.MAX_PACKETS * 8, most!!.bytes.size)
+    }
+
+    @Test
+    fun packetsLargerThanTheSoundAreNoSound() {
+        val packets = listOf(opusPacket(1), opusPacket(2))
+        val file = caf(desc(48000.0, "opus", 0, 0, 960, 1, 0), pakt(listOf(40, 41), 0, 0, 0), data(packets.fold(ByteArray(0)) { a, p -> a + p }))
+        assertNull(CafAudio.remux(file))
+    }
+
+    @Test
+    fun noDamagedFileThrows() {
+        val random = java.util.Random(7)
+        val good = caf(
+            desc(48000.0, "opus", 0, 0, 960, 1, 0),
+            pakt(listOf(40, 40), valid = 0, priming = 0, remainder = 0),
+            data(opusPacket(1) + opusPacket(2)),
+        )
+        repeat(500) {
+            // The good file with bytes changed, cut short, or grown.
+            val bytes = good.copyOf(good.size + random.nextInt(64) - 32).also { b ->
+                repeat(1 + random.nextInt(8)) { if (b.size > 8) b[8 + random.nextInt(b.size - 8)] = random.nextInt(256).toByte() }
+            }
+            CafAudio.remux(bytes)
+        }
+        repeat(200) { CafAudio.remux("caff".toByteArray(Charsets.US_ASCII) + ByteArray(random.nextInt(200)).also(random::nextBytes)) }
+    }
+
     // --- AAC ------------------------------------------------------------------------------------
 
     /** An `esds`-style magic cookie: version and flags, ES descriptor, decoder config, AudioSpecificConfig [asc]. */

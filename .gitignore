@@ -23,3 +23,16 @@ local.properties
 *.p12
 *.pfx
 /LightDecoder-*.apk
+
+# Built apps and native libraries never go in either: OpenBubbles' libraries are
+# imported or built in from outside (docs/imessage-openbubbles.md, bundleImessageLibs
+# in app/build.gradle.kts) and must not be published; APKs built with them neither.
+*.so
+app/src/main/jniLibs/
+*.apk
+*.apks
+*.xapk
+*.tipa
+
+# Where tools/openbubbles-inspect/README.md has OpenBubbles' APK pulled off a phone.
+/tools/openbubbles-inspect/openbubbles/

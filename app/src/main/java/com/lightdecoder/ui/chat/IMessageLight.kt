@@ -76,6 +76,7 @@ object IMessageLight {
         val state = runCatching { IMessageManager.get(context).state.value }.getOrNull()
         return when {
             state?.phase == RelayState.Phase.ERROR && state.code == IMessageErrors.NOT_INSTALLED -> R.string.imessage_light_not_installed
+            state?.phase == RelayState.Phase.ERROR && state.code == IMessageErrors.NOT_VERIFIED -> R.string.imessage_light_not_verified
             !MessengerNotificationListener.hasAccess(context) -> R.string.imessage_light_no_access
             !MessengerNotificationListener.isConnected() -> R.string.imessage_light_reader_stopped
             IMessagePrefs.hiddenTextAt(context) != 0L -> R.string.imessage_light_hidden_text

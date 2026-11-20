@@ -65,6 +65,27 @@ internal object BlueBubblesLinks {
             .sortedByDescending { it.lastMessageTs }
     }
 
+    /**
+     * The iMessage chats the user may link to the Messages conversation [messagesId] by hand
+     * ([unpaired]), with whether each has its name and no number of its own
+     * ([IMessageLinks.sameName]): those first. A name alone never links a chat by itself.
+     */
+    fun linkCandidates(context: Context, messagesId: String): List<kotlin.Pair<ConversationRow, Boolean>> {
+        val chats = unpaired(context)
+        val repo = ScreenBackends.get(context, ChatService.MESSAGES).repo
+        val name = runCatching {
+            val row = repo.conversation(messagesId)
+            row?.name.orEmpty().ifBlank { repo.participants(messagesId).firstOrNull { !it.isMe }?.name.orEmpty() }
+        }.getOrDefault("")
+        val im = IMessageManager.get(context)
+        val asChats = chats.map { row ->
+            val other = runCatching { im.repo.participants(row.id) }.getOrDefault(emptyList()).firstOrNull { !it.isMe }
+            IMessageLinks.Chat(row.id, im.addressOf(row.id)?.let(IMessageAddress::key), other?.name.orEmpty().ifBlank { row.name })
+        }
+        val same = IMessageLinks.sameName(name, asChats).mapTo(HashSet()) { it.id }
+        return chats.map { it to (it.id in same) }.sortedByDescending { it.second }
+    }
+
     /** The other person's name in a one-to-one iMessage chat. */
     fun iMessageName(context: Context, iMessageId: String): String =
         runCatching { IMessageManager.get(context).repo.participants(iMessageId) }.getOrDefault(emptyList())
@@ -89,15 +110,19 @@ internal object BlueBubblesLinks {
                 }
             }.getOrDefault(emptyList())
             IMessageLinks.pair(messages, iMessages, IMessageLinks.manual(context)).also { pairs ->
-                val byName = pairs.count { it.value.how == IMessageLinks.How.NAME }
                 val alone = iMessages.count { it.id !in pairs }
+                // Chats a name alone would have matched: never linked by it, only offered first when linking by hand.
+                val byName = iMessages.count { im ->
+                    im.id !in pairs && IMessageLinks.nameKey(im.name) != null &&
+                        messages.any { IMessageLinks.sameName(it.name, listOf(im)).isNotEmpty() }
+                }
                 // One person with several iMessage chats (OpenBubbles registered again, or a phone and an email chat):
                 // only one can be inside their conversation; the others stay rows of their own.
                 val sameKey = iMessages.mapNotNull { it.addressKey }.groupingBy { it }.eachCount().count { it.value > 1 }
                 val sharedNumbers = messages.mapNotNull { it.addressKey }.groupingBy { it }.eachCount().count { it.value > 1 }
                 if (byName + alone + sameKey + sharedNumbers > 0) logOnce(
                     context,
-                    "Links: ${pairs.size} iMessage chat(s) inside Messages conversations ($byName by name), $alone on their own" +
+                    "Links: ${pairs.size} iMessage chat(s) inside Messages conversations, $alone on their own ($byName with a conversation's name, not linked by it)" +
                         (if (sameKey > 0) "; $sameKey person(s) with more than one iMessage chat" else "") +
                         (if (sharedNumbers > 0) "; $sharedNumbers number(s) with more than one Messages conversation" else ""),
                 )

@@ -29,10 +29,15 @@ import org.json.JSONObject
 /**
  * Requests between LightDecoder's two processes over a bound service's [Messenger]: each request
  * carries an id and JSON ([DirectWire]) and is answered with a reply of the same id. Both
- * services are not exported, so only LightDecoder's own processes can bind to them.
+ * services are not exported, so only LightDecoder's own processes can bind to them; and every
+ * message, request or reply, is also dropped unless it was sent by this app's own uid
+ * ([fromThisApp], [Message.sendingUid]): a binder handed on by mistake reaches nothing.
  */
 object DirectIpc {
     private const val TAG = "DirectIpc"
+
+    /** Whether [msg] came from this app (either of its processes): [Message.sendingUid], which Android sets for a Messenger's messages. */
+    internal fun fromThisApp(msg: Message): Boolean = msg.sendingUid == android.os.Process.myUid()
 
     /** Answers requests: [handle] runs off the main thread and returns the reply's JSON. */
     class Server(private val handle: suspend (what: Int, request: JSONObject) -> JSONObject) {
@@ -42,6 +47,10 @@ object DirectIpc {
         val messenger = Messenger(
             object : Handler(thread.looper) {
                 override fun handleMessage(msg: Message) {
+                    if (!fromThisApp(msg)) {
+                        Log.w(TAG, "request ${msg.what} from uid ${msg.sendingUid} dropped: not this app")
+                        return
+                    }
                     val replyTo = msg.replyTo ?: return
                     val id = msg.data.getLong(DirectWire.KEY_ID)
                     val what = msg.what
@@ -97,7 +106,7 @@ object DirectIpc {
         private val replies = Messenger(
             object : Handler(thread.looper) {
                 override fun handleMessage(msg: Message) {
-                    if (msg.what != DirectWire.REPLY) return
+                    if (msg.what != DirectWire.REPLY || !fromThisApp(msg)) return
                     val id = msg.data.getLong(DirectWire.KEY_ID)
                     val json = try {
                         JSONObject(msg.data.getString(DirectWire.KEY_JSON) ?: "{}")

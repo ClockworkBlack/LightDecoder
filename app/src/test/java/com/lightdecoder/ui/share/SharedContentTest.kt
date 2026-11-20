@@ -44,6 +44,57 @@ class SharedContentTest {
     }
 
     @Test
+    fun theAppsOwnFilesAreNotTakenHoweverTheirAddressIsWritten() {
+        val pkg = context.packageName
+        val own = listOf(
+            // A user id before the authority: the content resolver drops it and opens this app's provider.
+            "content://0@$pkg.fileprovider/relay-media/x.jpg",
+            "content://10@$pkg.fileprovider/relay-media/x.jpg",
+            // The same with the '@' percent-encoded (Uri's host keeps "0@…", the resolver does not).
+            "content://0%40$pkg.fileprovider/relay-media/x.jpg",
+            "content://$pkg%2Efileprovider/relay-media/x.jpg",
+            "content://a@b@$pkg.fileprovider/relay-media/x.jpg",
+            "content://$pkg.fileprovider:12/relay-media/x.jpg",
+            "content://${pkg.uppercase()}.FILEPROVIDER/relay-media/x.jpg",
+            "CONTENT://$pkg.fileprovider/relay-media/x.jpg",
+        ).map(Uri::parse)
+        for (uri in own) {
+            assertFalse(uri.toString(), ExternalUris.isSafeExternal(context, uri))
+            val shared = SharedContent.from(context, Intent(Intent.ACTION_SEND).setType("image/jpeg").putExtra(Intent.EXTRA_STREAM, uri))
+            assertTrue(uri.toString(), shared.streams.isEmpty())
+        }
+        // Another profile's provider (a share from the work profile) is another app's: taken.
+        val otherProfile = Uri.parse("content://10@com.android.providers.media.documents/document/image%3A12")
+        assertTrue(ExternalUris.isSafeExternal(context, otherProfile))
+        assertEquals("com.android.providers.media.documents", ExternalUris.providerAuthority(otherProfile))
+        assertEquals("$pkg.fileprovider", ExternalUris.providerAuthority(Uri.parse("content://0%40$pkg.fileprovider/x")))
+        assertFalse(ExternalUris.isSafeExternal(context, Uri.parse("content:///no-authority")))
+    }
+
+    @Test
+    fun aConversationTakesOnlyTheShareScreensOwnCopies() {
+        val pkg = context.packageName
+        assertTrue(SharedContent.isOwnCopy(context, Uri.parse("content://$pkg.fileprovider/shared-in/1b2c/photo.jpg")))
+        for (other in listOf(
+            "content://$pkg.fileprovider/relay-media/x.jpg",
+            "content://$pkg.fileprovider/imessage-media/x.jpg",
+            "content://$pkg.fileprovider/shared-in/../relay-media/x.jpg",
+            "content://$pkg.fileprovider/shared-in/%2E%2E/relay-media/x.jpg",
+            "content://$pkg.fileprovider/shared-in",
+            "content://0@$pkg.fileprovider/shared-in/1b2c/photo.jpg",
+            "content://media/external/images/1",
+            "file:///data/data/$pkg/cache/shared-in/1b2c/photo.jpg",
+        )) {
+            assertFalse(other, SharedContent.isOwnCopy(context, Uri.parse(other)))
+        }
+        // What copyIn makes of another app's file is one.
+        org.robolectric.Robolectric.setupContentProvider(SharingAppFiles::class.java, SharingAppFiles.AUTHORITY)
+        val source = SharingAppFiles.add(context, "photo.jpg", byteArrayOf(1, 2, 3))
+        val copy = SharedContent.copyIn(context, listOf(source)).single()
+        assertTrue(copy.toString(), SharedContent.isOwnCopy(context, copy))
+    }
+
+    @Test
     fun onlyShareIntentsAreRead() {
         val intent = Intent(Intent.ACTION_VIEW).putExtra(Intent.EXTRA_TEXT, "x")
         assertTrue(SharedContent.from(context, intent).isEmpty)

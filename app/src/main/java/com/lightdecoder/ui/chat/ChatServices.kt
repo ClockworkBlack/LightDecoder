@@ -264,6 +264,7 @@ internal object ChatErrors {
     private fun iMessageRes(code: String, direct: Boolean): Int = when (code) {
         RelayException.NOT_PAIRED -> R.string.imessage_error_not_enabled
         com.lightdecoder.imessage.IMessageErrors.NOT_INSTALLED -> R.string.imessage_error_not_installed
+        com.lightdecoder.imessage.IMessageErrors.NOT_VERIFIED -> R.string.imessage_error_not_verified
         com.lightdecoder.imessage.IMessageErrors.NO_ACCESS -> R.string.imessage_error_no_access
         com.lightdecoder.imessage.IMessageErrors.NO_REPLY_BUTTON -> if (direct) R.string.imessage_error_no_reply_direct else R.string.imessage_error_no_reply
         // Through the library nothing is handed to another app.

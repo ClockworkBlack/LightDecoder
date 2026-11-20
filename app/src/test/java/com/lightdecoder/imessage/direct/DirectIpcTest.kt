@@ -81,4 +81,51 @@ class DirectIpcTest {
         client.close()
         server.close()
     }
+
+    @Test
+    fun aRequestFromAnotherAppIsDropped() {
+        val handled = java.util.concurrent.atomic.AtomicInteger()
+        val server = DirectIpc.Server { _, _ -> handled.incrementAndGet(); DirectWire.ok() }
+        val answers = java.util.concurrent.LinkedBlockingQueue<Long>()
+        val thread = android.os.HandlerThread("ipc-test-replies").apply { start() }
+        val replyTo = android.os.Messenger(
+            android.os.Handler(thread.looper) { msg -> answers.add(msg.data.getLong(DirectWire.KEY_ID)); true },
+        )
+        fun ask(id: Long) = server.messenger.send(
+            android.os.Message.obtain(null, DirectWire.UNSEND).apply {
+                this.replyTo = replyTo
+                data = android.os.Bundle().apply {
+                    putLong(DirectWire.KEY_ID, id)
+                    putString(DirectWire.KEY_JSON, "{}")
+                }
+            },
+        )
+        try {
+            // Android stamps a Messenger's message with its sender's uid: another app's.
+            org.robolectric.shadows.ShadowBinder.setCallingUid(android.os.Process.myUid() + 1)
+            ask(1)
+            assertEquals(null, answers.poll(500, java.util.concurrent.TimeUnit.MILLISECONDS))
+            assertEquals("never handled", 0, handled.get())
+            // This app's other process.
+            org.robolectric.shadows.ShadowBinder.setCallingUid(android.os.Process.myUid())
+            ask(2)
+            assertEquals(2L, answers.poll(5, java.util.concurrent.TimeUnit.SECONDS))
+            assertEquals(1, handled.get())
+        } finally {
+            org.robolectric.shadows.ShadowBinder.reset()
+            thread.quitSafely()
+            server.close()
+        }
+    }
+
+    @Test
+    fun aReplyFromAnotherAppIsNotTaken() {
+        val reply = android.os.Message.obtain(null, DirectWire.REPLY)
+        reply.sendingUid = android.os.Process.myUid() + 1
+        assertTrue(!DirectIpc.fromThisApp(reply))
+        reply.sendingUid = android.os.Process.myUid()
+        assertTrue(DirectIpc.fromThisApp(reply))
+        // Not sent through a Messenger at all.
+        assertTrue(!DirectIpc.fromThisApp(android.os.Message.obtain()))
+    }
 }
