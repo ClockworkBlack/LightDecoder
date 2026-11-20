@@ -198,13 +198,10 @@
                 <data android:mimeType="image/heif-sequence" />
             </intent-filter>
 
-            <!-- A picture shared to the app from Messages, a file manager and so on. -->
-            <intent-filter android:label="@string/open_with">
-                <action android:name="android.intent.action.SEND" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="image/*" />
-                <data android:mimeType="application/octet-stream" />
-            </intent-filter>
+            <!--
+                No ACTION_SEND here: in the share sheet LightDecoder offers only one entry,
+                ShareActivity (send to a conversation), not a second "Open with LightDecoder".
+            -->
 
             <!-- Some apps label a .heic as a generic file, so match the file name too. -->
             <intent-filter android:label="@string/open_with">
