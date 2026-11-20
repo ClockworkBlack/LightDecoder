@@ -32,6 +32,7 @@ import com.lightdecoder.ui.chat.ThreadActivity
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -2987,6 +2988,160 @@ class BlueBubblesScreenTest {
             assertEquals("Book club", group.name)
             assertEquals(setOf("me", "+15552223333", "carol@example.com"), imRepo.participants(id).map { it.id }.toSet())
             assertEquals(2, asked(asked, com.lightdecoder.imessage.direct.DirectWire.REACH).size)
+        }
+    }
+
+    // --- videos through the iMessage library ------------------------------------------------------
+
+    /** A tiny QuickTime file's start: enough to be a .mov here (nothing decodes it in these tests). */
+    private val movBytes = byteArrayOf(0, 0, 0, 0x14, 0x66, 0x74, 0x79, 0x70, 0x71, 0x74, 0x20, 0x20, 0, 0, 0, 0, 0x71, 0x74, 0x20, 0x20)
+
+    /** The row of [id] as the thread shows it. */
+    private fun shownRow(activity: Activity, id: String): com.lightdecoder.archive.MessageRow? =
+        ((activity.findViewById<RecyclerView>(R.id.messages).adapter as MessagesAdapter).currentList)
+            .filterIsInstance<com.lightdecoder.ui.chat.ThreadItem.Message>().firstOrNull { it.row.id == id }?.row
+
+    /** Taps [id]'s video and returns what the thread started for it (null: nothing, a toast said why). */
+    private fun tapVideo(scenario: ActivityScenario<ThreadActivity>, id: String): Intent? {
+        scenario.onActivity { a -> a.onMediaTap(shownRow(a, id)!!, shownRow(a, id)!!.media.single()) }
+        var started: Intent? = null
+        two.waitUntil("the video's tap answered") {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            started = shadowOf(two.app).nextStartedActivity
+            started != null || org.robolectric.shadows.ShadowToast.getLatestToast() != null
+        }
+        return started
+    }
+
+    /**
+     * Plays what the thread started ([started]) as a phone does: there the app's data directory is
+     * reached through /data/user/0, a link to /data/data where its files really are, so a file's
+     * real (canonical) path does not begin with the directory's name. Asserts it plays: the player
+     * stays open, without "This attachment is not available".
+     */
+    private fun assertPlaysOnAPhone(started: Intent?) {
+        assertEquals(com.lightdecoder.ui.chat.VideoPlayerActivity::class.java.name, started?.component?.className)
+        val path = started!!.getStringExtra("path")!!
+        assertTrue("the video's file is here: $path", java.io.File(path).length() > 0)
+        val info = two.app.applicationInfo
+        val dataDir = info.dataDir
+        val real = java.io.File(dataDir).canonicalFile
+        val link = java.io.File(two.app.cacheDir.parentFile!!.parentFile, "user0-${System.nanoTime()}")
+        java.nio.file.Files.createSymbolicLink(link.toPath(), real.toPath())
+        org.robolectric.shadows.ShadowToast.reset()
+        try {
+            info.dataDir = link.path
+            val throughLink = java.io.File(link, java.io.File(path).canonicalFile.toRelativeString(real)).path
+            val intent = android.content.Intent(started).setClassName(two.app, com.lightdecoder.ui.chat.VideoPlayerActivity::class.java.name)
+                .putExtra("path", throughLink)
+            ActivityScenario.launch<com.lightdecoder.ui.chat.VideoPlayerActivity>(intent).use { player ->
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                assertNotEquals(
+                    two.app.getString(R.string.chat_media_unavailable),
+                    org.robolectric.shadows.ShadowToast.getTextOfLatestToast(),
+                )
+                player.onActivity { assertFalse("the player stays open", it.isFinishing) }
+            }
+        } finally {
+            info.dataDir = dataDir
+            link.delete()
+        }
+    }
+
+    @Test
+    fun withTheLibraryAVideoSentInTheMessagesConversationPlaysHere() {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        directMode(asked)
+        val answer = appleSends()
+        com.lightdecoder.imessage.direct.DirectLink.installForTesting(two.app) { what, request, _ ->
+            asked += what to request
+            answer(what, request)
+        }
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        directMessage("H1", "Hers", System.currentTimeMillis() - 60_000, mine = false)
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("her iMessage") { shownTexts(it).contains("Hers") }
+            scenario.onActivity { activity ->
+                val video = java.io.File(activity.cacheDir, "IMG_0042.MOV").apply { writeBytes(movBytes) }
+                activity.setAttachment(android.net.Uri.fromFile(video))
+                activity.findViewById<View>(R.id.send).performClick()
+            }
+            two.waitUntil("the video sent and stored") { imRepo.message("imsg:S1") != null }
+            val sent = asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).map(com.lightdecoder.imessage.direct.DirectWire.SendRequest::fromJson).single()
+            assertEquals("video/quicktime", sent.attachments.single().mime)
+            // The sent file is the message's: the outbox copy moved to where a download would be kept.
+            val part = imRepo.message("imsg:S1")!!.media.single()
+            assertTrue(java.io.File(part.localPath).readBytes().contentEquals(movBytes))
+            scenario.waitFor("the sent video") { shownRow(it, "imsg:S1")?.media?.singleOrNull()?.localPath == part.localPath }
+            assertPlaysOnAPhone(tapVideo(scenario, "imsg:S1"))
+            assertTrue("nothing downloaded", asked(asked, com.lightdecoder.imessage.direct.DirectWire.DOWNLOAD).isEmpty())
+        }
+    }
+
+    @Test
+    fun withTheLibraryHerVideoIsDownloadedThroughIMessageThenPlaysHere() {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        directMode(asked)
+        com.lightdecoder.imessage.direct.DirectLink.installForTesting(two.app) { what, request, _ ->
+            asked += what to request
+            if (what == com.lightdecoder.imessage.direct.DirectWire.DOWNLOAD) {
+                java.io.File(request.getString("path")).apply { parentFile?.mkdirs(); writeBytes(movBytes) }
+                com.lightdecoder.imessage.direct.DirectWire.downloaded(movBytes.size.toLong())
+            } else {
+                com.lightdecoder.imessage.direct.DirectWire.ok()
+            }
+        }
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        val now = System.currentTimeMillis()
+        directMessage("H1", "Hers", now - 120_000, mine = false)
+        imRepo.upsertMessage(
+            com.lightdecoder.relay.MessageDto(
+                id = "imsg:V1", conversationId = ALICE_DIRECT, senderId = "+15551234567", senderName = "Alice", timestampMs = now - 60_000,
+                direction = "in", status = "INCOMING_COMPLETE", transport = IMessageManager.TRANSPORT, isOld = true,
+                parts = listOf(
+                    com.lightdecoder.relay.PartDto(
+                        "p0", "media", mediaId = "V1/p0", key = "DESC-V1".toByteArray(), mime = "video/quicktime", fileName = "IMG_7.MOV", size = movBytes.size.toLong(),
+                    ),
+                ),
+            ),
+        )
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("her video") { shownRow(it, "imsg:V1") != null }
+            two.waitUntil("her video downloaded") { imRepo.mediaPart("imsg:V1", "p0")?.localPath?.isNotEmpty() == true }
+            scenario.waitFor("her video's file shown") { shownRow(it, "imsg:V1")?.media?.single()?.localPath?.isNotEmpty() == true }
+            assertEquals("DESC-V1", asked(asked, com.lightdecoder.imessage.direct.DirectWire.DOWNLOAD).first().getString("descriptor"))
+            assertPlaysOnAPhone(tapVideo(scenario, "imsg:V1"))
+        }
+    }
+
+    @Test
+    fun withTheLibraryAVideoSentInTheIMessageChatsOwnScreenPlaysHere() {
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        val asked = java.util.Collections.synchronizedList(ArrayList<Pair<Int, org.json.JSONObject>>())
+        directMode(asked)
+        val answer = appleSends()
+        com.lightdecoder.imessage.direct.DirectLink.installForTesting(two.app) { what, request, _ ->
+            asked += what to request
+            answer(what, request)
+        }
+        directMessage("H1", "Hers", System.currentTimeMillis() - 60_000, mine = false)
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, ALICE_DIRECT, service = ChatService.IMESSAGE).setFlags(0)).use { scenario ->
+            scenario.waitFor("her iMessage") { shownTexts(it).contains("Hers") }
+            scenario.onActivity { activity ->
+                val video = java.io.File(activity.cacheDir, "clip.mp4").apply { writeBytes(movBytes) }
+                activity.setAttachment(android.net.Uri.fromFile(video))
+                activity.findViewById<View>(R.id.send).performClick()
+            }
+            two.waitUntil("the video sent and stored") { imRepo.message("imsg:S1") != null }
+            val part = imRepo.message("imsg:S1")!!.media.single()
+            assertTrue(part.mime, part.mime.startsWith("video/"))
+            scenario.waitFor("the sent video") { shownRow(it, "imsg:S1")?.media?.singleOrNull()?.localPath == part.localPath }
+            assertPlaysOnAPhone(tapVideo(scenario, "imsg:S1"))
         }
     }
 
