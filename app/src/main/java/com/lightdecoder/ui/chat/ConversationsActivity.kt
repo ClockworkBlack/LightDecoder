@@ -200,6 +200,7 @@ class ConversationsActivity : AppCompatActivity() {
             }
         }
         if (savedInstanceState == null && !asked) checkSetUp()
+        if (savedInstanceState == null) takeAppStep(intent)
     }
 
     /** Up from a thread, or a hand-over from setup: the list is already open, and shows the service asked for. */
@@ -208,10 +209,12 @@ class ConversationsActivity : AppCompatActivity() {
         setIntent(intent)
         if (!intent.hasExtra(RelayIntents.EXTRA_SERVICE)) return
         val service = tabServiceOf(RelayIntents.serviceOf(intent))
-        if (service == backend.service) return
-        // A search is over the service it was started in.
-        searchItem?.collapseActionView()
-        selectServiceTab(service)
+        if (service != backend.service) {
+            // A search is over the service it was started in.
+            searchItem?.collapseActionView()
+            selectServiceTab(service)
+        }
+        takeAppStep(intent)
     }
 
     override fun onStart() {
@@ -359,17 +362,21 @@ class ConversationsActivity : AppCompatActivity() {
     private var appSwipe: AppSwipe? = null
 
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean =
-        when (appSwipe?.handle(ev) ?: AppSwipe.Result.PASS) {
-            AppSwipe.Result.PASS -> super.dispatchTouchEvent(ev)
-            AppSwipe.Result.CONSUMED -> true
-            AppSwipe.Result.CLAIMED -> {
-                // The views under the finger let go of it: no tap, long press or scroll.
-                val cancel = MotionEvent.obtain(ev).apply { action = MotionEvent.ACTION_CANCEL }
-                super.dispatchTouchEvent(cancel)
-                cancel.recycle()
-                true
-            }
-        }
+        appSwipe?.dispatch(ev) { super.dispatchTouchEvent(it) } ?: super.dispatchTouchEvent(ev)
+
+    /**
+     * A swipe over a conversation's composer asked for the app next to the one it is of
+     * ([EXTRA_APP_STEP]): this screen goes there as the switcher's swipe does (the same order,
+     * round at the ends, and Discord's or Messenger's screen opened over this one). Taken once.
+     */
+    private fun takeAppStep(intent: Intent) {
+        val step = intent.getIntExtra(EXTRA_APP_STEP, 0)
+        if (step == 0) return
+        intent.removeExtra(EXTRA_APP_STEP)
+        // A search is over the service it was started in.
+        searchItem?.collapseActionView()
+        switcher?.go(step)
+    }
 
     private fun selectServiceTab(service: ChatService) {
         val tabs = binding.services
@@ -848,6 +855,22 @@ class ConversationsActivity : AppCompatActivity() {
     }
 
     companion object {
+        /**
+         * With [RelayIntents.EXTRA_SERVICE]: go on to the app next to that one (1) or the one
+         * before (-1), as a sideways swipe along the switcher does. A conversation's composer swipe
+         * ([ThreadActivity]) asks for it.
+         */
+        const val EXTRA_APP_STEP = "com.lightdecoder.extra.APP_STEP"
+
+        /**
+         * How many apps the switcher lists ([setUpServiceTabs]): the services shown as tabs, and
+         * Discord's and Messenger's tabs when they are there.
+         */
+        internal fun appTabCount(): Int =
+            Features.shownServices().size +
+                (if (Features.DISCORD && DiscordProcess.supported) 1 else 0) +
+                (if (Features.MESSENGER) 1 else 0)
+
         /** The tab a service's conversations are listed in: iMessage has none of its own and is in Messages. */
         internal fun tabServiceOf(service: ChatService): ChatService =
             if (service == ChatService.IMESSAGE) ChatService.MESSAGES else service

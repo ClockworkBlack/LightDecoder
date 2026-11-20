@@ -8,6 +8,13 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
    had earlier chosen "build with a warning", then "pause on Discord", and has now asked for
    the web-view tab only, with no bridge). **Instagram: skipped** (ban risk, like Messenger).
 
+## 0.5.70 (versionCode 81) - swipe over a chat's composer switches apps
+- In ThreadActivity a sideways swipe starting over the composer, reply bar or attachment bar opens
+  the list with `ConversationsActivity.EXTRA_APP_STEP` (+/-1), which runs the top switcher's
+  `go(step)`; the message list keeps swipe-to-reply. Off during selection/action modes and recording.
+  Dragging the cursor sideways in the field now switches apps instead (Android 11+ behaviour lost).
+- Unit tests: 1159 (1 skipped), all passing. Next version: 0.5.71 / 82.
+
 ## 0.5.69 (versionCode 80) - quiet iMessage status notice; swipe anywhere to switch apps
 - The ":imessage" service notice moved to channel `imessage_service_quiet` (MIN, no badge, silent,
   own group, no timestamp, re-posted only on text change; old `imessage_status` deleted) in
@@ -16,7 +23,7 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - `AppSwipe.kt`: a horizontal swipe anywhere on the conversation list switches apps through the same
   `ServiceTabStrip.Refresh.go(step)` as the top swipe; ignores edges, top bar, sideways scrollers,
   snackbars, open search. Not in threads.
-- Unit tests: 1149 (1 skipped), all passing. Not yet seen on the owner's Samsung. Next: 0.5.70 / 81.
+- Unit tests: 1149 (1 skipped), all passing. Not yet seen on the owner's Samsung.
 
 ## 0.5.68 (versionCode 79) - videos play; share goes to a ready draft; share list matches the inbox
 - Videos showed "not available" on phones: VideoPlayerActivity compared a canonical file path with the
