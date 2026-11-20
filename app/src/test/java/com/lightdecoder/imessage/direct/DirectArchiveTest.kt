@@ -460,7 +460,8 @@ class DirectArchiveTest {
         fun react(r: Reaction, enable: Boolean = true, sender: String = bob) =
             map(inst("R1", sender, PushChatMessage.React(ReactMessage("M1", 0UL, ReactMessageType.React(r, enable), "", null))))
         val heart = react(Reaction.Heart) as DirectArchive.Update.Reaction
-        assertEquals(DirectArchive.Update.Reaction("imsg:M1", "+15550000002", "❤️", true, false, 1_700_000_005_000L), heart)
+        // With the chat it came in, so that it is only taken there.
+        assertEquals(DirectArchive.Update.Reaction("imsg:M1", "+15550000002", "❤️", true, false, 1_700_000_005_000L, "imsg:$bob"), heart)
         assertEquals("👍", (react(Reaction.Like) as DirectArchive.Update.Reaction).emoji)
         assertEquals("👎", (react(Reaction.Dislike) as DirectArchive.Update.Reaction).emoji)
         assertEquals("😂", (react(Reaction.Laugh) as DirectArchive.Update.Reaction).emoji)
@@ -490,15 +491,24 @@ class DirectArchiveTest {
 
     @Test
     fun unsendEditAndTypingChangeTheStoredMessage() {
+        // Who did it, when and in which chat go with it: only the message's own sender's is taken.
         assertEquals(
-            DirectArchive.Update.Unsent("imsg:M1", 2, false, "Bob"),
+            DirectArchive.Update.Unsent("imsg:M1", 2, false, "Bob", bob, 1_700_000_005_000L, "imsg:$bob"),
             map(inst("X", bob, PushChatMessage.Unsend(UnsendMessage("M1", 2UL)))),
         )
-        assertEquals(DirectArchive.Update.Unsent("imsg:M1", 0, true, ""), map(inst("X", me, PushChatMessage.Unsend(UnsendMessage("M1", 0UL)))))
         assertEquals(
-            DirectArchive.Update.Edit("imsg:M1", "fixed it", 1, 1_700_000_005_000L),
+            DirectArchive.Update.Unsent("imsg:M1", 0, true, "", me, 1_700_000_005_000L, "imsg:$bob"),
+            map(inst("X", me, PushChatMessage.Unsend(UnsendMessage("M1", 0UL)))),
+        )
+        assertEquals(
+            DirectArchive.Update.Edit("imsg:M1", "fixed it", 1, 1_700_000_005_000L, emptyList(), bob, false, "imsg:$bob"),
             map(inst("X", bob, PushChatMessage.Edit(EditMessage("M1", 1UL, listOf(text("fixed "), text("it")))))),
         )
+        // In a group: its guid.
+        val inGroup = map(inst("X", carol, PushChatMessage.Edit(EditMessage("M1", 0UL, listOf(text("x")))), listOf(me, bob, carol), "G-E")) as DirectArchive.Update.Edit
+        assertEquals("imsg:group:G-E", inGroup.conversationId)
+        assertEquals("G-E", inGroup.groupGuid)
+        assertEquals(carol, inGroup.sender)
         assertEquals(DirectArchive.Update.Typing("imsg:$bob", "+15550000002", true), map(inst("X", bob, PushChatMessage.Typing(true, null))))
         assertEquals(DirectArchive.Update.Typing("imsg:$bob", "+15550000002", false), map(inst("X", bob, PushChatMessage.Typing(false, null))))
         // In a group down to one other person: its guid goes with it, so the group is found.
@@ -513,8 +523,9 @@ class DirectArchiveTest {
 
     @Test
     fun receiptsFromThemAndFromTheUsersOtherDevices() {
-        assertEquals(DirectArchive.Update.Receipt(listOf("imsg:M5"), DirectArchive.STATUS_DELIVERED), map(inst("M5", bob, PushChatMessage.Delivered)))
-        assertEquals(DirectArchive.Update.Receipt(listOf("imsg:M5"), DirectArchive.STATUS_READ), map(inst("M5", bob, PushChatMessage.Read)))
+        // Who it is from goes with it: only someone in the message's chat is taken.
+        assertEquals(DirectArchive.Update.Receipt(listOf("imsg:M5"), DirectArchive.STATUS_DELIVERED, bob), map(inst("M5", bob, PushChatMessage.Delivered)))
+        assertEquals(DirectArchive.Update.Receipt(listOf("imsg:M5"), DirectArchive.STATUS_READ, bob), map(inst("M5", bob, PushChatMessage.Read)))
         // Read on the user's iPhone: the chat is read; their other devices' Delivered says nothing.
         assertEquals(DirectArchive.Update.ReadElsewhere("imsg:M5"), map(inst("M5", me, PushChatMessage.Read)))
         assertEquals(DirectArchive.Update.Ignore, map(inst("M5", me, PushChatMessage.Delivered)))
@@ -522,13 +533,70 @@ class DirectArchiveTest {
 
     @Test
     fun whatAppleCouldNotVerifyIsDropped() {
+        val file = MmcsFile(byteArrayOf(), "o", "u", byteArrayOf(), 1UL)
         for (m in listOf(
             PushChatMessage.Delivered, PushChatMessage.Read, PushChatMessage.Typing(true, null),
             PushChatMessage.Edit(EditMessage("M1", 0UL, listOf(text("x")))), PushChatMessage.Unsend(UnsendMessage("M1", 0UL)),
             PushChatMessage.RenameMessage(ChatRenameMessage("Evil")),
+            // Nothing that removes or changes what is stored, nor a group's events.
+            PushChatMessage.ChangeParticipants(ChangeParticipantMessage(listOf(me, bob, carol, dave), 2UL)),
+            PushChatMessage.IconChange(IconChangeMessage(file, 3UL)),
+            PushChatMessage.Error(ErrorMessage("M7", 4UL, "x")),
+            PushChatMessage.PermanentDelete(uniffi.rust_bridge.PermanentDeleteMessage(uniffi.rust_bridge.DeleteTarget.Messages(listOf("M1")), true)),
+            PushChatMessage.SetTranscriptBackground(uniffi.rust_bridge.SetTranscriptBackgroundMessage.Remove(1u, 5UL, null, true)),
         )) {
             assertEquals(m.toString(), DirectArchive.Update.Ignore, map(inst("X", bob, m, participants = listOf(me, bob, carol), groupGuid = "G", unverified = true)))
+            // Never the user's: from one of the user's own addresses it is from nobody else either.
+            assertEquals(m.toString(), DirectArchive.Update.Ignore, map(inst("X", me, m, participants = listOf(me, bob, carol), groupGuid = "G", unverified = true)))
         }
+        // A message the user's address is said to have sent, unverified: not the user's, and not
+        // shown as the other person's in their chat either.
+        val spoofed = message("M9", me, listOf(me, bob), "it's me").copy(verificationFailed = true)
+        assertEquals(DirectArchive.Update.Ignore, map(spoofed))
+        assertEquals(DirectArchive.Update.Ignore, map(inst("X", me, PushChatMessage.React(ReactMessage("M1", 0UL, ReactMessageType.React(Reaction.Heart, true), "", null)), unverified = true)))
+        // Someone else's message is still shown, as OpenBubbles shows it.
+        val theirs = map(message("M10", bob, listOf(me, bob), "hi").copy(verificationFailed = true)) as DirectArchive.Update.Upsert
+        assertFalse(theirs.message.fromMe)
+        // A chat background unverified names no chat.
+        assertNull(DirectArchive.backgroundChat(inst("X", me, PushChatMessage.SetTranscriptBackground(uniffi.rust_bridge.SetTranscriptBackgroundMessage.Remove(1u, 5UL, "+15550000002", true)), unverified = true), setOf(me)))
+    }
+
+    @Test
+    fun anEventFromNobodyIsNothing() {
+        for (m in listOf(
+            PushChatMessage.Message(normal(listOf(text("hi")))), PushChatMessage.Delivered, PushChatMessage.Read,
+            PushChatMessage.Unsend(UnsendMessage("M1", 0UL)), PushChatMessage.Edit(EditMessage("M1", 0UL, listOf(text("x")))),
+            PushChatMessage.React(ReactMessage("M1", 0UL, ReactMessageType.React(Reaction.Heart, true), "", null)),
+        )) {
+            assertEquals(m.toString(), DirectArchive.Update.Ignore, map(inst("X", null, m)))
+        }
+    }
+
+    @Test
+    fun aTimeFromTheFutureIsTakenAsArrivedAndOneFromThePastAsItIs() {
+        val now = 1_800_000_000_000L
+        fun at(ts: Long) = (DirectArchive.map(message("T1", bob, listOf(me, bob), "hi").copy(sentTimestamp = ts.toULong()), setOf(me), ::nameOf, TestTexts, now = now) as DirectArchive.Update.Upsert).message.timestampMs
+        // Late (the phone was off): its own time.
+        assertEquals(now - 86_400_000L, at(now - 86_400_000L))
+        // A device's clock a little ahead: as it says.
+        assertEquals(now + 60_000L, at(now + 60_000L))
+        // Far ahead (it would stay the chat's latest, and a group's name with it): 5 minutes after it came.
+        assertEquals(now + DirectArchive.MAX_FUTURE_MS, at(now + 365L * 86_400_000L))
+        // An edit's and a rename's too.
+        val edit = DirectArchive.map(inst("X", bob, PushChatMessage.Edit(EditMessage("M1", 0UL, listOf(text("x"))))).copy(sentTimestamp = Long.MAX_VALUE.toULong()), setOf(me), ::nameOf, TestTexts, now = now)
+        assertEquals(now + DirectArchive.MAX_FUTURE_MS, (edit as DirectArchive.Update.Edit).atMs)
+        val rename = DirectArchive.map(inst("X", bob, PushChatMessage.RenameMessage(ChatRenameMessage("Mine forever")), listOf(me, bob, carol), "G-T").copy(sentTimestamp = (now * 2).toULong()), setOf(me), ::nameOf, TestTexts, now = now)
+        assertEquals(now + DirectArchive.MAX_FUTURE_MS, (rename as DirectArchive.Update.Upsert).message.timestampMs)
+    }
+
+    @Test
+    fun aScheduledMessageTakenBackOnlyRemovesOneStillWaiting() {
+        val gone = PushChatMessage.PermanentDelete(uniffi.rust_bridge.PermanentDeleteMessage(uniffi.rust_bridge.DeleteTarget.Messages(listOf("S1")), true))
+        assertEquals(DirectArchive.Update.Remove("imsg:S1", scheduledOnly = true), map(inst("X", me, gone)))
+        // Not from the user, or not a scheduled one: nothing.
+        assertEquals(DirectArchive.Update.Ignore, map(inst("X", bob, gone)))
+        val notScheduled = PushChatMessage.PermanentDelete(uniffi.rust_bridge.PermanentDeleteMessage(uniffi.rust_bridge.DeleteTarget.Messages(listOf("S1")), false))
+        assertEquals(DirectArchive.Update.Ignore, map(inst("X", me, notScheduled)))
     }
 
     @Test
@@ -570,6 +638,12 @@ class DirectArchiveTest {
         assertEquals("Carol left the conversation.", change(carol, listOf(me, bob)).message.text)
         assertEquals("Bob removed you.", change(bob, listOf(bob, carol)).message.text)
         assertEquals("You added Dave.", change(me, listOf(me, bob, carol, dave)).message.text)
+        // A change of the group's members, as such: the main process takes its members from it alone.
+        assertTrue(added.membersChanged)
+        val renamed = map(inst("E9", bob, PushChatMessage.RenameMessage(ChatRenameMessage("x")), listOf(me, bob, carol), "G-6")) as DirectArchive.Update.Upsert
+        assertFalse(renamed.membersChanged)
+        val wired = DirectWire.decode(org.json.JSONObject(DirectWire.encode(added).toString())) as DirectArchive.Update.Upsert
+        assertTrue(wired.membersChanged)
     }
 
     @Test
@@ -645,6 +719,9 @@ class DirectArchiveTest {
         val edit = map(
             inst("X", bob, PushChatMessage.Edit(EditMessage("F1", 0UL, listOf(text("now "), IndexedMessagePart(MessagePart.Text("shaking", TextFormat.Effect(TextEffect.SHAKE)), null, null))))),
         )
-        assertEquals(DirectArchive.Update.Edit("imsg:F1", "now shaking", 0, 1_700_000_005_000L, listOf(TextRun(4, 11, effect = TextEffectKind.SHAKE))), edit)
+        assertEquals(
+            DirectArchive.Update.Edit("imsg:F1", "now shaking", 0, 1_700_000_005_000L, listOf(TextRun(4, 11, effect = TextEffectKind.SHAKE)), bob, false, "imsg:$bob"),
+            edit,
+        )
     }
 }

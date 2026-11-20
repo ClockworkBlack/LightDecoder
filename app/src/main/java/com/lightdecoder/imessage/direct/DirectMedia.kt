@@ -10,6 +10,22 @@ object DirectMedia {
     /** Apple takes attachments up to this size; a larger one is refused here, with a clear error. */
     const val MAX_SEND_BYTES = 100L * 1024 * 1024
 
+    /**
+     * The most of an attachment downloaded (Apple's own limit for one): whatever size its message
+     * says it has, a download that brings more is stopped and thrown out.
+     */
+    const val MAX_DOWNLOAD_BYTES = MAX_SEND_BYTES
+
+    /**
+     * Where the ":imessage" process writes a small attachment that came inside a message, whose
+     * part's file is [file], until the main process has taken the message: only then is it moved
+     * into place, so a message the main process drops (one reusing another's GUID) never overwrites
+     * another message's file. Named as a partial file, so one never taken is cleaned up with them
+     * ([com.lightdecoder.archive.MediaCache.deleteStaleParts]).
+     */
+    fun pendingInlineFile(file: java.io.File): java.io.File =
+        java.io.File(file.parentFile, file.name + ".inline" + com.lightdecoder.archive.MediaCache.PART_SUFFIX)
+
     const val OCTET_STREAM = "application/octet-stream"
 
     /** What any other file is to Apple. */

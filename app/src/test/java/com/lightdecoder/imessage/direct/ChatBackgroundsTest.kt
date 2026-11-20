@@ -15,6 +15,9 @@ import com.lightdecoder.relay.ParticipantDto
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.Collections
+import java.util.zip.CRC32
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.After
@@ -112,21 +115,90 @@ class ChatBackgroundsTest {
 
     // --- fetched, its picture written (the library faked) --------------------------------------------
 
-    private class FakeNatives(private val poster: SimplifiedTranscriptPoster?) : IncomingBackgrounds.Natives {
+    /** A zip of [entries], packed (or [stored] as they are), as java.util.zip writes one. */
+    private fun zipOf(vararg entries: Pair<String, ByteArray>, stored: Boolean = false): ByteArray {
+        val out = ByteArrayOutputStream()
+        ZipOutputStream(out).use { z ->
+            for ((name, bytes) in entries) {
+                val e = ZipEntry(name)
+                if (stored) {
+                    e.method = ZipEntry.STORED
+                    e.size = bytes.size.toLong()
+                    e.compressedSize = bytes.size.toLong()
+                    e.crc = CRC32().apply { update(bytes) }.value
+                }
+                z.putNextEntry(e)
+                z.write(bytes)
+                z.closeEntry()
+            }
+        }
+        return out.toByteArray()
+    }
+
+    /** A poster as Apple's file servers hand it over: the Watch's picture and the poster (a zip itself). */
+    private fun posterZip(innerStored: Boolean = false) = zipOf(
+        "transcriptBackground/" to ByteArray(0),
+        "transcriptBackground/watchBackground" to ByteArray(300) { (it % 7).toByte() },
+        "transcriptBackground/poster" to zipOf("manifest.plist" to ByteArray(200) { (it % 5).toByte() }, "configuration/x" to ByteArray(50)),
+        stored = innerStored,
+    )
+
+    private fun u16(b: ByteArray, at: Int) = (b[at].toInt() and 0xFF) or ((b[at + 1].toInt() and 0xFF) shl 8)
+    private fun u32(b: ByteArray, at: Int) = u16(b, at).toLong() or (u16(b, at + 2).toLong() shl 16)
+    private fun put32(b: ByteArray, at: Int, v: Long) {
+        for (i in 0 until 4) b[at + i] = (v shr (8 * i)).toByte()
+    }
+
+    /** Where the first entry of [zip]'s directory is (a zip with no comment). */
+    private fun firstCen(zip: ByteArray) = u32(zip, zip.size - 22 + 16).toInt()
+
+    /** [zip] with its first entry's flags or method (at [at] in its directory entry) changed by [f]. */
+    private fun patchCen(zip: ByteArray, at: Int, f: (Int) -> Int): ByteArray = zip.copyOf().also { z ->
+        val cen = firstCen(z)
+        val v = f(u16(z, cen + at))
+        z[cen + at] = v.toByte()
+        z[cen + at + 1] = (v shr 8).toByte()
+    }
+
+    /** [zip] whose first entry says it unpacks to [size] bytes. */
+    private fun declaring(zip: ByteArray, size: Long): ByteArray = zip.copyOf().also { put32(it, firstCen(it) + 24, size) }
+
+    /** [zip] whose first entry unpacks to more than it says. */
+    private fun lying(zip: ByteArray) = declaring(zip, 1)
+
+    /** [zip] with [comment] after its end record. */
+    private fun withComment(zip: ByteArray, comment: ByteArray): ByteArray = zip.copyOf().also {
+        it[it.size - 2] = comment.size.toByte()
+        it[it.size - 1] = (comment.size shr 8).toByte()
+    } + comment
+
+    private class FakeNatives(private val poster: SimplifiedTranscriptPoster?, private val payload: ByteArray? = null) : IncomingBackgrounds.Natives {
         val downloads = ArrayList<MmcsFile>()
+        val maxBytes = ArrayList<Long>()
+        var parsed = 0
+        lateinit var zip: ByteArray
+
+        /** The library's download stops it for growing past what it may be. */
+        var stopped = false
+
         override fun toMmcs(message: SetTranscriptBackgroundMessage): MmcsFile? =
             (message as? SetTranscriptBackgroundMessage.Set)?.let { MmcsFile(byteArrayOf(1), it.objectId, it.url, byteArrayOf(2), 0UL) }
 
-        override suspend fun download(file: MmcsFile, path: String) {
+        override suspend fun download(file: MmcsFile, path: String, maxBytes: Long) {
             downloads += file
-            File(path).writeBytes(byteArrayOf(0x50, 0x4b, 3, 4))
+            this.maxBytes += maxBytes
+            if (stopped) throw DirectEngine.TooLarge("stopped")
+            File(path).writeBytes(payload ?: zip)
         }
 
         override fun parse(payload: ByteArray): SimplifiedTranscriptPoster {
+            parsed++
             assertEquals(0x50.toByte(), payload[0])
             return poster ?: throw IllegalStateException("no poster")
         }
     }
+
+    private fun natives(poster: SimplifiedTranscriptPoster?, payload: ByteArray? = null) = FakeNatives(poster, payload).also { it.zip = posterZip() }
 
     private fun jpeg(width: Int, height: Int, color: Int): ByteArray {
         val b = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).apply { eraseColor(color) }
@@ -148,7 +220,7 @@ class ChatBackgroundsTest {
 
     @Test
     fun aPhotoIsFetchedAndItsPictureWrittenForTheMainProcess() {
-        val natives = FakeNatives(photo())
+        val natives = natives(photo())
         val u = receive(inst("B1", bob, set(1_000)), natives) as DirectArchive.Update.Background
         assertEquals("OBJ", natives.downloads.single().`object`)
         assertEquals("imsg:$bob", u.conversationId)
@@ -179,12 +251,12 @@ class ChatBackgroundsTest {
     @Test
     fun aGradientOrDynamicBackgroundIsKeptToBeDrawnNotTakenOff() {
         // A gradient: its colours (PosterColor is alpha, blue, green, red), no picture, "changed".
-        val g = receive(inst("B2", bob, set(2_000)), FakeNatives(gradient(PosterColor(1.0, 0.0, 0.5, 1.0), PosterColor(1.0, 1.0, 0.0, 0.0)))) as DirectArchive.Update.Background
+        val g = receive(inst("B2", bob, set(2_000)), natives(gradient(PosterColor(1.0, 0.0, 0.5, 1.0), PosterColor(1.0, 1.0, 0.0, 0.0)))) as DirectArchive.Update.Background
         assertNull(g.path)
         assertEquals(BackgroundStyle.Gradient(listOf(Rgba(1.0, 0.5, 0.0, 1.0), Rgba(0.0, 0.0, 1.0, 1.0))), g.style)
         assertEquals("+15559876543 changed the chat background.", g.row!!.message.text)
         // Aurora, by its identifier.
-        val d = receive(inst("B2b", bob, set(2_001)), FakeNatives(dynamicNamed("aurora_1"))) as DirectArchive.Update.Background
+        val d = receive(inst("B2b", bob, set(2_001)), natives(dynamicNamed("aurora_1"))) as DirectArchive.Update.Background
         assertNull(d.path)
         assertEquals(BackgroundStyle.Dynamic("aurora_1"), d.style)
         assertTrue((d.style as BackgroundStyle.Dynamic).isKnown)
@@ -197,7 +269,7 @@ class ChatBackgroundsTest {
         // Nothing is left in the backgrounds' folder for them.
         assertTrue(ChatBackgrounds.dir(context).listFiles().orEmpty().none { it.name.endsWith(".jpg") })
         // Taken off: nothing is fetched.
-        val none = FakeNatives(null)
+        val none = natives(null)
         val r = receive(inst("B3", bob, remove(3_000)), none) as DirectArchive.Update.Background
         assertNull(r.path)
         assertNull(r.style)
@@ -239,12 +311,12 @@ class ChatBackgroundsTest {
                 PosterRole.PR_POSTER_ROLE_BACKDROP,
             ),
         )
-        assertEquals(DirectArchive.Update.Ignore, receive(inst("B4", bob, set(4_000)), FakeNatives(monogram)))
+        assertEquals(DirectArchive.Update.Ignore, receive(inst("B4", bob, set(4_000)), natives(monogram)))
         // A monogram with the Watch's picture shows that.
         val withWatch = monogram.copy(watch = p.watch)
-        assertNotNull((receive(inst("B5", bob, set(4_001)), FakeNatives(withWatch)) as DirectArchive.Update.Background).path)
+        assertNotNull((receive(inst("B5", bob, set(4_001)), natives(withWatch)) as DirectArchive.Update.Background).path)
         try {
-            receive(inst("B6", bob, set(4_002)), FakeNatives(null))
+            receive(inst("B6", bob, set(4_002)), natives(null))
             fail("an unreadable poster was taken")
         } catch (e: IllegalStateException) {
             // The engine logs it and goes on.
@@ -319,10 +391,250 @@ class ChatBackgroundsTest {
         assertNotNull(ChatBackgrounds(context).pictureOf("iMessage;-;+15559876543"))
         assertEquals("You changed the chat background.", repo.message("imsg:D1")!!.text)
         assertEquals("iMessage;-;+15559876543", repo.message("imsg:D1")!!.conversationId)
-        // A group, by its guid.
+        // A group, by its guid (one stored here: its messages came).
+        link.apply(groupMessage("D1g", bob, listOf(me, bob, carol), "G-9"))
         link.apply(change("D2", carol, set(21_000, "G-9"), incomingPicture(Color.BLUE), listOf(me, bob, carol), "G-9"))
         assertNotNull(ChatBackgrounds(context).pictureOf("imsg:group:G-9"))
         assertEquals("imsg:group:G-9", repo.message("imsg:D2")!!.conversationId)
+    }
+
+    private fun groupMessage(guid: String, sender: String, participants: List<String>, groupGuid: String) = wire(
+        DirectArchive.map(
+            MessageInst(
+                guid, sender, ConversationData(participants, null, groupGuid, null),
+                PushChatMessage.Message(
+                    uniffi.rust_bridge.NormalMessage(
+                        listOf(
+                            uniffi.rust_bridge.IndexedMessagePart(
+                                uniffi.rust_bridge.MessagePart.Text("hi", uniffi.rust_bridge.TextFormat.Flags(uniffi.rust_bridge.TextFlags(false, false, false, false))),
+                                null, null,
+                            ),
+                        ),
+                        null, null, null, uniffi.rust_bridge.MessageType.IMessage, null, null, null, false, null, null,
+                    ),
+                ),
+                1_700_000_000_000UL, null, false, false, null,
+            ),
+            setOf(me), Handles::display, DirectTexts(context),
+        ),
+    )
+
+    @Test
+    fun aBackgroundIsOnlyTakenFromSomeoneInTheChatAndNeverFromTheFuture() {
+        com.lightdecoder.imessage.IMessageLog.clear(context)
+        val link = DirectLink.get(context)
+        val store = ChatBackgrounds(context)
+        val mallory = "tel:+15558889999"
+        // Bob naming the user's chat with Carol by her address: only the user's own devices do that.
+        assertNull(DirectArchive.backgroundChat(inst("H1", bob, set(5, "+15551112222")), setOf(me)))
+        assertEquals(DirectArchive.Update.Ignore, DirectArchive.background(inst("H1", bob, set(5, "+15551112222")), setOf(me), Handles::display, DirectTexts(context), null))
+        // A group stored here: only from its members.
+        link.apply(groupMessage("H0", bob, listOf(me, bob, carol), "G-B"))
+        val pic = incomingPicture(Color.RED)
+        link.apply(change("H2", mallory, set(50_000, "G-B"), pic, listOf(me, bob, carol, mallory), "G-B"))
+        assertEquals(ChatBackgrounds.Background(null, 0), store.of("imsg:group:G-B"))
+        assertFalse(File(pic).exists())
+        assertNull(repo.message("imsg:H2"))
+        link.apply(change("H3", carol, set(50_001, "G-B"), incomingPicture(Color.BLUE), listOf(me, bob, carol), "G-B"))
+        assertNotNull(store.pictureOf("imsg:group:G-B"))
+        assertEquals("+15551112222 changed the chat background.", repo.message("imsg:H3")!!.text)
+        // A group not stored here: nothing to show it in, and it is not made for it.
+        val stray = incomingPicture(Color.BLUE)
+        link.apply(change("H4", carol, set(50_002, "G-NEW"), stray, listOf(me, bob, carol), "G-NEW"))
+        assertNull(repo.conversation("imsg:group:G-NEW"))
+        assertFalse(File(stray).exists())
+        // From the future: dropped, no row, and it holds no later change back.
+        val future = ChatBackgrounds.versionNow() + 60L * 60 * 1_000_000_000
+        val ahead = incomingPicture(Color.GREEN)
+        link.apply(change("H5", bob, set(future), ahead))
+        assertEquals(ChatBackgrounds.Background(null, 0), store.of("imsg:$bob"))
+        assertNull(repo.message("imsg:H5"))
+        assertFalse(File(ahead).exists())
+        link.apply(change("H6", bob, set(60_000), incomingPicture(Color.GREEN)))
+        assertEquals(60_000L, store.of("imsg:$bob").version)
+        val log = com.lightdecoder.imessage.IMessageLog.read(context)
+        assertTrue(log.toString(), log.any { it.contains("a chat background from someone not in the group was dropped") })
+        assertTrue(log.none { it.contains("8889999") })
+    }
+
+    @Test
+    fun aVersionMadeHereNeverOverflowsAndOneFromTheFutureHoldsNothingBack() {
+        val now = 1_800_000_000_000L
+        val v = ChatBackgrounds.versionNow(now)
+        assertEquals(v, ChatBackgrounds.nextVersion(0, now))
+        assertEquals(v, ChatBackgrounds.nextVersion(v - 1, now))
+        // The chat's, a clock's worth ahead: the one after it.
+        assertEquals(v + 1_000 + 1, ChatBackgrounds.nextVersion(v + 1_000, now))
+        // Never past a Long's end, nor after one from the future.
+        assertEquals(v, ChatBackgrounds.nextVersion(Long.MAX_VALUE, now))
+        assertTrue(ChatBackgrounds.isPlausibleVersion(v + ChatBackgrounds.VERSION_SKEW, now))
+        assertFalse(ChatBackgrounds.isPlausibleVersion(v + ChatBackgrounds.VERSION_SKEW + 1, now))
+        assertFalse(ChatBackgrounds.isPlausibleVersion(-1, now))
+        // A chat holding one from the future (kept before they were refused): a new one replaces it.
+        val store = ChatBackgrounds(context)
+        assertEquals(ChatBackgrounds.Applied.APPLIED, store.apply("imsg:x", null, Long.MAX_VALUE))
+        assertEquals(ChatBackgrounds.Applied.APPLIED, store.apply("imsg:x", null, 5))
+        assertEquals(ChatBackgrounds.Applied.SAME, store.apply("imsg:x", null, 5))
+    }
+
+    @Test
+    fun aBackgroundSetHereThatANewerOneOvertookWritesNoRow() {
+        directMode()
+        bobsChat()
+        lateinit var link: DirectLink
+        link = DirectLink.installForTesting(context) { what, _, _ ->
+            if (what == DirectWire.BACKGROUND) {
+                // Bob's change, newer, came while Apple was asked.
+                link.apply(change("K1", bob, set(ChatBackgrounds.versionNow() + 60_000_000_000L), incomingPicture(Color.GREEN)))
+            }
+            DirectWire.ok()
+        }
+        runBlocking { link.setBackground("imsg:$bob", BackgroundChoice.Drawn(BackgroundPalettes.ALL.first().style)) }
+        assertTrue(repo.messages("imsg:$bob").none { it.text == "You changed the chat background." })
+        // Bob's stays.
+        assertNotNull(ChatBackgrounds(context).pictureOf("imsg:$bob"))
+        assertNull(ChatBackgrounds(context).of("imsg:$bob").style)
+    }
+
+    @Test
+    fun aPosterTooLargeOrNotAPlainZipIsNeverHandedToTheLibrary() {
+        // Said to be larger than 20 MB: not even fetched.
+        val big = natives(photo())
+        val saidBig = set(1_100).copy(fileSize = (IncomingBackgrounds.MAX_POSTER_BYTES + 1).toULong())
+        assertTrue(receive(inst("Z1", bob, saidBig), big) is DirectArchive.Update.Dropped)
+        assertTrue(big.downloads.isEmpty())
+        // Larger once fetched, whatever it said: not read.
+        val grew = natives(photo(), payload = ByteArray((IncomingBackgrounds.MAX_POSTER_BYTES + 1).toInt()))
+        val dropped = receive(inst("Z2", bob, set(1_101)), grew) as DirectArchive.Update.Dropped
+        assertEquals("chat background", dropped.what)
+        assertEquals(listOf(IncomingBackgrounds.MAX_POSTER_BYTES), grew.maxBytes)
+        assertEquals(0, grew.parsed)
+        // Stopped while it came, for growing past it: the same.
+        val stopped = natives(photo()).also { it.stopped = true }
+        assertEquals(dropped, receive(inst("Z2b", bob, set(1_101)), stopped))
+        assertEquals(0, stopped.parsed)
+        // Not a zip, or one that unpacks to more than it says: not read either.
+        for (payload in listOf(byteArrayOf(0x50, 0x4b, 3, 4), lying(posterZip()))) {
+            val n = natives(photo(), payload = payload)
+            val u = receive(inst("Z3", bob, set(1_102)), n)
+            assertTrue(u.toString(), u is DirectArchive.Update.Dropped)
+            assertEquals(0, n.parsed)
+        }
+        // A version from the future: not fetched.
+        val future = natives(photo())
+        assertTrue(receive(inst("Z4", bob, set(ChatBackgrounds.versionNow() + 60L * 60 * 1_000_000_000)), future) is DirectArchive.Update.Dropped)
+        assertTrue(future.downloads.isEmpty())
+        // Nothing of them is left behind.
+        assertTrue(ChatBackgrounds.dir(context).listFiles().orEmpty().none { it.name.startsWith("poster-") || it.name.endsWith(".jpg") })
+        // A dropped one is said in the iMessage log, by kind and reason only.
+        com.lightdecoder.imessage.IMessageLog.clear(context)
+        DirectLink.get(context).apply(wire(dropped))
+        assertTrue(com.lightdecoder.imessage.IMessageLog.read(context).single().contains("an event from Apple was not taken (chat background): its poster is larger than 20 MB"))
+    }
+
+    @Test
+    fun onlyAPlainZipOfASensibleSizeIsReadAsAPoster() {
+        assertNull(PosterArchive.problem(posterZip()))
+        assertNull("its poster stored, not packed (an end record inside it)", PosterArchive.problem(posterZip(innerStored = true)))
+        assertNull(
+            "with the slash Apple puts first now",
+            PosterArchive.problem(zipOf("/transcriptBackground/watchBackground" to ByteArray(4), "/transcriptBackground/poster" to zipOf("manifest.plist" to ByteArray(4)))),
+        )
+        assertNull("a comment", PosterArchive.problem(withComment(posterZip(), "hi".toByteArray())))
+        assertNotNull("no poster in it", PosterArchive.problem(zipOf("transcriptBackground/watchBackground" to ByteArray(4))))
+        assertNotNull("not a zip", PosterArchive.problem(ByteArray(100)))
+        assertNotNull("nothing", PosterArchive.problem(ByteArray(0)))
+        assertNotNull("unpacks to more than it says", PosterArchive.problem(lying(posterZip())))
+        assertNotNull("says more than 64 MB", PosterArchive.problem(declaring(posterZip(), PosterArchive.MAX_UNPACKED_BYTES + 1)))
+        assertNotNull(
+            "too many entries",
+            PosterArchive.problem(zipOf(*Array(PosterArchive.MAX_ENTRIES) { "f$it" to ByteArray(1) }, "transcriptBackground/poster" to zipOf("m" to ByteArray(1)))),
+        )
+        assertNotNull("its poster unpacks to more than it says", PosterArchive.problem(zipOf("transcriptBackground/poster" to lying(zipOf("manifest.plist" to ByteArray(5_000))))))
+        assertNotNull(
+            "its poster has too many entries",
+            PosterArchive.problem(zipOf("transcriptBackground/poster" to zipOf(*Array(PosterArchive.MAX_POSTER_ENTRIES + 1) { "f$it" to ByteArray(1) }))),
+        )
+        assertNotNull("its poster says more than 64 MB", PosterArchive.problem(zipOf("transcriptBackground/poster" to declaring(zipOf("m" to ByteArray(3)), PosterArchive.MAX_UNPACKED_BYTES + 1))))
+        assertNotNull("encrypted", PosterArchive.problem(patchCen(posterZip(), 8) { it or 1 }))
+        assertNotNull("packed another way", PosterArchive.problem(patchCen(posterZip(), 10) { 12 }))
+        assertNotNull("bytes after its end", PosterArchive.problem(posterZip() + ByteArray(3)))
+        assertNotNull("an end record in its comment", PosterArchive.problem(withComment(posterZip(), byteArrayOf(0x50, 0x4b, 5, 6) + ByteArray(18))))
+    }
+
+    /** A PNG that says it is [width] x [height] (its header alone). */
+    private fun pngHeader(width: Int, height: Int): ByteArray {
+        val ihdr = java.nio.ByteBuffer.allocate(17).put("IHDR".toByteArray()).putInt(width).putInt(height)
+            .put(8).put(6).put(0).put(0).put(0).array()
+        val crc = CRC32().apply { update(ihdr) }.value.toInt()
+        val iend = byteArrayOf(0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae.toByte(), 0x42, 0x60, 0x82.toByte())
+        return byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a) +
+            java.nio.ByteBuffer.allocate(4).putInt(13).array() + ihdr + java.nio.ByteBuffer.allocate(4).putInt(crc).array() + iend
+    }
+
+    @Test
+    fun aPictureFromAppleIsDecodedNoLargerThanNeeded() {
+        // One that says it has more pixels than a 48 MP photo: refused before anything is decoded.
+        assertNull(BackgroundPosters.decodeIncoming(pngHeader(9_000, 9_000)))
+        // A wide one: decoded subsampled, at no more than twice the longest side kept.
+        val wide = BackgroundPosters.decodeIncoming(jpeg(4_200, 60, Color.RED))!!
+        assertEquals(2_100, wide.width)
+        // A small one as it is.
+        assertEquals(400, BackgroundPosters.decodeIncoming(jpeg(400, 800, Color.RED))!!.width)
+        assertNull(BackgroundPosters.decodeIncoming(ByteArray(10)))
+        // A photo poster whose layer is too large shows the Watch's picture instead.
+        val p = BackgroundPosters.photoPoster(9_000, 9_000, pngHeader(9_000, 9_000), jpeg(82, 100, Color.BLUE), aspect = 0.5)
+        val out = File(context.cacheDir, "bg.jpg")
+        assertTrue(BackgroundPosters.writePicture(p, out))
+        val shown = BitmapFactory.decodeFile(out.path)!!
+        val px = shown.getPixel(shown.width / 2, shown.height / 2)
+        assertTrue("the Watch's picture", Color.blue(px) > 200 && Color.red(px) < 60)
+    }
+
+    @Test
+    fun anEventThatTookTheProcessDownTwiceIsSkippedTheNextTime() {
+        val file = File(context.filesDir, "imessage/attempts-test").apply { delete() }
+        // Each a new process (a restart) reading what the one before kept.
+        fun fresh() = EventAttempts(file)
+        // Read, and done with: nothing held against it.
+        var a = fresh()
+        assertTrue(a.start("E1"))
+        a.risky()
+        a.ended()
+        a.done()
+        assertTrue(fresh().start("E1"))
+        // Down while it was read (between risky and ended), twice: skipped the third time.
+        a = fresh()
+        assertTrue(a.start("E2"))
+        a.risky()
+        a = fresh()
+        assertTrue(a.start("E2"))
+        a.risky()
+        a = fresh()
+        assertFalse(a.start("E2"))
+        a.done()
+        assertTrue("acknowledged, it is forgotten", fresh().start("E2"))
+        // Down while it waited for the main process to store it (not while read): not counted.
+        repeat(3) {
+            a = fresh()
+            assertTrue(a.start("E3"))
+            a.risky()
+            a.ended()
+        }
+        // Down in its delivery receipt (the library's, a step of its own): counted.
+        a = fresh()
+        assertTrue(a.start("E4"))
+        a.risky()
+        a.ended()
+        a.risky()
+        a = fresh()
+        assertTrue(a.start("E4"))
+        a.risky()
+        a = fresh()
+        assertFalse(a.start("E4"))
+        // Another event: a count of its own.
+        assertTrue(fresh().start("E5"))
+        file.delete()
     }
 
     @Test

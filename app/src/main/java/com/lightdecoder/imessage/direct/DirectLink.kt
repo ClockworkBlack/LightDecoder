@@ -799,15 +799,20 @@ class DirectLink private constructor(
 
     /**
      * The files the ":imessage" process wrote for [message]'s small attachments, which come inside
-     * the message ([DirectEngine]), become its parts' files at once, so they go with the message
-     * (unsent, deleted) even if never shown. One whose part is not stored (the message dropped, or
-     * that part unsent since) is deleted. An iPhone's voice message is made playable only when it
-     * is played: its original is kept as the part's second file meanwhile.
+     * the message ([DirectEngine]), become its parts' files at once, once it is taken: written aside
+     * ([DirectMedia.pendingInlineFile]), each is moved into place only now, so a message that is not
+     * taken never overwrites another's. They then go with the message (unsent, deleted) even if
+     * never shown. One whose part is not stored (that part unsent since) is deleted. An iPhone's
+     * voice message is made playable only when it is played: its original is kept as the part's
+     * second file meanwhile.
      */
     private fun claimInlineFiles(message: MessageDto) {
         for (part in message.mediaParts) {
             if (part.mediaId.isEmpty()) continue
             val file = repo.mediaFileFor(part.mediaId, DirectMedia.extensionFor(part.mime, part.fileName))
+            // Written aside by the ":imessage" process until the message was taken: its file from now on.
+            val pending = DirectMedia.pendingInlineFile(file)
+            if (pending.isFile && !pending.renameTo(file)) pending.delete()
             if (file.length() <= 0) continue
             try {
                 val stored = repo.mediaPart(message.id, part.partId)?.takeIf { it.mediaId == part.mediaId }
@@ -821,6 +826,18 @@ class DirectLink private constructor(
             } catch (e: RuntimeException) {
                 Log.w(TAG, "inline attachment not recorded", e)
             }
+        }
+    }
+
+    /**
+     * The files the ":imessage" process wrote aside for [message]'s small attachments
+     * ([DirectMedia.pendingInlineFile]), when the message is not taken: they go, and never become
+     * the files of another message with the same media ids.
+     */
+    private fun dropInlineFiles(message: MessageDto) {
+        for (part in message.mediaParts) {
+            if (part.mediaId.isEmpty()) continue
+            DirectMedia.pendingInlineFile(repo.mediaFileFor(part.mediaId, DirectMedia.extensionFor(part.mime, part.fileName))).delete()
         }
     }
 
@@ -1078,15 +1095,26 @@ class DirectLink private constructor(
      * The archive's form of a conversation the library describes: the person's stored chat if
      * there is one (one-to-one), `me` for the user, addresses without their scheme, contact names.
      */
-    private fun toArchive(c: ConversationDto, groupId: String? = null, groupName: String? = null, member: Boolean? = null): ConversationDto {
-        val others = c.participants.filter { !it.isMe }
+    private fun toArchive(
+        c: ConversationDto,
+        groupId: String? = null,
+        groupName: String? = null,
+        member: Boolean? = null,
+        /** The members to store, when not [c]'s (a stored group's own: [upsert]). */
+        members: List<ParticipantDto>? = null,
+    ): ConversationDto {
         val group = c.isGroup || groupId != null
-        val existingId = if (!group && others.size == 1) manager.conversationWith(Handles.display(others[0].id)) else null
-        val id = groupId ?: existingId ?: c.id
+        val id = archiveIdOf(c, groupId)
         val existing = repo.conversation(id)
-        val people = others.map {
-            val address = Handles.display(it.id)
-            ParticipantDto(id = address, name = nameOf(it.id), number = address, formattedNumber = address)
+        var people = members ?: c.participants.filter { !it.isMe }.map { personOf(it.id) }
+        if (!group && existing != null) {
+            // A person's chat never gets someone else's number: the one stored stays.
+            val stored = repo.participants(id).filter { !it.isMe }
+            val storedKey = stored.singleOrNull()?.let { IMessageAddress.key(it.number.ifBlank { it.id }) }
+            val newKey = people.singleOrNull()?.let { IMessageAddress.key(it.number.ifBlank { it.id }) }
+            if (storedKey != null && newKey != null && storedKey != newKey && storedKey.startsWith("+") && newKey.startsWith("+")) {
+                people = stored.map { ParticipantDto(id = it.id, name = it.name, number = it.number, formattedNumber = it.formattedNumber) }
+            }
         }
         // A group's own name (commas and all), else its members' names.
         val name = if (group) (groupName ?: c.name).ifBlank { people.joinToString(", ") { it.name } } else ""
@@ -1113,6 +1141,32 @@ class DirectLink private constructor(
         )
     }
 
+    /**
+     * The archive's id of a conversation the library describes: the group [groupId] when it is
+     * stored as one; else, for one other person, their stored chat (a Blue Bubbles one too:
+     * [IMessageManager.conversationWith], the whole number); else its own.
+     */
+    private fun archiveIdOf(c: ConversationDto, groupId: String?): String {
+        if (groupId != null) return groupId
+        val others = c.participants.filter { !it.isMe }
+        val existingId = if (!c.isGroup && others.size == 1) manager.conversationWith(Handles.display(others[0].id)) else null
+        return existingId ?: c.id
+    }
+
+    /** A member as the archive keeps them: the address without its scheme, and their contact name. */
+    private fun personOf(handle: String): ParticipantDto {
+        val address = Handles.display(handle)
+        return ParticipantDto(id = address, name = nameOf(handle), number = address, formattedNumber = address)
+    }
+
+    /** Whether [address] (with or without its scheme) is [p]'s: the whole number, or the email address. */
+    private fun isAddressOf(p: com.lightdecoder.archive.ParticipantRow, address: String): Boolean =
+        address.isNotBlank() && (IMessageAddress.same(p.number.ifBlank { p.id }, address) || IMessageAddress.same(p.id, address))
+
+    /** Whether [address] is one of [conversationId]'s members (besides the user), as stored. */
+    private fun isMember(conversationId: String, address: String): Boolean =
+        address.isNotBlank() && repo.participants(conversationId).any { !it.isMe && isAddressOf(it, address) }
+
     /** Stores one change from the ":imessage" process. Returns once it is in the archive. */
     fun apply(update: DirectArchive.Update) {
         synchronized(this) { store(update) }
@@ -1121,18 +1175,8 @@ class DirectLink private constructor(
     private fun store(update: DirectArchive.Update) {
         when (update) {
             is DirectArchive.Update.Upsert -> upsert(update)
-            is DirectArchive.Update.Remove -> repo.applyDeletion(update.messageId)
-            is DirectArchive.Update.Receipt -> {
-                val advanced = HashSet<String>()
-                val stored = repo.advanceMessageStatus(
-                    update.messageIds, update.status, DirectArchive.statusCode(update.status), DirectArchive::statusRank, advanced,
-                )
-                // "Read 9:41" under the message: when it was seen to be read. Only a message this
-                // receipt made read: one read before (the same receipt handed over again, or a
-                // message read before read times were kept) keeps its time, or has none.
-                if (update.status == DirectArchive.STATUS_READ) noteRead(advanced)
-                for (id in update.messageIds - stored) hold(id, DirectArchive.Update.Receipt(listOf(id), update.status))
-            }
+            is DirectArchive.Update.Remove -> remove(update)
+            is DirectArchive.Update.Receipt -> receipt(update)
             is DirectArchive.Update.Edit -> edit(update)
             is DirectArchive.Update.Reaction -> reaction(update)
             is DirectArchive.Update.Unsent -> unsent(update)
@@ -1140,8 +1184,12 @@ class DirectLink private constructor(
                 // A group down to one other person is still that group, as for its messages ([upsert]).
                 val id = update.groupGuid?.let(DirectArchive::groupConversationId)?.takeIf { repo.conversation(it)?.isGroup == true }
                     ?: archiveConversationId(update.conversationId, update.participantId)
+                // In a group, only one of its members shows as typing.
+                if (repo.conversation(id)?.isGroup == true && !isMember(id, update.participantId)) return
                 manager.noteTyping(id, update.participantId, nameOf(update.participantId), update.typing)
             }
+            is DirectArchive.Update.Dropped ->
+                IMessageLog.add(app, "an event from Apple was not taken (${loggableText(update.what, 40)}): ${loggableText(update.why, 160)}")
             is DirectArchive.Update.ReadElsewhere -> readElsewhere(update)
             is DirectArchive.Update.Background -> background(update)
             is DirectArchive.Update.Failed -> {
@@ -1158,26 +1206,64 @@ class DirectLink private constructor(
         }
     }
 
+    /**
+     * A message, or a group's event, from Apple: stored in its chat. Who may write where:
+     *
+     * - A group stored here takes messages and events (renamed, a new photo or background, members
+     *   changed) only from its members, or the user on another device; anyone else's are dropped.
+     * - A stored group's members change only with a change of its members
+     *   ([DirectArchive.Update.Upsert.membersChanged]) one of those made. What other messages say
+     *   its members are is not taken as such, unlike OpenBubbles, which takes every message's list
+     *   (adding and removing people) and says so in rows of the chat's own: here a message from a
+     *   member may only add someone the group does not have yet (an addition missed), said in a
+     *   row of its own ("Bob added Dave."), never take anyone out.
+     * - A message whose GUID another message already has (in another chat, from someone else, or
+     *   the other way round) is dropped, not moved or rewritten.
+     *
+     * Its small attachments that came inside it become its files only once it is taken
+     * ([claimInlineFiles]); a dropped one's go ([dropInlineFiles]).
+     */
     private fun upsert(update: DirectArchive.Update.Upsert) {
         // A group down to one other person is still that group, when it is stored as one.
         val groupId = update.groupGuid?.let(DirectArchive::groupConversationId)?.takeIf { repo.conversation(it)?.isGroup == true }
-        if (update.groupOnly && groupId == null) return claimInlineFiles(update.message)
-        val id = groupId ?: update.conversation.id
+        if (update.groupOnly && groupId == null) return dropInlineFiles(update.message)
+        val target = archiveIdOf(update.conversation, groupId)
         // A group's event (renamed, someone added) is shown, but is not a message to read.
         val system = update.message.direction == "system"
-        // Whether the user is in the group: a change of its members says; so does a message the
-        // user wrote in it on another device.
-        val member = update.member ?: true.takeIf { update.message.fromMe && !system }
-        val conversation = toArchive(update.conversation, groupId, if (DirectArchive.isGroup(id)) groupNameAfter(id, update) else null, member)
-        val onScreen = MessageNotifier.visibleConversationId(ChatService.IMESSAGE) == conversation.id
-        val incoming = !update.message.fromMe && !system
+        val fromMe = update.message.fromMe
+        val storedMembers = repo.conversation(target)?.takeIf { it.isGroup }?.let { repo.participants(target).filter { p -> !p.isMe } }
+        if (storedMembers != null && !fromMe && storedMembers.none { isAddressOf(it, update.message.senderId) }) {
+            IMessageLog.add(app, "${IMessageLog.chatRef(target)}: ${if (system) "a group event" else "a message"} from someone not in the group was dropped")
+            return dropInlineFiles(update.message)
+        }
         val existing = repo.message(update.message.id)
         // Unsent since: it stays unsent.
-        if (existing != null && existing.direction == "system" && !system) return claimInlineFiles(update.message)
+        if (existing != null && existing.direction == "system" && !system) return dropInlineFiles(update.message)
+        if (existing != null && !sameMessage(existing, target, update.message)) {
+            IMessageLog.add(app, "${IMessageLog.chatRef(target)}: a message whose id another message already has was dropped")
+            return dropInlineFiles(update.message)
+        }
+        // A stored group keeps its members, but for someone a member's message names that it does not have.
+        val added = if (storedMembers != null && !update.membersChanged && !system) {
+            update.conversation.participants.filter { p -> !p.isMe && storedMembers.none { isAddressOf(it, p.id) } }.map { personOf(it.id) }
+                .distinctBy { IMessageAddress.key(it.number) ?: it.number }
+        } else {
+            emptyList()
+        }
+        val members = if (storedMembers == null || update.membersChanged) null else {
+            storedMembers.map { ParticipantDto(id = it.id, name = it.name, number = it.number, formattedNumber = it.formattedNumber) } + added
+        }
+        // Whether the user is in the group: a change of its members says; so does a message the
+        // user wrote in it on another device.
+        val member = update.member ?: true.takeIf { fromMe && !system }
+        val conversation = toArchive(update.conversation, groupId, if (DirectArchive.isGroup(target)) groupNameAfter(target, update) else null, member, members)
+        val onScreen = MessageNotifier.visibleConversationId(ChatService.IMESSAGE) == conversation.id
+        val incoming = !fromMe && !system
         // The message moves the chat's latest message, time and snippet (see toArchive).
         // Only a message not stored before makes the chat unread: Apple handing one over again
         // (after a restart) leaves a chat the user read as read.
         repo.upsertConversation(conversation.copy(unread = (conversation.unread || (incoming && existing == null)) && !onScreen, lastMessageTs = 0))
+        if (added.isNotEmpty()) noteAdded(conversation.id, update.message, added)
         val fresh = update.message.copy(
             conversationId = conversation.id,
             senderId = if (update.message.fromMe) "" else Handles.display(update.message.senderId),
@@ -1205,6 +1291,43 @@ class DirectLink private constructor(
                     (if (incoming) "received" else "sent from another device") + " through the iMessage library",
             )
         }
+    }
+
+    /**
+     * Whether Apple's [fresh] copy of a message is [stored], handed over again: filed in the same
+     * chat ([chatId]), the same way (the user's, or to them, or a row of the chat's own) and from
+     * the same person.
+     */
+    private fun sameMessage(stored: MessageRow, chatId: String, fresh: MessageDto): Boolean {
+        if (stored.conversationId != chatId) return false
+        if (stored.direction != fresh.direction || stored.isOutgoing != fresh.fromMe) return false
+        return fresh.fromMe || IMessageAddress.same(stored.senderId, fresh.senderId)
+    }
+
+    /**
+     * A row of [chatId]'s own, right before [message], saying that its sender added [added] to the
+     * group ("Bob added Dave."): people a member's message named that the group did not have.
+     */
+    private fun noteAdded(chatId: String, message: MessageDto, added: List<ParticipantDto>) {
+        val texts = DirectTexts(app)
+        val who = if (message.fromMe) texts.you else nameOf(message.senderId)
+        val text = texts.added(who, added.joinToString(", ") { it.name.ifBlank { it.number } })
+        repo.upsertMessage(
+            MessageDto(
+                id = message.id + ADDED,
+                conversationId = chatId,
+                senderId = if (message.fromMe) "" else Handles.display(message.senderId),
+                senderName = if (message.fromMe) "" else nameOf(message.senderId),
+                fromMe = message.fromMe,
+                timestampMs = message.timestampMs - 1,
+                direction = "system",
+                transport = IMessageManager.TRANSPORT,
+                text = text,
+                parts = listOf(PartDto(partId = "0", kind = "text", text = text)),
+                isOld = true,
+            ),
+        )
+        IMessageLog.add(app, "${IMessageLog.chatRef(chatId)}: ${added.size} member(s) a member's message names added to the group")
     }
 
     /**
@@ -1268,11 +1391,96 @@ class DirectLink private constructor(
     }
 
     /**
+     * A delivery or read receipt: taken only for the user's own messages (as
+     * [ArchiveRepository.advanceMessageStatus] does), and only from someone in the message's chat.
+     * One for a message not stored yet is held for it ([hold]) and checked once it is.
+     */
+    private fun receipt(update: DirectArchive.Update.Receipt) {
+        val taken = ArrayList<String>()
+        for (id in update.messageIds.distinct()) {
+            val row = repo.message(id)
+            if (row == null) {
+                hold(id, update.copy(messageIds = listOf(id)))
+            } else if (!isMember(row.conversationId, update.sender)) {
+                refused("a receipt", row.conversationId, "from someone not in the chat")
+            } else {
+                taken += id
+            }
+        }
+        if (taken.isEmpty()) return
+        val advanced = HashSet<String>()
+        repo.advanceMessageStatus(taken, update.status, DirectArchive.statusCode(update.status), DirectArchive::statusRank, advanced)
+        // "Read 9:41" under the message: when it was seen to be read. Only a message this
+        // receipt made read: one read before (the same receipt handed over again, or a
+        // message read before read times were kept) keeps its time, or has none.
+        if (update.status == DirectArchive.STATUS_READ) noteRead(advanced)
+    }
+
+    /** A message taken out ([DirectArchive.Update.Remove]); a Send Later one only while it is still waiting for its time. */
+    private fun remove(update: DirectArchive.Update.Remove) {
+        if (update.scheduledOnly) {
+            val row = repo.message(update.messageId) ?: return
+            if (!SendLater.pending(row, System.currentTimeMillis())) {
+                refused("a deletion of a Send Later message", row.conversationId, "for a message not waiting for its time")
+                return
+            }
+        }
+        repo.applyDeletion(update.messageId)
+    }
+
+    /** One of Apple's changes not taken, said in the iMessage log ([what] it was, [why]; never the chat by more than its tag). */
+    private fun refused(what: String, conversationId: String, why: String) {
+        IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: $what $why was dropped")
+    }
+
+    /**
+     * Whether a change for [row] came in its chat: the chat Apple named for it ([conversationId] and
+     * [groupGuid]; [DirectArchive.conversationId]'s) is [row]'s, as the archive files it. One that
+     * names none (Apple names none with an edit or an unsend) is taken by who sent it alone.
+     */
+    private fun inChatOf(row: MessageRow, conversationId: String, groupGuid: String?): Boolean {
+        if (conversationId.isEmpty() && groupGuid == null) return true
+        groupGuid?.let(DirectArchive::groupConversationId)?.takeIf { repo.conversation(it)?.isGroup == true }?.let { return it == row.conversationId }
+        if (conversationId.isEmpty()) return true
+        if (DirectArchive.isGroup(conversationId)) return conversationId == row.conversationId
+        val peer = conversationId.removePrefix(DirectArchive.PREFIX)
+        return (manager.conversationWith(Handles.display(peer)) ?: conversationId) == row.conversationId
+    }
+
+    /**
+     * Whether [row] is the message of whoever an edit or unsend says did it: the user's own
+     * (sent from here or another of their devices) for one from the user ([fromMe]); else one
+     * [sender] sent.
+     */
+    private fun authoredBy(row: MessageRow, fromMe: Boolean, sender: String): Boolean =
+        if (fromMe) {
+            row.isOutgoing && row.direction == "out"
+        } else {
+            !row.isOutgoing && row.direction == "in" && sender.isNotBlank() && IMessageAddress.same(row.senderId, sender)
+        }
+
+    /**
+     * Whether a change at [atMs] (Apple's time of it; 0: now) of a message sent at [sentAt] is within
+     * Apple's [windowMs] of it, give or take a device's clock ([DirectArchive.MAX_FUTURE_MS]). The
+     * change's own time is what counts, not when it got here: one the user made on another device,
+     * or anyone's, can arrive long after (the phone off, or Apple's journal after a restart).
+     */
+    private fun inWindow(sentAt: Long, atMs: Long, windowMs: Long): Boolean {
+        val at = atMs.takeIf { it > 0 } ?: System.currentTimeMillis()
+        return at - sentAt <= windowMs + DirectArchive.MAX_FUTURE_MS
+    }
+
+    /**
      * Someone put a tapback on a message or took it back. A new one on one of the user's messages
-     * is announced, as an iPhone does ("Loved “See you at 6”"), unless its chat is on screen.
+     * is announced, as an iPhone does ("Loved “See you at 6”"), unless its chat is on screen. Taken
+     * only from someone in the message's chat (or the user, on another device), in that chat.
      */
     private fun reaction(update: DirectArchive.Update.Reaction) {
         val row = repo.message(update.messageId) ?: return hold(update.messageId, update)
+        if (!update.fromMe && !isMember(row.conversationId, update.participantId)) {
+            return refused("a tapback", row.conversationId, "from someone not in the chat")
+        }
+        if (!inChatOf(row, update.conversationId, update.groupGuid)) return refused("a tapback", row.conversationId, "from another chat")
         val who = if (update.fromMe) ME else update.participantId
         // Apple's journal hands a tapback over again after a restart: one already shown is not announced again.
         val known = row.reactions.any { it.emoji == update.emoji && who in it.participantIds }
@@ -1298,15 +1506,21 @@ class DirectLink private constructor(
 
     /**
      * The sender edited a part: the message's text is rebuilt from its parts, marked edited. The
-     * same edit handed over again (Apple's journal does that after a restart) counts once.
+     * same edit handed over again (Apple's journal does that after a restart) counts once. Taken
+     * only from the message's own sender, in its chat, within Apple's 15 minutes of it being sent
+     * and for 5 edits at most ([inWindow]).
      */
     private fun edit(update: DirectArchive.Update.Edit) {
         val row = repo.message(update.messageId) ?: return hold(update.messageId, update)
         if (row.direction == "system") return
+        if (!authoredBy(row, update.fromMe, update.sender)) return refused("an edit", row.conversationId, "of someone else's message")
+        if (!inChatOf(row, update.conversationId, update.groupGuid)) return refused("an edit", row.conversationId, "from another chat")
         val extra = IMessageExtra.parse(row.extra)
         if (update.part in extra.unsent) return
         val parts = partsOf(row, extra)
         if (parts[update.part] == update.text && update.atMs <= row.editedAtMs) return
+        if (!inWindow(row.timestampMs, update.atMs, EditRule.WINDOW_MS)) return refused("an edit", row.conversationId, "after Apple's 15 minutes")
+        if (extra.edits >= IMessageExtra.MAX_EDITS) return refused("an edit", row.conversationId, "past Apple's ${IMessageExtra.MAX_EDITS} edits")
         val runs = extra.withRuns(update.part, TextRuns.normalize(update.text, update.runs))
         val next = extra.copy(parts = parts + (update.part to update.text), edits = extra.edits + 1, runs = runs)
         repo.editText(row.id, next.text(), update.atMs, next.toJson(), snippetOf(next.text(), row.extra))
@@ -1315,13 +1529,17 @@ class DirectLink private constructor(
     /**
      * The sender unsent a part. Nothing of the message left: it gives way to "… unsent a
      * message." Else only that part goes, and is remembered as unsent, so the same unsend handed
-     * over again changes nothing.
+     * over again changes nothing. Taken only from the message's own sender, in its chat, within
+     * Apple's 2 minutes of it being sent ([inWindow]).
      */
     private fun unsent(update: DirectArchive.Update.Unsent) {
         val row = repo.message(update.messageId) ?: return hold(update.messageId, update)
         if (row.direction == "system") return
+        if (!authoredBy(row, update.fromMe, update.sender)) return refused("an unsend", row.conversationId, "of someone else's message")
+        if (!inChatOf(row, update.conversationId, update.groupGuid)) return refused("an unsend", row.conversationId, "from another chat")
         val extra = IMessageExtra.parse(row.extra)
         if (update.part in extra.unsent) return
+        if (!inWindow(row.timestampMs, update.atMs, UnsendWindow.MS)) return refused("an unsend", row.conversationId, "after Apple's 2 minutes")
         val parts = partsOf(row, extra)
         val partId = DirectArchive.partId(update.part)
         val media = row.media.map { it.partId }
@@ -1347,16 +1565,30 @@ class DirectLink private constructor(
      */
     private fun background(update: DirectArchive.Update.Background) {
         val incoming = update.path?.let(::File)?.takeIf { ChatBackgrounds.isOurs(app, it) }
+        // From the future: it would hold the chat's background against every later change.
+        if (!ChatBackgrounds.isPlausibleVersion(update.version)) {
+            incoming?.delete()
+            IMessageLog.add(app, "a chat background from Apple whose version is from the future was dropped")
+            return
+        }
         val store = ChatBackgrounds(app)
         val id = backgroundChatId(update) ?: run {
             // A group not stored here: nothing to show it in.
             incoming?.delete()
             return
         }
+        // Only someone in the chat sets it: the user (on another device), the other person of a
+        // chat with one person (it is the chat with them: DirectArchive.backgroundChat), a member of a group.
+        val by = update.row?.message
+        if (by?.fromMe != true && update.groupGuid != null && !isMember(id, by?.senderId.orEmpty())) {
+            incoming?.delete()
+            refused("a chat background", id, "from someone not in the group")
+            return
+        }
         // Older than the chat's, or that one again (Apple's journal after a restart, or the user's
         // own change from here coming back): nothing new to show or to say.
         val stored = store.of(id).version
-        if (stored > 0 && update.version <= stored) {
+        if (stored > 0 && update.version <= stored && ChatBackgrounds.isPlausibleVersion(stored)) {
             incoming?.delete()
             return
         }
@@ -1388,11 +1620,19 @@ class DirectLink private constructor(
     private fun loggable(identifier: String): String =
         identifier.take(64).map { if (it.isLetterOrDigit() || it in "._-") it else '?' }.joinToString("")
 
-    /** The archive's chat a background change is for: the group, or the person's stored chat (a Blue Bubbles one too). */
+    /** Words the ":imessage" process gave for the log ([DirectArchive.Update.Dropped]): at most [max] characters, plain ones only. */
+    private fun loggableText(text: String, max: Int): String =
+        text.take(max).map { if (it.isLetterOrDigit() || it in " .,:;()/'_-") it else '?' }.joinToString("")
+
+    /**
+     * The archive's chat a background change is for: the group, when it is stored (it is not made
+     * for its background, nor would anyone in it be known), or the person's stored chat (a Blue
+     * Bubbles one too), else theirs as it is made now.
+     */
     private fun backgroundChatId(update: DirectArchive.Update.Background): String? {
         update.groupGuid?.let { guid ->
             val group = DirectArchive.groupConversationId(guid)
-            return group.takeIf { update.row != null || repo.conversation(it) != null }
+            return group.takeIf { repo.conversation(it)?.isGroup == true }
         }
         val peer = update.peer ?: return update.conversationId
         return manager.conversationWith(Handles.display(peer)) ?: update.conversationId
@@ -1426,7 +1666,7 @@ class DirectLink private constructor(
             try {
                 // Read again in turn: the chat as it is when it goes.
                 val target = targetOf(conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
-                val version = maxOf(ChatBackgrounds.versionNow(), ChatBackgrounds(app).of(conversationId).version + 1)
+                val version = ChatBackgrounds.nextVersion(ChatBackgrounds(app).of(conversationId).version)
                 val reply = requests.call(DirectWire.BACKGROUND, DirectWire.background(target, picture?.path, version, style), MEDIA_SEND_TIMEOUT_MS)
                 DirectWire.errorOf(reply)?.let { throw DirectEngine.ImessageError(it) }
                 synchronized(this@DirectLink) { backgroundSetHere(conversationId, picture, version, style) }
@@ -1439,9 +1679,16 @@ class DirectLink private constructor(
         done.await()
     }
 
-    /** The background just set from here: shown, with the row saying so, as one from Apple would be. */
+    /**
+     * The background just set from here: shown, with the row saying so, as one from Apple would be.
+     * Not when the chat has one as new (a change from another device came meanwhile): then nothing
+     * changed here, and no row says it did.
+     */
     private fun backgroundSetHere(conversationId: String, picture: File?, version: Long, style: BackgroundStyle?) {
-        ChatBackgrounds(app).apply(conversationId, picture, version, style)
+        if (ChatBackgrounds(app).apply(conversationId, picture, version, style) != ChatBackgrounds.Applied.APPLIED) {
+            Log.i(TAG, "a background set here was not newer than the chat's")
+            return
+        }
         val texts = DirectTexts(app)
         val text = if (picture != null || style != null) texts.changedBackground(texts.you) else texts.removedBackground(texts.you)
         repo.upsertMessage(
@@ -1570,7 +1817,10 @@ class DirectLink private constructor(
         for (update in held.take(messageId, System.currentTimeMillis())) apply(update)
     }
 
-    /** A display name for an address: the Messages archive's contact with that number, else the address. */
+    /**
+     * A display name for an address: the Messages archive's contact with that number (the whole
+     * number, [IMessageAddress.same]: never someone whose number only ends the same), else the address.
+     */
     private fun nameOf(handle: String): String {
         val address = Handles.display(handle)
         if (handle.startsWith("mailto:") || '@' in address) return address
@@ -1578,7 +1828,7 @@ class DirectLink private constructor(
         if (digits.length < 7) return address
         return try {
             RelayManager.get(app).repo.contacts(digits).firstOrNull { c ->
-                c.phoneNumber.filter { it.isDigit() }.endsWith(digits) && (c.customAlias.isNotBlank() || c.displayName.isNotBlank())
+                IMessageAddress.same(c.phoneNumber, address) && (c.customAlias.isNotBlank() || c.displayName.isNotBlank())
             }?.let { it.customAlias.ifBlank { it.displayName } } ?: address
         } catch (e: RuntimeException) {
             address
@@ -1759,6 +2009,9 @@ class DirectLink private constructor(
         /** Added to a video's media id for the file of its still ([keepStill]). */
         private const val STILL = "#still"
 
+        /** Added to a message's id for the row saying that its sender added people to the group ([noteAdded]). */
+        private const val ADDED = "~added"
+
         /** The name an iPhone gives a voice message's file (before its extension). */
         private const val VOICE_NAME = "Audio Message"
 
@@ -1805,16 +2058,24 @@ class DirectLink private constructor(
 /**
  * Changes for messages that are not stored yet, by message id, for up to [windowMs] (then they
  * are forgotten): Apple's receipt for a message sent from here can come before the send's own
- * answer, and a reaction or edit before its message. At most [maxMessages] messages are held.
+ * answer, and a reaction or edit before its message. At most [maxMessages] messages are held, and
+ * [maxPerMessage] changes for each (the latest kept). Each is held as it came, who sent it and
+ * all, and checked as any other once its message is stored ([DirectLink.apply]).
  */
-internal class HeldUpdates(private val windowMs: Long = 2 * 60 * 1000L, private val maxMessages: Int = 200) {
+internal class HeldUpdates(
+    private val windowMs: Long = 2 * 60 * 1000L,
+    private val maxMessages: Int = 200,
+    private val maxPerMessage: Int = 50,
+) {
 
     private val held = LinkedHashMap<String, MutableList<Pair<Long, DirectArchive.Update>>>()
 
     @Synchronized
     fun hold(messageId: String, update: DirectArchive.Update, nowMs: Long) {
         evict(nowMs)
-        held.getOrPut(messageId) { ArrayList() }.add(nowMs to update)
+        val list = held.getOrPut(messageId) { ArrayList() }
+        list.add(nowMs to update)
+        while (list.size > maxPerMessage) list.removeAt(0)
         while (held.size > maxMessages) held.remove(held.keys.first())
     }
 
@@ -1944,9 +2205,10 @@ internal class GroupNames(context: Context) {
      * (a message from before a rename, come late). True when [name] is now its name.
      */
     @Synchronized
-    fun note(conversationId: String, name: String, atMs: Long): Boolean {
+    fun note(conversationId: String, name: String, atMs: Long, nowMs: Long = System.currentTimeMillis()): Boolean {
         val known = prefs.getString(conversationId, null)
-        val knownAt = prefs.getLong(conversationId + AT, Long.MIN_VALUE)
+        // A name dated in the future (kept before event times were held to now) holds no later one back.
+        val knownAt = prefs.getLong(conversationId + AT, Long.MIN_VALUE).takeIf { it <= nowMs + DirectArchive.MAX_FUTURE_MS } ?: Long.MIN_VALUE
         if (known != null && atMs < knownAt) return false
         if (known != name || atMs != knownAt) prefs.edit().putString(conversationId, name).putLong(conversationId + AT, atMs).apply()
         return true

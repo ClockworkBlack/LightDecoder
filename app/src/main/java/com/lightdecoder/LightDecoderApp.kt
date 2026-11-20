@@ -36,6 +36,8 @@ class LightDecoderApp : Application() {
         // Also for processes that start with no screen (boot, the link's service):
         // sign-in cookies a killed sign-in left behind go before anything else runs.
         SignInWebData.wipeIfDirty(this)
+        // Phone numbers written without a country code are read in this phone's country (iMessage chats).
+        com.lightdecoder.imessage.IMessageAddress.useRegionOf(this)
         RelayNotifications.ensureChannels(this)
         com.lightdecoder.relay.ReadNotifier.ensureChannel(this)
         RelayManager.get(this)

@@ -10,8 +10,10 @@ import android.os.Build
 import android.util.Log
 import com.lightdecoder.R
 import com.lightdecoder.heif.ExifOrientation
+import com.lightdecoder.heif.HeifCodec
 import com.lightdecoder.heif.ImageSniffer
 import com.lightdecoder.heif.Media
+import com.lightdecoder.ui.chat.MediaLoader
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.UUID
@@ -247,14 +249,18 @@ object BackgroundPosters {
 
     /**
      * Writes the picture to show for [poster] to [out] as a JPEG, from the first of its
-     * [pictureSources] that decodes (HEIC included: the app's own decoder). False when none does.
+     * [pictureSources] that decodes (HEIC included: the app's own decoder), never larger than
+     * needed ([decodeIncoming]). False when none does.
      */
     fun writePicture(poster: SimplifiedTranscriptPoster, out: File): Boolean {
         for ((source, crop) in pictureSources(poster)) {
             val bitmap = try {
-                Media.decodeFirstFrame(source.bytes)
+                decodeIncoming(source.bytes)
             } catch (e: Exception) {
                 Log.w(TAG, "background picture not decoded", e)
+                null
+            } catch (e: OutOfMemoryError) {
+                Log.w(TAG, "background picture too large to decode")
                 null
             } ?: continue
             val box = crop?.let { cropOf(it, bitmap.width, bitmap.height) }
@@ -287,14 +293,50 @@ object BackgroundPosters {
         return writeJpeg(Media.scaledToFit(bitmap, MAX_SIDE), out)
     }
 
-    /** A JPEG/PNG/WebP decoded at no more than about twice [MAX_SIDE], upright. */
-    private fun decodeBounded(bytes: ByteArray): Bitmap? {
+    /**
+     * A JPEG/PNG/WebP decoded at no more than about twice [MAX_SIDE], upright; null when it is no
+     * picture, or one of more than [maxPixels] (its size read first, nothing decoded then).
+     */
+    private fun decodeBounded(bytes: ByteArray, maxPixels: Long = Long.MAX_VALUE): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        if (bounds.outWidth.toLong() * bounds.outHeight > maxPixels) return null
         var sample = 1
         while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= MAX_SIDE) sample *= 2
         val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample }) ?: return null
         return ExifOrientation.upright(bytes, bitmap)
+    }
+
+    /**
+     * The most pixels a picture of a background from Apple may have to be decoded at all (a 48 MP
+     * photo); it is decoded subsampled, at about twice [MAX_SIDE].
+     */
+    const val MAX_INCOMING_PIXELS = 50_000_000L
+
+    /**
+     * The most pixels a HEIC picture Android's own decoder cannot subsample (one with transparency,
+     * or before Android 9) may have: it is decoded whole, 4 bytes a pixel.
+     */
+    const val MAX_FULL_DECODE_PIXELS = 4096L * 4096
+
+    /**
+     * A picture of a background from Apple (a layer of a photo poster, or the Watch's picture: anyone
+     * can send one), decoded never larger than about twice [MAX_SIDE]: its size read first, and
+     * then subsampled while it decodes. Null when it is no picture or too large ([MAX_INCOMING_PIXELS],
+     * [MAX_FULL_DECODE_PIXELS]).
+     */
+    fun decodeIncoming(bytes: ByteArray): Bitmap? {
+        if (!ImageSniffer.isHeif(bytes)) return decodeBounded(bytes, MAX_INCOMING_PIXELS)
+        val info = HeifCodec.probe(bytes)
+        if (info.width <= 0 || info.height <= 0) return null
+        val pixels = info.width.toLong() * info.height
+        if (pixels > MAX_INCOMING_PIXELS) return null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && !info.hasAlpha && !info.isSequence) {
+            MediaLoader.systemDecode(bytes, MAX_SIDE * 2)?.let { return it }
+        }
+        if (pixels > MAX_FULL_DECODE_PIXELS) return null
+        return HeifCodec.decodeStill(bytes)
     }
 
     /** The Watch's picture of [bitmap] as a background: centre-cut to [WATCH_WIDTH] x [WATCH_HEIGHT], PNG. */
@@ -350,6 +392,12 @@ object BackgroundPosters {
  * ([ChatBackgrounds.incomingFile]), then it becomes the archive's change
  * ([DirectArchive.background]). The library's calls are passed in ([Natives]) so this can be tested
  * without it.
+ *
+ * Anyone can send a chat a background, so nothing of one is trusted: a poster said to be, or
+ * found to be, larger than [MAX_POSTER_BYTES] is not fetched or not read; one that is not a plain
+ * zip of a sensible size unpacked is not handed to the library ([PosterArchive]); its pictures are
+ * decoded no larger than needed ([BackgroundPosters.decodeIncoming]); and a version from the future
+ * ([ChatBackgrounds.isPlausibleVersion]) is not fetched at all.
  */
 class IncomingBackgrounds(private val app: Context, private val natives: Natives) {
 
@@ -358,8 +406,11 @@ class IncomingBackgrounds(private val app: Context, private val natives: Natives
         /** Where the poster is ([uniffi.rust_bridge.transcriptBackgroundToMmcs]). */
         fun toMmcs(message: SetTranscriptBackgroundMessage): MmcsFile?
 
-        /** Fetches [file] into [path] ([uniffi.rust_bridge.downloadMmcsFile]). */
-        suspend fun download(file: MmcsFile, path: String)
+        /**
+         * Fetches [file] into [path] ([uniffi.rust_bridge.downloadMmcsFile]), never more than
+         * [maxBytes] of it: one larger is stopped and thrown out ([DirectEngine.TooLarge]).
+         */
+        suspend fun download(file: MmcsFile, path: String, maxBytes: Long)
 
         /** Reads the poster ([uniffi.rust_bridge.parseTranscriptPoster]). */
         fun parse(payload: ByteArray): SimplifiedTranscriptPoster
@@ -370,17 +421,26 @@ class IncomingBackgrounds(private val app: Context, private val natives: Natives
 
     /**
      * [inst] (a [PushChatMessage.SetTranscriptBackground]) as the archive's change. Ignored when it
-     * names no chat or its picture cannot be made; throws when the poster could not be fetched or read.
+     * names no chat or its picture cannot be made; [DirectArchive.Update.Dropped] (said in the
+     * iMessage log) when its poster is too large or not one to hand to the library; throws when the
+     * poster could not be fetched or read.
      */
     suspend fun receive(inst: MessageInst, me: Set<String>, nameOf: (String) -> String, texts: DirectArchive.Texts): DirectArchive.Update {
         val m = (inst.message as? PushChatMessage.SetTranscriptBackground)?.v1 ?: return DirectArchive.Update.Ignore
         if (DirectArchive.backgroundChat(inst, me) == null) return DirectArchive.Update.Ignore
+        if (!ChatBackgrounds.isPlausibleVersion(DirectArchive.backgroundVersion(m))) return dropped("its version is from the future")
         var style: BackgroundStyle? = null
         val path = when (m) {
             is SetTranscriptBackgroundMessage.Remove -> null
             is SetTranscriptBackgroundMessage.Set -> {
+                if (m.fileSize > MAX_POSTER_BYTES.toULong()) return dropped(tooLarge)
                 val file = natives.toMmcs(m) ?: return DirectArchive.Update.Ignore
-                val payload = fetch(file)
+                if (file.size > MAX_POSTER_BYTES.toULong()) return dropped(tooLarge)
+                val payload = fetch(file) ?: return dropped(tooLarge)
+                PosterArchive.problem(payload)?.let { problem ->
+                    Log.w(TAG, "a chat background's poster not read: $problem")
+                    return dropped("its poster is not one to read ($problem)")
+                }
                 val poster = natives.parse(payload)
                 style = BackgroundPosters.styleOf(poster)
                 if (style != null) {
@@ -400,19 +460,33 @@ class IncomingBackgrounds(private val app: Context, private val natives: Natives
         return DirectArchive.background(inst, me, nameOf, texts, path, style)
     }
 
-    private suspend fun fetch(file: MmcsFile): ByteArray {
+    /** The poster's bytes, or null when more than [MAX_POSTER_BYTES] came (nothing of it read). */
+    private suspend fun fetch(file: MmcsFile): ByteArray? {
         val partial = File(ChatBackgrounds.dir(app).apply { mkdirs() }, "poster-${UUID.randomUUID()}.zip")
         try {
             // The library makes the file itself.
-            natives.download(file, partial.path)
+            try {
+                natives.download(file, partial.path, MAX_POSTER_BYTES)
+            } catch (e: DirectEngine.TooLarge) {
+                return null
+            }
+            // Whatever the library or the sender said: what is on disk is what counts.
+            if (partial.length() > MAX_POSTER_BYTES) return null
             return partial.readBytes()
         } finally {
             partial.delete()
         }
     }
 
-    private companion object {
-        const val TAG = "IncomingBackgrounds"
+    private val tooLarge = "its poster is larger than ${MAX_POSTER_BYTES shr 20} MB"
+
+    private fun dropped(why: String) = DirectArchive.Update.Dropped("chat background", why)
+
+    companion object {
+        private const val TAG = "IncomingBackgrounds"
+
+        /** The largest poster fetched (a photo poster is a few MB: two HEIC layers and the Watch's PNG). */
+        const val MAX_POSTER_BYTES = 20L * 1024 * 1024
     }
 }
 

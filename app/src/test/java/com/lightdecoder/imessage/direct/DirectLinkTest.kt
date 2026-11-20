@@ -82,10 +82,10 @@ class DirectLinkTest {
         db.close()
     }
 
-    private fun incoming(guid: String, from: String, text: String, ts: Long = 1_700_000_000_000L, replyGuid: String? = null) =
+    private fun incoming(guid: String, from: String, text: String, ts: Long = 1_700_000_000_000L, replyGuid: String? = null, chatWith: String = from) =
         DirectArchive.map(
             MessageInst(
-                guid, from, ConversationData(listOf(me, from), null, null, null),
+                guid, from, ConversationData(listOf(me, chatWith), null, null, null),
                 PushChatMessage.Message(
                     NormalMessage(
                         listOf(IndexedMessagePart(MessagePart.Text(text, TextFormat.Flags(TextFlags(false, false, false, false))), null, null)),
@@ -184,6 +184,263 @@ class DirectLinkTest {
         assertEquals("G4", DirectArchive.guidOf(repo.message("imsg:G4")!!.id))
     }
 
+    private fun textPart(text: String) = IndexedMessagePart(MessagePart.Text(text, TextFormat.Flags(TextFlags(false, false, false, false))), null, null)
+
+    private fun textMessage(text: String) =
+        PushChatMessage.Message(NormalMessage(listOf(textPart(text)), null, null, null, MessageType.IMessage, null, null, null, false, null, null))
+
+    private fun heart(guid: String) = PushChatMessage.React(ReactMessage(guid, 0UL, ReactMessageType.React(Reaction.Heart, true), "", null))
+
+    @Test
+    fun aCoParticipantCannotEditOrUnsendSomeoneElsesMessage() {
+        val link = DirectLink.get(context)
+        val carol = "tel:+15553334444"
+        val group = listOf(me, bob, carol)
+        link.apply(event("GB1", bob, textMessage("dinner at 7"), participants = group, groupGuid = "G-E", ts = 1_700_000_000_000L))
+        link.apply(event("GB2", bob, textMessage("bring wine"), participants = group, groupGuid = "G-E", ts = 1_700_000_001_000L))
+        assertEquals("imsg:group:G-E", repo.message("imsg:GB1")!!.conversationId)
+        // Carol edits and unsends Bob's messages: nothing changes.
+        link.apply(event("X20", carol, PushChatMessage.Edit(EditMessage("GB1", 0UL, listOf(textPart("dinner cancelled")))), participants = group, groupGuid = "G-E"))
+        link.apply(event("X21", carol, PushChatMessage.Unsend(UnsendMessage("GB2", 0UL)), participants = group, groupGuid = "G-E"))
+        // As Apple hands them over (naming no chat), the same.
+        link.apply(DirectArchive.Update.Edit("imsg:GB1", "hijacked", 0, 1_700_000_005_000L, sender = carol))
+        link.apply(DirectArchive.Update.Unsent("imsg:GB2", 0, false, "Carol", carol, 1_700_000_005_000L))
+        // Nor do the user's own devices: Bob's message is not the user's.
+        link.apply(event("X22", me, PushChatMessage.Unsend(UnsendMessage("GB2", 0UL)), participants = group, groupGuid = "G-E"))
+        link.apply(DirectArchive.Update.Edit("imsg:GB1", "mine now", 0, 1_700_000_005_000L, sender = me, fromMe = true))
+        // And one naming no sender at all (an older process's) is no one's.
+        link.apply(DirectArchive.Update.Unsent("imsg:GB2", 0, false, "Bob"))
+        assertEquals("dinner at 7", repo.message("imsg:GB1")!!.text)
+        assertEquals(0L, repo.message("imsg:GB1")!!.editedAtMs)
+        assertEquals("in", repo.message("imsg:GB2")!!.direction)
+        assertEquals("bring wine", repo.message("imsg:GB2")!!.text)
+        // Bob himself can, in the group.
+        link.apply(event("X23", bob, PushChatMessage.Edit(EditMessage("GB1", 0UL, listOf(textPart("dinner at 8")))), participants = group, groupGuid = "G-E"))
+        assertEquals("dinner at 8", repo.message("imsg:GB1")!!.text)
+        // But not said to be in another chat (his chat with the user) for the group's message.
+        link.apply(event("X24", bob, PushChatMessage.Unsend(UnsendMessage("GB2", 0UL)), participants = listOf(me, bob)))
+        assertEquals("in", repo.message("imsg:GB2")!!.direction)
+        link.apply(event("X25", bob, PushChatMessage.Unsend(UnsendMessage("GB2", 0UL)), participants = group, groupGuid = "G-E"))
+        assertEquals("system", repo.message("imsg:GB2")!!.direction)
+        // The user's own message: theirs to edit, from another device, never Bob's.
+        repo.upsertMessage(
+            com.lightdecoder.relay.MessageDto(
+                id = "imsg:GB3", conversationId = "imsg:group:G-E", fromMe = true, timestampMs = 1_700_000_002_000L, direction = "out",
+                status = DirectArchive.STATUS_SENT, statusCode = 1, transport = IMessageManager.TRANSPORT, text = "mine",
+                parts = listOf(com.lightdecoder.relay.PartDto("0", "text", "mine")),
+            ),
+        )
+        link.apply(event("X26", bob, PushChatMessage.Edit(EditMessage("GB3", 0UL, listOf(textPart("Bob's words")))), participants = group, groupGuid = "G-E"))
+        assertEquals("mine", repo.message("imsg:GB3")!!.text)
+        link.apply(event("X27", me, PushChatMessage.Edit(EditMessage("GB3", 0UL, listOf(textPart("mine, fixed")))), participants = group, groupGuid = "G-E"))
+        assertEquals("mine, fixed", repo.message("imsg:GB3")!!.text)
+    }
+
+    @Test
+    fun aTapbackOrReceiptFromSomeoneNotInTheChatIsIgnored() {
+        com.lightdecoder.imessage.IMessageLog.clear(context)
+        val link = DirectLink.get(context)
+        link.apply(incoming("T7", bob, "hello"))
+        sentHere("T8", "mine", ts = 1_700_000_001_000L)
+        // Alice is not in the chat with Bob: her tapbacks and receipts change nothing.
+        link.apply(event("RA1", alice, heart("T7"), participants = listOf(me, alice)))
+        link.apply(DirectArchive.Update.Reaction("imsg:T8", "+15551234567", "😂", true, false, 5))
+        link.apply(event("T8", alice, PushChatMessage.Delivered))
+        link.apply(event("T8", alice, PushChatMessage.Read))
+        assertTrue(repo.message("imsg:T7")!!.reactions.isEmpty())
+        assertTrue(repo.message("imsg:T8")!!.reactions.isEmpty())
+        assertEquals(DirectArchive.STATUS_SENT, repo.message("imsg:T8")!!.status)
+        // Bob's are taken.
+        link.apply(event("T8", bob, PushChatMessage.Read))
+        assertEquals(DirectArchive.STATUS_READ, repo.message("imsg:T8")!!.status)
+        link.apply(event("RB1", bob, heart("T8"), participants = listOf(me, bob)))
+        assertEquals(listOf(com.lightdecoder.relay.ReactionDto("❤️", listOf("+15559876543"))), repo.message("imsg:T8")!!.reactions)
+        // A tapback said to be in another chat is not for this one.
+        link.apply(event("RB2", bob, PushChatMessage.React(ReactMessage("T7", 0UL, ReactMessageType.React(Reaction.Like, true), "", null)), participants = listOf(me, bob, alice), groupGuid = "G-other"))
+        assertTrue(repo.message("imsg:T7")!!.reactions.isEmpty())
+        // A receipt is only ever for the user's own messages.
+        link.apply(event("T7", bob, PushChatMessage.Read))
+        assertEquals(DirectArchive.STATUS_RECEIVED, repo.message("imsg:T7")!!.status)
+        // Logged, without who or what.
+        val log = com.lightdecoder.imessage.IMessageLog.read(context)
+        assertTrue(log.toString(), log.any { it.contains("a tapback from someone not in the chat was dropped") })
+        assertTrue(log.toString(), log.any { it.contains("a receipt from someone not in the chat was dropped") })
+        assertTrue(log.none { it.contains("1234567") || it.contains("hello") })
+    }
+
+    @Test
+    fun editsAndUnsendsKeepApplesTimesAndTheUsersOwnStillComeLate() {
+        val link = DirectLink.get(context)
+        val sent = 1_700_000_000_000L
+        link.apply(incoming("W1", bob, "first", ts = sent))
+        fun edit(guid: String, from: String, text: String, at: Long) =
+            link.apply(event("E-$text", from, PushChatMessage.Edit(EditMessage(guid, 0UL, listOf(textPart(text)))), ts = at))
+        // 21 minutes after it was sent: past Apple's 15, and a device's clock 5 minutes off.
+        edit("W1", bob, "too late", sent + 21 * 60_000L)
+        assertEquals("first", repo.message("imsg:W1")!!.text)
+        // 19 minutes: within them, give or take a clock.
+        edit("W1", bob, "edit 1", sent + 19 * 60_000L)
+        assertEquals("edit 1", repo.message("imsg:W1")!!.text)
+        for (n in 2..5) edit("W1", bob, "edit $n", sent + 19 * 60_000L + n)
+        assertEquals("edit 5", repo.message("imsg:W1")!!.text)
+        assertEquals(5, IMessageExtra.parse(repo.message("imsg:W1")!!.extra).edits)
+        // A sixth: past Apple's five.
+        edit("W1", bob, "edit 6", sent + 19 * 60_000L + 6)
+        assertEquals("edit 5", repo.message("imsg:W1")!!.text)
+        // Unsent 8 minutes after: past Apple's 2 (and 5 more); 6 minutes after: taken.
+        link.apply(incoming("W2", bob, "oops", ts = sent))
+        link.apply(event("U-late", bob, PushChatMessage.Unsend(UnsendMessage("W2", 0UL)), ts = sent + 8 * 60_000L))
+        assertEquals("in", repo.message("imsg:W2")!!.direction)
+        link.apply(event("U-ok", bob, PushChatMessage.Unsend(UnsendMessage("W2", 0UL)), ts = sent + 6 * 60_000L))
+        assertEquals("system", repo.message("imsg:W2")!!.direction)
+        // The user's own, made on their iPhone in time and handed over only now (years after, here): taken.
+        sentHere("W3", "on my wya", ts = sent)
+        link.apply(event("E-mine", me, PushChatMessage.Edit(EditMessage("W3", 0UL, listOf(textPart("on my way")))), participants = listOf(me, bob), ts = sent + 60_000L))
+        assertEquals("on my way", repo.message("imsg:W3")!!.text)
+        sentHere("W4", "mine", ts = sent)
+        link.apply(event("U-mine", me, PushChatMessage.Unsend(UnsendMessage("W4", 0UL)), participants = listOf(me, bob), ts = sent + 60_000L))
+        assertEquals("You unsent a message.", repo.message("imsg:W4")!!.text)
+    }
+
+    @Test
+    fun aStoredGroupsMembersChangeOnlyByAChangeOneOfThemMade() {
+        com.lightdecoder.imessage.IMessageLog.clear(context)
+        val link = DirectLink.get(context)
+        val manager = IMessageManager.get(context)
+        val carol = "tel:+15553334444"
+        val dave = "tel:+15556667777"
+        val mallory = "tel:+15558889999"
+        val id = "imsg:group:G-M"
+        fun members() = repo.participants(id).filter { !it.isMe }.map { it.number }.toSet()
+        link.apply(event("GM1", bob, textMessage("hi all"), participants = listOf(me, bob, carol), groupGuid = "G-M", ts = 1_700_000_000_000L))
+        assertEquals(setOf("+15559876543", "+15553334444"), members())
+        // Someone not in it: their message, rename, change of its members and typing are dropped.
+        link.apply(event("GM2", mallory, textMessage("buy now"), participants = listOf(me, bob, carol, mallory), groupGuid = "G-M"))
+        link.apply(event("GM3", mallory, PushChatMessage.RenameMessage(ChatRenameMessage("Pwned")), participants = listOf(me, bob, carol), groupGuid = "G-M"))
+        link.apply(event("GM4", mallory, PushChatMessage.ChangeParticipants(uniffi.rust_bridge.ChangeParticipantMessage(listOf(me, mallory), 3UL)), participants = listOf(me, bob, carol), groupGuid = "G-M"))
+        link.apply(event("GT1", mallory, PushChatMessage.Typing(true, null), participants = listOf(me, bob, carol), groupGuid = "G-M"))
+        assertNull(repo.message("imsg:GM2"))
+        assertNull(repo.message("imsg:GM3"))
+        assertNull(repo.message("imsg:GM4"))
+        assertTrue(manager.typing.value[id].isNullOrEmpty())
+        assertEquals(setOf("+15559876543", "+15553334444"), members())
+        assertFalse(repo.conversation(id)!!.name.contains("Pwned"))
+        // A member's message that leaves someone out does not take them out.
+        link.apply(event("GM5", bob, textMessage("just us?"), participants = listOf(me, bob), groupGuid = "G-M", ts = 1_700_000_001_000L))
+        assertEquals(id, repo.message("imsg:GM5")!!.conversationId)
+        assertEquals(setOf("+15559876543", "+15553334444"), members())
+        // One that names someone the group does not have (an addition missed here): added, and said so.
+        link.apply(event("GM6", bob, textMessage("welcome Dave"), participants = listOf(me, bob, carol, dave), groupGuid = "G-M", ts = 1_700_000_002_000L))
+        assertEquals(setOf("+15559876543", "+15553334444", "+15556667777"), members())
+        val row = repo.message("imsg:GM6~added")!!
+        assertEquals("+15559876543 added +15556667777.", row.text)
+        assertEquals("system", row.direction)
+        assertEquals("the message is still the chat's latest", "imsg:GM6", repo.conversation(id)!!.latestMessageId)
+        // A member's change of its members is taken: Dave is out, and his messages with him.
+        link.apply(
+            event(
+                "GM7", carol, PushChatMessage.ChangeParticipants(uniffi.rust_bridge.ChangeParticipantMessage(listOf(me, bob, carol), 4UL)),
+                participants = listOf(me, bob, carol, dave), groupGuid = "G-M", ts = 1_700_000_003_000L,
+            ),
+        )
+        assertEquals(setOf("+15559876543", "+15553334444"), members())
+        assertEquals("+15553334444 removed +15556667777.", repo.message("imsg:GM7")!!.text)
+        link.apply(event("GM8", dave, textMessage("hey"), participants = listOf(me, bob, carol, dave), groupGuid = "G-M"))
+        assertNull(repo.message("imsg:GM8"))
+        // The user's own devices always can.
+        link.apply(
+            event(
+                "GM9", me, PushChatMessage.ChangeParticipants(uniffi.rust_bridge.ChangeParticipantMessage(listOf(me, bob, carol, dave), 5UL)),
+                participants = listOf(me, bob, carol), groupGuid = "G-M", ts = 1_700_000_004_000L,
+            ),
+        )
+        assertEquals(setOf("+15559876543", "+15553334444", "+15556667777"), members())
+        // Logged, without who or what.
+        val log = com.lightdecoder.imessage.IMessageLog.read(context)
+        assertTrue(log.toString(), log.any { it.contains("a message from someone not in the group was dropped") })
+        assertTrue(log.toString(), log.any { it.contains("a group event from someone not in the group was dropped") })
+        assertTrue(log.toString(), log.none { it.contains("8889999") || it.contains("buy now") || it.contains("Pwned") })
+    }
+
+    @Test
+    fun aMessageReusingAnothersIdIsDroppedNotMoved() {
+        com.lightdecoder.imessage.IMessageLog.clear(context)
+        val link = DirectLink.get(context)
+        link.apply(incoming("D1", bob, "the real one"))
+        // Alice's message with the same GUID: not moved to her chat, nor rewritten.
+        link.apply(incoming("D1", alice, "fake"))
+        assertNull(repo.conversation("imsg:$alice"))
+        // Nor as the user's own, sent from another device.
+        link.apply(incoming("D1", me, "mine now", chatWith = bob))
+        val row = repo.message("imsg:D1")!!
+        assertEquals("imsg:$bob", row.conversationId)
+        assertEquals("the real one", row.text)
+        assertEquals("+15559876543", row.senderId)
+        assertEquals("in", row.direction)
+        // Apple handing the real one over again is still taken as it.
+        link.apply(event("X30", bob, PushChatMessage.Edit(EditMessage("D1", 0UL, listOf(textPart("the real one, edited"))))))
+        link.apply(incoming("D1", bob, "the real one"))
+        assertEquals("the real one, edited", repo.message("imsg:D1")!!.text)
+        assertTrue(com.lightdecoder.imessage.IMessageLog.read(context).any { it.contains("a message whose id another message already has was dropped") })
+    }
+
+    @Test
+    fun aSendLaterTakenBackElsewhereOnlyRemovesOneStillWaiting() {
+        val link = DirectLink.get(context)
+        link.apply(incoming("B0", bob, "hi"))
+        sentHere("P5", "already went")
+        val gone = PushChatMessage.PermanentDelete(uniffi.rust_bridge.PermanentDeleteMessage(uniffi.rust_bridge.DeleteTarget.Messages(listOf("P5")), true))
+        link.apply(event("PD5", me, gone, participants = listOf(me, bob)))
+        assertNotNull("not one waiting for its time", repo.message("imsg:P5"))
+        // Nor someone else's message.
+        val theirs = PushChatMessage.PermanentDelete(uniffi.rust_bridge.PermanentDeleteMessage(uniffi.rust_bridge.DeleteTarget.Messages(listOf("B0")), true))
+        link.apply(event("PD6", me, theirs, participants = listOf(me, bob)))
+        assertNotNull(repo.message("imsg:B0"))
+    }
+
+    @Test
+    fun aGroupsNameDatedInTheFutureHoldsNoLaterRenameBack() {
+        val link = DirectLink.get(context)
+        val now = System.currentTimeMillis()
+        link.apply(event("FR1", bob, PushChatMessage.RenameMessage(ChatRenameMessage("Forever")), participants = listOf(me, bob, alice), groupGuid = "G-F", ts = now + 365L * 86_400_000L))
+        assertEquals("Forever", repo.conversation("imsg:group:G-F")!!.name)
+        // Its time was taken as when it came, give or take a clock.
+        assertTrue(repo.message("imsg:FR1")!!.timestampMs <= System.currentTimeMillis() + DirectArchive.MAX_FUTURE_MS)
+        // A name kept dated far ahead (before times were held to now) holds no rename back either.
+        context.getSharedPreferences("imessage_group_names", Context.MODE_PRIVATE).edit()
+            .putString("imsg:group:G-F", "Locked").putLong("imsg:group:G-F@at", Long.MAX_VALUE / 2).commit()
+        link.apply(event("FR2", alice, PushChatMessage.RenameMessage(ChatRenameMessage("Trip")), participants = listOf(me, bob, alice), groupGuid = "G-F", ts = now + 6 * 60_000L))
+        assertEquals("Trip", repo.conversation("imsg:group:G-F")!!.name)
+    }
+
+    @Test
+    fun numbersThatOnlyEndTheSameAreDifferentPeople() {
+        // Ana in São Paulo, from OpenBubbles' notifications.
+        repo.upsertConversation(
+            ConversationDto(
+                id = "iMessage;-;+5511987654321", type = IMessageManager.TRANSPORT,
+                participants = listOf(ParticipantDto(id = "me", isMe = true), ParticipantDto(id = "+5511987654321", name = "Ana", number = "+5511987654321")),
+            ),
+        )
+        val link = DirectLink.get(context)
+        // Bia in Rio: the same last ten digits, someone else.
+        link.apply(incoming("BR1", "tel:+5521987654321", "oi"))
+        assertEquals("imsg:tel:+5521987654321", repo.message("imsg:BR1")!!.conversationId)
+        assertEquals("+5511987654321", repo.participants("iMessage;-;+5511987654321").single { !it.isMe }.number)
+        // Ana herself: her chat.
+        link.apply(incoming("BR2", "tel:+5511987654321", "olá"))
+        assertEquals("iMessage;-;+5511987654321", repo.message("imsg:BR2")!!.conversationId)
+        // +1 917 555 1234 and +91 91755 51234.
+        link.apply(incoming("US1", "tel:+19175551234", "hi"))
+        link.apply(incoming("IN1", "tel:+919175551234", "namaste"))
+        assertEquals("imsg:tel:+19175551234", repo.message("imsg:US1")!!.conversationId)
+        assertEquals("imsg:tel:+919175551234", repo.message("imsg:IN1")!!.conversationId)
+        assertEquals("imsg:tel:+19175551234", IMessageManager.get(context).conversationWith("+1 (917) 555-1234"))
+        assertEquals("imsg:tel:+919175551234", IMessageManager.get(context).conversationWith("+91 91755 51234"))
+        // A US number written without its country code is still the US one (this phone is in the US).
+        assertEquals("imsg:tel:+19175551234", IMessageManager.get(context).conversationWith("(917) 555-1234"))
+    }
+
     @Test
     fun aRemovedMessageGoes() {
         val link = DirectLink.get(context)
@@ -196,6 +453,11 @@ class DirectLinkTest {
     fun anUnsentMessageLeavesWhoUnsentIt() {
         val link = DirectLink.get(context)
         link.apply(incoming("U1", bob, "oops"))
+        // Only Bob can unsend his message: not Alice, nor the user's own devices.
+        link.apply(event("X0", alice, PushChatMessage.Unsend(UnsendMessage("U1", 0UL)), participants = listOf(me, alice, bob)))
+        link.apply(event("X0b", me, PushChatMessage.Unsend(UnsendMessage("U1", 0UL)), participants = listOf(me, bob)))
+        assertEquals("in", repo.message("imsg:U1")!!.direction)
+        assertEquals("oops", repo.message("imsg:U1")!!.text)
         link.apply(event("X1", bob, PushChatMessage.Unsend(UnsendMessage("U1", 0UL))))
         val row = repo.message("imsg:U1")!!
         assertEquals("system", row.direction)
@@ -258,7 +520,7 @@ class DirectLinkTest {
         link.apply(edit)
         assertEquals(1, IMessageExtra.parse(repo.message("imsg:E2")!!.extra).edits)
         // A later edit back to an earlier text is an edit of its own.
-        link.apply(DirectArchive.Update.Edit("imsg:E2", "dinner at 7", 0, 1_700_000_010_000L))
+        link.apply(DirectArchive.Update.Edit("imsg:E2", "dinner at 7", 0, 1_700_000_010_000L, sender = bob))
         assertEquals("dinner at 7", repo.message("imsg:E2")!!.text)
         assertEquals(2, IMessageExtra.parse(repo.message("imsg:E2")!!.extra).edits)
     }
@@ -315,7 +577,7 @@ class DirectLinkTest {
         link = DirectLink.installForTesting(context) { what, request, _ ->
             asked += what to request
             // Apple's Delivered and Bob's tapback come before the send's own answer does.
-            link.apply(DirectArchive.Update.Receipt(listOf("imsg:S9"), DirectArchive.STATUS_DELIVERED))
+            link.apply(DirectArchive.Update.Receipt(listOf("imsg:S9"), DirectArchive.STATUS_DELIVERED, bob))
             link.apply(DirectArchive.Update.Reaction("imsg:S9", "+15559876543", "❤️", true, false, 5))
             DirectWire.sent("S9", 1_700_000_005_000L)
         }
@@ -381,7 +643,7 @@ class DirectLinkTest {
         assertEquals("on my way", row.text)
         assertEquals(runs, IMessageExtra.parse(row.extra).textRuns(row.text))
         // Edited on another device to plain text: the formatting goes with it.
-        link.apply(DirectArchive.Update.Edit("imsg:E8", "on my way!", 0, System.currentTimeMillis()))
+        link.apply(DirectArchive.Update.Edit("imsg:E8", "on my way!", 0, System.currentTimeMillis(), fromMe = true))
         row = repo.message("imsg:E8")!!
         assertEquals("on my way!", row.text)
         assertTrue(IMessageExtra.parse(row.extra).runs.isEmpty())
@@ -470,21 +732,25 @@ class DirectLinkTest {
         // Apple's Delivered arrives before the send returned.
         link.apply(event("S1", bob, PushChatMessage.Delivered))
         link.apply(DirectArchive.Update.Reaction("imsg:S1", "+15559876543", "❤️", true, false, 5))
-        link.apply(incoming("S1", me, "sent from the Mac"))
+        // Someone not in the chat: held too, and dropped once the message is there.
+        link.apply(event("S1", alice, PushChatMessage.Read))
+        link.apply(DirectArchive.Update.Reaction("imsg:S1", "+15551234567", "😂", true, false, 6))
+        link.apply(incoming("S1", me, "sent from the Mac", chatWith = bob))
         val row = repo.message("imsg:S1")!!
         assertEquals(DirectArchive.STATUS_DELIVERED, row.status)
         assertEquals("❤️", row.reactions.single().emoji)
         // A later copy of the message does not put the status back.
-        link.apply(incoming("S1", me, "sent from the Mac"))
+        link.apply(incoming("S1", me, "sent from the Mac", chatWith = bob))
         assertEquals(DirectArchive.STATUS_DELIVERED, repo.message("imsg:S1")!!.status)
     }
 
     @Test
     fun aFailureMarksTheUsersMessageUnlessItWasDelivered() {
         val link = DirectLink.get(context)
+        link.apply(incoming("B0", bob, "hi"))
         sentHere("F1", "one")
         sentHere("F2", "two")
-        link.apply(DirectArchive.Update.Receipt(listOf("imsg:F2"), DirectArchive.STATUS_DELIVERED))
+        link.apply(DirectArchive.Update.Receipt(listOf("imsg:F2"), DirectArchive.STATUS_DELIVERED, bob))
         link.apply(event("X5", me, PushChatMessage.Error(ErrorMessage("F1", 4UL, "Not delivered"))))
         link.apply(event("X6", me, PushChatMessage.Error(ErrorMessage("F2", 4UL, "Not delivered"))))
         assertEquals(DirectArchive.STATUS_FAILED, repo.message("imsg:F1")!!.status)
@@ -562,6 +828,12 @@ class DirectLinkTest {
         held.hold("imsg:C", r, 0)
         assertTrue("the oldest goes first", held.take("imsg:A", 1).isEmpty())
         assertEquals(listOf(r), held.take("imsg:C", 1))
+        // So many for one message: the latest are kept.
+        val many = HeldUpdates(windowMs = 120_000, maxMessages = 10, maxPerMessage = 3)
+        repeat(5) { many.hold("imsg:X", DirectArchive.Update.Receipt(listOf("imsg:X"), "S$it", bob), 0) }
+        assertEquals(listOf("S2", "S3", "S4"), many.take("imsg:X", 1).map { (it as DirectArchive.Update.Receipt).status })
+        // As they came, who sent them and all.
+        assertEquals(bob, (HeldUpdates().apply { hold("imsg:Y", DirectArchive.Update.Receipt(listOf("imsg:Y"), "S", bob), 0) }.take("imsg:Y", 1).single() as DirectArchive.Update.Receipt).sender)
     }
 
     @Test
@@ -1580,7 +1852,7 @@ class DirectLinkTest {
         assertEquals("Sent with Invisible Ink", com.lightdecoder.ui.chat.ThreadItems.preview(row, "Picture", "Sent with Invisible Ink"))
         assertEquals("Bob said: Sent with Invisible Ink", com.lightdecoder.ui.voice.ReadAloudText.sentence(context, row.copy(senderName = "Bob")))
         // Edited: still hidden there.
-        link.apply(DirectArchive.Update.Edit("imsg:INK1", "the new secret", 0, 1_700_000_020_000L))
+        link.apply(DirectArchive.Update.Edit("imsg:INK1", "the new secret", 0, 1_700_000_020_000L, sender = bob))
         assertEquals("the new secret", repo.message("imsg:INK1")!!.text)
         assertEquals("Sent with Invisible Ink", repo.conversation("imsg:$bob")!!.snippet)
         // Text without it shows as it is.

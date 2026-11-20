@@ -60,7 +60,8 @@ class ChatBackgrounds(context: Context) {
         val all = read()
         val entry = all.optJSONObject(conversationId)
         val stored = entry?.optLong(KEY_VERSION) ?: 0L
-        if (entry != null && version <= stored) {
+        // One from the future (kept before such were refused) holds no later change back.
+        if (entry != null && version <= stored && isPlausibleVersion(stored)) {
             picture?.delete()
             return if (version == stored) Applied.SAME else Applied.OLDER
         }
@@ -141,6 +142,28 @@ class ChatBackgrounds(context: Context) {
          * OpenBubbles mints them this way; a later one wins on every device.
          */
         fun versionNow(nowMs: Long = System.currentTimeMillis()): Long = (nowMs * 1000 - APPLE_EPOCH_MICROS) * 1000
+
+        /** How far ahead of this phone's clock a device's may be, in a background's version (nanoseconds): 5 minutes. */
+        const val VERSION_SKEW = 5L * 60 * 1_000_000_000
+
+        /**
+         * Whether [version] (Apple's, [versionNow] as of when it was set) could be a real one: not
+         * from the future (beyond [VERSION_SKEW]), nor negative (past what a Long holds). One from the
+         * future would hold the chat's background against every later change, as only a newer one
+         * replaces it.
+         */
+        fun isPlausibleVersion(version: Long, nowMs: Long = System.currentTimeMillis()): Boolean =
+            version >= 0 && version <= versionNow(nowMs) + VERSION_SKEW
+
+        /**
+         * The version of a change made here to a chat whose version is [version]: [versionNow], or
+         * the one after the chat's should that be later (a device's clock ahead); never past a
+         * Long's end, and never after one from the future ([isPlausibleVersion]), which holds nothing back.
+         */
+        fun nextVersion(version: Long, nowMs: Long = System.currentTimeMillis()): Long {
+            val after = if (!isPlausibleVersion(version, nowMs)) 0L else if (version == Long.MAX_VALUE) version else version + 1
+            return maxOf(versionNow(nowMs), after)
+        }
 
         private const val APPLE_EPOCH_MICROS = 978_307_200_000_000L
     }

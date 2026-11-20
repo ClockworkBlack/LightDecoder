@@ -135,7 +135,7 @@ class SendLaterTest {
         assertFalse(DirectLink.reactable(row))
         // Its time reached, or delivered: an ordinary sent message.
         assertFalse(SendLater.pending(row, at + 1))
-        link.apply(DirectArchive.Update.Receipt(listOf("imsg:SL1"), DirectArchive.STATUS_DELIVERED))
+        link.apply(DirectArchive.Update.Receipt(listOf("imsg:SL1"), DirectArchive.STATUS_DELIVERED, bob))
         assertFalse(SendLater.pending(repo.message("imsg:SL1")!!, System.currentTimeMillis()))
     }
 
@@ -208,7 +208,8 @@ class SendLaterTest {
             PushChatMessage.PermanentDelete(PermanentDeleteMessage(DeleteTarget.Messages(listOf("OD1")), true)),
             1_700_000_000_000UL, null, false, false, null,
         )
-        assertEquals(DirectArchive.Update.Remove("imsg:OD1"), DirectArchive.map(gone, setOf(me), Handles::display, DirectTexts(context)))
+        // Only while it is still waiting for its time.
+        assertEquals(DirectArchive.Update.Remove("imsg:OD1", scheduledOnly = true), DirectArchive.map(gone, setOf(me), Handles::display, DirectTexts(context)))
         val link = DirectLink.installForTesting(context) { _, _, _ -> DirectWire.ok() }
         link.apply(u)
         assertNotNull(repo.message("imsg:OD1"))

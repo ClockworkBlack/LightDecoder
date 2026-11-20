@@ -132,6 +132,10 @@ class MadridSessions(
     @Synchronized
     fun pkgOf(session: String): String? = sessions[session]?.pkg
 
+    /** The conversation [session] was opened in, while it is known. */
+    @Synchronized
+    fun conversationOf(session: String): String? = sessions[session]?.conversationId
+
     /** Forgets [session] and its handles, once it is no longer engaged; true when it was forgotten. */
     @Synchronized
     fun releaseIfIdle(session: String, now: Long): Boolean {

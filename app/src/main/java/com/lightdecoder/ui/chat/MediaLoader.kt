@@ -438,7 +438,7 @@ class MediaLoader(
 
         /** Android's HEIF decoder, subsampled; null if it cannot read this file. */
         @RequiresApi(28)
-        private fun systemDecode(bytes: ByteArray, maxSide: Int): Bitmap? = try {
+        internal fun systemDecode(bytes: ByteArray, maxSide: Int): Bitmap? = try {
             val decoded = ImageDecoder.decodeBitmap(ImageDecoder.createSource(ByteBuffer.wrap(bytes))) { decoder, info, _ ->
                 decoder.setTargetSampleSize(sampleSize(info.size.width, info.size.height, maxSide))
                 decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE

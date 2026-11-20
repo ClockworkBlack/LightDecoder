@@ -55,8 +55,20 @@ class DirectWireTest {
             DirectArchive.Update.Typing("imsg:tel:+15550000002", "+15550000002", true, groupGuid = "G-S"),
             DirectArchive.Update.ReadElsewhere("imsg:G1"),
             DirectArchive.Update.Failed("imsg:G1", "Not delivered"),
+            // Who did it and where, as the main process checks it.
+            DirectArchive.Update.Receipt(listOf("imsg:A"), DirectArchive.STATUS_DELIVERED, "tel:+15550000002"),
+            DirectArchive.Update.Edit("imsg:G1", "fixed", 0, 5_000, emptyList(), "tel:+15550000002", false, "imsg:group:G", "G"),
+            DirectArchive.Update.Edit("imsg:G1", "mine", 0, 6_000, emptyList(), "tel:+15550000001", true, ""),
+            DirectArchive.Update.Reaction("imsg:G1", "+15550000002", "❤️", true, false, 7_000, "imsg:tel:+15550000002"),
+            DirectArchive.Update.Reaction("imsg:G1", "+15550000002", "👍", true, false, 7_000, "imsg:group:G", "G"),
+            DirectArchive.Update.Unsent("imsg:G1", 0, false, "Bob", "tel:+15550000002", 9_000, "imsg:group:G", "G"),
+            DirectArchive.Update.Remove("imsg:G2", scheduledOnly = true),
+            DirectArchive.Update.Dropped("chat background", "its poster is larger than 20 MB"),
         )
         for (u in kinds) assertEquals(u, trip(u))
+        val changed = trip(DirectArchive.Update.Upsert(conv, msg, membersChanged = true)) as DirectArchive.Update.Upsert
+        assertTrue(changed.membersChanged)
+        assertFalse((trip(DirectArchive.Update.Upsert(conv, msg)) as DirectArchive.Update.Upsert).membersChanged)
         assertEquals(DirectArchive.Update.Ignore, trip(DirectArchive.Update.Ignore))
         assertEquals(DirectArchive.Update.Ignore, DirectWire.decode(JSONObject().put("kind", "from-a-newer-version")))
     }

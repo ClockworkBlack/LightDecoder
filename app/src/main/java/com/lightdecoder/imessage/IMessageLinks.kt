@@ -9,7 +9,9 @@ import org.json.JSONObject
  * an iPhone). In this order:
  *
  * 1. A link the user made or broke by hand (thread menu), kept here.
- * 2. The same phone number, compared loosely (last 10 digits).
+ * 2. The same phone number (the whole international number: [IMessageAddress.key]; by its
+ *    national digits only where one side has no country code and none is known to read it in,
+ *    [IMessageAddress.sameKey]), or the same email address.
  * 3. The same name, when it is unambiguous: one Messages conversation and
  *    one iMessage chat with that name, and the iMessage chat has no phone
  *    number of its own (OpenBubbles did not say, or the person writes from
@@ -53,7 +55,7 @@ object IMessageLinks {
         for (m in messages) m.addressKey?.let { byKey.putIfAbsent(it, m.id) }
         for (im in iMessages) {
             if (!free(im)) continue
-            val to = im.addressKey?.let(byKey::get) ?: continue
+            val to = im.addressKey?.let { byKey.lookup(it) } ?: continue
             if (to in usedMessages) continue
             out[im.id] = Pair(to, How.NUMBER)
             usedMessages += to
@@ -79,11 +81,15 @@ object IMessageLinks {
         }
         for (im in iMessages) {
             if (!free(im)) continue
-            val to = im.addressKey?.let(byPerson::get) ?: continue
+            val to = im.addressKey?.let { byPerson.lookup(it) } ?: continue
             out[im.id] = Pair(to, How.SAME_PERSON)
         }
         return out
     }
+
+    /** The value under [key] ([IMessageAddress.key]), else under a key that is the same address written otherwise ([IMessageAddress.sameKey]). */
+    private fun <V> Map<String, V>.lookup(key: String): V? =
+        get(key) ?: entries.firstOrNull { IMessageAddress.sameKey(it.key, key) }?.value
 
     /** A name to compare, or null when there is none worth comparing (empty, or only a number or an address). */
     fun nameKey(name: String): String? {

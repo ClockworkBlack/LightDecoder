@@ -334,17 +334,24 @@ object DirectWire {
             .put("conversation", u.conversation.toJson()).put("message", u.message.toJson())
             .apply { u.groupGuid?.let { put("groupGuid", it).put("groupName", u.groupName) } }.put("groupOnly", u.groupOnly).put("renamed", u.renamed)
             .apply { u.member?.let { put("member", it) } }
+            .apply { if (u.membersChanged) put("membersChanged", true) }
         is DirectArchive.Update.Remove -> JSONObject().put("kind", "remove").put("messageId", u.messageId)
+            .apply { if (u.scheduledOnly) put("scheduledOnly", true) }
         is DirectArchive.Update.Receipt -> JSONObject().put("kind", "receipt")
-            .put("messageIds", JSONArray(u.messageIds)).put("status", u.status)
+            .put("messageIds", JSONArray(u.messageIds)).put("status", u.status).put("sender", u.sender)
         is DirectArchive.Update.Edit -> JSONObject().put("kind", "edit").put("messageId", u.messageId).put("text", u.text)
             .put("part", u.part).put("atMs", u.atMs)
             .apply { if (u.runs.isNotEmpty()) put("runs", TextRuns.toJsonArray(u.runs)) }
+            .put("sender", u.sender).put("fromMe", u.fromMe).put("conversationId", u.conversationId)
+            .apply { u.groupGuid?.let { put("groupGuid", it) } }
         is DirectArchive.Update.Reaction -> JSONObject().put("kind", "reaction").put("messageId", u.messageId)
             .put("participantId", u.participantId).put("emoji", u.emoji).put("enable", u.enable).put("fromMe", u.fromMe)
-            .put("atMs", u.atMs)
+            .put("atMs", u.atMs).put("conversationId", u.conversationId)
+            .apply { u.groupGuid?.let { put("groupGuid", it) } }
         is DirectArchive.Update.Unsent -> JSONObject().put("kind", "unsent").put("messageId", u.messageId).put("part", u.part)
             .put("fromMe", u.fromMe).put("senderName", u.senderName)
+            .put("sender", u.sender).put("atMs", u.atMs).put("conversationId", u.conversationId)
+            .apply { u.groupGuid?.let { put("groupGuid", it) } }
         is DirectArchive.Update.Typing -> JSONObject().put("kind", "typing").put("conversationId", u.conversationId)
             .put("participantId", u.participantId).put("typing", u.typing).apply { u.groupGuid?.let { put("groupGuid", it) } }
         is DirectArchive.Update.ReadElsewhere -> JSONObject().put("kind", "readElsewhere").put("messageId", u.messageId)
@@ -355,6 +362,7 @@ object DirectWire {
             .apply { u.groupGuid?.let { put("groupGuid", it) } }
             .apply { u.peer?.let { put("peer", it) } }
             .apply { u.row?.let { put("row", encode(it)) } }
+        is DirectArchive.Update.Dropped -> JSONObject().put("kind", "dropped").put("what", u.what).put("why", u.why)
         DirectArchive.Update.Ignore -> JSONObject().put("kind", "ignore")
     }
 
@@ -424,20 +432,26 @@ object DirectWire {
             groupOnly = o.optBoolean("groupOnly"),
             renamed = o.optBoolean("renamed"),
             member = if (o.has("member")) o.optBoolean("member") else null,
+            membersChanged = o.optBoolean("membersChanged"),
         )
-        "remove" -> DirectArchive.Update.Remove(o.getString("messageId"))
+        "remove" -> DirectArchive.Update.Remove(o.getString("messageId"), o.optBoolean("scheduledOnly"))
         "receipt" -> DirectArchive.Update.Receipt(
             o.getJSONArray("messageIds").let { a -> (0 until a.length()).map { a.getString(it) } },
             o.getString("status"),
+            o.optString("sender"),
         )
         "edit" -> DirectArchive.Update.Edit(
             o.getString("messageId"), o.getString("text"), o.optInt("part"), o.optLong("atMs"), TextRuns.fromJsonArray(o.optJSONArray("runs")),
+            o.optString("sender"), o.optBoolean("fromMe"), o.optString("conversationId"), o.optString("groupGuid").takeIf { it.isNotEmpty() },
         )
         "reaction" -> DirectArchive.Update.Reaction(
             o.getString("messageId"), o.optString("participantId"), o.getString("emoji"), o.optBoolean("enable"),
-            o.optBoolean("fromMe"), o.optLong("atMs"),
+            o.optBoolean("fromMe"), o.optLong("atMs"), o.optString("conversationId"), o.optString("groupGuid").takeIf { it.isNotEmpty() },
         )
-        "unsent" -> DirectArchive.Update.Unsent(o.getString("messageId"), o.optInt("part"), o.optBoolean("fromMe"), o.optString("senderName"))
+        "unsent" -> DirectArchive.Update.Unsent(
+            o.getString("messageId"), o.optInt("part"), o.optBoolean("fromMe"), o.optString("senderName"),
+            o.optString("sender"), o.optLong("atMs"), o.optString("conversationId"), o.optString("groupGuid").takeIf { it.isNotEmpty() },
+        )
         "typing" -> DirectArchive.Update.Typing(
             o.getString("conversationId"), o.optString("participantId"), o.optBoolean("typing"),
             o.optString("groupGuid").takeIf { it.isNotEmpty() },
@@ -453,6 +467,7 @@ object DirectWire {
             o.optJSONObject("row")?.let { decode(it) as? DirectArchive.Update.Upsert },
             BackgroundStyle.of(o.optStringOrNull("styleType"), o.optStringOrNull("styleData")),
         )
+        "dropped" -> DirectArchive.Update.Dropped(o.optString("what"), o.optString("why"))
         else -> DirectArchive.Update.Ignore
     }
 

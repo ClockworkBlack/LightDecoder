@@ -176,15 +176,19 @@ class DirectAttachmentsTest {
         val link = link { _, _ -> DirectWire.ok() }
         val bytes = byteArrayOf(71, 73, 70, 56, 57, 97, 2)
         fun gif() = MessageAttachment(AttachmentType.Inline(bytes), 0UL, "com.compuserve.gif", "image/gif", "a.gif", false)
-        // Written by the ":imessage" process before it hands the message over.
-        fun written(guid: String) = MediaCache.fileFor(context, "$guid/p0", DirectMedia.extensionFor("image/gif", "a.gif"), ChatService.IMESSAGE)
-            .also { MediaCache.writeAtomically(it, bytes) }
-        val file = written("G5")
+        fun fileOf(guid: String) = MediaCache.fileFor(context, "$guid/p0", DirectMedia.extensionFor("image/gif", "a.gif"), ChatService.IMESSAGE)
+        // Written aside by the ":imessage" process before it hands the message over.
+        fun written(guid: String) = DirectMedia.pendingInlineFile(fileOf(guid)).also { MediaCache.writeAtomically(it, bytes) }
+        val pending = written("G5")
+        val file = fileOf("G5")
+        assertFalse("not in place until the message is taken", file.exists())
         link.apply(incoming("G5", gif()))
-        // The part's file from the start.
+        // The part's file from the start, moved into place.
         assertEquals(file.path, repo.mediaPart("imsg:G5", "p0")!!.localPath)
+        assertArrayEquals(bytes, file.readBytes())
+        assertFalse(pending.exists())
         // Unsent before it was ever shown: the file goes with it.
-        link.apply(DirectArchive.Update.Unsent("imsg:G5", 0, false, "Bob"))
+        link.apply(DirectArchive.Update.Unsent("imsg:G5", 0, false, "Bob", bob, 1_700_000_005_000L))
         assertEquals("system", repo.message("imsg:G5")!!.direction)
         assertFalse(file.exists())
         // Apple handing it over again (its file written again): it stays unsent, and the file goes.
@@ -192,8 +196,10 @@ class DirectAttachmentsTest {
         link.apply(incoming("G5", gif()))
         assertEquals("system", repo.message("imsg:G5")!!.direction)
         assertFalse(file.exists())
+        assertFalse(pending.exists())
         // Deleted before it was shown: the same.
-        val deleted = written("G6")
+        written("G6")
+        val deleted = fileOf("G6")
         link.apply(incoming("G6", gif()))
         link.apply(DirectArchive.Update.Remove("imsg:G6"))
         assertNull(repo.message("imsg:G6"))
@@ -213,6 +219,37 @@ class DirectAttachmentsTest {
         )
         assertNull(repo.message("imsg:G7"))
         assertFalse(dropped.exists())
+        assertFalse(fileOf("G7").exists())
+    }
+
+    @Test
+    fun aMessageReusingAnothersIdNeverReplacesItsFile() {
+        val link = link { _, _ -> DirectWire.ok() }
+        val bobs = byteArrayOf(71, 73, 70, 56, 57, 97, 3)
+        val gif = { b: ByteArray -> MessageAttachment(AttachmentType.Inline(b), 0UL, "com.compuserve.gif", "image/gif", "a.gif", false) }
+        val file = MediaCache.fileFor(context, "G8/p0", DirectMedia.extensionFor("image/gif", "a.gif"), ChatService.IMESSAGE)
+        MediaCache.writeAtomically(DirectMedia.pendingInlineFile(file), bobs)
+        link.apply(incoming("G8", gif(bobs)))
+        assertArrayEquals(bobs, file.readBytes())
+        // Alice's message with the same GUID and a picture of her own, written aside by the ":imessage" process.
+        val alices = byteArrayOf(71, 73, 70, 56, 57, 97, 9, 9, 9)
+        MediaCache.writeAtomically(DirectMedia.pendingInlineFile(file), alices)
+        val fake = DirectArchive.map(
+            MessageInst(
+                "G8", "tel:+15551234567", ConversationData(listOf(me, "tel:+15551234567"), null, null, null),
+                PushChatMessage.Message(
+                    NormalMessage(listOf(IndexedMessagePart(MessagePart.Attachment(gif(alices)), 0UL, null)), null, null, null, MessageType.IMessage, null, null, null, false, null, null),
+                ),
+                1_700_000_000_000UL, null, false, false, null,
+            ),
+            setOf(me), Handles::display, DirectTexts(context), { "DESC" },
+        ).let { DirectWire.decode(JSONObject(DirectWire.encode(it).toString())) }
+        link.apply(fake)
+        // Bob's message and its picture are as they were; Alice's picture went.
+        assertEquals(chat, repo.message("imsg:G8")!!.conversationId)
+        assertArrayEquals(bobs, file.readBytes())
+        assertFalse(DirectMedia.pendingInlineFile(file).exists())
+        assertEquals(file.path, repo.mediaPart("imsg:G8", "p0")!!.localPath)
     }
 
     @Test

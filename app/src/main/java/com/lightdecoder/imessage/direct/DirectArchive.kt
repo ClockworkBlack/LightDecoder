@@ -129,17 +129,32 @@ object DirectArchive {
              * says nothing about it (most messages).
              */
             val member: Boolean? = null,
+            /**
+             * A change of the group's members ([PushChatMessage.ChangeParticipants]): [conversation]'s
+             * members are the group's from now on. Anything else leaves a stored group's members as
+             * they are (it may only add someone, said in a row of its own: see DirectLink).
+             */
+            val membersChanged: Boolean = false,
         ) : Update()
 
-        /** A message to take out of the archive. */
-        data class Remove(val messageId: String) : Update()
+        /**
+         * A message to take out of the archive; with [scheduledOnly] only while it is one of the
+         * user's messages still waiting for its Send Later time (one taken back on another device).
+         */
+        data class Remove(val messageId: String, val scheduledOnly: Boolean = false) : Update()
 
-        /** A delivery or read receipt for messages the user sent. */
-        data class Receipt(val messageIds: List<String>, val status: String) : Update()
+        /**
+         * A delivery or read receipt for messages the user sent, from [sender] (their address, as
+         * the library has it: "tel:+15551234567"; only someone in the message's chat is taken).
+         */
+        data class Receipt(val messageIds: List<String>, val status: String, val sender: String = "") : Update()
 
         /**
          * The sender edited part [part] of a message, at [atMs]: that part's new text, and its
-         * formatting ([runs], over [text]; none: plain).
+         * formatting ([runs], over [text]; none: plain). Taken only from the message's own sender:
+         * [sender] (their address), or the user ([fromMe], from another device) for the user's
+         * own; and, when Apple said in which chat it was ([conversationId], [groupGuid]), only in
+         * the message's chat.
          */
         data class Edit(
             val messageId: String,
@@ -147,11 +162,17 @@ object DirectArchive {
             val part: Int = 0,
             val atMs: Long = 0,
             val runs: List<TextRun> = emptyList(),
+            val sender: String = "",
+            val fromMe: Boolean = false,
+            val conversationId: String = "",
+            val groupGuid: String? = null,
         ) : Update()
 
         /**
          * Someone put a tapback on a message ([enable]) or took it back. [participantId] is their
-         * address without its scheme; [fromMe] when it is the user, from another device.
+         * address without its scheme; [fromMe] when it is the user, from another device. Taken only
+         * from someone in the message's chat (and, when Apple said in which chat it was:
+         * [conversationId], [groupGuid], in that one).
          */
         data class Reaction(
             val messageId: String,
@@ -160,10 +181,24 @@ object DirectArchive {
             val enable: Boolean,
             val fromMe: Boolean,
             val atMs: Long,
+            val conversationId: String = "",
+            val groupGuid: String? = null,
         ) : Update()
 
-        /** The sender unsent part [part] of a message ([fromMe]: the user, from another device). */
-        data class Unsent(val messageId: String, val part: Int, val fromMe: Boolean, val senderName: String) : Update()
+        /**
+         * The sender unsent part [part] of a message ([fromMe]: the user, from another device), at
+         * [atMs] (0: now). Taken as an [Edit] is: only from the message's own [sender], in its chat.
+         */
+        data class Unsent(
+            val messageId: String,
+            val part: Int,
+            val fromMe: Boolean,
+            val senderName: String,
+            val sender: String = "",
+            val atMs: Long = 0,
+            val conversationId: String = "",
+            val groupGuid: String? = null,
+        ) : Update()
 
         /**
          * [participantId] (an address without its scheme) started or stopped typing, in the chat
@@ -193,6 +228,12 @@ object DirectArchive {
             /** A gradient or dynamic background (drawn here, no picture): set, though [path] is null. */
             val style: BackgroundStyle? = null,
         ) : Update()
+
+        /**
+         * An event from Apple the ":imessage" process did not take: [what] kind of event it was and
+         * [why] (kinds and reasons only, never its text, names or addresses), for the iMessage log.
+         */
+        data class Dropped(val what: String, val why: String) : Update()
 
         object Ignore : Update()
     }
@@ -238,81 +279,111 @@ object DirectArchive {
         nameOf: (String) -> String,
         texts: Texts,
         describe: (MessageAttachment) -> String = { "" },
+        now: Long = System.currentTimeMillis(),
     ): Update {
-        val sender = inst.sender
-        val fromMe = sender != null && sender in me
+        // From nobody: nothing to take (an iPhone shows none either).
+        val sender = inst.sender ?: return Update.Ignore
         val m = inst.message
-        // OpenBubbles drops these when Apple could not verify who sent them.
-        if (inst.verificationFailed && droppedUnverified(m)) return Update.Ignore
+        // Apple could not verify who sent it. As OpenBubbles, nothing that changes or removes what
+        // is stored, or a group, is taken from it; and it is never the user's: claiming one of the
+        // user's own addresses, it is from nobody else either (a message would show as the other
+        // person's in a chat with one person), so it is dropped.
+        if (inst.verificationFailed && (sender in me || droppedUnverified(m))) return Update.Ignore
+        val fromMe = sender in me
+        val at = timestampOf(inst, now)
         return when (m) {
             is PushChatMessage.Message -> {
                 val n = m.v1
-                // Send Later from another of the user's devices: Apple sends it then.
-                val scheduled = n.scheduled?.takeIf { it.schedule && fromMe }?.ms?.toLong() ?: 0L
+                // Send Later from another of the user's devices: Apple sends it then (two weeks ahead at most).
+                val scheduled = n.scheduled?.takeIf { it.schedule && fromMe }?.ms?.toLong()
+                    ?.coerceAtMost(now + SendLater.MAX_AHEAD_MS + MAX_FUTURE_MS) ?: 0L
                 val body = Body(n.parts, n.effect, n.voice, linkOf(n.linkMeta), appOf(n.app, messageId(inst.id)), n.subject, n.replyGuid, scheduled)
-                message(inst, body, me, nameOf, describe)
+                message(inst, body, me, nameOf, describe, now)
             }
             is PushChatMessage.React -> when (val r = m.v1.reaction) {
                 is ReactMessageType.React -> {
-                    if (sender == null) return Update.Ignore
-                    Update.Reaction(messageId(m.v1.toUuid), Handles.display(sender), emojiOf(r.reaction), r.enable, fromMe, timestampOf(inst))
+                    val (chat, guid) = chatOf(inst, me)
+                    Update.Reaction(messageId(m.v1.toUuid), Handles.display(sender), emojiOf(r.reaction), r.enable, fromMe, at, chat, guid)
                 }
-                is ReactMessageType.Extension -> appUpdate(inst, m.v1.toUuid, r, me, nameOf, texts, describe)
+                is ReactMessageType.Extension -> appUpdate(inst, m.v1.toUuid, r, me, nameOf, texts, describe, now)
             }
-            is PushChatMessage.Unsend ->
-                Update.Unsent(messageId(m.v1.tuuid), m.v1.editPart.toInt(), fromMe, if (fromMe || sender == null) "" else nameOf(sender))
-            is PushChatMessage.Edit ->
+            is PushChatMessage.Unsend -> {
+                val (chat, guid) = chatOf(inst, me)
+                Update.Unsent(messageId(m.v1.tuuid), m.v1.editPart.toInt(), fromMe, if (fromMe) "" else nameOf(sender), sender, at, chat, guid)
+            }
+            is PushChatMessage.Edit -> {
+                val (chat, guid) = chatOf(inst, me)
                 m.v1.newParts.map { it.part }.let { parts ->
-                    Update.Edit(messageId(m.v1.tuuid), textOf(parts), m.v1.editPart.toInt(), timestampOf(inst), TextRuns.fromEdit(parts))
+                    Update.Edit(messageId(m.v1.tuuid), textOf(parts), m.v1.editPart.toInt(), at, TextRuns.fromEdit(parts), sender, fromMe, chat, guid)
                 }
+            }
             // From one of the user's own devices: a Delivered says nothing; a Read means they read it there.
             is PushChatMessage.Delivered ->
-                if (fromMe) Update.Ignore else Update.Receipt(listOf(messageId(inst.id)), STATUS_DELIVERED)
+                if (fromMe) Update.Ignore else Update.Receipt(listOf(messageId(inst.id)), STATUS_DELIVERED, sender)
             is PushChatMessage.Read ->
-                if (fromMe) Update.ReadElsewhere(messageId(inst.id)) else Update.Receipt(listOf(messageId(inst.id)), STATUS_READ)
+                if (fromMe) Update.ReadElsewhere(messageId(inst.id)) else Update.Receipt(listOf(messageId(inst.id)), STATUS_READ, sender)
             is PushChatMessage.Typing -> {
                 val conversation = inst.conversation
-                if (sender == null || fromMe || conversation == null) return Update.Ignore
+                if (fromMe || conversation == null) return Update.Ignore
                 val id = conversationId((conversation.participants + sender).distinct(), me, conversation.senderGuid)
                 Update.Typing(id, Handles.display(sender), m.v1, conversation.senderGuid?.takeIf { it.isNotBlank() })
             }
             is PushChatMessage.RenameMessage -> {
                 val conversation = inst.conversation ?: return Update.Ignore
                 val who = actor(sender, fromMe, nameOf, texts) ?: return Update.Ignore
-                groupEvent(inst, conversation, conversation.participants, m.v1.newName, me, nameOf, texts.named(who, m.v1.newName), renamed = true)
+                groupEvent(inst, conversation, conversation.participants, m.v1.newName, me, nameOf, texts.named(who, m.v1.newName), renamed = true, now = now)
             }
             is PushChatMessage.ChangeParticipants -> {
                 val conversation = inst.conversation ?: return Update.Ignore
                 val text = participantsText(conversation.participants, m.v1.newParticipants, sender, fromMe, me, nameOf, texts)
                     ?: return Update.Ignore
-                val event = groupEvent(inst, conversation, m.v1.newParticipants, conversation.cvName, me, nameOf, text)
+                val event = groupEvent(inst, conversation, m.v1.newParticipants, conversation.cvName, me, nameOf, text, now = now)
                 // Removed from it, left it, or added back: whether the user can still write in it.
-                (event as? Update.Upsert)?.copy(member = m.v1.newParticipants.any { it in me }) ?: event
+                (event as? Update.Upsert)?.copy(member = m.v1.newParticipants.any { it in me }, membersChanged = true) ?: event
             }
             is PushChatMessage.IconChange -> {
                 val conversation = inst.conversation ?: return Update.Ignore
                 val who = actor(sender, fromMe, nameOf, texts) ?: return Update.Ignore
                 val text = if (m.v1.file != null) texts.changedPhoto(who) else texts.removedPhoto(who)
-                groupEvent(inst, conversation, conversation.participants, conversation.cvName, me, nameOf, text)
+                groupEvent(inst, conversation, conversation.participants, conversation.cvName, me, nameOf, text, now = now)
             }
             is PushChatMessage.Error ->
                 if (fromMe) Update.Failed(messageId(m.v1.forUuid), m.v1.statusStr) else Update.Ignore
-            // A Send Later message taken back on another of the user's devices: it is gone there too.
+            // A Send Later message taken back on another of the user's devices: it is gone there too
+            // (only while it is one still waiting for its time).
             is PushChatMessage.PermanentDelete -> {
                 val target = m.v1.target as? DeleteTarget.Messages
                 val guid = target?.v1?.singleOrNull()
-                if (fromMe && m.v1.isScheduled && guid != null) Update.Remove(messageId(guid)) else Update.Ignore
+                if (fromMe && m.v1.isScheduled && guid != null) Update.Remove(messageId(guid), scheduledOnly = true) else Update.Ignore
             }
             else -> Update.Ignore
         }
     }
 
+    /** What is not taken from an event Apple could not verify (as OpenBubbles): what changes or removes what is stored, and a group's events. */
     private fun droppedUnverified(m: PushChatMessage): Boolean =
         m is PushChatMessage.Delivered || m is PushChatMessage.Read || m is PushChatMessage.Edit ||
-            m is PushChatMessage.Unsend || m is PushChatMessage.Typing || m is PushChatMessage.RenameMessage
+            m is PushChatMessage.Unsend || m is PushChatMessage.Typing || m is PushChatMessage.RenameMessage ||
+            m is PushChatMessage.ChangeParticipants || m is PushChatMessage.IconChange || m is PushChatMessage.Error ||
+            m is PushChatMessage.PermanentDelete || m is PushChatMessage.SetTranscriptBackground
 
-    /** Apple's time of the event, else now. */
-    private fun timestampOf(inst: MessageInst): Long = inst.sentTimestamp.toLong().takeIf { it > 0 } ?: System.currentTimeMillis()
+    /**
+     * How far ahead of this phone's clock an event's time is taken (a device's clock may be a little
+     * ahead): later, it is taken as this much after it arrived. A time in the past is taken as it is
+     * (an event can come late: after the phone was off, or Apple's journal after a restart).
+     */
+    const val MAX_FUTURE_MS = 5 * 60 * 1000L
+
+    /** Apple's time of the event ([MAX_FUTURE_MS] after [now] at the latest), else [now]. */
+    fun timestampOf(inst: MessageInst, now: Long = System.currentTimeMillis()): Long =
+        inst.sentTimestamp.toLong().takeIf { it > 0 }?.coerceAtMost(now + MAX_FUTURE_MS) ?: now
+
+    /** The chat an event names (its id as [conversationId] makes it, and its group's guid), or "" and null when it names none. */
+    private fun chatOf(inst: MessageInst, me: Set<String>): Pair<String, String?> {
+        val c = inst.conversation ?: return "" to null
+        val id = conversationId((c.participants + listOfNotNull(inst.sender)).distinct(), me, c.senderGuid)
+        return id to c.senderGuid?.takeIf { it.isNotBlank() }
+    }
 
     /** What a stored message is made of: an iMessage's, or an iMessage app's new move's. */
     private class Body(
@@ -332,6 +403,7 @@ object DirectArchive {
         me: Set<String>,
         nameOf: (String) -> String,
         describe: (MessageAttachment) -> String,
+        now: Long,
     ): Update {
         val conversation = inst.conversation ?: return Update.Ignore
         val sender = inst.sender
@@ -361,7 +433,7 @@ object DirectArchive {
             senderName = if (fromMe || sender == null) "" else nameOf(sender),
             fromMe = fromMe,
             // A Send Later message is at the time Apple sends it, as on an iPhone.
-            timestampMs = n.scheduledAt.takeIf { it > 0 } ?: timestampOf(inst),
+            timestampMs = n.scheduledAt.takeIf { it > 0 } ?: timestampOf(inst, now),
             direction = if (fromMe) "out" else "in",
             status = if (fromMe) STATUS_SENT else STATUS_RECEIVED,
             transport = TRANSPORT,
@@ -395,6 +467,7 @@ object DirectArchive {
         nameOf: (String) -> String,
         texts: Texts,
         describe: (MessageAttachment) -> String,
+        now: Long,
     ): Update {
         val conversation = inst.conversation ?: return Update.Ignore
         val sender = inst.sender
@@ -402,11 +475,11 @@ object DirectArchive {
         if (ext.isMeta) {
             val who = actor(sender, sender != null && sender in me, nameOf, texts) ?: return Update.Ignore
             val members = (conversation.participants + listOfNotNull(sender)).distinct()
-            return eventRow(inst, conversation, members, conversation.cvName, me, nameOf, texts.updated(who, app.shownName))
+            return eventRow(inst, conversation, members, conversation.cvName, me, nameOf, texts.updated(who, app.shownName), now)
         }
         // Without a card it is nothing an iPhone shows.
         if (ext.spec.balloon == null) return Update.Ignore
-        return message(inst, Body(ext.body, null, false, null, app, null, null), me, nameOf, describe)
+        return message(inst, Body(ext.body, null, false, null, app, null, null), me, nameOf, describe, now)
     }
 
     /**
@@ -543,12 +616,13 @@ object DirectArchive {
         nameOf: (String) -> String,
         text: String,
         renamed: Boolean = false,
+        now: Long = System.currentTimeMillis(),
     ): Update {
         // The group as it was, so that members leaving never turn it into a one-to-one chat.
         val id = conversationId((conversation.participants + listOfNotNull(inst.sender)).distinct(), me, conversation.senderGuid)
         // Down to one other person, it is the group only by its guid: the main process knows if it is one.
         if (!isGroup(id) && conversation.senderGuid.isNullOrBlank()) return Update.Ignore
-        val row = eventRow(inst, conversation, members, groupName, me, nameOf, text) as Update.Upsert
+        val row = eventRow(inst, conversation, members, groupName, me, nameOf, text, now) as Update.Upsert
         return row.copy(groupOnly = !isGroup(id), renamed = renamed)
     }
 
@@ -564,6 +638,7 @@ object DirectArchive {
         me: Set<String>,
         nameOf: (String) -> String,
         text: String,
+        now: Long,
     ): Update {
         val sender = inst.sender
         val id = conversationId((conversation.participants + listOfNotNull(sender)).distinct(), me, conversation.senderGuid)
@@ -575,7 +650,7 @@ object DirectArchive {
             senderId = sender.orEmpty(),
             senderName = if (fromMe || sender == null) "" else nameOf(sender),
             fromMe = fromMe,
-            timestampMs = timestampOf(inst),
+            timestampMs = timestampOf(inst, now),
             direction = "system",
             transport = TRANSPORT,
             text = text,
@@ -588,33 +663,39 @@ object DirectArchive {
      * The chat a background change ([PushChatMessage.SetTranscriptBackground]) is for, as
      * OpenBubbles finds it: its `chatId` is the other person's address (a chat with one person, as
      * the user's own devices are told), else a group's guid; with none, the chat with its sender.
-     * Null when it names no chat.
+     * Null when it names no chat, and for one nobody can take it from: one from no one, one Apple
+     * could not verify, and one naming a chat by an address from anyone but the user's own devices
+     * (anyone else's is about the chat with themselves; it names none). Whether the sender is in
+     * a group named by its guid is the main process's to tell (DirectLink).
      */
     data class BackgroundChat(val conversationId: String, val members: List<String>, val groupGuid: String?, val peer: String?)
 
     fun backgroundChat(inst: MessageInst, me: Set<String>): BackgroundChat? {
         val m = (inst.message as? PushChatMessage.SetTranscriptBackground)?.v1 ?: return null
+        val sender = inst.sender ?: return null
+        if (inst.verificationFailed) return null
+        val fromMe = sender in me
         val chatId = when (m) {
             is SetTranscriptBackgroundMessage.Set -> m.chatId
             is SetTranscriptBackgroundMessage.Remove -> m.chatId
         }?.trim()?.takeIf { it.isNotEmpty() }
-        val sender = inst.sender
         val conversation = inst.conversation
         if (chatId != null && ('+' in chatId || '@' in chatId)) {
+            if (!fromMe) return null
             val peer = Handles.normalize(chatId) ?: chatId
             if (peer in me) return null
-            val members = (listOf(peer) + listOfNotNull(sender)).distinct()
+            val members = (listOf(peer) + sender).distinct()
             return BackgroundChat(conversationId(members, me, null), members, null, peer)
         }
         if (chatId != null) {
-            val members = ((conversation?.participants ?: emptyList()) + listOfNotNull(sender)).distinct()
+            val members = ((conversation?.participants ?: emptyList()) + sender).distinct()
             return BackgroundChat(groupConversationId(chatId), members, chatId, null)
         }
         val peer = when {
-            sender != null && sender !in me -> sender
+            !fromMe -> sender
             else -> conversation?.participants?.filter { it !in me }?.distinct()?.singleOrNull()
         } ?: return null
-        val members = (listOf(peer) + listOfNotNull(sender)).distinct()
+        val members = (listOf(peer) + sender).distinct()
         return BackgroundChat(conversationId(members, me, null), members, null, peer)
     }
 
@@ -630,7 +711,15 @@ object DirectArchive {
      * or dynamic background [style] (neither: the background was taken off), and the row saying who did it
      * ("Bob changed the chat background.", as an iPhone puts it). Ignored when it names no chat.
      */
-    fun background(inst: MessageInst, me: Set<String>, nameOf: (String) -> String, texts: Texts, path: String?, style: BackgroundStyle? = null): Update {
+    fun background(
+        inst: MessageInst,
+        me: Set<String>,
+        nameOf: (String) -> String,
+        texts: Texts,
+        path: String?,
+        style: BackgroundStyle? = null,
+        now: Long = System.currentTimeMillis(),
+    ): Update {
         val m = (inst.message as? PushChatMessage.SetTranscriptBackground)?.v1 ?: return Update.Ignore
         val chat = backgroundChat(inst, me) ?: return Update.Ignore
         val sender = inst.sender
@@ -645,7 +734,7 @@ object DirectArchive {
             senderId = sender.orEmpty(),
             senderName = if (fromMe || sender == null) "" else nameOf(sender),
             fromMe = fromMe,
-            timestampMs = timestampOf(inst),
+            timestampMs = timestampOf(inst, now),
             direction = "system",
             transport = TRANSPORT,
             text = text,

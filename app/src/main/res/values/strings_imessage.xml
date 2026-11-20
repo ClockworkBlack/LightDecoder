@@ -158,6 +158,7 @@
     <string name="imessage_direct_attachment_unreadable">This file could not be read.</string>
     <string name="imessage_direct_attachment_no_file">Apple sent this attachment without a file.</string>
     <string name="imessage_direct_attachment_not_saved">The attachment could not be saved.</string>
+    <string name="imessage_direct_attachment_download_too_big">This attachment is larger than %1$d MB, so it was not downloaded.</string>
     <string name="imessage_direct_message_not_confirmed">Apple did not confirm the message within %1$d seconds. It may not have been delivered.</string>
     <string name="imessage_direct_message_refused">Apple refused the message: %1$s</string>
     <string name="imessage_direct_unsend_not_confirmed">Apple did not confirm the unsend within %1$d seconds. It may not have gone through.</string>

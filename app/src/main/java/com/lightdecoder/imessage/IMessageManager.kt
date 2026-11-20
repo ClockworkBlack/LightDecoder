@@ -3,6 +3,7 @@ package com.lightdecoder.imessage
 import android.content.Context
 import android.net.Uri
 import android.service.notification.StatusBarNotification
+import android.telephony.TelephonyManager
 import com.lightdecoder.archive.ArchiveRepository
 import com.lightdecoder.archive.LocalState
 import com.lightdecoder.archive.MessageRow
@@ -30,6 +31,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.Locale
 import java.util.UUID
 
 /**
@@ -527,13 +529,17 @@ class IMessageManager private constructor(
             .firstOrNull { !it.isMe }?.number?.trim()?.takeIf { IMessageAddress.key(it) != null }
     }
 
-    /** The stored iMessage conversation with [address], if one has been seen. */
+    /**
+     * The stored iMessage conversation with [address], if one has been seen: the whole number (or
+     * email address) the same ([IMessageAddress.key]); else, only where one of the two is written
+     * without its country code and none is known, the same national number ([IMessageAddress.sameKey]).
+     */
     fun conversationWith(address: String): String? {
         val wanted = IMessageAddress.key(address) ?: return null
-        return runCatching { repo.conversations(null) }.getOrDefault(emptyList())
+        val chats = runCatching { repo.conversations(null) }.getOrDefault(emptyList())
             .filter { !it.isGroup && it.folderEnum != Folder.DELETED }
-            .firstOrNull { row -> addressOf(row.id)?.let(IMessageAddress::key) == wanted }
-            ?.id
+            .map { row -> row.id to addressOf(row.id)?.let(IMessageAddress::key) }
+        return (chats.firstOrNull { it.second == wanted } ?: chats.firstOrNull { IMessageAddress.sameKey(it.second, wanted) })?.first
     }
 
     // --- deleting here --------------------------------------------------------------------
@@ -774,19 +780,113 @@ object IMessageErrors {
     const val HAND_OFF = "hand_off"
 }
 
-/** Comparing a phone number or email address from OpenBubbles with one stored for the Messages tab. */
+/**
+ * Comparing a phone number or email address from OpenBubbles or Apple with one stored for the
+ * Messages tab. Phone numbers are compared whole, as international (E.164) numbers: "+55 11
+ * 98765-4321" and "+55 21 98765-4321" are two people, as are "+1 917 555 1234" and "+91 91755
+ * 51234", though their last ten digits are the same. A number written without its country code is
+ * read in this phone's country ([region]), as a phone reads one dialled that way. Only when no
+ * country is known is such a number compared by its national digits, with a number that has one
+ * ([sameKey]); two numbers that both say their country are never compared that way.
+ */
 object IMessageAddress {
+
+    /** Fewer digits than this is no phone number. */
+    private const val MIN_DIGITS = 7
+
+    /** What a [key] of a number written without its country code, none known to read it in, starts with. */
+    const val NATIONAL = "#"
+
+    @Volatile
+    private var regionSource: () -> String? = { Locale.getDefault().country }
+
     /**
-     * A key that two spellings of the same address share: an email address
-     * in lower case; a phone number as its last ten digits (enough to tell
-     * numbers apart, and blind to "+1", spaces and dashes). Null for
-     * something that is neither.
+     * Numbers written without a country code are read in this phone's country from now on: its
+     * SIM's, else its mobile network's, else its locale's (until this is called: the locale's).
+     * Called once per process.
+     */
+    fun useRegionOf(context: Context) {
+        val app = context.applicationContext
+        val found by lazy { regionOf(app) }
+        regionSource = { found }
+    }
+
+    private fun regionOf(context: Context): String? {
+        val tm = runCatching { context.getSystemService(TelephonyManager::class.java) }.getOrNull()
+        val sim = runCatching { tm?.simCountryIso }.getOrNull()
+        val network = runCatching { tm?.networkCountryIso }.getOrNull()
+        return listOf(sim, network, Locale.getDefault().country).firstOrNull { CallingCodes.of(it) != null }?.uppercase()
+    }
+
+    /** Tests: numbers without a country code are read in [region] (null: in none). */
+    internal fun setRegionForTesting(region: String?) {
+        regionSource = { region }
+    }
+
+    internal fun resetForTesting() {
+        regionSource = { Locale.getDefault().country }
+    }
+
+    /** The country (ISO 3166 alpha-2) a number written without its country code is read in, or null when none is known. */
+    fun region(): String? = runCatching { regionSource() }.getOrNull()?.takeIf { CallingCodes.of(it) != null }?.uppercase()
+
+    /** The calling code of [region] ("1", "55"), or null when no country is known. */
+    fun callingCode(): String? = CallingCodes.of(region())?.code
+
+    /**
+     * [address] as its whole international number ("+5511987654321") when it is a phone number
+     * whose country is known: the one it is written with ("+55 …", or "00 55 …"), else [region]'s,
+     * its trunk prefix (the national "0", or "1" in North America) left out. Null for an email
+     * address, for something too short to be a number, and for a number written without its
+     * country code when no country is known.
+     */
+    fun e164(address: String, region: String? = region()): String? {
+        val text = address.trim().removePrefix("tel:")
+        if ('@' in text) return null
+        val digits = text.filter { it.isDigit() }
+        if (digits.length < MIN_DIGITS) return null
+        if (text.startsWith("+")) return "+$digits"
+        val home = CallingCodes.of(region) ?: return null
+        // The international prefix dialled in place of "+".
+        if (digits.startsWith("00") && digits.length - 2 >= MIN_DIGITS) return "+" + digits.substring(2)
+        if (home.code == "1" && digits.startsWith("011") && digits.length - 3 >= MIN_DIGITS) return "+" + digits.substring(3)
+        val national = if (home.trunk.isNotEmpty() && digits.startsWith(home.trunk)) digits.substring(home.trunk.length) else digits
+        return "+" + home.code + national
+    }
+
+    /**
+     * A key that two spellings of the same address share: an email address in lower case; a
+     * phone number as its whole international number ([e164]: "+15551234567"), or, written
+     * without its country code when no country is known, as [NATIONAL] and its national digits
+     * (compared with [sameKey]). Null for something that is neither.
      */
     fun key(address: String): String? {
         val text = address.trim().removePrefix("tel:").removePrefix("mailto:")
         if (text.contains('@')) return text.lowercase().takeIf { it.length > 2 }
         val digits = text.filter { it.isDigit() }
-        if (digits.length < 7) return null
-        return "#" + digits.takeLast(10)
+        if (digits.length < MIN_DIGITS) return null
+        return e164(text) ?: (NATIONAL + digits.trimStart('0').ifEmpty { digits })
     }
+
+    /**
+     * Whether keys [a] and [b] ([key]) are the same address: equal; or, as a fallback only when one
+     * of them is a number without its country code ([NATIONAL]) and the other has one, when the
+     * other is that national number after a country's calling code.
+     */
+    fun sameKey(a: String?, b: String?): Boolean {
+        if (a == null || b == null) return false
+        if (a == b) return true
+        val (national, full) = when {
+            a.startsWith(NATIONAL) && b.startsWith("+") -> a to b
+            b.startsWith(NATIONAL) && a.startsWith("+") -> b to a
+            else -> return false
+        }
+        val n = national.removePrefix(NATIONAL)
+        val f = full.removePrefix("+")
+        if (f == n) return true
+        return f.length > n.length && f.endsWith(n) && f.dropLast(n.length) in CallingCodes.codes
+    }
+
+    /** Whether [a] and [b] are the same phone number or email address ([sameKey]). */
+    fun same(a: String, b: String): Boolean = sameKey(key(a), key(b))
 }

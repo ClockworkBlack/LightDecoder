@@ -10,12 +10,17 @@ import com.lightdecoder.relay.ConversationDto
 import com.lightdecoder.relay.ParticipantDto
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
@@ -82,12 +87,17 @@ class DirectEngine private constructor(private val app: Context) {
     /** Apple did not answer in time: what was asked may have gone through all the same. */
     class Unconfirmed(message: String) : ImessageError(message)
 
+    /** A download larger than it may be ([downloadCapped]): stopped, and nothing of it kept. */
+    class TooLarge(message: String) : ImessageError(message)
+
     /** Stores an archive change in the main process: how it was taken. */
     fun interface Sink {
         suspend fun deliver(update: DirectArchive.Update): Delivery
     }
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /** Whatever escapes the work below is logged, never taken for a crash of the process. */
+    private val failures = CoroutineExceptionHandler { _, e -> Log.e(TAG, "iMessage work failed (${e::class.java.simpleName})", e) }
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + failures)
     private val lock = Mutex()
     private val _status = MutableStateFlow<Status>(Status.NotRegistered)
     val status: StateFlow<Status> = _status
@@ -114,13 +124,13 @@ class DirectEngine private constructor(private val app: Context) {
         app,
         object : IncomingBackgrounds.Natives {
             override fun toMmcs(message: SetTranscriptBackgroundMessage): MmcsFile? = uniffi.rust_bridge.transcriptBackgroundToMmcs(message)
-            override suspend fun download(file: MmcsFile, path: String) {
-                val s = requireSession()
-                call { uniffi.rust_bridge.downloadMmcsFile(s, file, path, null) }
-            }
+            override suspend fun download(file: MmcsFile, path: String, maxBytes: Long) = downloadCapped(requireSession(), file, path, maxBytes)
             override fun parse(payload: ByteArray): SimplifiedTranscriptPoster = uniffi.rust_bridge.parseTranscriptPoster(payload)
         },
     )
+
+    /** How often reading each of Apple's events took this process down ([EventAttempts]). */
+    private val attempts = EventAttempts(File(app.filesDir, "imessage/event-attempts"))
 
     /** Waiting for Apple's answer to a send, by message id. */
     private val confirms = ConcurrentHashMap<String, CompletableDeferred<String?>>()
@@ -134,36 +144,90 @@ class DirectEngine private constructor(private val app: Context) {
     val isRegistered: Boolean get() = _status.value is Status.Registered
 
     init {
-        scope.launch {
-            for ((id, event) in events) {
-                if (event is PushEvent.Message) handle(event.v1)
-                // Acknowledged (in order) once the main process stored it; until then the library
-                // keeps the event in its journal and hands it over again after a restart.
-                pipeline?.ack(id)
-            }
-        }
+        // Numbers written without their country code are read in this phone's country.
+        com.lightdecoder.imessage.IMessageAddress.useRegionOf(app)
+        consume()
     }
 
     /**
+     * Takes Apple's events, one at a time in the order they came. Nothing one of them does stops
+     * the ones after it: what it throws is caught ([take]), and should anything still end this,
+     * it starts again (the events not taken yet wait for it).
+     */
+    private fun consume() {
+        scope.launch {
+            for ((id, event) in events) take(id, event)
+        }.invokeOnCompletion { e -> if (e != null && e !is CancellationException) consume() }
+    }
+
+    /**
+     * One event: read and stored ([handle]), then acknowledged (in order) once the main process
+     * stored it; until then the library keeps it in its journal and hands it over again after a
+     * restart. One that took this process down [EventAttempts.MAX_DEATHS] times while it was read
+     * is acknowledged without being read, and said so in the iMessage log; one that fails here
+     * (memory running out included) is given up on, so neither holds up every event after it.
+     */
+    private suspend fun take(id: String, event: PushEvent) {
+        try {
+            if (event is PushEvent.Message) {
+                if (!attempts.start(id)) {
+                    Log.w(TAG, "an event that took the iMessage process down is skipped (${kindOf(event.v1)})")
+                    store(DirectArchive.Update.Dropped(kindOf(event.v1), "reading it took the iMessage process down ${EventAttempts.MAX_DEATHS} times"))
+                } else {
+                    handle(event.v1)
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Log.w(TAG, "an event from Apple was not handled (${e::class.java.simpleName})", e)
+        }
+        try {
+            pipeline?.ack(id)
+        } catch (e: Exception) {
+            Log.w(TAG, "event not acknowledged", e)
+        }
+        attempts.done()
+    }
+
+    /** What kind of event [inst] is, for the log: its type's name, never its content. */
+    private fun kindOf(inst: MessageInst): String = inst.message::class.simpleName.orEmpty().ifEmpty { "event" }
+
+    /**
      * One message from Apple: once the user's addresses are known (until then nothing is
-     * acknowledged, so the journal keeps it), into the archive, then the delivery receipt.
+     * acknowledged, so the journal keeps it), into the archive, then the delivery receipt. Its
+     * reading and the receipt (the library's, on what the sender sent) are counted while they last
+     * ([EventAttempts.risky]).
      */
     private suspend fun handle(inst: MessageInst) {
         val me = handles.first { it.isNotEmpty() }.toSet()
-        DirectMessages.oneToOneChat(inst, me)?.let { (peer, guid) -> chatGuids.remember(peer, guid) }
+        // A chat's guid only from a message Apple could verify the sender of.
+        if (!inst.verificationFailed) DirectMessages.oneToOneChat(inst, me)?.let { (peer, guid) -> chatGuids.remember(peer, guid) }
+        attempts.risky()
         val update = try {
-            if (inst.message is PushChatMessage.SetTranscriptBackground) {
+            val mapped = if (inst.message is PushChatMessage.SetTranscriptBackground) {
                 backgrounds.receive(inst, me, Handles::display, texts)
             } else {
                 DirectArchive.map(inst, me, Handles::display, texts, ::describe)
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "message ${inst.message::class.simpleName} not mapped", e)
-            DirectArchive.Update.Ignore
+            if (mapped is DirectArchive.Update.Upsert) keepInlineFiles(inst)
+            mapped
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            // Memory run out on a picture included: this one is given up on, the next ones go on.
+            Log.w(TAG, "message ${kindOf(inst)} not mapped (${e::class.java.simpleName})", e)
+            DirectArchive.Update.Dropped(kindOf(inst), "it could not be read (${e::class.java.simpleName})")
+        } finally {
+            attempts.ended()
         }
-        if (update is DirectArchive.Update.Upsert) keepInlineFiles(inst)
         if (update != DirectArchive.Update.Ignore) store(update)
-        sendDeliveryAck(inst, me)
+        attempts.risky()
+        try {
+            sendDeliveryAck(inst, me)
+        } finally {
+            attempts.ended()
+        }
     }
 
     /** The library's description of an attachment, from which it is downloaded later; empty if it has none. */
@@ -175,17 +239,20 @@ class DirectEngine private constructor(private val app: Context) {
     }
 
     /**
-     * Small attachments come inside the message: they are written straight to the files the main
+     * Small attachments come inside the message: they are written next to the files the main
      * process looks for them in ([DirectMedia.extensionFor]), so no media bytes cross between the
-     * processes.
+     * processes; aside ([DirectMedia.pendingInlineFile]), as the main process moves each into place
+     * only once it has taken the message (one reusing another message's GUID is not, and never
+     * overwrites that message's files).
      */
     private fun keepInlineFiles(inst: MessageInst) {
         for (a in DirectArchive.attachments(DirectArchive.storedParts(inst.message))) {
             val bytes = a.inlineBytes?.takeIf { it.isNotEmpty() } ?: continue
             val file = MediaCache.fileFor(app, DirectArchive.mediaId(inst.id, a.idx), DirectMedia.extensionFor(a.mime, a.name), ChatService.IMESSAGE)
+            // The same message again (Apple's journal after a restart): its file is there.
             if (file.length() == bytes.size.toLong()) continue
             try {
-                MediaCache.writeAtomically(file, bytes)
+                MediaCache.writeAtomically(DirectMedia.pendingInlineFile(file), bytes)
             } catch (e: java.io.IOException) {
                 Log.w(TAG, "attachment not written", e)
             }
@@ -621,13 +688,16 @@ class DirectEngine private constructor(private val app: Context) {
         val partial = File.createTempFile(file.name + ".", MediaCache.PART_SUFFIX, file.parentFile)
         try {
             when (val type = attachment.aType) {
-                is AttachmentType.Inline -> partial.writeBytes(type.v1)
+                is AttachmentType.Inline -> {
+                    if (type.v1.size > DirectMedia.MAX_DOWNLOAD_BYTES) throw tooBigToDownload()
+                    partial.writeBytes(type.v1)
+                }
                 is AttachmentType.Mmcs -> {
                     val s = requireSession()
                     val largest = type.v1.maxByOrNull { it.size } ?: throw ImessageError(app.getString(R.string.imessage_direct_attachment_no_file))
                     // The library makes the file itself, as it does for OpenBubbles: only its name is taken here.
                     partial.delete()
-                    call { uniffi.rust_bridge.downloadMmcsFile(s, largest, partial.path, null) }
+                    downloadCapped(s, largest, partial.path, DirectMedia.MAX_DOWNLOAD_BYTES)
                 }
             }
             if (partial.length() <= 0 || !partial.renameTo(file)) {
@@ -638,6 +708,61 @@ class DirectEngine private constructor(private val app: Context) {
             partial.delete()
         }
     }
+
+    private fun tooBigToDownload(maxBytes: Long = DirectMedia.MAX_DOWNLOAD_BYTES) =
+        TooLarge(app.getString(R.string.imessage_direct_attachment_download_too_big, (maxBytes shr 20).toInt()))
+
+    /**
+     * Fetches [file] into [path] with the library, never more than [maxBytes] of it, whatever size
+     * the sender said it has: refused at once when it says more; else stopped once more has come,
+     * as the library counts it or as the file on disk grows, the partial file deleted. Throws
+     * [ImessageError] then, as for any download that fails.
+     */
+    private suspend fun downloadCapped(s: SharedPushStateHandle, file: MmcsFile, path: String, maxBytes: Long) {
+        if (file.size > maxBytes.toULong()) throw tooBigToDownload(maxBytes)
+        val target = File(path)
+        val over = java.util.concurrent.atomic.AtomicBoolean(false)
+        try {
+            coroutineScope {
+                val fetch = async {
+                    val self = coroutineContext[kotlinx.coroutines.Job]
+                    call { uniffi.rust_bridge.downloadMmcsFile(s, file, path, progress(maxBytes, over) { self?.cancel() }) }
+                }
+                val watch = launch {
+                    while (isActive) {
+                        if (target.length() > maxBytes) {
+                            over.set(true)
+                            fetch.cancel()
+                            break
+                        }
+                        delay(DOWNLOAD_WATCH_MS)
+                    }
+                }
+                try {
+                    fetch.await()
+                } finally {
+                    watch.cancel()
+                }
+            }
+        } catch (e: CancellationException) {
+            if (!over.get()) throw e
+        } finally {
+            // Also one that grew past it after it was last looked at.
+            if (target.length() > maxBytes) over.set(true)
+            if (over.get()) target.delete()
+        }
+        if (over.get()) throw tooBigToDownload(maxBytes)
+    }
+
+    /** The library's progress of a download: past [maxBytes], [over] is set and [stop] is called. */
+    private fun progress(maxBytes: Long, over: java.util.concurrent.atomic.AtomicBoolean, stop: () -> Unit) =
+        object : uniffi.rust_bridge.AttachmentProgressCallback {
+            override fun onProgress(transferred: ULong, total: ULong) {
+                if (transferred > maxBytes.toULong() || total > maxBytes.toULong()) {
+                    if (over.compareAndSet(false, true)) stop()
+                }
+            }
+        }
 
     /**
      * The library's conversation for [target] and the address to send from. A one-to-one chat
@@ -737,6 +862,9 @@ class DirectEngine private constructor(private val app: Context) {
 
         /** How long a delivery receipt may hold up the next message from Apple. */
         private const val RECEIPT_TIMEOUT_MS = 15_000L
+
+        /** How often a download's file is looked at while it comes ([downloadCapped]). */
+        private const val DOWNLOAD_WATCH_MS = 250L
 
         /** Added to the error when Apple's text gateway stays silent and the SIM route is not allowed yet. */
         const val NEEDS_SIM = "If this keeps happening, your carrier may verify the number with the SIM instead of a text."

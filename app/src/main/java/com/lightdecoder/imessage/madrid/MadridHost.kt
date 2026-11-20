@@ -297,6 +297,12 @@ class MadridHost private constructor(private val app: Context) : IMessageApps.Ho
         val ext = MadridApps.forApp(balloon) ?: return
         val guid = DirectArchive.guidOf(message.id) ?: return
         if (!sessions.isEngaged(balloon.session, now())) return
+        // Only a move in the conversation the session was opened in: a session's id is in every
+        // move of it, so anyone could send one naming it from another chat.
+        if (sessions.conversationOf(balloon.session) != conversationId) {
+            Log.w(TAG, "a move for an open session came from another conversation; not handed over")
+            return
+        }
         incoming.trySend {
             val conn = connection(ext)
             val api = conn.acquire() ?: return@trySend

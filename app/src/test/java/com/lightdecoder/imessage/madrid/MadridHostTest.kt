@@ -286,6 +286,26 @@ class MadridHostTest {
     }
 
     @Test
+    fun aMoveNamingAnOpenSessionFromAnotherChatIsNotHandedOver() {
+        assertTrue(tap("imsg:M1"))
+        waitFor("the tap") { fake.tapped != null }
+        // Carol's move, naming the session open in Bob's chat, in her own chat with the user.
+        val carol = "tel:+15551112222"
+        link.apply(
+            DirectArchive.map(
+                MessageInst("MC1", carol, ConversationData(listOf(me, carol), null, null, null), move("C1", session, "not hers"), 1_700_000_150_000UL, null, false, false, null),
+                setOf(me), Handles::display, DirectTexts(context),
+            ).let { DirectWire.decode(JSONObject(DirectWire.encode(it).toString())) },
+        )
+        // Bob's next move, in his chat: handed over, and only it.
+        link.apply(fromBob("M5", move("C1", session, "bob's"), 8))
+        waitFor("the move") { fake.updated.isNotEmpty() }
+        Thread.sleep(200)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(listOf("M5"), fake.updated.map { it.messageGuid })
+    }
+
+    @Test
     fun aGameStillOnItsWayCannotBeOpenedAndSaysSo() {
         val card = IMessageExtra.App(
             name = "GamePigeon", appId = 1124197642L, bundleId = ext.bundleId, url = "data:new", session = other, ldText = "Darts",

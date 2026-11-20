@@ -1015,7 +1015,7 @@ class BlueBubblesScreenTest {
             // She edits hers: "Edited" by its time as well, and a tap says when.
             val editedAt = System.currentTimeMillis()
             com.lightdecoder.imessage.direct.DirectLink.get(two.app)
-                .apply(com.lightdecoder.imessage.direct.DirectArchive.Update.Edit("imsg:H1", "Hers, changed", 0, editedAt))
+                .apply(com.lightdecoder.imessage.direct.DirectArchive.Update.Edit("imsg:H1", "Hers, changed", 0, editedAt, sender = "tel:+15551234567"))
             scenario.waitFor("her edit, marked") { activity ->
                 org.robolectric.shadows.ShadowLooper.idleMainLooper()
                 bubbleOf(activity, "Hers, changed")?.findViewById<View>(R.id.edited)?.visibility == View.VISIBLE
@@ -3070,7 +3070,8 @@ class BlueBubblesScreenTest {
                 activity.setAttachment(android.net.Uri.fromFile(video))
                 activity.findViewById<View>(R.id.send).performClick()
             }
-            two.waitUntil("the video sent and stored") { imRepo.message("imsg:S1") != null }
+            // Stored, and its file recorded (just after the row is written, under the link's lock).
+            two.waitUntil("the video sent and stored") { imRepo.message("imsg:S1")?.media?.singleOrNull()?.localPath?.isNotEmpty() == true }
             val sent = asked(asked, com.lightdecoder.imessage.direct.DirectWire.SEND).map(com.lightdecoder.imessage.direct.DirectWire.SendRequest::fromJson).single()
             assertEquals("video/quicktime", sent.attachments.single().mime)
             // The sent file is the message's: the outbox copy moved to where a download would be kept.
