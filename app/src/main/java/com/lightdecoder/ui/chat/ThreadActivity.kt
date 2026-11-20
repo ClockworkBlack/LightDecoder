@@ -111,8 +111,21 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private var participants: List<ParticipantRow> = emptyList()
     private var title = ""
 
-    /** What the toolbar's avatar was last drawn for (name, key, colour). */
-    private var shownAvatar: Triple<String, String, String>? = null
+    /** What the toolbar's avatar was last drawn for (name, key, colour, picture). */
+    private var shownAvatar: List<String>? = null
+
+    /** The picture the conversation is shown by (an iMessage group's photo, a person's picture: [AvatarPhotos]), as the last load found it. */
+    private var avatarPhoto: File? = null
+
+    /** A group's members' pictures, by their address's key ([com.lightdecoder.imessage.IMessageAddress.key]), as the last load found them. */
+    private var memberPhotos: Map<String, File> = emptyMap()
+
+    /** The picture beside [row] in a group: its sender's, if one is kept. */
+    private fun senderPhoto(row: MessageRow): File? {
+        if (memberPhotos.isEmpty()) return null
+        val key = com.lightdecoder.imessage.IMessageAddress.key(row.senderId) ?: return null
+        return memberPhotos[key]
+    }
 
     /** How many of the newest messages are shown; grows as the user scrolls up. */
     private var windowSize = PAGE
@@ -377,7 +390,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         setUpList()
         effectPlayer = EffectPlayer(this, binding.messages)
         setUpComposer()
-        binding.phoneHeader.setOnClickListener { binding.toolbar.showOverflowMenu() }
+        // As on an iPhone, the name and picture at the top open the chat's details (an iMessage chat's,
+        // or a Messages conversation's with the person's iMessage chat in it); elsewhere the menu.
+        binding.phoneHeader.setOnClickListener { if (!openDetails()) binding.toolbar.showOverflowMenu() }
         updateThreadsInChat()
         updatePhoneStyle()
         lifecycleScope.launch { voicePlayer.state.collect { adapter.updateVoiceViews(binding.messages, it) } }
@@ -438,6 +453,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             it.onPicture = binding.chatBackground.visibility == View.VISIBLE
             it.voiceDuration = voicePlayer::durationOf
             it.voiceState = voicePlayer.state.value
+            it.senderPhoto = ::senderPhoto
         }
         binding.messages.adapter = adapter
         updatePhoneStyle()
@@ -518,6 +534,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             // or who can be replied to until the new one's has been read.
             conversation = null
             participants = emptyList()
+            avatarPhoto = null
+            memberPhotos = emptyMap()
             renderConversation()
             if (started) manager.watchPresence(id)
             // Android pauses a thread before handing it a new intent (onResume then sets the mark);
@@ -660,6 +678,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             it.onPicture = binding.chatBackground.visibility == View.VISIBLE
             it.voiceDuration = voicePlayer::durationOf
             it.voiceState = voicePlayer.state.value
+            it.senderPhoto = ::senderPhoto
         }
         layoutManager = LinearLayoutManager(this).apply { stackFromEnd = true }
         binding.messages.layoutManager = layoutManager
@@ -796,6 +815,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val reach: String? = null,
         /** The background behind the messages: this iMessage chat's, or its companion's ([ChatBackgrounds]). */
         val background: com.lightdecoder.imessage.direct.ChatBackgrounds.Background? = null,
+        /** The picture the conversation is shown by at the top ([AvatarPhotos]). */
+        val photo: File? = null,
+        /** A group's members' pictures ([memberPhotos]). */
+        val memberPhotos: Map<String, File> = emptyMap(),
     )
 
     /**
@@ -876,6 +899,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 direct = direct?.active == true,
                 reach = reach,
                 background = background,
+                photo = AvatarPhotos.forConversation(applicationContext, link.service, id, conversation?.isGroup == true, people),
+                memberPhotos = if (conversation?.isGroup == true) AvatarPhotos.members(applicationContext, people) else emptyMap(),
             )
         }
         if (grow) growPending = false
@@ -903,6 +928,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         conversation = snapshot.conversation
         participants = snapshot.participants
         historyComplete = snapshot.historyComplete
+        avatarPhoto = snapshot.photo
+        memberPhotos = snapshot.memberPhotos
         renderConversation()
         renderBackground(snapshot.background)
         watchSendLater(messages)
@@ -1204,21 +1231,28 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 .joinToString(", ").ifBlank { getString(R.string.chat_untitled) }
         // The person's (or group's) avatar next to the name, as in the conversation list:
         // only redrawn when it changes, and before the title, which is what the rest follows.
-        val avatarKey = Triple(title, conv?.id ?: conversationId, conv?.avatarColor.orEmpty())
+        val key = conv?.id ?: conversationId
+        val color = conv?.avatarColor.orEmpty()
+        val photo = avatarPhoto
+        val avatarKey = listOf(title, key, color, photo?.path.orEmpty())
         if (phoneStyle) {
             // As on an iPhone: the picture in the middle of the bar, the name under it.
             shownAvatar = null
             binding.toolbar.logo = null
-            Avatars.bind(binding.phoneAvatar, avatarKey.first, avatarKey.second, avatarKey.third)
+            Avatars.bind(binding.phoneAvatar, title, key, color, photo)
             binding.phoneName.text = title
             binding.phoneHeader.contentDescription = getString(R.string.imessage_phone_header, title)
         } else if (avatarKey != shownAvatar) {
             shownAvatar = avatarKey
             val density = resources.displayMetrics.density
-            val avatar = Avatars.drawable(this, avatarKey.first, avatarKey.second, avatarKey.third, (TOOLBAR_AVATAR_DP * density).toInt())
+            val avatar = Avatars.drawable(this, title, key, color, (TOOLBAR_AVATAR_DP * density).toInt(), photo)
             binding.toolbar.logo = android.graphics.drawable.InsetDrawable(avatar, 0, 0, (TOOLBAR_AVATAR_GAP_DP * density).toInt(), 0)
         }
         supportActionBar?.title = title
+        // The bar (its name and picture) opens the details where there are any; elsewhere it is no button.
+        val details = hasDetails()
+        binding.toolbar.setOnClickListener(if (details) View.OnClickListener { openDetails() } else null)
+        binding.toolbar.isClickable = details
         renderPeerActivity()
         invalidateOptionsMenu()
         renderComposerState()
@@ -3021,6 +3055,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 it.appleReceipts = { row -> appleReceipts(row, manager.service, iMessageIds) }
                 it.voiceDuration = voicePlayer::durationOf
                 it.voiceState = voicePlayer.state.value
+                it.senderPhoto = ::senderPhoto
             },
             send = { text -> sendThreadReply(rootId, text) },
             onClosed = { panel -> if (threadPanel === panel) threadPanel = null },
@@ -3753,6 +3788,23 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      * in a one-to-one conversation of a phone-number service. Null in a group,
      * in email, or without a number.
      */
+    /**
+     * The chat's details ([ChatDetailsActivity]), as an iPhone opens them from the name at the top:
+     * for an iMessage chat, and for a Messages conversation with the person's iMessage chat in it
+     * (both are shown there). False (nothing opened) for every other conversation.
+     */
+    @VisibleForTesting
+    internal fun openDetails(): Boolean {
+        val conv = conversation ?: return false
+        if (!hasDetails()) return false
+        startActivity(ChatDetailsActivity.intent(this, conv.id, manager.service, companionId.takeIf { manager.service == ChatService.MESSAGES }))
+        return true
+    }
+
+    /** Whether this conversation has details to open ([openDetails]): an iMessage chat, or a Messages conversation with one in it. */
+    private fun hasDetails(): Boolean =
+        conversation != null && (manager.service == ChatService.IMESSAGE || (manager.service == ChatService.MESSAGES && companionId != null))
+
     private fun callNumber(): String? {
         if (manager.service == ChatService.GMAIL) return null
         return otherAddress()?.takeIf { it.count(Char::isDigit) >= MIN_CALL_DIGITS && !it.contains('@') }

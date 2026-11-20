@@ -19,7 +19,8 @@ import org.json.JSONObject
  * The ":imessage" process's service: keeps the iMessage session connected (in the foreground,
  * like the Google Messages link's service) so iMessages reach the Messages tab whether a screen is
  * open or not, answers the main process's requests ([DirectWire]: send, unsend, reach, edit,
- * react, typing, read, download, an iMessage app's update, a chat's background, Send Later taken back), and hands what Apple sends to the main process's
+ * react, typing, read, download, an iMessage app's update, a chat's background, Send Later taken back,
+ * a group's name, members and photo), and hands what Apple sends to the main process's
  * [DirectSinkService].
  */
 class DirectService : Service() {
@@ -66,8 +67,24 @@ class DirectService : Service() {
                 DirectWire.ok()
             }
             DirectWire.READ -> {
-                engine.read(target(request), request.getString("guid"))
+                val r = DirectWire.ReadRequest.fromJson(request)
+                engine.read(r.target, r.guid, r.receipts)
                 DirectWire.ok()
+            }
+            DirectWire.RENAME -> {
+                val r = DirectWire.RenameRequest.fromJson(request)
+                DirectWire.guid(engine.rename(r.target, r.name))
+            }
+            DirectWire.MEMBERS -> {
+                val r = DirectWire.MembersRequest.fromJson(request)
+                DirectWire.guid(engine.members(r.target, r.participants, r.groupVersion))
+            }
+            DirectWire.GROUP_PHOTO -> {
+                val r = DirectWire.GroupPhotoRequest.fromJson(request)
+                // Only a picture the main process put where group photos are kept.
+                val path = r.path?.takeIf { GroupPhotos.isOurs(this, java.io.File(it)) }
+                if (r.path != null && path == null) throw DirectEngine.ImessageError(getString(R.string.imessage_group_photo_unreadable))
+                DirectWire.guid(engine.groupPhoto(r.target, path, r.groupVersion))
             }
             DirectWire.DOWNLOAD -> {
                 // Written only into the app's own media folders, never over the library's state or outside the app.

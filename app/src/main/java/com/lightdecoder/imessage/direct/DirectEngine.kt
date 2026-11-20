@@ -29,6 +29,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import uniffi.rust_bridge.AttachmentType
+import uniffi.rust_bridge.ChatRenameMessage
 import uniffi.rust_bridge.ConversationData
 import uniffi.rust_bridge.EditMessage
 import uniffi.rust_bridge.EventPipeline
@@ -129,6 +130,9 @@ class DirectEngine private constructor(private val app: Context) {
         },
     )
 
+    /** Group photos from Apple: fetched, their square picture written for the main process. */
+    private val groupPhotos = IncomingGroupPhotos(app) { file, path, maxBytes -> downloadCapped(requireSession(), file, path, maxBytes) }
+
     /** How often reading each of Apple's events took this process down ([EventAttempts]). */
     private val attempts = EventAttempts(File(app.filesDir, "imessage/event-attempts"))
 
@@ -205,10 +209,10 @@ class DirectEngine private constructor(private val app: Context) {
         if (!inst.verificationFailed) DirectMessages.oneToOneChat(inst, me)?.let { (peer, guid) -> chatGuids.remember(peer, guid) }
         attempts.risky()
         val update = try {
-            val mapped = if (inst.message is PushChatMessage.SetTranscriptBackground) {
-                backgrounds.receive(inst, me, Handles::display, texts)
-            } else {
-                DirectArchive.map(inst, me, Handles::display, texts, ::describe)
+            val mapped = when (inst.message) {
+                is PushChatMessage.SetTranscriptBackground -> backgrounds.receive(inst, me, Handles::display, texts)
+                is PushChatMessage.IconChange -> groupPhotos.receive(inst, me, Handles::display, texts)
+                else -> DirectArchive.map(inst, me, Handles::display, texts, ::describe)
             }
             if (mapped is DirectArchive.Update.Upsert) keepInlineFiles(inst)
             mapped
@@ -612,6 +616,72 @@ class DirectEngine private constructor(private val app: Context) {
         }
     }
 
+    /**
+     * Renames the group [target] to [name] ("" takes its name off), as OpenBubbles' `renameChat`
+     * does: rustpush's [PushChatMessage.RenameMessage], to its members (and the user's other
+     * devices). Returns its GUID once Apple confirmed it.
+     */
+    suspend fun rename(target: DirectWire.Target, name: String): String {
+        val s = requireSession()
+        val (conversation, from) = conversationOf(requireGroup(target))
+        val inst = uniffi.rust_bridge.newMsg(conversation, from, PushChatMessage.RenameMessage(ChatRenameMessage(name)))
+            .copy(sentTimestamp = System.currentTimeMillis().toULong())
+        sendAndConfirm(s, inst, Sent.RENAME)
+        return inst.id
+    }
+
+    /**
+     * Changes the group [target]'s members to [participants] (the user's own address among them, or
+     * not: the user leaves), as of [groupVersion], as OpenBubbles' `chatParticipant` and `leaveChat`
+     * do: rustpush's [PushChatMessage.ChangeParticipants] to its members as they were, and the ones
+     * added (rustpush adds them itself). Returns its GUID once Apple confirmed it.
+     */
+    suspend fun members(target: DirectWire.Target, participants: List<String>, groupVersion: Long): String {
+        val s = requireSession()
+        val group = requireGroup(target)
+        val (conversation, from) = conversationOf(group)
+        val newParticipants = DirectMessages.newParticipants(participants, group.from, from, myHandles.toSet())
+        if (newParticipants.none { it != from }) throw ImessageError(app.getString(R.string.imessage_group_nobody))
+        val change = uniffi.rust_bridge.ChangeParticipantMessage(newParticipants, groupVersion.coerceAtLeast(0).toULong())
+        val inst = uniffi.rust_bridge.newMsg(conversation, from, PushChatMessage.ChangeParticipants(change))
+            .copy(sentTimestamp = System.currentTimeMillis().toULong())
+        sendAndConfirm(s, inst, Sent.MEMBERS)
+        return inst.id
+    }
+
+    /**
+     * Sets the group [target]'s photo to the square JPEG at [path], or takes it off ([path] null), as
+     * of [groupVersion], as OpenBubbles' `setChatIcon` and `deleteChatIcon` do: the picture uploaded
+     * to Apple's file servers (as a background's poster is), and rustpush's [PushChatMessage.IconChange]
+     * naming it. Returns its GUID once Apple confirmed it.
+     */
+    suspend fun groupPhoto(target: DirectWire.Target, path: String?, groupVersion: Long): String {
+        val s = requireSession()
+        val (conversation, from) = conversationOf(requireGroup(target))
+        val file = path?.let { uploadGroupPhoto(s, File(it)) }
+        val change = uniffi.rust_bridge.IconChangeMessage(file, groupVersion.coerceAtLeast(0).toULong())
+        val inst = uniffi.rust_bridge.newMsg(conversation, from, PushChatMessage.IconChange(change))
+            .copy(sentTimestamp = System.currentTimeMillis().toULong())
+        sendAndConfirm(s, inst, Sent.GROUP_PHOTO)
+        return inst.id
+    }
+
+    /** [target], when it is a group (with its guid): only a group has a name, members and a photo to change. */
+    private fun requireGroup(target: DirectWire.Target): DirectWire.Target {
+        if (target.groupGuid.isNullOrBlank()) throw ImessageError(app.getString(R.string.imessage_group_not_a_group))
+        return target
+    }
+
+    /** The group photo at [jpeg] on Apple's file servers: where it is, and its key. */
+    private suspend fun uploadGroupPhoto(s: SharedPushStateHandle, jpeg: File): MmcsFile {
+        if (!jpeg.isFile || jpeg.length() == 0L || jpeg.length() > IncomingGroupPhotos.MAX_DOWNLOAD_BYTES) {
+            throw ImessageError(app.getString(R.string.imessage_group_photo_unreadable))
+        }
+        val uploaded = call { uniffi.rust_bridge.uploadMmcsAttachment(s, jpeg.path, APP_IMAGE_MIME, GROUP_PHOTO_UTI, GROUP_PHOTO_NAME, null) }
+        return (uploaded.aType as? AttachmentType.Mmcs)?.v1?.singleOrNull()
+            ?: throw ImessageError(app.getString(R.string.imessage_group_photo_upload))
+    }
+
     /** The photo at [jpeg], or [style] (a gradient or dynamic one), as a background poster on Apple's file servers. */
     private suspend fun uploadPoster(s: SharedPushStateHandle, jpeg: File?, style: BackgroundStyle?): MmcsFile =
         OutgoingBackgrounds(
@@ -667,12 +737,14 @@ class DirectEngine private constructor(private val app: Context) {
 
     /**
      * The user read the chat up to [guid]: the user's other devices are told (they clear it too),
-     * and with read receipts on, the other person of a one-to-one chat. Apple does not answer it.
+     * and with read receipts on, the other person of a one-to-one chat: as the chat's own choice
+     * says ([receipts], its details' "Send Read Receipts"), else as the iMessage screen's setting
+     * does. Apple does not answer it.
      */
-    suspend fun read(target: DirectWire.Target, guid: String) {
+    suspend fun read(target: DirectWire.Target, guid: String, receipts: Boolean? = null) {
         val s = requireSession()
         val (conversation, from) = conversationOf(target)
-        val to = DirectMessages.readReceiptParticipants(target, DirectPrefs.sendReadReceipts(app))
+        val to = DirectMessages.readReceiptParticipants(target, receipts ?: DirectPrefs.sendReadReceipts(app))
         val receipt = conversation.copy(participants = (to + from).distinct(), afterGuid = null)
         sendOnly(s, uniffi.rust_bridge.newMsg(receipt, from, PushChatMessage.Read).copy(id = guid))
     }
@@ -786,6 +858,9 @@ class DirectEngine private constructor(private val app: Context) {
         REACTION(R.string.imessage_direct_reaction_not_confirmed, R.string.imessage_direct_reaction_refused),
         UNSCHEDULE(R.string.imessage_direct_unschedule_not_confirmed, R.string.imessage_direct_unschedule_refused),
         BACKGROUND(R.string.imessage_direct_background_not_confirmed, R.string.imessage_direct_background_refused),
+        RENAME(R.string.imessage_direct_group_not_confirmed, R.string.imessage_direct_group_refused),
+        MEMBERS(R.string.imessage_direct_group_not_confirmed, R.string.imessage_direct_group_refused),
+        GROUP_PHOTO(R.string.imessage_direct_group_not_confirmed, R.string.imessage_direct_group_refused),
     }
 
     /**
@@ -862,6 +937,10 @@ class DirectEngine private constructor(private val app: Context) {
         private const val POSTER_MIME = "application/zip"
         private const val POSTER_UTI = "public.zip-archive"
         private const val POSTER_NAME = "transcriptBackground.zip"
+
+        /** How a group photo is uploaded (a square JPEG; Apple keeps it as the transfer "GroupPhotoImage"). */
+        private const val GROUP_PHOTO_UTI = "public.jpeg"
+        private const val GROUP_PHOTO_NAME = "GroupPhotoImage.jpg"
 
         /** How long a delivery receipt may hold up the next message from Apple. */
         private const val RECEIPT_TIMEOUT_MS = 15_000L

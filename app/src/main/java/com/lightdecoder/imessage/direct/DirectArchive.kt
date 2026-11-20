@@ -135,6 +135,11 @@ object DirectArchive {
              * they are (it may only add someone, said in a row of its own: see DirectLink).
              */
             val membersChanged: Boolean = false,
+            /**
+             * The group's version as of this event (a change of its members or of its photo carries
+             * one: [GroupVersions]); null when it says nothing about it.
+             */
+            val groupVersion: Long? = null,
         ) : Update()
 
         /**
@@ -230,6 +235,21 @@ object DirectArchive {
         ) : Update()
 
         /**
+         * A group's photo was set or taken off ([PushChatMessage.IconChange]), as of the group's
+         * [version] (an older one than the photo's is ignored): the group of [groupGuid] (stored
+         * as [conversationId]), the square picture to show from now on at [path] (written by the
+         * ":imessage" process where the group photos are kept, [GroupPhotos]; null: none), and the
+         * row saying who did it ([row], "Bob changed the group photo.").
+         */
+        data class GroupPhoto(
+            val conversationId: String,
+            val groupGuid: String,
+            val version: Long,
+            val path: String?,
+            val row: Upsert,
+        ) : Update()
+
+        /**
          * An event from Apple the ":imessage" process did not take: [what] kind of event it was and
          * [why] (kinds and reasons only, never its text, names or addresses), for the iMessage log.
          */
@@ -250,6 +270,9 @@ object DirectArchive {
         val youObject: String
 
         fun named(who: String, name: String): String
+
+        /** Someone took the group's name off (a rename to nothing): "Bob removed the name from the conversation." */
+        fun nameRemoved(who: String): String
         fun added(who: String, whom: String): String
         fun removed(who: String, whom: String): String
         fun left(who: String): String
@@ -331,7 +354,9 @@ object DirectArchive {
             is PushChatMessage.RenameMessage -> {
                 val conversation = inst.conversation ?: return Update.Ignore
                 val who = actor(sender, fromMe, nameOf, texts) ?: return Update.Ignore
-                groupEvent(inst, conversation, conversation.participants, m.v1.newName, me, nameOf, texts.named(who, m.v1.newName), renamed = true, now = now)
+                val newName = m.v1.newName
+                val text = if (newName.isBlank()) texts.nameRemoved(who) else texts.named(who, newName)
+                groupEvent(inst, conversation, conversation.participants, newName, me, nameOf, text, renamed = true, now = now)
             }
             is PushChatMessage.ChangeParticipants -> {
                 val conversation = inst.conversation ?: return Update.Ignore
@@ -339,13 +364,19 @@ object DirectArchive {
                     ?: return Update.Ignore
                 val event = groupEvent(inst, conversation, m.v1.newParticipants, conversation.cvName, me, nameOf, text, now = now)
                 // Removed from it, left it, or added back: whether the user can still write in it.
-                (event as? Update.Upsert)?.copy(member = m.v1.newParticipants.any { it in me }, membersChanged = true) ?: event
+                (event as? Update.Upsert)?.copy(
+                    member = m.v1.newParticipants.any { it in me }, membersChanged = true, groupVersion = groupVersionOf(m.v1.groupVersion),
+                ) ?: event
             }
+            // The row alone, with the group's version: the photo itself is fetched by the ":imessage"
+            // process, which then makes the change a [groupPhoto] (DirectEngine; this is what is left
+            // when it could not be fetched).
             is PushChatMessage.IconChange -> {
                 val conversation = inst.conversation ?: return Update.Ignore
                 val who = actor(sender, fromMe, nameOf, texts) ?: return Update.Ignore
                 val text = if (m.v1.file != null) texts.changedPhoto(who) else texts.removedPhoto(who)
-                groupEvent(inst, conversation, conversation.participants, conversation.cvName, me, nameOf, text, now = now)
+                val event = groupEvent(inst, conversation, conversation.participants, conversation.cvName, me, nameOf, text, now = now)
+                (event as? Update.Upsert)?.copy(groupVersion = groupVersionOf(m.v1.groupVersion)) ?: event
             }
             is PushChatMessage.Error ->
                 if (fromMe) Update.Failed(messageId(m.v1.forUuid), m.v1.statusStr) else Update.Ignore
@@ -741,6 +772,38 @@ object DirectArchive {
             parts = listOf(PartDto(partId = "0", kind = "text", text = text)),
         )
         return Update.Background(chat.conversationId, chat.groupGuid, chat.peer, backgroundVersion(m), path, Update.Upsert(conv, row), style)
+    }
+
+    /** A group's version as Apple counts it (a ULong), as the archive keeps it: never past what a Long holds. */
+    fun groupVersionOf(version: ULong): Long = if (version > Long.MAX_VALUE.toULong()) Long.MAX_VALUE else version.toLong()
+
+    /**
+     * A group's photo change from Apple ([PushChatMessage.IconChange]) as the archive takes it: the
+     * group (by its guid), the picture the ":imessage" process saved for it at [path] (null: the
+     * photo was taken off), as of the group's version, and the row saying who did it ("Bob changed
+     * the group photo.", as an iPhone puts it). Ignored for one nobody can take it from (from no one,
+     * or one Apple could not verify) and for anything that is not a group's (no guid). Whether the
+     * sender is in the group is the main process's to tell (DirectLink).
+     */
+    fun groupPhoto(
+        inst: MessageInst,
+        me: Set<String>,
+        nameOf: (String) -> String,
+        texts: Texts,
+        path: String?,
+        now: Long = System.currentTimeMillis(),
+    ): Update {
+        val m = (inst.message as? PushChatMessage.IconChange)?.v1 ?: return Update.Ignore
+        val sender = inst.sender ?: return Update.Ignore
+        if (inst.verificationFailed) return Update.Ignore
+        val conversation = inst.conversation ?: return Update.Ignore
+        val guid = conversation.senderGuid?.takeIf { it.isNotBlank() } ?: return Update.Ignore
+        val who = actor(sender, sender in me, nameOf, texts) ?: return Update.Ignore
+        val text = if (path != null) texts.changedPhoto(who) else texts.removedPhoto(who)
+        val version = groupVersionOf(m.groupVersion)
+        val row = groupEvent(inst, conversation, conversation.participants, conversation.cvName, me, nameOf, text, now = now) as? Update.Upsert
+            ?: return Update.Ignore
+        return Update.GroupPhoto(groupConversationId(guid), guid, version, path, row.copy(groupVersion = version))
     }
 
     private fun actor(sender: String?, fromMe: Boolean, nameOf: (String) -> String, texts: Texts): String? = when {

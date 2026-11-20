@@ -102,6 +102,7 @@ class PhoneStyleScreenTest {
         DirectPrefs.setPhoneStyleOn(two.app, true)
         DirectPrefs.setReplyThreadsInChat(two.app, false)
         ChatBackgrounds.dir(two.app).deleteRecursively()
+        com.lightdecoder.imessage.direct.GroupPhotos.dir(two.app).deleteRecursively()
         IMessagePrefs.setEnabled(two.app, false)
         DirectPrefs.setRegistered(two.app, false)
         DirectLink.resetForTesting()
@@ -239,6 +240,44 @@ class PhoneStyleScreenTest {
         message("G6", "Don't forget the snacks", now - 3 * 60_000 + 20_000, mine = false, chat = GROUP, sender = ben)
         message("G7", "And water. Lots of water.", now - 3 * 60_000 + 30_000, mine = false, chat = GROUP, sender = ben)
         message("G8", "On it", now - 60_000, mine = true, chat = GROUP)
+    }
+
+    /** "Ski trip": the user and three others, with a group photo (a drawn sky and mountains), for its details. */
+    private fun detailsGroup() {
+        imRepo.upsertConversation(
+            ConversationDto(
+                id = DETAILS_GROUP, name = "Ski trip", isGroup = true, type = IMessageManager.TRANSPORT, defaultOutgoingId = "tel:+15550000001",
+                participants = listOf(
+                    ParticipantDto(id = "me", isMe = true),
+                    ParticipantDto(id = "+15551234567", name = "Alice Martin", number = "+15551234567", formattedNumber = "+15551234567"),
+                    ParticipantDto(id = "+15557654321", name = "Ben Ortiz", number = "+15557654321", formattedNumber = "+15557654321"),
+                    ParticipantDto(id = "carol@example.com", name = "Carol Diaz", number = "carol@example.com", formattedNumber = "carol@example.com"),
+                ),
+            ),
+        )
+        message("D1", "Who has chains for the car?", System.currentTimeMillis() - 10 * 60_000, mine = false, chat = DETAILS_GROUP)
+        val side = 570
+        val bitmap = Bitmap.createBitmap(side, side, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        canvas.drawPaint(
+            android.graphics.Paint().apply {
+                shader = android.graphics.LinearGradient(0f, 0f, 0f, side.toFloat(), 0xFF3A7BD5.toInt(), 0xFFB6E3FF.toInt(), android.graphics.Shader.TileMode.CLAMP)
+            },
+        )
+        val mountains = android.graphics.Path().apply {
+            moveTo(0f, side * 0.8f)
+            lineTo(side * 0.3f, side * 0.42f)
+            lineTo(side * 0.5f, side * 0.62f)
+            lineTo(side * 0.72f, side * 0.3f)
+            lineTo(side.toFloat(), side * 0.75f)
+            lineTo(side.toFloat(), side.toFloat())
+            lineTo(0f, side.toFloat())
+            close()
+        }
+        canvas.drawPath(mountains, android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFF5F7FA.toInt() })
+        val file = com.lightdecoder.imessage.direct.GroupPhotos.incomingFile(two.app)
+        file.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 90, it) }
+        com.lightdecoder.imessage.direct.GroupPhotos(two.app).apply(DETAILS_GROUP, file, 1)
     }
 
     /** Alice changed the chat's background to a gradient, as of [version]. */
@@ -1198,6 +1237,18 @@ class PhoneStyleScreenTest {
                 scenario.onActivity { shoot(it, File(out, "group-$suffix.png")) }
             }
         }
+        // A group's details, as an iPhone's: its photo and name, its members (with Remove: four people), Hide Alerts, Leave.
+        detailsGroup()
+        for (night in listOf(false, true)) {
+            RuntimeEnvironment.setQualifiers(if (night) "+night" else "+notnight")
+            ActivityScenario.launch<com.lightdecoder.ui.chat.ChatDetailsActivity>(
+                com.lightdecoder.ui.chat.ChatDetailsActivity.intent(two.app, DETAILS_GROUP, ChatService.IMESSAGE),
+            ).use { scenario ->
+                scenario.waitFor("the details") { it.details?.photo != null && it.findViewById<View>(R.id.leave).isShown }
+                two.settle()
+                scenario.onActivity { shoot(it, File(out, "chat-details-${if (night) "dark" else "light"}.png")) }
+            }
+        }
         // Right to left.
         RuntimeEnvironment.setQualifiers("+ldrtl-notnight")
         launch(GROUP).use { scenario ->
@@ -1278,6 +1329,7 @@ class PhoneStyleScreenTest {
         const val ALICE_DIRECT = "imsg:tel:+15551234567"
         const val GROUP = "imsg:group:11111111-2222-3333-4444-555555555555"
         const val REPLY_CHAT = "imsg:tel:+15551230000"
+        const val DETAILS_GROUP = "imsg:group:66666666-7777-8888-9999-000000000000"
         const val SHOTS_PROPERTY = "lightdecoder.uiShots"
     }
 }

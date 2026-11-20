@@ -23,7 +23,9 @@ internal object InboxLists {
         val own = from.repo.conversations(folder).map { ConversationItem(it, ConversationTitles.of(context, from.repo, it), from.service) }
         val extra = if (iMessage == null) emptyList() else runCatching { iMessage.repo.conversations(folder) }.getOrDefault(emptyList())
             .map { ConversationItem(it, ConversationTitles.of(context, iMessage.repo, it), iMessage.service) }
-        return if (extra.isEmpty()) own else foldIn(own, extra, BlueBubblesLinks.pairs(context.applicationContext))
+        val listed = if (extra.isEmpty()) own else foldIn(own, extra, BlueBubblesLinks.pairs(context.applicationContext))
+        // The pictures they are shown by: a group's photo, a person's picture.
+        return runCatching { AvatarPhotos.withPhotos(context.applicationContext, listed) }.getOrDefault(listed)
     }
 
     /** [from]'s inbox as its tab lists it: for Messages with Blue Bubbles on, the iMessage chats folded in. Runs on IO. */

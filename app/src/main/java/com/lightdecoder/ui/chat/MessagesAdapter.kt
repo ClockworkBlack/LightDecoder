@@ -72,6 +72,9 @@ class MessagesAdapter(
     /** A picture is behind the messages: iPhone-style times and notices keep their pill, to stay readable on it. */
     var onPicture = false
 
+    /** The picture of whoever sent a message, for the avatar beside it in a group ([AvatarPhotos]); null for their initials. */
+    var senderPhoto: (MessageRow) -> java.io.File? = { null }
+
     interface Callbacks {
         fun onMessageLongPress(row: MessageRow)
         fun onFailedTap(row: MessageRow)
@@ -698,7 +701,7 @@ class MessagesAdapter(
         b.avatar.visibility = if (avatar) View.VISIBLE else View.GONE
         if (avatar) {
             val row = item.row
-            Avatars.bind(b.avatar, row.senderName.ifBlank { "?" }, row.senderId.ifBlank { row.senderName }, "")
+            Avatars.bind(b.avatar, row.senderName.ifBlank { "?" }, row.senderId.ifBlank { row.senderName }, "", senderPhoto(row))
         }
         val sender = b.sender.layoutParams as android.widget.LinearLayout.LayoutParams
         sender.marginStart = holder.senderMarginStart + if (phone) holder.phoneBubble.gutter + holder.dp(2f) else 0

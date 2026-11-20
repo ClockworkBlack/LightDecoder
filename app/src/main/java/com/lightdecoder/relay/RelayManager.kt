@@ -174,6 +174,8 @@ class RelayManager private constructor(
          */
         val pollNotifications: Boolean = Build.VERSION.SDK_INT < Build.VERSION_CODES.P,
         val notificationCheckMs: Long = 120_000,
+        /** People's pictures are asked for this long after the link came up ([startContactPhotos]), so the catch-up goes first. */
+        val contactPhotosDelayMs: Long = 20_000,
     )
 
     private val app: Context = context.applicationContext
@@ -1468,6 +1470,7 @@ class RelayManager private constructor(
         gate.wipe { repo.clearAll() }
         runCatching { com.lightdecoder.reactions.ReactionTimes.get(app).clear(service) }
         runCatching { com.lightdecoder.reactions.ReadTimes.get(app).clear(service) }
+        runCatching { ContactPhotos.get(app).clear() }
         com.lightdecoder.chat.ShareShortcuts.removeAll(app, service)
         RelayPrefs.setArchiveOwner(app, "", "")
         RelayPrefs.setUnconfirmedSends(app, emptyMap())
@@ -1920,11 +1923,63 @@ class RelayManager private constructor(
         synchronized(jobsLock) {
             if (sync?.isActive == false || connection.get() != current) return false
             if (list != null) startCatchUp(list, catchUpMark?.takeIf { it.connection == current })
+            if (list != null) startContactPhotos(list)
             val depth = RelayPrefs.backfillDepth(app)
             val running = backfillJob?.isActive == true
             if (depth != BackfillDepth.OFF && RelayPrefs.backfillDoneAt(app) == 0L && !running) startBackfill(depth)
         }
         return list != null
+    }
+
+    /**
+     * People's pictures as Google Messages has them ([ContactPhotos]), a while after the link came
+     * up and never alongside other paging: for the people of the listed [conversations] not asked
+     * about for a week, a few at a time. Runs with the connection (cancelled with it); a failure is
+     * only logged, and the next connection asks again.
+     */
+    private fun startContactPhotos(conversations: List<ConversationDto>) {
+        scope.launch(catchUps) {
+            delay(timing.contactPhotosDelayMs)
+            pager.withLock {
+                try {
+                    fetchContactPhotos(conversations)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: RuntimeException) {
+                    RelayLog.add(app, "Contact pictures not fetched: ${e.javaClass.simpleName}")
+                }
+            }
+        }
+    }
+
+    private fun fetchContactPhotos(conversations: List<ConversationDto>) {
+        val photos = ContactPhotos.get(app)
+        // Google Messages' participant id -> their number.
+        val people = LinkedHashMap<String, String>()
+        for (c in conversations) {
+            for (p in c.participants) {
+                if (p.isMe || p.id.isEmpty()) continue
+                val number = p.number.ifBlank { p.formattedNumber }
+                if (number.isNotBlank()) people.putIfAbsent(p.id, number)
+            }
+        }
+        val due = photos.due(people, System.currentTimeMillis()).entries.take(MAX_CONTACT_PHOTOS)
+        var changed = false
+        for (batch in due.chunked(CONTACT_PHOTOS_BATCH)) {
+            val asked = batch.associate { it.key to it.value }
+            val thumbnails = try {
+                requireBridge().participantThumbnails(asked.keys.toList())
+            } catch (e: RelayException) {
+                RelayLog.add(app, "Contact pictures not fetched: ${e.code}")
+                break
+            }
+            if (photos.store(asked, thumbnails, System.currentTimeMillis())) changed = true
+        }
+        if (changed) {
+            // The lists and screens draw them now: both tabs' (a person's iMessage chat shows theirs too).
+            com.lightdecoder.archive.ArchiveEvents.notify(com.lightdecoder.archive.ArchiveChange(null, com.lightdecoder.archive.ArchiveChange.Kind.CONVERSATIONS, ChatService.MESSAGES))
+            com.lightdecoder.archive.ArchiveEvents.notify(com.lightdecoder.archive.ArchiveChange(null, com.lightdecoder.archive.ArchiveChange.Kind.CONVERSATIONS, ChatService.IMESSAGE))
+        }
     }
 
     /** The archive's newest stored message per conversation, now; see [CatchUpMark]. */
@@ -2581,6 +2636,11 @@ class RelayManager private constructor(
         private val ARCHIVED_KINDS = setOf("message", "conversation", "typing", "resync")
         private const val PAIRING_TIMEOUT_MS = 180_000L
         private const val CONVERSATION_COUNT = 100
+
+
+        /** At most this many people's pictures are asked for per connection, this many per call. */
+        private const val MAX_CONTACT_PHOTOS = 100
+        private const val CONTACT_PHOTOS_BATCH = 20
         private const val EVENT_DRAIN_TIMEOUT_S = 10L
         private const val STALE_MESSAGE_MS = 24 * 60 * 60 * 1000L
 

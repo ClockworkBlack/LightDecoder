@@ -40,8 +40,15 @@ import kotlinx.coroutines.withContext
  * iMessage ("New iMessage group", through the iMessage library) has no
  * contacts of its own: they are Messages', and an email address can be typed
  * as well as a number.
+ *
+ * With [EXTRA_ADD_TO] (an iMessage group's id) it is a group's "Add Member" instead: the people
+ * picked are added to that group ([com.lightdecoder.imessage.direct.DirectLink.addMembers], once
+ * Apple says each of them is on iMessage); it closes once they are, and says why when they are not.
  */
 class NewConversationActivity : AppCompatActivity() {
+
+    /** The iMessage group people are added to ([EXTRA_ADD_TO]), or null for a new conversation. */
+    private var addTo: String? = null
 
     private lateinit var binding: ActivityNewConversationBinding
     private lateinit var manager: ChatBackend
@@ -68,13 +75,14 @@ class NewConversationActivity : AppCompatActivity() {
         applySystemBarAndImePadding(binding.root)
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
-        manager = ScreenBackends.get(this, RelayIntents.serviceOf(intent))
+        addTo = intent.getStringExtra(EXTRA_ADD_TO)?.takeIf { it.isNotEmpty() }
+        manager = ScreenBackends.get(this, if (addTo != null) ChatService.IMESSAGE else RelayIntents.serviceOf(intent))
         val iMessage = manager.service == ChatService.IMESSAGE
         contactsFrom = if (iMessage) ScreenBackends.get(this, ChatService.MESSAGES) else manager
         repo = contactsFrom.repo
-        groups = Capability.NEW_GROUP in manager.capabilities
+        groups = Capability.NEW_GROUP in manager.capabilities || addTo != null
         if (iMessage) {
-            supportActionBar?.title = getString(R.string.imessage_new_group)
+            supportActionBar?.title = getString(if (addTo != null) R.string.chat_details_add_member else R.string.imessage_new_group)
             binding.queryLayout.hint = getString(R.string.imessage_to_hint)
         }
 
@@ -201,7 +209,13 @@ class NewConversationActivity : AppCompatActivity() {
         }
         binding.selectedScroll.visibility = if (selected.isEmpty()) View.GONE else View.VISIBLE
         binding.start.isEnabled = selected.isNotEmpty() && !starting
-        binding.start.setText(if (selected.size > 1) R.string.chat_start_group else R.string.chat_start)
+        binding.start.setText(
+            when {
+                addTo != null -> R.string.chat_details_add
+                selected.size > 1 -> R.string.chat_start_group
+                else -> R.string.chat_start
+            },
+        )
     }
 
     // --- starting ------------------------------------------------------------
@@ -209,6 +223,10 @@ class NewConversationActivity : AppCompatActivity() {
     private fun start() {
         val numbers = selected.keys.toList()
         if (numbers.isEmpty()) return
+        addTo?.let { group ->
+            addMembers(group, numbers)
+            return
+        }
         if (numbers.size == 1 || !groups) {
             startConversation(numbers, null)
             return
@@ -253,10 +271,45 @@ class NewConversationActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * "Add Member": the people at [numbers] go into the iMessage group [group] once Apple says each
+     * of them is on iMessage; this closes once they are in it, and says why when they are not (who
+     * is not on iMessage), keeping what was picked.
+     */
+    private fun addMembers(group: String, numbers: List<String>) {
+        starting = true
+        renderSelection()
+        binding.progress.visibility = View.VISIBLE
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(this)
+        lifecycleScope.launch {
+            relayAttempt { withContext(Dispatchers.IO) { direct.addMembers(group, numbers) } }
+                .onSuccess { finish() }
+                .onFailure {
+                    starting = false
+                    binding.progress.visibility = View.GONE
+                    renderSelection()
+                    Toast.makeText(
+                        this@NewConversationActivity,
+                        ChatErrors.message(this@NewConversationActivity, ChatService.IMESSAGE, it),
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+        }
+    }
+
     companion object {
         private const val STATE_NUMBERS = "numbers"
         private const val STATE_LABELS = "labels"
         private const val FILTER_DEBOUNCE_MS = 150L
+
+        /** An iMessage group's conversation id: the screen adds people to it ("Add Member") instead of starting a conversation. */
+        const val EXTRA_ADD_TO = "com.lightdecoder.ui.chat.extra.ADD_TO"
+
+        /** "Add Member" for the iMessage group [conversationId]. */
+        fun addMembers(context: android.content.Context, conversationId: String): Intent =
+            Intent(context, NewConversationActivity::class.java)
+                .putExtra(EXTRA_ADD_TO, conversationId)
+                .putExtra(RelayIntents.EXTRA_SERVICE, ChatService.IMESSAGE.key)
 
         /** At least three digits, and nothing but digits and phone punctuation. */
         fun looksLikeNumber(text: String): Boolean {

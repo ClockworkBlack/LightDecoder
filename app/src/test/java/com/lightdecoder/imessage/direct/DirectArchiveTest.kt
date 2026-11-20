@@ -656,6 +656,56 @@ class DirectArchiveTest {
     }
 
     @Test
+    fun aGroupPhotoChangeNamesItsGroupItsVersionAndThePictureFetched() {
+        val file = MmcsFile(byteArrayOf(1), "o", "u", byteArrayOf(2), 1_000UL)
+        fun photo(i: MessageInst, path: String?) = DirectArchive.groupPhoto(i, setOf(me), ::nameOf, TestTexts, path)
+        val set = photo(inst("P1", bob, PushChatMessage.IconChange(IconChangeMessage(file, 7UL)), listOf(me, bob, carol), "G-7", "Trip"), "/x/incoming-1.jpg")
+        set as DirectArchive.Update.GroupPhoto
+        assertEquals("imsg:group:G-7", set.conversationId)
+        assertEquals("G-7", set.groupGuid)
+        assertEquals(7L, set.version)
+        assertEquals("/x/incoming-1.jpg", set.path)
+        assertEquals("Bob changed the group photo.", set.row.message.text)
+        assertEquals("system", set.row.message.direction)
+        assertEquals("imsg:P1", set.row.message.id)
+        assertEquals(7L, set.row.groupVersion)
+        // Taken off: no picture, and the row says so.
+        val removed = photo(inst("P2", carol, PushChatMessage.IconChange(IconChangeMessage(null, 8UL)), listOf(me, bob, carol), "G-7"), null)
+        removed as DirectArchive.Update.GroupPhoto
+        assertNull(removed.path)
+        assertEquals(8L, removed.version)
+        assertEquals("Carol removed the group photo.", removed.row.message.text)
+        // The user's, from another device.
+        val mine = photo(inst("P3", me, PushChatMessage.IconChange(IconChangeMessage(file, 9UL)), listOf(me, bob, carol), "G-7"), "/x/incoming-2.jpg")
+        assertEquals("You changed the group photo.", (mine as DirectArchive.Update.GroupPhoto).row.message.text)
+        // A version past what a Long holds is held to it.
+        val huge = photo(inst("P4", bob, PushChatMessage.IconChange(IconChangeMessage(file, ULong.MAX_VALUE)), listOf(me, bob, carol), "G-7"), "/x/i.jpg")
+        assertEquals(Long.MAX_VALUE, (huge as DirectArchive.Update.GroupPhoto).version)
+        // Nothing anyone can take: unverified, from nobody, not a group's (no guid), or not a photo change.
+        assertEquals(DirectArchive.Update.Ignore, photo(inst("P5", bob, PushChatMessage.IconChange(IconChangeMessage(file, 9UL)), listOf(me, bob, carol), "G-7", unverified = true), "/x/i.jpg"))
+        assertEquals(DirectArchive.Update.Ignore, photo(inst("P6", null, PushChatMessage.IconChange(IconChangeMessage(file, 9UL)), listOf(me, bob, carol), "G-7"), "/x/i.jpg"))
+        assertEquals(DirectArchive.Update.Ignore, photo(inst("P7", bob, PushChatMessage.IconChange(IconChangeMessage(file, 9UL)), listOf(me, bob, carol)), "/x/i.jpg"))
+        assertEquals(DirectArchive.Update.Ignore, photo(inst("P8", bob, PushChatMessage.Read, listOf(me, bob, carol), "G-7"), "/x/i.jpg"))
+        // Its row alone (the picture could not be fetched) carries the group's version too.
+        val rowAlone = map(inst("P9", bob, PushChatMessage.IconChange(IconChangeMessage(file, 10UL)), listOf(me, bob, carol), "G-7")) as DirectArchive.Update.Upsert
+        assertEquals(10L, rowAlone.groupVersion)
+        assertEquals("Bob changed the group photo.", rowAlone.message.text)
+    }
+
+    @Test
+    fun aChangeOfMembersCarriesTheGroupsVersionAndARenameToNothingSaysTheNameWasRemoved() {
+        val change = map(inst("V1", bob, PushChatMessage.ChangeParticipants(ChangeParticipantMessage(listOf(me, bob, carol, dave), 6UL)), listOf(me, bob, carol), "G-8"))
+        assertEquals(6L, (change as DirectArchive.Update.Upsert).groupVersion)
+        val renamed = map(inst("V2", bob, PushChatMessage.RenameMessage(ChatRenameMessage("Trip")), listOf(me, bob, carol), "G-8")) as DirectArchive.Update.Upsert
+        // A rename carries no version.
+        assertNull(renamed.groupVersion)
+        val unnamed = map(inst("V3", bob, PushChatMessage.RenameMessage(ChatRenameMessage("")), listOf(me, bob, carol), "G-8", "Trip")) as DirectArchive.Update.Upsert
+        assertEquals("Bob removed the name from the conversation.", unnamed.message.text)
+        assertTrue(unnamed.renamed)
+        assertEquals("", unnamed.conversation.name)
+    }
+
+    @Test
     fun receiptsNeverMoveAMessageBackwards() {
         assertTrue(DirectArchive.statusRank(DirectArchive.STATUS_READ) > DirectArchive.statusRank(DirectArchive.STATUS_DELIVERED))
         assertTrue(DirectArchive.statusRank(DirectArchive.STATUS_DELIVERED) > DirectArchive.statusRank(DirectArchive.STATUS_SENT))
@@ -679,6 +729,7 @@ class DirectArchiveTest {
         override val you = "You"
         override val youObject = "you"
         override fun named(who: String, name: String) = "$who named the conversation “$name”."
+        override fun nameRemoved(who: String) = "$who removed the name from the conversation."
         override fun added(who: String, whom: String) = "$who added $whom."
         override fun removed(who: String, whom: String) = "$who removed $whom."
         override fun left(who: String) = "$who left the conversation."

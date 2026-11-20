@@ -100,6 +100,12 @@ class DirectLink private constructor(
     /** Each group's own name, as Apple has it ([GroupNames]). */
     private val groupNames = GroupNames(app)
 
+    /** Each group's version, as Apple's events said it ([GroupVersions]): what a change from here goes as. */
+    private val groupVersions = GroupVersions(app)
+
+    /** Each chat's own "Send Read Receipts" ([ReadReceiptChoices]). */
+    private val receiptChoices = ReadReceiptChoices(app)
+
     init {
         if (active) scope.launch { failInterruptedSends() }
         scope.launch { for (notice in typingOut) tell(notice) }
@@ -1069,8 +1075,8 @@ class DirectLink private constructor(
     /**
      * The user read [conversationId]: it is read here and its notification goes. Apple is told once
      * per latest message, for the user's other devices (they clear it too) and, with read receipts
-     * on (the iMessage screen's setting, read by the library), for the other person of a one-to-one
-     * chat, who then sees "Read".
+     * on (the chat's own choice, [setSendsReadReceipts], else the iMessage screen's setting, read by
+     * the library), for the other person of a one-to-one chat, who then sees "Read".
      */
     suspend fun markRead(conversationId: String) {
         runCatching { repo.markConversationRead(conversationId) }
@@ -1088,7 +1094,8 @@ class DirectLink private constructor(
         try {
             // Once asked, it goes even if the screen that read the chat closes meanwhile.
             withContext(NonCancellable) {
-                val error = DirectWire.errorOf(requests.call(DirectWire.READ, DirectWire.read(target, guid), NOTICE_TIMEOUT_MS))
+                val choice = runCatching { receiptChoices.of(conversationId) }.getOrNull()
+                val error = DirectWire.errorOf(requests.call(DirectWire.READ, DirectWire.read(target, guid, choice), NOTICE_TIMEOUT_MS))
                 if (error == null) told = true else Log.i(TAG, "read receipt not sent: $error")
             }
         } catch (e: CancellationException) {
@@ -1204,6 +1211,7 @@ class DirectLink private constructor(
                 IMessageLog.add(app, "an event from Apple was not taken (${loggableText(update.what, 40)}): ${loggableText(update.why, 160)}")
             is DirectArchive.Update.ReadElsewhere -> readElsewhere(update)
             is DirectArchive.Update.Background -> background(update)
+            is DirectArchive.Update.GroupPhoto -> groupPhoto(update)
             is DirectArchive.Update.Failed -> {
                 if (repo.message(update.messageId) == null) {
                     hold(update.messageId, update)
@@ -1275,6 +1283,8 @@ class DirectLink private constructor(
         // Only a message not stored before makes the chat unread: Apple handing one over again
         // (after a restart) leaves a chat the user read as read.
         repo.upsertConversation(conversation.copy(unread = (conversation.unread || (incoming && existing == null)) && !onScreen, lastMessageTs = 0))
+        // The group's version a change of its members (or photo) carried: a change from here goes as the next one.
+        update.groupVersion?.let { if (DirectArchive.isGroup(conversation.id)) groupVersions.note(conversation.id, it) }
         if (added.isNotEmpty()) noteAdded(conversation.id, update.message, added)
         val fresh = update.message.copy(
             conversationId = conversation.id,
@@ -1800,6 +1810,359 @@ class DirectLink private constructor(
         return sendText(row.conversationId, row.text, row.replyToId.ifEmpty { null }, extra.effect, extra.textRuns(row.text))
     }
 
+    // --- a group's name, members and photo, from here (a chat's details) ---------------------------
+
+    /** What a chat's details offer for a group ([groupRules]): what the library can change of it now. */
+    data class GroupRules(
+        /** It can be renamed, given a photo, and have people added (the library reaches it, the user is in it). */
+        val manageable: Boolean,
+        /** Someone can be removed from it: it has [MIN_OTHERS_TO_LEAVE] others besides the user at least, as on an iPhone. */
+        val canRemove: Boolean,
+        /** The user can leave it: the same. */
+        val canLeave: Boolean,
+    ) {
+        companion object {
+            val NONE = GroupRules(manageable = false, canRemove = false, canLeave = false)
+        }
+    }
+
+    /**
+     * What a chat's details may change of [conversationId] through the library: nothing but for an
+     * iMessage group (with its guid) it can reach, the user still in it; people removed, or the user
+     * leaving, only while it has [MIN_OTHERS_TO_LEAVE] others at least (an iPhone's rule: unverified).
+     */
+    fun groupRules(conversationId: String): GroupRules {
+        if (!active || DirectArchive.groupGuid(conversationId) == null) return GroupRules.NONE
+        val target = runCatching { targetOf(conversationId) }.getOrNull()?.takeIf { it.groupGuid != null } ?: return GroupRules.NONE
+        val enough = target.participants.size >= MIN_OTHERS_TO_LEAVE && target.from.isNotBlank()
+        return GroupRules(manageable = true, canRemove = enough, canLeave = enough)
+    }
+
+    /** Group [conversationId]'s own name ("" for none: it is shown by its members' names), as "Change Name and Photo" starts from. */
+    fun groupName(conversationId: String): String = synchronized(this) { ownName(conversationId) }
+
+    /** The group [conversationId] to change, as the library reaches it; throws why it cannot be changed. */
+    private fun groupTarget(conversationId: String, members: Boolean = false): DirectWire.Target {
+        if (!active || DirectArchive.groupGuid(conversationId) == null) throw DirectEngine.ImessageError(app.getString(R.string.imessage_group_not_a_group))
+        if (isLeft(conversationId)) throw DirectEngine.ImessageError(app.getString(R.string.imessage_not_in_group))
+        val target = targetOf(conversationId)?.takeIf { it.groupGuid != null }
+            ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
+        // A change of its members names the user's own address among them: without it the user would leave.
+        if (members && target.from.isBlank()) throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
+        return target
+    }
+
+    /** Runs [block] in turn with [conversationId]'s sends ([inTurn]) and returns what it did, or throws what it threw. */
+    private suspend fun <T> inTurnAwait(conversationId: String, block: suspend () -> T): T {
+        val done = kotlinx.coroutines.CompletableDeferred<T>()
+        inTurn(conversationId) {
+            try {
+                done.complete(block())
+            } catch (e: Throwable) {
+                // Never thrown on: the chat's next send still goes.
+                done.completeExceptionally(e)
+            }
+        }
+        return done.await()
+    }
+
+    /** Throws what [reply] says went wrong, if anything. */
+    private fun failOn(reply: JSONObject) {
+        DirectWire.errorOf(reply)?.let { throw if (DirectWire.unconfirmed(reply)) DirectEngine.Unconfirmed(it) else DirectEngine.ImessageError(it) }
+    }
+
+    /**
+     * Renames the group [conversationId] to [name] ("" takes its name off), as on an iPhone: every
+     * member's iPhone (and the user's other devices) shows it. In turn with the chat's sends; once
+     * Apple confirmed it, it is the group's name here too, with "You named the conversation “…”.".
+     * Throws [DirectEngine.ImessageError] saying why when it does not go through.
+     */
+    suspend fun renameGroup(conversationId: String, name: String) {
+        val newName = name.trim().take(MAX_GROUP_NAME)
+        groupTarget(conversationId)
+        inTurnAwait(conversationId) {
+            // Read again in turn: the group as it is when it goes.
+            val target = groupTarget(conversationId)
+            val reply = requests.call(DirectWire.RENAME, DirectWire.rename(target, newName), SEND_TIMEOUT_MS)
+            failOn(reply)
+            val texts = DirectTexts(app)
+            val text = if (newName.isEmpty()) texts.nameRemoved(texts.you) else texts.named(texts.you, newName)
+            synchronized(this) { upsert(ownGroupEvent(conversationId, target, reply, text, name = newName, renamed = true)) }
+            IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: group ${if (newName.isEmpty()) "name taken off" else "renamed"} through the iMessage library (Apple confirmed)")
+        }
+    }
+
+    /**
+     * Adds the people at [addresses] (numbers or email addresses) to the group [conversationId], as
+     * on an iPhone. Apple is asked first whether each of them is on iMessage; if any is not (or is no
+     * address), nobody is added and the error names them. People already in it are left out. Once
+     * Apple confirmed it, they are in it here too, with "You added …". Throws
+     * [DirectEngine.ImessageError] saying why when it does not go through.
+     */
+    suspend fun addMembers(conversationId: String, addresses: List<String>) {
+        val target = groupTarget(conversationId, members = true)
+        val own = IMessageAddress.key(target.from)
+        val notOnIMessage = ArrayList<String>()
+        val adding = LinkedHashMap<String, String>()
+        for (address in addresses.map { it.trim() }.filter { it.isNotEmpty() }) {
+            val handle = Handles.normalize(address)
+            val key = handle?.let(IMessageAddress::key)
+            when {
+                handle == null || key == null -> notOnIMessage += address
+                IMessageAddress.sameKey(key, own) -> Unit
+                target.participants.any { IMessageAddress.sameKey(IMessageAddress.key(it), key) } -> Unit
+                else -> adding.putIfAbsent(key, handle)
+            }
+        }
+        if (notOnIMessage.isEmpty() && adding.isEmpty()) throw DirectEngine.ImessageError(app.getString(R.string.imessage_group_already_in))
+        for (handle in adding.values) {
+            val reply = requests.call(DirectWire.REACH, DirectWire.reach(handle), REACH_TIMEOUT_MS)
+            // The library could not be asked: that says nothing about whether they have iMessage.
+            DirectWire.errorOf(reply)?.let { throw DirectEngine.ImessageError(it) }
+            if (reply.optJSONObject("conversation") == null) notOnIMessage += nameOf(handle)
+        }
+        if (notOnIMessage.isNotEmpty()) {
+            throw DirectEngine.ImessageError(
+                app.resources.getQuantityString(R.plurals.imessage_group_add_not_on_imessage, notOnIMessage.size, notOnIMessage.joinToString(", ")),
+            )
+        }
+        inTurnAwait(conversationId) {
+            val now = groupTarget(conversationId, members = true)
+            val added = adding.values.filter { h -> now.participants.none { IMessageAddress.same(it, h) } }
+            if (added.isEmpty()) throw DirectEngine.ImessageError(app.getString(R.string.imessage_group_already_in))
+            val others = now.participants + added
+            val version = groupVersions.next(conversationId)
+            val reply = requests.call(DirectWire.MEMBERS, DirectWire.members(now, others + now.from, version), SEND_TIMEOUT_MS)
+            failOn(reply)
+            val texts = DirectTexts(app)
+            val text = texts.added(texts.you, added.joinToString(", ") { nameOf(it) })
+            synchronized(this) { upsert(ownGroupEvent(conversationId, now, reply, text, members = others, member = true, groupVersion = version)) }
+            IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: ${added.size} member(s) added through the iMessage library (Apple confirmed)")
+        }
+    }
+
+    /**
+     * Removes the member at [address] from the group [conversationId], as on an iPhone: only while it
+     * has [MIN_OTHERS_TO_LEAVE] others at least ([groupRules]). Once Apple confirmed it, they are out
+     * of it here too, with "You removed …". Throws [DirectEngine.ImessageError] saying why when it
+     * does not go through.
+     */
+    suspend fun removeMember(conversationId: String, address: String) {
+        val key = IMessageAddress.key(address) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_group_not_member))
+        fun check(target: DirectWire.Target): String {
+            if (target.participants.size < MIN_OTHERS_TO_LEAVE) throw DirectEngine.ImessageError(app.getString(R.string.imessage_group_too_small))
+            return target.participants.firstOrNull { IMessageAddress.sameKey(IMessageAddress.key(it), key) }
+                ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_group_not_member))
+        }
+        check(groupTarget(conversationId, members = true))
+        inTurnAwait(conversationId) {
+            val now = groupTarget(conversationId, members = true)
+            val removed = check(now)
+            val others = now.participants - removed
+            val version = groupVersions.next(conversationId)
+            val reply = requests.call(DirectWire.MEMBERS, DirectWire.members(now, others + now.from, version), SEND_TIMEOUT_MS)
+            failOn(reply)
+            val texts = DirectTexts(app)
+            synchronized(this) {
+                upsert(ownGroupEvent(conversationId, now, reply, texts.removed(texts.you, nameOf(removed)), members = others, member = true, groupVersion = version))
+            }
+            IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: a member removed through the iMessage library (Apple confirmed)")
+        }
+    }
+
+    /**
+     * The user leaves the group [conversationId] ("Leave this Conversation"), as on an iPhone: only
+     * while it has [MIN_OTHERS_TO_LEAVE] others at least. Once Apple confirmed it, the group is read
+     * only here ("You left the conversation."): nothing more goes to it. Throws
+     * [DirectEngine.ImessageError] saying why when it does not go through.
+     */
+    suspend fun leaveGroup(conversationId: String) {
+        val first = groupTarget(conversationId, members = true)
+        if (first.participants.size < MIN_OTHERS_TO_LEAVE) throw DirectEngine.ImessageError(app.getString(R.string.imessage_group_too_small))
+        inTurnAwait(conversationId) {
+            val now = groupTarget(conversationId, members = true)
+            if (now.participants.size < MIN_OTHERS_TO_LEAVE) throw DirectEngine.ImessageError(app.getString(R.string.imessage_group_too_small))
+            val version = groupVersions.next(conversationId)
+            // Everyone but the user.
+            val reply = requests.call(DirectWire.MEMBERS, DirectWire.members(now, now.participants, version), SEND_TIMEOUT_MS)
+            failOn(reply)
+            val texts = DirectTexts(app)
+            synchronized(this) {
+                upsert(ownGroupEvent(conversationId, now, reply, texts.left(texts.you), members = now.participants, member = false, groupVersion = version))
+            }
+            IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: left the group through the iMessage library (Apple confirmed)")
+        }
+    }
+
+    /**
+     * Sets the group [conversationId]'s photo to the picture at [uri] (one the user picked: cut to a
+     * centred square, [GroupPhotoImages]), or takes it off ([uri] null), as on an iPhone. In turn with
+     * the chat's sends; once Apple confirmed it, it shows here too, with "You changed the group
+     * photo.". Throws [DirectEngine.ImessageError] saying why when it does not go through.
+     */
+    suspend fun setGroupPhoto(conversationId: String, uri: Uri?) {
+        groupTarget(conversationId)
+        val picture = uri?.let(::prepareGroupPhoto)
+        try {
+            inTurnAwait(conversationId) {
+                val target = groupTarget(conversationId)
+                val version = nextPhotoVersion(conversationId)
+                val reply = requests.call(DirectWire.GROUP_PHOTO, DirectWire.groupPhoto(target, picture?.path, version), MEDIA_SEND_TIMEOUT_MS)
+                failOn(reply)
+                synchronized(this) { groupPhotoSetHere(conversationId, target, reply, picture, version) }
+            }
+        } catch (e: Exception) {
+            picture?.delete()
+            throw e
+        }
+    }
+
+    /** The version a group photo set here goes as: after the group's, and after its photo's. */
+    private fun nextPhotoVersion(conversationId: String): Long {
+        val photo = GroupPhotos(app).of(conversationId)
+        val afterPhoto = if (photo.known) GroupVersions.nextAfter(photo.version) else 0
+        return maxOf(groupVersions.next(conversationId), afterPhoto)
+    }
+
+    /** The picture at [uri] as the square JPEG that is sent and shown ([GroupPhotoImages]), where the group photos are kept. */
+    private fun prepareGroupPhoto(uri: Uri): File {
+        val raw = GroupPhotos.incomingFile(app, "picked")
+        copyCapped(uri, raw)
+        if (raw.length() > MAX_BACKGROUND_SOURCE_BYTES) {
+            raw.delete()
+            throw DirectEngine.ImessageError(app.getString(R.string.imessage_group_photo_too_big))
+        }
+        val out = GroupPhotos.incomingFile(app, "outgoing")
+        val ok = try {
+            GroupPhotoImages.write(raw.readBytes(), out)
+        } catch (e: OutOfMemoryError) {
+            false
+        } finally {
+            raw.delete()
+        }
+        if (!ok) {
+            out.delete()
+            throw DirectEngine.ImessageError(app.getString(R.string.imessage_group_photo_unreadable))
+        }
+        return out
+    }
+
+    /**
+     * The photo just set from here: shown, with the row saying so, as one from Apple would be. Not
+     * when the group's photo is as new already (a change from another device came meanwhile): then
+     * nothing changed here, and no row says it did.
+     */
+    private fun groupPhotoSetHere(conversationId: String, target: DirectWire.Target, reply: JSONObject, picture: File?, version: Long) {
+        groupVersions.note(conversationId, version)
+        if (GroupPhotos(app).apply(conversationId, picture, version) != GroupPhotos.Applied.APPLIED) {
+            Log.i(TAG, "a group photo set here was not newer than the group's")
+            return
+        }
+        val texts = DirectTexts(app)
+        val text = if (picture != null) texts.changedPhoto(texts.you) else texts.removedPhoto(texts.you)
+        upsert(ownGroupEvent(conversationId, target, reply, text, groupVersion = version))
+        IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: group photo ${if (picture != null) "set" else "taken off"} through the iMessage library (Apple confirmed)")
+        com.lightdecoder.archive.ArchiveEvents.notify(
+            com.lightdecoder.archive.ArchiveChange(conversationId, com.lightdecoder.archive.ArchiveChange.Kind.CONVERSATIONS, ChatService.IMESSAGE),
+        )
+    }
+
+    /**
+     * A change of the group [conversationId] the user made from here, as the user's other device's
+     * would come from Apple ([upsert] then takes it the same way): the group with [members] (the
+     * library's addresses of the others; null: as they are) and, for a rename, [name]; the row [text]
+     * by the user, known by the GUID Apple's answer [reply] named.
+     */
+    private fun ownGroupEvent(
+        conversationId: String,
+        target: DirectWire.Target,
+        reply: JSONObject,
+        text: String,
+        name: String? = null,
+        renamed: Boolean = false,
+        members: List<String>? = null,
+        member: Boolean? = null,
+        groupVersion: Long? = null,
+    ): DirectArchive.Update.Upsert {
+        val others = members ?: target.participants
+        val from = target.from
+        val guid = reply.optString("guid").takeIf { it.isNotBlank() } ?: ("group-" + UUID.randomUUID().toString().uppercase())
+        val conversation = ConversationDto(
+            id = conversationId,
+            // A name only with a rename: any other event says nothing about it (its own name stays).
+            name = name.orEmpty(),
+            isGroup = true,
+            type = DirectArchive.TRANSPORT,
+            defaultOutgoingId = from,
+            participants = others.map { h -> ParticipantDto(id = h, name = nameOf(h), number = Handles.display(h), formattedNumber = Handles.display(h)) } +
+                listOfNotNull(from.takeIf { it.isNotBlank() }?.let { ParticipantDto(id = it, isMe = true) }),
+            otherParticipantIds = others,
+        )
+        val row = MessageDto(
+            id = DirectArchive.messageId(guid),
+            conversationId = conversationId,
+            senderId = from,
+            fromMe = true,
+            timestampMs = System.currentTimeMillis(),
+            direction = "system",
+            transport = DirectArchive.TRANSPORT,
+            text = text,
+            parts = listOf(PartDto(partId = "0", kind = "text", text = text)),
+            isOld = true,
+        )
+        return DirectArchive.Update.Upsert(
+            conversation, row, renamed = renamed, member = member, membersChanged = members != null, groupVersion = groupVersion,
+        )
+    }
+
+    /**
+     * A group's photo was set or taken off (by someone in it, or the user on another device): the
+     * picture the ":imessage" process wrote becomes the group's ([GroupPhotos]) and the row saying so
+     * is stored, unless the group's photo is as new already (then neither: the picture goes). Only a
+     * group stored here, and only from one of its members.
+     */
+    private fun groupPhoto(update: DirectArchive.Update.GroupPhoto) {
+        val incoming = update.path?.let(::File)?.takeIf { GroupPhotos.isOurs(app, it) }
+        // A path that is not where group photos are kept: nothing of it is taken.
+        if (update.path != null && incoming == null) return
+        val id = DirectArchive.groupConversationId(update.groupGuid).takeIf { repo.conversation(it)?.isGroup == true } ?: run {
+            // A group not stored here: nothing to show it in.
+            incoming?.delete()
+            return
+        }
+        val by = update.row.message
+        if (!by.fromMe && !isMember(id, by.senderId)) {
+            incoming?.delete()
+            refused("a group photo", id, "from someone not in the group")
+            return
+        }
+        val store = GroupPhotos(app)
+        val stored = store.of(id)
+        groupVersions.note(id, update.version)
+        // Older than the group's photo, or that one again (Apple's journal after a restart): nothing new.
+        if (stored.known && update.version <= stored.version) {
+            incoming?.delete()
+            return
+        }
+        upsert(update.row)
+        if (store.apply(id, incoming, update.version) == GroupPhotos.Applied.APPLIED) {
+            IMessageLog.add(app, "${IMessageLog.chatRef(id)}: group photo ${if (incoming != null) "set" else "taken off"} (through the iMessage library)")
+        }
+        com.lightdecoder.archive.ArchiveEvents.notify(
+            com.lightdecoder.archive.ArchiveChange(id, com.lightdecoder.archive.ArchiveChange.Kind.CONVERSATIONS, ChatService.IMESSAGE),
+        )
+    }
+
+    // --- a chat's own "Send Read Receipts" ----------------------------------------------------------
+
+    /** Whether the other person of [conversationId] is told when the user read it: the chat's own choice, else the iMessage screen's setting. */
+    fun sendsReadReceipts(conversationId: String): Boolean = receiptChoices.effective(conversationId, DirectPrefs.sendReadReceipts(app))
+
+    /** The chat's own choice ([sendsReadReceipts]); null to follow the iMessage screen's setting again. */
+    fun setSendsReadReceipts(conversationId: String, on: Boolean?) {
+        receiptChoices.set(conversationId, on)
+    }
+
     /** The user read [update]'s message on another device: the chat is read here too, unless something newer came since. */
     private fun readElsewhere(update: DirectArchive.Update.ReadElsewhere) {
         val row = repo.message(update.messageId) ?: return hold(update.messageId, update)
@@ -1992,8 +2355,18 @@ class DirectLink private constructor(
         /** A send with a file also waits for the file to go up to Apple (up to 100 MB). */
         private const val MEDIA_SEND_TIMEOUT_MS = 10 * 60_000L
 
-        /** The largest picture taken as a chat's background (it is read whole to be made smaller). */
+        /** The largest picture taken as a chat's background or a group's photo (it is read whole to be made smaller). */
         private const val MAX_BACKGROUND_SOURCE_BYTES = 40L * 1024 * 1024
+
+        /**
+         * As on an iPhone, someone can be removed from a group, and the user leave it, only while it
+         * has this many others at least (so that it stays a group). Apple's rule as iPhones show it:
+         * not verified against Apple's servers.
+         */
+        const val MIN_OTHERS_TO_LEAVE = 3
+
+        /** The longest group name sent. */
+        private const val MAX_GROUP_NAME = 255
 
         /**
          * The size a design ([BackgroundThemes]) is drawn at for a screen of [width] x [height]:

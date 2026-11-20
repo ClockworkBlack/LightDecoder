@@ -19,6 +19,8 @@ data class ConversationItem(
     val row: ConversationRow,
     val title: String,
     val service: com.lightdecoder.chat.ChatService = com.lightdecoder.chat.ChatService.MESSAGES,
+    /** The picture it is shown by (an iMessage group's photo, a person's contact picture: [AvatarPhotos]); "" for its initials. */
+    val photo: String = "",
 )
 
 /** What a conversation is called in a list: its name, else the people in it. */
@@ -59,7 +61,7 @@ class ConversationsAdapter(
         val b = holder.binding
         val context = b.root.context
 
-        Avatars.bind(b.avatar, item.title, row.id, row.avatarColor)
+        Avatars.bind(b.avatar, item.title, row.id, row.avatarColor, item.photo.takeIf { it.isNotEmpty() }?.let { java.io.File(it) })
         b.name.text = item.title
         b.name.setTypeface(null, if (row.unread) Typeface.BOLD else Typeface.NORMAL)
         val snippet = snippetText(holder, row)

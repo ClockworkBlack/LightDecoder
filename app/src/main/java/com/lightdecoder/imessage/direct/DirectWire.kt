@@ -11,8 +11,8 @@ import org.json.JSONObject
  * tested (DirectWireTest), so both sides always agree.
  *
  * Main -> :imessage: [SEND], [UNSEND], [REACH], [EDIT], [REACT], [TYPING], [READ], [DOWNLOAD],
- * [EXTENSION], [BACKGROUND], [UNSCHEDULE] (requests, answered with the same request id; a failure is answered with
- * [error]). Never raw media bytes: files are passed by path, in the app's own storage.
+ * [EXTENSION], [BACKGROUND], [UNSCHEDULE], [RENAME], [MEMBERS], [GROUP_PHOTO] (requests, answered with the same
+ * request id; a failure is answered with [error]). Never raw media bytes: files are passed by path, in the app's own storage.
  * :imessage -> main: [UPDATE] (an archive change from Apple), answered once it is stored; only
  * then does the library forget the event.
  */
@@ -53,6 +53,18 @@ object DirectWire {
 
     /** Takes back a Send Later message before Apple sends it ("Cancel Send Later"): [unschedule], answered with [ok]. */
     const val UNSCHEDULE = 12
+
+    /** Renames a group (an empty name takes its name off): [rename], answered with [guid] (the rename's own) once Apple confirmed it. */
+    const val RENAME = 13
+
+    /**
+     * Changes a group's members: [members], the full new list (without the user's own address: the
+     * user leaves it), answered with [guid] once Apple confirmed it.
+     */
+    const val MEMBERS = 14
+
+    /** Sets a group's photo to the picture at a path, or takes it off: [groupPhoto], answered with [guid] once Apple confirmed it. */
+    const val GROUP_PHOTO = 15
 
     const val REPLY = 100
 
@@ -172,6 +184,57 @@ object DirectWire {
         }
     }
 
+    /** What a [RENAME] request asks for: the group [target] is called [name] from now on ("": it has no name). */
+    data class RenameRequest(val target: Target, val name: String) {
+        companion object {
+            fun fromJson(o: JSONObject) = RenameRequest(Target.fromJson(o.getJSONObject("target")), o.optString("name"))
+        }
+    }
+
+    /**
+     * What a [MEMBERS] request asks for: the group [target]'s members from now on, [participants]
+     * (addresses as the library has them, "tel:+15551234567"), the user's own ([Target.from]) among
+     * them unless the user leaves; as of [groupVersion] (the group's version after the change).
+     */
+    data class MembersRequest(val target: Target, val participants: List<String>, val groupVersion: Long) {
+        companion object {
+            fun fromJson(o: JSONObject) = MembersRequest(
+                Target.fromJson(o.getJSONObject("target")),
+                o.optJSONArray("participants")?.let { a -> (0 until a.length()).map { a.optString(it) } }.orEmpty().filter { it.isNotBlank() },
+                o.optLong("groupVersion"),
+            )
+        }
+    }
+
+    /**
+     * What a [GROUP_PHOTO] request asks for: the group [target]'s photo is now the picture at [path]
+     * (a square JPEG where the group photos are kept, [GroupPhotos]), or none ([path] null), as of
+     * [groupVersion].
+     */
+    data class GroupPhotoRequest(val target: Target, val path: String?, val groupVersion: Long) {
+        companion object {
+            fun fromJson(o: JSONObject) = GroupPhotoRequest(
+                Target.fromJson(o.getJSONObject("target")),
+                o.optStringOrNull("path")?.ifEmpty { null },
+                o.optLong("groupVersion"),
+            )
+        }
+    }
+
+    /**
+     * What a [READ] request asks for: the user read [target] up to message [guid]; [receipts] is the
+     * chat's own choice whether the other person is told (null: as the iMessage screen's setting says).
+     */
+    data class ReadRequest(val target: Target, val guid: String, val receipts: Boolean?) {
+        companion object {
+            fun fromJson(o: JSONObject) = ReadRequest(
+                Target.fromJson(o.getJSONObject("target")),
+                o.getString("guid"),
+                if (o.has("receipts") && !o.isNull("receipts")) o.optBoolean("receipts") else null,
+            )
+        }
+    }
+
     /** What an [EDIT] request asks for: part [part] of message [guid] now reads [text], formatted with [runs]. */
     data class EditRequest(val target: Target, val guid: String, val part: Int, val text: String, val runs: List<TextRun>) {
         companion object {
@@ -275,8 +338,23 @@ object DirectWire {
     /** The user started ([typing]) or stopped typing in [target]. */
     fun typing(target: Target, typing: Boolean): JSONObject = JSONObject().put("target", target.toJson()).put("typing", typing)
 
-    /** The user read the chat up to message [guid]. */
-    fun read(target: Target, guid: String): JSONObject = JSONObject().put("target", target.toJson()).put("guid", guid)
+    /**
+     * The user read the chat up to message [guid]; with [receipts] the chat's own choice whether the
+     * other person is told (null: the iMessage screen's setting decides).
+     */
+    fun read(target: Target, guid: String, receipts: Boolean? = null): JSONObject =
+        JSONObject().put("target", target.toJson()).put("guid", guid).apply { if (receipts != null) put("receipts", receipts) }
+
+    /** The group [target] is called [name] from now on ("": no name). */
+    fun rename(target: Target, name: String): JSONObject = JSONObject().put("target", target.toJson()).put("name", name)
+
+    /** The group [target]'s members are [participants] from now on (without the user's own address: the user leaves), as of [groupVersion]. */
+    fun members(target: Target, participants: List<String>, groupVersion: Long): JSONObject =
+        JSONObject().put("target", target.toJson()).put("participants", JSONArray(participants)).put("groupVersion", groupVersion)
+
+    /** The group [target]'s photo is the picture at [path] from now on, or none ([path] null), as of [groupVersion]. */
+    fun groupPhoto(target: Target, path: String?, groupVersion: Long): JSONObject =
+        JSONObject().put("target", target.toJson()).put("path", path ?: JSONObject.NULL).put("groupVersion", groupVersion)
 
     /** Fetch the attachment [descriptor] (as the library saved it) into the file [path]. */
     fun download(descriptor: String, path: String): JSONObject = JSONObject().put("descriptor", descriptor).put("path", path)
@@ -335,6 +413,7 @@ object DirectWire {
             .apply { u.groupGuid?.let { put("groupGuid", it).put("groupName", u.groupName) } }.put("groupOnly", u.groupOnly).put("renamed", u.renamed)
             .apply { u.member?.let { put("member", it) } }
             .apply { if (u.membersChanged) put("membersChanged", true) }
+            .apply { u.groupVersion?.let { put("groupVersion", it) } }
         is DirectArchive.Update.Remove -> JSONObject().put("kind", "remove").put("messageId", u.messageId)
             .apply { if (u.scheduledOnly) put("scheduledOnly", true) }
         is DirectArchive.Update.Receipt -> JSONObject().put("kind", "receipt")
@@ -362,6 +441,9 @@ object DirectWire {
             .apply { u.groupGuid?.let { put("groupGuid", it) } }
             .apply { u.peer?.let { put("peer", it) } }
             .apply { u.row?.let { put("row", encode(it)) } }
+        is DirectArchive.Update.GroupPhoto -> JSONObject().put("kind", "groupPhoto").put("conversationId", u.conversationId)
+            .put("groupGuid", u.groupGuid).put("version", u.version).put("path", u.path ?: JSONObject.NULL)
+            .put("row", encode(u.row))
         is DirectArchive.Update.Dropped -> JSONObject().put("kind", "dropped").put("what", u.what).put("why", u.why)
         DirectArchive.Update.Ignore -> JSONObject().put("kind", "ignore")
     }
@@ -433,6 +515,7 @@ object DirectWire {
             renamed = o.optBoolean("renamed"),
             member = if (o.has("member")) o.optBoolean("member") else null,
             membersChanged = o.optBoolean("membersChanged"),
+            groupVersion = if (o.has("groupVersion") && !o.isNull("groupVersion")) o.optLong("groupVersion") else null,
         )
         "remove" -> DirectArchive.Update.Remove(o.getString("messageId"), o.optBoolean("scheduledOnly"))
         "receipt" -> DirectArchive.Update.Receipt(
@@ -467,6 +550,16 @@ object DirectWire {
             o.optJSONObject("row")?.let { decode(it) as? DirectArchive.Update.Upsert },
             BackgroundStyle.of(o.optStringOrNull("styleType"), o.optStringOrNull("styleData")),
         )
+        "groupPhoto" -> {
+            // Without its row (who did it, in which group) or the group's guid it is nothing to take.
+            val row = o.optJSONObject("row")?.let { decode(it) as? DirectArchive.Update.Upsert }
+            val guid = o.optStringOrNull("groupGuid")?.takeIf { it.isNotBlank() }
+            if (row == null || guid == null) {
+                DirectArchive.Update.Ignore
+            } else {
+                DirectArchive.Update.GroupPhoto(o.optString("conversationId"), guid, o.optLong("version"), o.optStringOrNull("path")?.ifEmpty { null }, row)
+            }
+        }
         "dropped" -> DirectArchive.Update.Dropped(o.optString("what"), o.optString("why"))
         else -> DirectArchive.Update.Ignore
     }

@@ -260,7 +260,17 @@ class FakeRelayBridge(session: ByteArray?, private val sink: RelayBridge.Sink) :
         return contacts.toList()
     }
 
-    override fun participantThumbnails(ids: List<String>): List<ThumbnailDto> = emptyList()
+    /** The pictures [participantThumbnails] has, by participant id. */
+    val thumbnails = ConcurrentHashMap<String, ByteArray>()
+
+    /** Who [participantThumbnails] was asked about, call by call. */
+    val thumbnailsAsked = CopyOnWriteArrayList<List<String>>()
+
+    override fun participantThumbnails(ids: List<String>): List<ThumbnailDto> {
+        thumbnailsAsked += ids
+        requireConnected()
+        return ids.mapNotNull { id -> thumbnails[id]?.let { ThumbnailDto(id, it) } }
+    }
 
     override fun downloadMedia(mediaId: String, key: ByteArray): ByteArray {
         downloads += mediaId

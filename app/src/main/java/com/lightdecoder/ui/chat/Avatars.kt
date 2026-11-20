@@ -1,17 +1,79 @@
 package com.lightdecoder.ui.chat
 
 import android.content.res.ColorStateList
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.util.LruCache
 import android.widget.TextView
 import androidx.core.graphics.ColorUtils
+import androidx.core.graphics.drawable.RoundedBitmapDrawableFactory
 import com.lightdecoder.R
+import java.io.File
 
 /**
  * Letter avatars for people and conversations. The phone sends a colour per
  * conversation; when it does not, one is picked from [PALETTE] by a hash of
  * the conversation id, so the same chat keeps the same colour.
+ *
+ * With a picture (an iMessage group's photo, a person's contact picture), the picture in a circle
+ * instead: decoded no larger than the avatar ([photo]: its size read first), and kept decoded for
+ * the next time it is drawn; the initials when it cannot be read.
  */
 object Avatars {
+
+    /** Decoded pictures, by file, its time and the size drawn: a list scrolls without decoding them again. */
+    private val photos = object : LruCache<String, Bitmap>(PHOTO_CACHE_BYTES) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
+    }
+
+    /** Pictures that are none (or too large to read), so they are not read again each time a row is drawn. */
+    private val unreadable = object : LruCache<String, Boolean>(64) {}
+
+    /**
+     * [file] as a square picture [sizePx] pixels on a side (its centre, as an avatar shows it),
+     * decoded no larger than needed: its size read first, nothing decoded past [MAX_PHOTO_PIXELS].
+     * Kept decoded for the next time; null when it is no picture.
+     */
+    fun photo(file: File, sizePx: Int): Bitmap? {
+        val side = sizePx.coerceIn(1, MAX_PHOTO_SIDE)
+        val key = "${file.path}#${file.lastModified()}#${file.length()}#$side"
+        photos.get(key)?.let { return it }
+        if (unreadable.get(key) == true) return null
+        val bitmap = try {
+            decodeSquare(file, side)
+        } catch (e: OutOfMemoryError) {
+            null
+        } catch (e: RuntimeException) {
+            null
+        }
+        if (bitmap == null) unreadable.put(key, true) else photos.put(key, bitmap)
+        return bitmap
+    }
+
+    private fun decodeSquare(file: File, side: Int): Bitmap? {
+        if (!file.isFile) return null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.path, bounds)
+        val w = bounds.outWidth
+        val h = bounds.outHeight
+        if (w <= 0 || h <= 0 || w.toLong() * h > MAX_PHOTO_PIXELS) return null
+        var sample = 1
+        while (minOf(w, h) / (sample * 2) >= side) sample *= 2
+        val decoded = BitmapFactory.decodeFile(file.path, BitmapFactory.Options().apply { inSampleSize = sample }) ?: return null
+        val edge = minOf(decoded.width, decoded.height)
+        val square = Bitmap.createBitmap(decoded, (decoded.width - edge) / 2, (decoded.height - edge) / 2, edge, edge)
+        return if (edge == side) square else Bitmap.createScaledBitmap(square, side, side, true)
+    }
+
+    /** The size an avatar [view] is drawn at: its own, else a list's. */
+    private fun sizeOf(view: TextView): Int =
+        view.layoutParams?.width?.takeIf { it > 0 } ?: view.width.takeIf { it > 0 } ?: (DEFAULT_SIDE_DP * view.resources.displayMetrics.density).toInt()
+
+    private const val PHOTO_CACHE_BYTES = 8 * 1024 * 1024
+    private const val MAX_PHOTO_PIXELS = 50_000_000L
+    private const val MAX_PHOTO_SIDE = 1024
+    private const val DEFAULT_SIDE_DP = 40
 
     /** Dark enough that white initials stay readable (large text, ≥ 3:1) in light and dark themes. */
     private val PALETTE = intArrayOf(
@@ -62,12 +124,40 @@ object Avatars {
         return if (white >= black) Color.WHITE else Color.BLACK
     }
 
-    /** Shows [name]'s initials on a circle in its colour. The view needs @drawable/bg_avatar. */
     /**
      * The same avatar as a drawable of [sizePx] (a coloured circle with the
-     * initials), for places that take a drawable, such as a toolbar's logo.
+     * initials, or [photo] in a circle), for places that take a drawable, such
+     * as a toolbar's logo.
      */
-    fun drawable(context: android.content.Context, name: String, key: String, phoneColor: String, sizePx: Int): android.graphics.drawable.Drawable {
+    fun drawable(
+        context: android.content.Context,
+        name: String,
+        key: String,
+        phoneColor: String,
+        sizePx: Int,
+        photo: File? = null,
+    ): android.graphics.drawable.Drawable {
+        photo?.let { photo(it, sizePx) }?.let { picture ->
+            return RoundedBitmapDrawableFactory.create(context.resources, picture).apply { isCircular = true }
+        }
+        return initialsBitmap(name, key, phoneColor, sizePx).let { android.graphics.drawable.BitmapDrawable(context.resources, it) }
+    }
+
+    /** [photo] cut to a circle [sizePx] across (a notification's picture), or null when it is no picture. */
+    fun circlePhoto(photo: File, sizePx: Int): Bitmap? {
+        val square = photo(photo, sizePx) ?: return null
+        val out = Bitmap.createBitmap(square.width, square.height, Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(out)
+        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.FILTER_BITMAP_FLAG).apply {
+            shader = android.graphics.BitmapShader(square, android.graphics.Shader.TileMode.CLAMP, android.graphics.Shader.TileMode.CLAMP)
+        }
+        val r = square.width / 2f
+        canvas.drawCircle(r, r, r, paint)
+        return out
+    }
+
+    /** [name]'s initials on a circle in its colour, [sizePx] across (a notification's picture, a toolbar's logo). */
+    fun initialsBitmap(name: String, key: String, phoneColor: String, sizePx: Int): Bitmap {
         val background = colorFor(key, phoneColor)
         val bitmap = android.graphics.Bitmap.createBitmap(sizePx, sizePx, android.graphics.Bitmap.Config.ARGB_8888)
         val canvas = android.graphics.Canvas(bitmap)
@@ -83,10 +173,21 @@ object Avatars {
             }
             canvas.drawText(text, r, r - (paint.descent() + paint.ascent()) / 2f, paint)
         }
-        return android.graphics.drawable.BitmapDrawable(context.resources, bitmap)
+        return bitmap
     }
 
-    fun bind(view: TextView, name: String, key: String, phoneColor: String) {
+    /**
+     * Shows [photo] in a circle on [view], or, without one (or when it cannot be read), [name]'s
+     * initials on a circle in its colour. The view needs @drawable/bg_avatar.
+     */
+    fun bind(view: TextView, name: String, key: String, phoneColor: String, photo: File? = null) {
+        val picture = photo?.let { photo(it, sizeOf(view)) }
+        if (picture != null) {
+            view.text = ""
+            view.backgroundTintList = null
+            view.background = RoundedBitmapDrawableFactory.create(view.resources, picture).apply { isCircular = true }
+            return
+        }
         val color = colorFor(key, phoneColor)
         view.text = initials(name)
         view.setBackgroundResource(R.drawable.bg_avatar)

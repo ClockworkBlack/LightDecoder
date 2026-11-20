@@ -97,12 +97,33 @@ class DirectWordingTest {
             R.string.imessage_thread_quote_description, R.string.imessage_thread_open, R.string.imessage_thread_title,
             R.string.imessage_thread_reply_hint, R.string.imessage_thread_close, R.string.imessage_thread_send,
             R.string.imessage_reply_threads_in_chat, R.string.imessage_reply_threads_in_chat_help,
+            // A chat's details, and a group's name, members and photo changed from here.
+            R.string.chat_details_title, R.string.chat_details_open, R.string.chat_details_change_name_photo,
+            R.string.chat_details_name_hint, R.string.chat_details_choose_photo, R.string.chat_details_remove_photo,
+            R.string.chat_details_done, R.string.chat_details_add_member, R.string.chat_details_add,
+            R.string.chat_details_remove_member, R.string.chat_details_remove_title, R.string.chat_details_remove,
+            R.string.chat_details_hide_alerts, R.string.chat_details_read_receipts, R.string.chat_details_leave,
+            R.string.chat_details_leave_title, R.string.chat_details_leave_body, R.string.chat_details_leave_confirm,
+            R.string.chat_details_failed, R.string.chat_details_photo, R.string.imessage_event_name_removed,
+            R.string.imessage_direct_group_not_confirmed, R.string.imessage_direct_group_refused,
+            R.string.imessage_group_not_a_group, R.string.imessage_group_photo_unreadable, R.string.imessage_group_photo_too_big,
+            R.string.imessage_group_photo_upload, R.string.imessage_group_already_in, R.string.imessage_group_not_member,
+            R.string.imessage_group_too_small, R.string.imessage_event_named, R.string.imessage_event_added,
+            R.string.imessage_event_removed, R.string.imessage_event_left, R.string.imessage_event_photo_changed,
+            R.string.imessage_event_photo_removed,
         )
         for (res in direct) {
             val text = context.getString(res)
             assertFalse(text, text.contains("OpenBubbles"))
         }
+        assertEquals("Leave this Conversation", context.getString(R.string.chat_details_leave))
+        assertEquals("Change Name and Photo", context.getString(R.string.chat_details_change_name_photo))
+        assertEquals("Hide Alerts", context.getString(R.string.chat_details_hide_alerts))
+        assertEquals("Send Read Receipts", context.getString(R.string.chat_details_read_receipts))
+        assertEquals("You removed the name from the conversation.", context.getString(R.string.imessage_event_name_removed, "You"))
         for (count in listOf(1, 2)) {
+            val added = context.resources.getQuantityString(R.plurals.imessage_group_add_not_on_imessage, count, "Bob")
+            assertFalse(added, added.contains("OpenBubbles"))
             val text = context.resources.getQuantityString(R.plurals.imessage_group_not_on_imessage, count, "Bob")
             assertFalse(text, text.contains("OpenBubbles"))
             for (plural in listOf(R.plurals.imessage_thread_replies, R.plurals.imessage_thread_open_replies)) {

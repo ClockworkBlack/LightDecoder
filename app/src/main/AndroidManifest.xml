@@ -379,6 +379,11 @@
             android:name=".ui.chat.NewConversationActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />
+        <!-- A chat's details, as an iPhone's (a tap on the name at the top of an iMessage chat). -->
+        <activity
+            android:name=".ui.chat.ChatDetailsActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
 
         <!--
             WhatsApp link: linking (the user's number, then the pairing code

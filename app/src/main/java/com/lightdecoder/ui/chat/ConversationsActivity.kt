@@ -720,13 +720,15 @@ class ConversationsActivity : AppCompatActivity() {
         val iMessage = if (showsIMessage()) ScreenBackends.get(this, ChatService.IMESSAGE) else null
         searchJob = lifecycleScope.launch {
             if (debounce) delay(SEARCH_DEBOUNCE_MS)
-            val hits: List<SearchHit> = if (query.isBlank()) emptyList() else withContext(Dispatchers.IO) {
+            val (hits, photos) = if (query.isBlank()) emptyList<SearchHit>() to emptyMap<String, java.io.File>() else withContext(Dispatchers.IO) {
                 val own = from.repo.search(query).map { it.copy(service = from.service) }
                 // The iMessage chats listed in the Messages tab are searched with it.
                 val extra = iMessage?.let { im -> runCatching { im.repo.search(query) }.getOrDefault(emptyList()).map { it.copy(service = im.service) } }.orEmpty()
-                if (extra.isEmpty()) own else (own + extra).sortedByDescending { it.timestampMs }
+                val found = if (extra.isEmpty()) own else (own + extra).sortedByDescending { it.timestampMs }
+                found to runCatching { AvatarPhotos.forHits(applicationContext, found) }.getOrDefault(emptyMap())
             }
             if (searchQuery != query || from !== backend) return@launch
+            searchAdapter.photos = photos
             searchAdapter.submitList(hits)
             binding.emptyText.setText(R.string.chat_search_empty)
             binding.emptyText.visibility = if (hits.isEmpty() && query.isNotBlank()) View.VISIBLE else View.GONE

@@ -124,6 +124,7 @@
     <string name="imessage_event_left">%1$s left the conversation.</string>
     <string name="imessage_event_photo_changed">%1$s changed the group photo.</string>
     <string name="imessage_event_photo_removed">%1$s removed the group photo.</string>
+    <string name="imessage_event_name_removed">%1$s removed the name from the conversation.</string>
     <string name="imessage_you_unsent">You unsent a message.</string>
     <string name="imessage_unsent">%1$s unsent a message.</string>
 
@@ -310,7 +311,7 @@
     <string name="imessage_phone_style">iPhone-style chats</string>
     <string name="imessage_phone_style_help">iMessage chats look as they do on an iPhone: blue and grey bubbles, the name at the top, times between messages. Turn off for the look of the other chats.</string>
     <string name="imessage_phone_hint_text">Text Message</string>
-    <string name="imessage_phone_header">%1$s, conversation options</string>
+    <string name="imessage_phone_header">%1$s, details</string>
     <string name="imessage_phone_add">Add a picture, sticker or game</string>
     <string name="imessage_attach_stickers">Stickers</string>
     <string name="imessage_games_get">Get games</string>
@@ -432,4 +433,47 @@
     <string name="imessage_thread_reply_hint">Reply</string>
     <string name="imessage_thread_close">Close the thread</string>
     <string name="imessage_thread_send">Send reply</string>
+
+    <!--
+        A chat's details (ui/chat/ChatDetailsActivity), as an iPhone's: the picture and name, a group's
+        members, Hide Alerts and Send Read Receipts; a group's name, photo and members changed from here.
+    -->
+    <string name="chat_details_title">Details</string>
+    <string name="chat_details_open">Details</string>
+    <string name="chat_details_change_name_photo">Change Name and Photo</string>
+    <string name="chat_details_name_hint">Group name</string>
+    <string name="chat_details_choose_photo">Choose Photo</string>
+    <string name="chat_details_remove_photo">Remove Photo</string>
+    <string name="chat_details_done">Done</string>
+    <string name="chat_details_add_member">Add Member</string>
+    <string name="chat_details_add">Add</string>
+    <!-- %1$s: the member, by name or address. -->
+    <string name="chat_details_remove_member">Remove %1$s</string>
+    <string name="chat_details_remove_title">Remove %1$s from this conversation?</string>
+    <string name="chat_details_remove">Remove</string>
+    <string name="chat_details_hide_alerts">Hide Alerts</string>
+    <string name="chat_details_read_receipts">Send Read Receipts</string>
+    <string name="chat_details_leave">Leave this Conversation</string>
+    <string name="chat_details_leave_title">Leave this Conversation?</string>
+    <string name="chat_details_leave_body">You won\'t get messages from this conversation unless someone adds you back.</string>
+    <string name="chat_details_leave_confirm">Leave</string>
+    <!-- %1$s: why, in words. -->
+    <string name="chat_details_failed">That did not go through: %1$s</string>
+    <!-- What TalkBack says of the big picture. %1$s: the person or group. -->
+    <string name="chat_details_photo">%1$s\'s picture</string>
+    <!-- Errors of the iMessage library's group changes. -->
+    <string name="imessage_direct_group_not_confirmed">Apple did not confirm the change within %1$d seconds. It may not have gone through.</string>
+    <string name="imessage_direct_group_refused">Apple refused the change: %1$s</string>
+    <string name="imessage_group_not_a_group">Only an iMessage group\'s name, members and photo can be changed.</string>
+    <string name="imessage_group_photo_unreadable">That picture could not be read.</string>
+    <string name="imessage_group_photo_too_big">That picture is too large to use as the group photo.</string>
+    <string name="imessage_group_photo_upload">The group photo could not be uploaded to Apple.</string>
+    <string name="imessage_group_already_in">They\'re already in this conversation.</string>
+    <string name="imessage_group_not_member">They\'re not in this conversation.</string>
+    <string name="imessage_group_too_small">Someone can be removed, or you can leave, only in a group of 4 people or more.</string>
+    <!-- %1$s: the people Apple says are not on iMessage, by name or address, comma-separated. -->
+    <plurals name="imessage_group_add_not_on_imessage">
+        <item quantity="one">%1$s is not on iMessage, so they can\'t be added.</item>
+        <item quantity="other">%1$s are not on iMessage, so they can\'t be added.</item>
+    </plurals>
 </resources>

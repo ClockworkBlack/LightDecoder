@@ -38,6 +38,8 @@ object ShareShortcuts {
         val avatarColor: String,
         val pinned: Boolean,
         val timestampMs: Long,
+        /** The picture it is shown by ([com.lightdecoder.ui.chat.ConversationItem.photo]); "" for its initials. */
+        val photo: String = "",
     )
 
     /** By tab: its newest conversations as last offered, and every conversation its list then had. */
@@ -57,7 +59,7 @@ object ShareShortcuts {
         val entries = items.asSequence()
             .filter { !it.row.readOnly && it.title.isNotBlank() && it.row.id.isNotEmpty() }
             .take(MAX_PUBLISHED)
-            .map { Entry(it.service, it.row.id, it.title, it.row.avatarColor, it.row.pinned, it.row.lastMessageTs) }
+            .map { Entry(it.service, it.row.id, it.title, it.row.avatarColor, it.row.pinned, it.row.lastMessageTs, it.photo) }
             .toList()
         val ids = items.map { id(it.service, it.row.id) }.toSet()
         val (top, gone) = synchronized(offered) {
@@ -75,7 +77,7 @@ object ShareShortcuts {
             if (gone.isNotEmpty()) ShortcutManagerCompat.removeLongLivedShortcuts(context, gone.toList())
             ShortcutManagerCompat.setDynamicShortcuts(
                 context,
-                top.mapIndexed { rank, e -> shortcut(context, e.service, e.conversationId, e.title, e.avatarColor, rank) },
+                top.mapIndexed { rank, e -> shortcut(context, e.service, e.conversationId, e.title, e.avatarColor, rank, e.photo) },
             )
         }
     }
@@ -105,9 +107,18 @@ object ShareShortcuts {
         runCatching { ShortcutManagerCompat.pushDynamicShortcut(context, shortcut(context, service, conversationId, title, avatarColor, 0)) }
     }
 
-    private fun shortcut(context: Context, service: ChatService, conversationId: String, title: String, avatarColor: String, rank: Int): ShortcutInfoCompat {
+    private fun shortcut(
+        context: Context,
+        service: ChatService,
+        conversationId: String,
+        title: String,
+        avatarColor: String,
+        rank: Int,
+        photo: String = "",
+    ): ShortcutInfoCompat {
         val side = (ICON_DP * context.resources.displayMetrics.density).toInt()
-        val icon = Avatars.drawable(context, title, conversationId, avatarColor, side).toBitmap(side, side)
+        val picture = photo.takeIf { it.isNotEmpty() }?.let { java.io.File(it) }
+        val icon = Avatars.drawable(context, title, conversationId, avatarColor, side, picture).toBitmap(side, side)
         val open = RelayIntents.thread(context, conversationId, service = service).setAction(Intent.ACTION_VIEW)
         return ShortcutInfoCompat.Builder(context, id(service, conversationId))
             .setShortLabel(title.take(MAX_LABEL))

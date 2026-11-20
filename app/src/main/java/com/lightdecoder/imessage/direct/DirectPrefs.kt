@@ -38,12 +38,27 @@ object DirectPrefs {
         return prefs
     }
 
-    /** Whether people are told when the user has read their messages (one-to-one chats). Off, as on an iPhone. */
-    fun sendReadReceipts(context: Context): Boolean = prefs(context).getBoolean(KEY_READ_RECEIPTS, false)
+    private fun readReceiptsFile(context: Context) = File(context.filesDir, "imessage/read-receipts")
+
+    /**
+     * Whether people are told when the user has read their messages (one-to-one chats). Off, as on
+     * an iPhone. Read in either process: the setup screen (":imessage") sets it, and a chat's details
+     * (main process) show it as the chat's default. Kept in a file of its own once it is set, which a
+     * SharedPreferences cache would not see change; one set before that is in [prefs].
+     */
+    fun sendReadReceipts(context: Context): Boolean {
+        val stored = runCatching { readReceiptsFile(context).takeIf { it.isFile }?.readText()?.trim() }.getOrNull()
+        return when (stored) {
+            "1" -> true
+            "0" -> false
+            else -> prefs(context).getBoolean(KEY_READ_RECEIPTS, false)
+        }
+    }
 
     /** Turns read receipts to people on or off (see [sendReadReceipts]). */
     fun setSendReadReceipts(context: Context, on: Boolean) {
         prefs(context).edit().putBoolean(KEY_READ_RECEIPTS, on).apply()
+        runCatching { readReceiptsFile(context).apply { parentFile?.mkdirs() }.writeText(if (on) "1" else "0") }
     }
 
     private fun gamesOffMarker(context: Context) = File(context.filesDir, "imessage/games-off")

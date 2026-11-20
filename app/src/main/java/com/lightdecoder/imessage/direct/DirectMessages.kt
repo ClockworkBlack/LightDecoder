@@ -79,6 +79,19 @@ object DirectMessages {
     fun readReceiptParticipants(target: DirectWire.Target, sendReadReceipts: Boolean): List<String> =
         if (sendReadReceipts) listOfNotNull(target.peer) else emptyList()
 
+    /**
+     * A group's members after a change the main process asked for ([DirectWire.MembersRequest]):
+     * [participants], the user among them by [targetFrom] (the address the chat is sent from) or any
+     * of the user's addresses [mine], which is then the one actually sent from ([from]), last; with
+     * none of the user's: the user leaves it. Each once, the others in the order given.
+     */
+    fun newParticipants(participants: List<String>, targetFrom: String, from: String, mine: Set<String>): List<String> {
+        val own = mine + from + listOfNotNull(targetFrom.takeIf { it.isNotBlank() })
+        val stays = participants.any { it in own }
+        val others = participants.filter { it.isNotBlank() && it !in own }.distinct()
+        return if (stays) others + from else others
+    }
+
     /** A message's parts as they go to Apple, and its attachments as the archive numbers them. */
     class Outgoing(val parts: List<IndexedMessagePart>, val attachments: List<DirectWire.SentPart>)
 

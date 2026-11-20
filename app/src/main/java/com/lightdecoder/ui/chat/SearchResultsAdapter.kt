@@ -16,6 +16,9 @@ class SearchResultsAdapter(
 
     private val ids = StableIds()
 
+    /** The pictures the results' conversations are shown by ([AvatarPhotos.forHits]), set with each list. */
+    var photos: Map<String, java.io.File> = emptyMap()
+
     init {
         setHasStableIds(true)
     }
@@ -32,7 +35,7 @@ class SearchResultsAdapter(
         val b = holder.binding
         val context = b.root.context
         val name = hit.conversationName.ifBlank { context.getString(R.string.chat_untitled) }
-        Avatars.bind(b.avatar, name, hit.conversationId, "")
+        Avatars.bind(b.avatar, name, hit.conversationId, "", photos[AvatarPhotos.key(hit.service, hit.conversationId)])
         b.name.text = name
         b.snippet.text = hit.snippet.replace('\n', ' ')
         b.time.text = TimeFormat.listTime(context, hit.timestampMs)

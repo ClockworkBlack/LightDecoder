@@ -55,6 +55,9 @@ object MessageNotifier {
     private const val NOTIFICATION_ID_IMESSAGE = 0x5245_4c13
     private const val MAX_LINES = 6
 
+    /** The size of a notification's picture. */
+    private const val PHOTO_DP = 64
+
     /** Tags of WhatsApp's notifications start with this; Google Messages' are the bare conversation id, as before. */
     private const val WHATSAPP_TAG_PREFIX = "wa:"
     private const val GMAIL_TAG_PREFIX = "gm:"
@@ -118,7 +121,7 @@ object MessageNotifier {
             .ifBlank { context.getString(R.string.relay_notify_someone) }
         val line = Line(sender, bodyOf(context, message), message.timestampMs.takeIf { it > 0 } ?: System.currentTimeMillis(), false)
         val key = Key(service, message.conversationId)
-        post(context, key, conversation, add(key, line), alert = true)
+        post(context, key, conversation, add(key, line), alert = true, photo = photoFor(context, repo, message.conversationId, conversation))
     }
 
     /**
@@ -135,8 +138,25 @@ object MessageNotifier {
         }
         val line = Line(context.getString(R.string.relay_notify_you), text, System.currentTimeMillis(), true)
         val key = Key(service, conversationId)
-        post(context, key, repo.conversation(conversationId), add(key, line), alert = false)
+        val conversation = repo.conversation(conversationId)
+        post(context, key, conversation, add(key, line), alert = false, photo = photoFor(context, repo, conversationId, conversation))
     }
+
+    /**
+     * The picture a conversation is shown by ([com.lightdecoder.ui.chat.AvatarPhotos]): an iMessage
+     * group's photo, a person's picture; in a circle, for the notification. Null for none; never throws.
+     */
+    private fun photoFor(context: Context, repo: ArchiveRepository, conversationId: String, conversation: ConversationRow?): android.graphics.Bitmap? =
+        try {
+            val file = com.lightdecoder.ui.chat.AvatarPhotos.forConversation(
+                context.applicationContext, repo.service, conversationId, conversation?.isGroup == true, repo.participants(conversationId),
+            )
+            file?.let { com.lightdecoder.ui.chat.Avatars.circlePhoto(it, (PHOTO_DP * context.resources.displayMetrics.density).toInt()) }
+        } catch (e: Exception) {
+            null
+        } catch (e: OutOfMemoryError) {
+            null
+        }
 
     fun cancel(context: Context, conversationId: String, service: ChatService = ChatService.MESSAGES) {
         synchronized(this) { lines.remove(Key(service, conversationId)) }
@@ -196,7 +216,7 @@ object MessageNotifier {
     }
 
     @SuppressLint("MissingPermission") // checked with areNotificationsEnabled()
-    private fun post(context: Context, key: Key, conversation: ConversationRow?, recent: List<Line>, alert: Boolean) {
+    private fun post(context: Context, key: Key, conversation: ConversationRow?, recent: List<Line>, alert: Boolean, photo: android.graphics.Bitmap? = null) {
         val manager = NotificationManagerCompat.from(context)
         if (!manager.areNotificationsEnabled()) return
         val service = key.service
@@ -208,8 +228,10 @@ object MessageNotifier {
         val style = NotificationCompat.MessagingStyle(me)
             .setConversationTitle(if (isGroup) conversation?.name else null)
             .setGroupConversation(isGroup)
+        // A chat with one person: their picture with what they said.
+        val icon = photo?.takeIf { !isGroup }?.let { androidx.core.graphics.drawable.IconCompat.createWithBitmap(it) }
         for (line in recent) {
-            val person = if (line.fromMe) null else Person.Builder().setName(line.sender).build()
+            val person = if (line.fromMe) null else Person.Builder().setName(line.sender).apply { if (icon != null) setIcon(icon) }.build()
             style.addMessage(line.text, line.timestampMs, person)
         }
 
@@ -261,6 +283,8 @@ object MessageNotifier {
             .setShowWhen(true)
             .setOnlyAlertOnce(!alert)
             .setSilent(!alert)
+            // The group's photo, or the person's picture, as the notification's.
+            .apply { if (photo != null) setLargeIcon(photo) }
             .build()
         try {
             manager.notify(tag, idFor(service), notification)

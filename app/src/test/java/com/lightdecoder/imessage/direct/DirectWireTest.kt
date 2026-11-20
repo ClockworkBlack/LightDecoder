@@ -373,4 +373,75 @@ class DirectWireTest {
         val incoming = DirectArchive.Update.Edit("imsg:G1", "Hey there", 0, 5_000, runs)
         assertEquals(incoming, trip(incoming))
     }
+
+    // --- a group's name, members and photo; a chat's own read receipts ------------------------------
+
+    @Test
+    fun theGroupRequestsHaveCodesOfTheirOwnAfterTheOnesBefore() {
+        assertEquals(13, DirectWire.RENAME)
+        assertEquals(14, DirectWire.MEMBERS)
+        assertEquals(15, DirectWire.GROUP_PHOTO)
+        val codes = listOf(
+            DirectWire.SEND, DirectWire.UNSEND, DirectWire.REACH, DirectWire.EDIT, DirectWire.REACT, DirectWire.TYPING,
+            DirectWire.READ, DirectWire.DOWNLOAD, DirectWire.EXTENSION, DirectWire.UPDATE, DirectWire.BACKGROUND,
+            DirectWire.UNSCHEDULE, DirectWire.RENAME, DirectWire.MEMBERS, DirectWire.GROUP_PHOTO, DirectWire.REPLY,
+        )
+        assertEquals(codes.size, codes.toSet().size)
+    }
+
+    @Test
+    fun aGroupsRenameMembersAndPhotoSurviveTheTrip() {
+        val t = DirectWire.Target(listOf("tel:+15550000002", "mailto:carol@example.com"), "Trip", "G-1", "tel:+15550000001", "G-LAST")
+        val rename = DirectWire.RenameRequest.fromJson(JSONObject(DirectWire.rename(t, "Ski “trip” ✓").toString()))
+        assertEquals(DirectWire.RenameRequest(t, "Ski “trip” ✓"), rename)
+        assertEquals("", DirectWire.RenameRequest.fromJson(JSONObject(DirectWire.rename(t, "").toString())).name)
+        val members = listOf("tel:+15550000002", "mailto:carol@example.com", "tel:+15550000004", "tel:+15550000001")
+        assertEquals(DirectWire.MembersRequest(t, members, 7), DirectWire.MembersRequest.fromJson(JSONObject(DirectWire.members(t, members, 7).toString())))
+        // Leaving: the list without the user's own address.
+        val leave = DirectWire.MembersRequest.fromJson(JSONObject(DirectWire.members(t, members.dropLast(1), 8).toString()))
+        assertEquals(members.dropLast(1), leave.participants)
+        assertEquals(8L, leave.groupVersion)
+        val photo = DirectWire.GroupPhotoRequest.fromJson(JSONObject(DirectWire.groupPhoto(t, "/data/x/imessage/group-photos/outgoing-1.jpg", 3).toString()))
+        assertEquals(DirectWire.GroupPhotoRequest(t, "/data/x/imessage/group-photos/outgoing-1.jpg", 3), photo)
+        assertNull(DirectWire.GroupPhotoRequest.fromJson(JSONObject(DirectWire.groupPhoto(t, null, 4).toString())).path)
+        // An older main process's request names no version: 0, as OpenBubbles starts.
+        assertEquals(0L, DirectWire.MembersRequest.fromJson(JSONObject().put("target", t.toJson()).put("participants", org.json.JSONArray(members))).groupVersion)
+    }
+
+    @Test
+    fun aReadCarriesTheChatsOwnReceiptsChoiceOnlyWhenItHasOne() {
+        val t = DirectWire.Target(listOf("tel:+2"), null, null, "tel:+1")
+        assertNull(DirectWire.ReadRequest.fromJson(JSONObject(DirectWire.read(t, "G2").toString())).receipts)
+        assertFalse(JSONObject(DirectWire.read(t, "G2").toString()).has("receipts"))
+        assertEquals(DirectWire.ReadRequest(t, "G2", true), DirectWire.ReadRequest.fromJson(JSONObject(DirectWire.read(t, "G2", true).toString())))
+        assertEquals(false, DirectWire.ReadRequest.fromJson(JSONObject(DirectWire.read(t, "G2", false).toString())).receipts)
+    }
+
+    @Test
+    fun aGroupsVersionAndPhotoChangeSurviveTheTrip() {
+        val conv = ConversationDto(
+            id = "imsg:group:G-1", name = "Trip", isGroup = true, type = DirectArchive.TRANSPORT,
+            participants = listOf(ParticipantDto(id = "tel:+15550000002"), ParticipantDto(id = "tel:+15550000001", isMe = true)),
+        )
+        val row = MessageDto(
+            id = "imsg:IC1", conversationId = conv.id, senderId = "tel:+15550000002", senderName = "Bob", timestampMs = 5,
+            direction = "system", transport = DirectArchive.TRANSPORT, text = "Bob changed the group photo.",
+            parts = listOf(PartDto("0", "text", "Bob changed the group photo.")),
+        )
+        val versioned = DirectArchive.Update.Upsert(conv, row, member = true, membersChanged = true, groupVersion = 12)
+        assertEquals(12L, (trip(versioned) as DirectArchive.Update.Upsert).groupVersion)
+        assertNull((trip(DirectArchive.Update.Upsert(conv, row)) as DirectArchive.Update.Upsert).groupVersion)
+        val photo = DirectArchive.Update.GroupPhoto(conv.id, "G-1", 12, "/data/x/imessage/group-photos/incoming-1.jpg", versioned)
+        val back = trip(photo) as DirectArchive.Update.GroupPhoto
+        assertEquals(photo.copy(row = back.row), back)
+        assertEquals(versioned.message, back.row.message)
+        assertEquals(12L, back.row.groupVersion)
+        val removed = trip(photo.copy(path = null)) as DirectArchive.Update.GroupPhoto
+        assertNull(removed.path)
+        // Without who did it, or the group's guid, it is nothing to take.
+        assertEquals(DirectArchive.Update.Ignore, DirectWire.decode(JSONObject(DirectWire.encode(photo).toString()).apply { remove("row") }))
+        assertEquals(DirectArchive.Update.Ignore, DirectWire.decode(JSONObject(DirectWire.encode(photo).toString()).put("groupGuid", "")))
+        // It crosses as it is (no message of its own to cut).
+        assertEquals(DirectWire.encode(photo).toString(), DirectWire.encodeUpdate(photo).toString())
+    }
 }
