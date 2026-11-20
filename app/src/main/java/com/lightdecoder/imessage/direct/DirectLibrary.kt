@@ -79,14 +79,12 @@ object DirectLibrary {
     fun isBundled(context: Context): Boolean = processAbi() in bundledAbis(context)
 
     /**
-     * The libraries still missing for this CPU type (empty: ready to load). One that has no pinned
-     * build for it ([unpinned]) counts as missing whatever is on disk: it can never be loaded.
+     * The libraries still missing for this CPU type (empty: ready to load). Whether the files there
+     * are the pinned builds is checked when they are loaded ([load], [verify]), which refuses (and
+     * removes) any that is not.
      */
-    fun missing(context: Context): List<String> {
-        if (isBundled(context)) return emptyList()
-        val abi = processAbi()
-        return REQUIRED.filter { !File(dir(context), it).isFile || pinFor(it, abi) == null }
-    }
+    fun missing(context: Context): List<String> =
+        if (isBundled(context)) emptyList() else REQUIRED.filter { !File(dir(context), it).isFile }
 
     fun isInstalled(context: Context): Boolean = missing(context).isEmpty()
 
@@ -139,13 +137,21 @@ object DirectLibrary {
 
     /**
      * Whether the library files in [dir] are the pinned builds for [abi], read again now: null when
-     * they are, else why not. A file that is there but is not the pinned build is deleted, so it is
-     * asked for again. Never loads anything.
+     * they are, else why not. A file that is there but is not the pinned build (or has no pinned
+     * build for [abi] at all, as an earlier version could leave) is deleted, so it is asked for
+     * again and never loaded by anything. Never loads anything itself.
      */
     internal fun verify(dir: File, abi: String, pins: List<Pin> = PINS): String? {
         for (name in REQUIRED) {
-            val pin = pins.firstOrNull { it.name == name && it.abi == abi } ?: return notPinnedForAbi(name, abi)
             val file = File(dir, name)
+            val pin = pins.firstOrNull { it.name == name && it.abi == abi }
+            if (pin == null) {
+                if (file.exists()) {
+                    file.setWritable(true)
+                    file.delete()
+                }
+                return notPinnedForAbi(name, abi)
+            }
             if (!file.isFile) return "$name is not imported yet."
             val sha = try {
                 sha256(file)

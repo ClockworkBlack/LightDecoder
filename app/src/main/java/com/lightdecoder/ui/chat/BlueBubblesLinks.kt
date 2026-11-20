@@ -86,6 +86,15 @@ internal object BlueBubblesLinks {
         return chats.map { it to (it.id in same) }.sortedByDescending { it.second }
     }
 
+    /**
+     * For Check iMessage's verdict only, never a link: the chat with [messagesId]'s name and no
+     * number of its own ([linkCandidates]) that has a message since [sinceMs], when the check found
+     * no chat by number or link (an OpenBubbles notification that names the person but leaves out
+     * their number). The worst a stranger under that name can do is answer the check.
+     */
+    fun sameNameChatSince(context: Context, messagesId: String, sinceMs: Long): String? =
+        linkCandidates(context, messagesId).firstOrNull { (row, sameName) -> sameName && row.lastMessageTs >= sinceMs }?.first?.id
+
     /** The other person's name in a one-to-one iMessage chat. */
     fun iMessageName(context: Context, iMessageId: String): String =
         runCatching { IMessageManager.get(context).repo.participants(iMessageId) }.getOrDefault(emptyList())

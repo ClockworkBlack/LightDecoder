@@ -4024,6 +4024,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             findChat = {
                 BlueBubblesLinks.iMessageFor(app, textRepo.conversation(id), textRepo.participants(id))
                     ?: address?.let(im::conversationWith)
+                    // For the verdict only (nothing is linked by it): their new chat named as they are, but without their number.
+                    ?: BlueBubblesLinks.sameNameChatSince(app, id, sentAt)
             },
             text, silent, sentAt, im, textRepo,
         )

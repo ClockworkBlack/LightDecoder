@@ -57,7 +57,8 @@ handed to it, and its saved pictures taken from the gallery. A copy signed by an
 named on the screens and in the problem report as not used (`IMessageErrors.NOT_VERIFIED`).
 An iMessage chat is linked into a Messages conversation by its number or email address (or by
 hand), never by a name alone: a chat with no number of its own whose name matches is only listed
-first in "Link an iMessage chat…", for the user to confirm.
+first in "Link an iMessage chat…", for the user to confirm. (Check iMessage still takes the reply in
+such a chat, written since the check was sent, for its verdict; nothing is linked by it.)
 
 ## Inline replies (0.5.57)
 A reply names the answered message's GUID (`NormalMessage.replyGuid`) and the part of it

@@ -184,9 +184,11 @@ class DirectLogicTest {
                 DirectLibrary.Pin(DirectLibrary.BRIDGE, "arm64-v8a", DirectLibrary.sha256(bridge).uppercase()),
             )
             assertNull("both are the pinned builds", DirectLibrary.verify(dir, "arm64-v8a", pins))
-            // Another CPU type has none of these pinned: nothing is loaded, and nothing deleted.
-            assertTrue(DirectLibrary.verify(dir, "armeabi-v7a", pins)!!.contains("no pinned"))
             assertTrue(heif.isFile && bridge.isFile)
+            // A CPU type with nothing pinned: nothing is loaded, and a file there (an earlier version's) goes.
+            assertTrue(DirectLibrary.verify(dir, "armeabi-v7a", pins)!!.contains("no pinned"))
+            assertFalse(heif.exists())
+            heif.writeBytes(byteArrayOf(1, 2, 3))
             // Changed since it was imported (or kept from before the pins were enforced): refused and removed.
             bridge.writeBytes(byteArrayOf(4, 5, 6, 7))
             val why = DirectLibrary.verify(dir, "arm64-v8a", pins)!!

@@ -294,6 +294,8 @@ class BlueBubblesScreenTest {
     @Test
     fun theMessagesConversationShowsTheIMessagesInBlueAndSendsAsIMessage() {
         two.env.pairedManager()
+        // OpenBubbles is here: its Reply button is pressed only while it is the real one.
+        installOpenBubbles()
         IMessagePrefs.setEnabled(two.app, true)
         two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
         two.seedIncoming(ChatService.MESSAGES, "sms1", "c1", "A text", ts = 1_000)
@@ -439,6 +441,8 @@ class BlueBubblesScreenTest {
      */
     private fun runCheck(replyByIMessage: Boolean, closeFirst: Boolean = false) {
         two.env.pairedManager()
+        // OpenBubbles is here: its Reply button is pressed only while it is the real one.
+        installOpenBubbles()
         IMessagePrefs.setEnabled(two.app, true)
         two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
         seedIMessage("An iMessage", ts = 5_000)
@@ -572,17 +576,33 @@ class BlueBubblesScreenTest {
     // --- iMessages in the right conversation, and unsending -----------------------------
 
     @Test
-    fun anIMessageChatWithoutANumberShowsInTheConversationWithItsName() {
+    fun anIMessageChatWithoutANumberIsOfferedByItsNameButLinkedOnlyByTheUser() {
         two.env.pairedManager()
         IMessagePrefs.setEnabled(two.app, true)
         two.seedConversation(ChatService.MESSAGES, "c1", "Nina", lastTs = 1_000, number = "+1 555-123-4567")
         two.seedIncoming(ChatService.MESSAGES, "sms1", "c1", "An earlier text", ts = 1_000)
-        // OpenBubbles' notification names her but carries no number.
+        // OpenBubbles' notification names her but carries no number: anyone could write under that name.
         iMessage.record(
             CapturedIMessageChat(ALICE, "m1", "Nina", false, "", listOf(CapturedIMessage("Nina", "", false, "OK", 5_000))),
             live = true,
         )
+        launchList().use { scenario ->
+            scenario.waitFor("a row of its own: a name alone links nothing") { titles(it).count { t -> t == "Nina" } == 2 }
+        }
         ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("the conversation") { it.findViewById<View>(R.id.input).isEnabled }
+            scenario.onActivity { activity ->
+                assertEquals("not shown here by itself", listOf("An earlier text"), shownTexts(activity))
+                val item = menu(activity).findItem(R.id.action_link_imessage)
+                assertTrue(item.isVisible)
+                activity.onOptionsItemSelected(item)
+            }
+            scenario.waitFor("the list of chats") { ShadowDialog.getLatestDialog()?.isShowing == true }
+            val dialog = latestDialog()
+            // Offered first, saying why, for the user to confirm it is her.
+            val first = dialog.listView.adapter.getItem(0).toString()
+            assertTrue(first, first.startsWith(two.app.getString(R.string.imessage_link_same_name, "Nina")))
+            shadowOf(dialog.listView).performItemClick(0)
             scenario.waitFor("her iMessage inside the ongoing conversation") { shownTexts(it) == listOf("An earlier text", "OK") }
             scenario.onActivity { activity ->
                 assertEquals(activity.getString(R.string.imessage_compose_hint), activity.findViewById<EditText>(R.id.input).hint.toString())
@@ -677,6 +697,8 @@ class BlueBubblesScreenTest {
 
     /** Alice's Messages conversation with her iMessages in it, and OpenBubbles' Reply button held; the replies it gets. */
     private fun withReplyButton(block: (ArrayList<String>) -> Unit) {
+        // OpenBubbles is here: its Reply button is pressed only while it is the real one.
+        installOpenBubbles()
         val replies = ArrayList<String>()
         val receiver = object : android.content.BroadcastReceiver() {
             override fun onReceive(context: android.content.Context, intent: Intent) {
