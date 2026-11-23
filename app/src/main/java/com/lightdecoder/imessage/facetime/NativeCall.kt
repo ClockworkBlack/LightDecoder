@@ -177,12 +177,24 @@ class NativeCall(
  * between every value and the library.
  */
 object CallOrientation {
-    /** [android.view.Surface.ROTATION_0] .. ROTATION_270 are 0..3. */
-    fun forCamera(displayRotation: Int, front: Boolean): Int = when (displayRotation.coerceIn(0, 3)) {
-        0 -> if (front) 1 else 0
-        1 -> 3
-        2 -> if (front) 0 else 1
-        else -> 2
+    /**
+     * [android.view.Surface.ROTATION_0] .. ROTATION_270 are 0..3. [sensor] is how the camera is
+     * mounted ([android.hardware.camera2.CameraCharacteristics.SENSOR_ORIENTATION]); without it a
+     * usual phone's (90 back, 270 front) is assumed, which gives OpenBubbles' own table. A camera
+     * mounted otherwise (a foldable's, read against its inner screen) gets what its picture
+     * really needs, or the other side would see it turned and squeezed.
+     */
+    fun forCamera(displayRotation: Int, front: Boolean, sensor: Int? = null): Int {
+        val mounted = sensor?.takeIf { it % 90 == 0 }?.let { ((it % 360) + 360) % 360 } ?: if (front) 270 else 90
+        val screen = displayRotation.coerceIn(0, 3) * 90
+        // Degrees clockwise the camera's picture is to be turned to be upright (Android's formula).
+        val turn = if (front) (mounted + screen) % 360 else (mounted - screen + 360) % 360
+        return when (turn) {
+            90 -> 0
+            270 -> 1
+            180 -> 2
+            else -> 3
+        }
     }
 
     fun clamp(value: Int): Int = value.coerceIn(0, 3)

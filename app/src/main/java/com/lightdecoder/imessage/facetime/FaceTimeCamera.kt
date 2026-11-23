@@ -48,25 +48,10 @@ class FaceTimeCamera(context: Context) : CallCamera {
 
     override fun has(front: Boolean): Boolean = idFor(front) != null
 
-    /** The camera on that side that can feed a video encoder at the encoder's size; null for none. */
-    private fun idFor(front: Boolean): String? {
-        val m = manager ?: return null
-        return try {
-            m.cameraIdList.firstOrNull { id ->
-                val c = m.getCameraCharacteristics(id)
-                val facing = c.get(CameraCharacteristics.LENS_FACING)
-                val wanted = if (front) CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
-                facing == wanted && feedsEncoder(c)
-            }
-        } catch (e: Exception) {
-            null
-        }
-    }
+    override fun sensorOrientation(front: Boolean): Int? = sensorOrientationOf(manager, front)
 
-    private fun feedsEncoder(c: CameraCharacteristics): Boolean {
-        val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return false
-        return map.getOutputSizes(MediaCodec::class.java)?.any { it.width == ENCODER.width && it.height == ENCODER.height } == true
-    }
+    /** The camera on that side that can feed a video encoder at the encoder's size; null for none. */
+    private fun idFor(front: Boolean): String? = idFor(manager, front)
 
     @SuppressLint("MissingPermission") // the call engine starts the camera only with the permission
     override fun start(encoder: Surface, preview: Surface?, front: Boolean, started: (ok: Boolean, front: Boolean) -> Unit) {
@@ -221,6 +206,43 @@ class FaceTimeCamera(context: Context) : CallCamera {
 
         /** The size the small view's pictures are made at (the encoder's shape, smaller). */
         val PREVIEW = Size(1280, 720)
+
+        /** The camera on that side that can feed a video encoder at the encoder's size; null for none. */
+        internal fun idFor(m: CameraManager?, front: Boolean): String? {
+            m ?: return null
+            return try {
+                m.cameraIdList.firstOrNull { id ->
+                    val c = m.getCameraCharacteristics(id)
+                    val facing = c.get(CameraCharacteristics.LENS_FACING)
+                    val wanted = if (front) CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
+                    facing == wanted && feedsEncoder(c)
+                }
+            } catch (e: Exception) {
+                null
+            }
+        }
+
+        private fun feedsEncoder(c: CameraCharacteristics): Boolean {
+            val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return false
+            return map.getOutputSizes(MediaCodec::class.java)?.any { it.width == ENCODER.width && it.height == ENCODER.height } == true
+        }
+
+        /**
+         * How the camera a call uses on that side is mounted ([CameraCharacteristics.SENSOR_ORIENTATION]:
+         * 0, 90, 180 or 270); null when it cannot be read. Most phones say 90 (back) and 270 (front);
+         * a foldable's cameras, read against its inner screen, may not.
+         */
+        fun sensorOrientationOf(m: CameraManager?, front: Boolean): Int? {
+            val id = idFor(m, front) ?: return null
+            return try {
+                m?.getCameraCharacteristics(id)?.get(CameraCharacteristics.SENSOR_ORIENTATION)?.takeIf { it % 90 == 0 }?.let { ((it % 360) + 360) % 360 }
+            } catch (e: Exception) {
+                null
+            }
+        }
+
+        fun sensorOrientationOf(context: Context, front: Boolean): Int? =
+            sensorOrientationOf(context.applicationContext.getSystemService(CameraManager::class.java), front)
 
         /** A Surface of [texture] for the small view, at [PREVIEW]'s size. */
         fun previewSurface(texture: SurfaceTexture): Surface {

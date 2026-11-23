@@ -209,6 +209,15 @@ class NativeCallTest {
         // The table from the screen's rotation: front camera 1, 3, 0, 2; back camera 0, 3, 1, 2.
         assertEquals(listOf(1, 3, 0, 2), (0..3).map { CallOrientation.forCamera(it, front = true) })
         assertEquals(listOf(0, 3, 1, 2), (0..3).map { CallOrientation.forCamera(it, front = false) })
+        // A usual phone's cameras (front 270, back 90) give the same table.
+        assertEquals(listOf(1, 3, 0, 2), (0..3).map { CallOrientation.forCamera(it, front = true, sensor = 270) })
+        assertEquals(listOf(0, 3, 1, 2), (0..3).map { CallOrientation.forCamera(it, front = false, sensor = 90) })
+        // A camera mounted along the screen's natural way (a foldable's inner screen): its picture needs no turn upright.
+        assertEquals(3, CallOrientation.forCamera(0, front = false, sensor = 0))
+        assertEquals(3, CallOrientation.forCamera(0, front = true, sensor = 0))
+        assertEquals(0, CallOrientation.forCamera(1, front = true, sensor = 0))
+        // Nonsense mountings fall back to the usual phone's.
+        assertEquals(1, CallOrientation.forCamera(0, front = true, sensor = 45))
         // And whatever a rotation is said to be.
         for (rotation in listOf(-5, 4, 270, Int.MAX_VALUE)) {
             assertTrue(CallOrientation.forCamera(rotation, true) in 0..3)

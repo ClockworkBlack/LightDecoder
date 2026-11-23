@@ -8,7 +8,6 @@ import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Matrix
-import android.graphics.RectF
 import android.graphics.SurfaceTexture
 import android.media.AudioManager
 import android.net.Uri
@@ -17,6 +16,9 @@ import android.os.Bundle
 import android.os.SystemClock
 import android.provider.Settings
 import android.text.format.DateUtils
+import android.view.GestureDetector
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
@@ -111,6 +113,20 @@ class FaceTimeCallActivity : AppCompatActivity() {
 
     private var remoteSurface: Surface? = null
     private var previewSurface: Surface? = null
+
+    /** The user's pinch, drag and double tap on the other side's picture. */
+    private val remoteZoom = VideoFit.Zoom()
+
+    /** The picture's decoder already turns it (its SurfaceTexture's transform says so): it is not turned again. */
+    private var textureTurned = false
+    private var textureChecked = false
+    private val textureMatrix = FloatArray(16)
+
+    /** The shape and turn the zoom was made for: another stream starts fresh. */
+    private var zoomFor: Triple<Int, Int, Int>? = null
+
+    /** How the camera in use is mounted, by side (read once). */
+    private val sensors = HashMap<Boolean, Int?>()
     private var ticker: Job? = null
 
     /** What the screen shows now. */
@@ -151,6 +167,7 @@ class FaceTimeCallActivity : AppCompatActivity() {
         binding.openSettings.setOnClickListener { openAppSettings() }
         binding.remoteVideo.surfaceTextureListener = remoteListener
         binding.localPreview.surfaceTextureListener = previewListener
+        setUpRemoteGestures()
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() = stepBack()
@@ -519,7 +536,17 @@ class FaceTimeCallActivity : AppCompatActivity() {
         binding.name.textSize = if (pictures) 20f else 30f
         // Always there (its Surface is ready before the camera starts), seen only with the camera on.
         binding.previewCard.alpha = if (call.joined && media.cameraOn) 1f else 0f
-        if (pictures) fitRemote()
+        if (pictures) {
+            fitRemote()
+        } else if (remoteZoom.isZoomed || remoteZoom.fill != null || textureChecked) {
+            remoteZoom.reset()
+            remoteZoom.fill = null
+            textureChecked = false
+            textureTurned = false
+            zoomFor = null
+        }
+        // The camera's picture is laid out for that side's camera once it is known.
+        if (call.joined && media.cameraOn) fitPreview()
 
         val ringingIn = call.phase == Phase.RINGING_IN || call.phase == Phase.SCREENING
         binding.incoming.visibility = if (ringingIn) View.VISIBLE else View.GONE
@@ -715,7 +742,21 @@ class FaceTimeCallActivity : AppCompatActivity() {
             return false
         }
 
-        override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
+        /** Once per stream: whether the decoder turns the picture itself (then it is not turned again). */
+        override fun onSurfaceTextureUpdated(texture: SurfaceTexture) {
+            if (textureChecked) return
+            textureChecked = true
+            val turned = try {
+                texture.getTransformMatrix(textureMatrix)
+                VideoFit.textureIsTurned(textureMatrix)
+            } catch (e: RuntimeException) {
+                false
+            }
+            if (turned != textureTurned) {
+                textureTurned = turned
+                fitRemote()
+            }
+        }
     }
 
     private val previewListener = object : TextureView.SurfaceTextureListener {
@@ -744,19 +785,69 @@ class FaceTimeCallActivity : AppCompatActivity() {
     }
 
     /**
-     * The other side's picture keeps its shape in the view: filling it (its edges cut) when both are
-     * upright or both lie on their side, whole (with bars) otherwise.
+     * The other side's picture, turned upright as its stream says and in its own shape: filling the
+     * view (edges cut) when the two shapes are close, whole (with bars) otherwise, or as the user
+     * chose with a double tap; then their pinch and drag.
      */
     private fun fitRemote() {
         val view = binding.remoteVideo
-        val (w, h) = calls.media.value.remoteShown
-        view.setTransform(remoteTransform(view.width, view.height, w, h))
+        val m = calls.media.value
+        val key = Triple(m.remoteWidth, m.remoteHeight, m.remoteRotation)
+        if (zoomFor != key) {
+            // Another stream, or the other side turned their phone: back to fitted, and the decoder looked at again.
+            if (zoomFor != null && (zoomFor!!.first != key.first || zoomFor!!.second != key.second)) textureChecked = false
+            zoomFor = key
+            remoteZoom.reset()
+        }
+        view.setTransform(remoteTransform(view.width, view.height, m.remoteWidth, m.remoteHeight, m.remoteRotation, textureTurned, remoteZoom))
     }
 
-    /** The small view of the user's own camera: the camera's picture, upright and uncut in shape, however the screen is turned. */
+    /** The small view of the user's own camera: the camera's picture, upright and in its shape, however the screen is turned and the camera mounted. */
     private fun fitPreview() {
         val view = binding.localPreview
-        view.setTransform(previewTransform(view.width, view.height, screenRotation() ?: Surface.ROTATION_0))
+        val front = calls.media.value.cameraFront
+        val sensor = sensors.getOrPut(front) { runCatching { FaceTimeCamera.sensorOrientationOf(this, front) }.getOrNull() }
+        view.setTransform(previewTransform(view.width, view.height, screenRotation() ?: Surface.ROTATION_0, sensor))
+    }
+
+    /** Pinch to zoom the other side's picture, drag to look around it, double tap to switch between filled and whole. */
+    private fun setUpRemoteGestures() {
+        val view = binding.remoteVideo
+        val scale = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScale(detector: ScaleGestureDetector): Boolean {
+                remoteZoom.scaleBy(detector.scaleFactor, detector.focusX - view.width / 2f, detector.focusY - view.height / 2f)
+                fitRemote()
+                return true
+            }
+        })
+        val gestures = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDown(e: MotionEvent): Boolean = true
+
+            override fun onScroll(e1: MotionEvent?, e2: MotionEvent, distanceX: Float, distanceY: Float): Boolean {
+                if (scale.isInProgress) return false
+                remoteZoom.panX -= distanceX
+                remoteZoom.panY -= distanceY
+                fitRemote()
+                return true
+            }
+
+            override fun onDoubleTap(e: MotionEvent): Boolean {
+                val m = calls.media.value
+                val (w, h) = VideoFit.upright(m.remoteWidth, m.remoteHeight, VideoFit.degreesForStream(m.remoteRotation))
+                val filled = remoteZoom.fill ?: VideoFit.fillsByDefault(view.width, view.height, w, h)
+                remoteZoom.fill = !filled
+                remoteZoom.reset()
+                fitRemote()
+                return true
+            }
+        })
+        view.setOnTouchListener { _, event ->
+            // Only while the other side's picture shows; otherwise the screen behind takes the touch as before.
+            if (binding.backdrop.visibility == View.VISIBLE) return@setOnTouchListener false
+            scale.onTouchEvent(event)
+            gestures.onTouchEvent(event)
+            true
+        }
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
@@ -820,59 +911,48 @@ class FaceTimeCallActivity : AppCompatActivity() {
         fun showIntent(context: Context): Intent = base(context, ACTION_SHOW)
 
         /**
-         * How a picture [contentWidth] x [contentHeight] (as shown, upright) is laid into a view
-         * [viewWidth] x [viewHeight] that would stretch it to its own shape: scaled about the middle
-         * so that it keeps its shape, filling the view when both are of the same kind (upright, or
-         * on their side), fitting into it otherwise. Pure.
+         * How the other side's picture, [bufferWidth] x [bufferHeight] as its decoder makes it and
+         * turned by the library's [rotation] (0..3, [Media.ROTATION_NONE] for none), is laid into
+         * the view [viewWidth] x [viewHeight]: upright, in its own shape (never stretched), filling
+         * the view when the shapes are close and fitting it otherwise, unless the user chose
+         * ([zoom]'s fill), then zoomed and moved as the user did. [decoderTurns]: the decoder already
+         * turned it (only its shape changes then). Pure.
          */
-        fun remoteTransform(viewWidth: Int, viewHeight: Int, contentWidth: Int, contentHeight: Int): Matrix {
-            val matrix = Matrix()
-            if (viewWidth <= 0 || viewHeight <= 0 || contentWidth <= 0 || contentHeight <= 0) return matrix
-            val view = viewWidth.toFloat() / viewHeight
-            val content = contentWidth.toFloat() / contentHeight
-            val fill = (view >= 1f) == (content >= 1f)
-            // Stretched to the view, the picture is too wide by view/content (or too tall by its inverse).
-            val wider = content > view
-            val (sx, sy) = when {
-                fill && wider -> content / view to 1f
-                fill -> 1f to view / content
-                wider -> 1f to view / content
-                else -> content / view to 1f
+        fun remoteTransform(
+            viewWidth: Int,
+            viewHeight: Int,
+            bufferWidth: Int,
+            bufferHeight: Int,
+            rotation: Int = Media.ROTATION_NONE,
+            decoderTurns: Boolean = false,
+            zoom: VideoFit.Zoom? = null,
+        ): Matrix {
+            val degrees = VideoFit.degreesForStream(rotation)
+            val (uw, uh) = VideoFit.upright(bufferWidth, bufferHeight, degrees)
+            val fill = zoom?.fill ?: VideoFit.fillsByDefault(viewWidth, viewHeight, uw, uh)
+            return if (decoderTurns) {
+                // The view already gets it upright (stretched to the view): only its shape is put right.
+                VideoFit.transform(viewWidth, viewHeight, uw, uh, 0, fill, zoom)
+            } else {
+                VideoFit.transform(viewWidth, viewHeight, bufferWidth, bufferHeight, degrees, fill, zoom)
             }
-            matrix.setScale(sx, sy, viewWidth / 2f, viewHeight / 2f)
-            return matrix
         }
 
         /**
-         * How the camera's picture ([FaceTimeCamera.PREVIEW], which Android lays upright for a phone
-         * held upright) is laid into the small view [viewWidth] x [viewHeight] with the screen turned
-         * to [rotation] ([Surface.ROTATION_0]..): upright, filling the view, in its own shape. Pure.
+         * How the camera's picture ([FaceTimeCamera.PREVIEW]) is laid into the small view
+         * [viewWidth] x [viewHeight] with the screen turned to [rotation] ([Surface.ROTATION_0]..):
+         * upright, filling the view, in its own shape. Android lays a camera's picture upright for
+         * the screen's natural way up, turned as the camera is mounted ([sensor], degrees; a usual
+         * phone's 90 when not known): a foldable's inner screen, or a camera mounted otherwise,
+         * gives a picture of the other shape, which must not be stretched into the view. Pure.
          */
-        fun previewTransform(viewWidth: Int, viewHeight: Int, rotation: Int): Matrix {
-            val matrix = Matrix()
-            if (viewWidth <= 0 || viewHeight <= 0) return matrix
-            val vw = viewWidth.toFloat()
-            val vh = viewHeight.toFloat()
-            val cx = vw / 2f
-            val cy = vh / 2f
-            // The picture as it lies for an upright phone: taller than wide.
-            val bw = FaceTimeCamera.PREVIEW.height.toFloat()
-            val bh = FaceTimeCamera.PREVIEW.width.toFloat()
-            if (rotation == Surface.ROTATION_90 || rotation == Surface.ROTATION_270) {
-                val viewRect = RectF(0f, 0f, vw, vh)
-                val bufferRect = RectF(0f, 0f, bw, bh)
-                bufferRect.offset(cx - bufferRect.centerX(), cy - bufferRect.centerY())
-                matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
-                val scale = maxOf(vh / bw, vw / bh)
-                matrix.postScale(scale, scale, cx, cy)
-                matrix.postRotate(90f * (rotation - 2), cx, cy)
-            } else {
-                val content = bw / bh
-                val view = vw / vh
-                if (view > content) matrix.setScale(1f, view / content, cx, cy) else matrix.setScale(content / view, 1f, cx, cy)
-                if (rotation == Surface.ROTATION_180) matrix.postRotate(180f, cx, cy)
-            }
-            return matrix
+        fun previewTransform(viewWidth: Int, viewHeight: Int, rotation: Int, sensor: Int? = null): Matrix {
+            val mounted = sensor?.takeIf { it % 90 == 0 } ?: 90
+            val sideways = ((mounted % 360) + 360) % 180 == 90
+            val bw = if (sideways) FaceTimeCamera.PREVIEW.height else FaceTimeCamera.PREVIEW.width
+            val bh = if (sideways) FaceTimeCamera.PREVIEW.width else FaceTimeCamera.PREVIEW.height
+            val degrees = (360 - rotation.coerceIn(0, 3) * 90) % 360
+            return VideoFit.transform(viewWidth, viewHeight, bw, bh, degrees, fill = true)
         }
     }
 }

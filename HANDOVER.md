@@ -8,6 +8,25 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
    had earlier chosen "build with a warning", then "pause on Discord", and has now asked for
    the web-view tab only, with no bridge). **Instagram: skipped** (ban risk, like Messenger).
 
+## 0.5.73 (versionCode 84) - hotfix: FaceTime video stretched, no zoom (Galaxy Z Fold 7)
+- Made on branch `ccr-1d2709f2-vu6cl9` from `ccr-ffe9dbd4-xu00fq-isolated` at 0.5.72, apart from the
+  session working there; merge it into that line.
+- **Cause:** the other side's picture was never turned by its stream rotation (the library's
+  `setStreamRotation`: 0 = 90° clockwise, 1 = 270°, 2 = 180°, 3 = none, the same scheme
+  `CallOrientation.forCamera` sends) — only its width and height were swapped and scaled, so an
+  iPhone held upright came out on its side and squeezed. Fill-or-fit was decided by "both upright"
+  alone, so on the Fold's near-square inner screen a 9:16 picture was cut to a sliver.
+- **Fix:** `ui/imessage/VideoFit` undoes the TextureView's stretch, turns, then fills (shapes within
+  1.4x) or fits, then the user's zoom/pan. If the decoder already turns the picture (its
+  SurfaceTexture transform shows a turn, checked once per stream), it is not turned again.
+  Pinch to zoom (up to 4x), drag to pan (stops at the edge), double tap switches filled/whole.
+- Own camera: the preview and the orientation sent to the library now use the camera's real
+  `SENSOR_ORIENTATION` (`FaceTimeCamera.sensorOrientationOf`, `CallCamera.sensorOrientation`);
+  usual phones (90 back / 270 front) give exactly OpenBubbles' old table.
+- **Not run on a phone.** If the other side's picture is upside down when they hold the phone
+  upright, swap 0 and 1 in `VideoFit.degreesForStream`. Tests: `VideoFitTest`, `NativeCallTest`.
+  Next version: 0.5.74 / 85.
+
 ## 0.5.72 (versionCode 83) - FaceTime audio and video calls (one-to-one)
 - Owner asked for FaceTime. The bundled library has the signalling and the media engine; guide kept in
   the session scratchpad (facetime-host.md). JNI contract class
@@ -25,7 +44,7 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
   ring: the note "ring from someone who is not in the call" (CallRules.ring members check) in the
   iMessage log; relax that check if real calls hit it. Not built: group calls, links, screen share,
   picture-in-picture, Telecom.
-- Unit tests: 1574 (4 skipped: gated screenshots), all passing. Next version: 0.5.73 / 84.
+- Unit tests: 1574 (4 skipped: gated screenshots), all passing. (0.5.73 / 84 was then taken by the hotfix above.)
 
 ## 0.5.71 (versionCode 82) - security audit and fixes; missing iPhone features
 - 0.5.70's composer swipe was removed again (5011c63): apps switch only by swiping the middle of the

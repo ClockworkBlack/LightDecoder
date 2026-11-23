@@ -102,6 +102,9 @@ interface CallCamera {
     /** Whether there is a camera on that side that can feed the encoder. */
     fun has(front: Boolean): Boolean
 
+    /** How that side's camera is mounted (0, 90, 180, 270 degrees); null: not known (a usual phone's is assumed). */
+    fun sensorOrientation(front: Boolean): Int? = null
+
     /**
      * Starts the camera on [front] (or the other side when there is none), drawing into [encoder]
      * and, when there is one, [preview]. [started] says whether it runs, and with which side.
