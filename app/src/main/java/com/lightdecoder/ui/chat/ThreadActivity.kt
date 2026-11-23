@@ -16,6 +16,7 @@ import android.view.Gravity
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
+import android.widget.PopupMenu
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
@@ -651,6 +652,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         MessageNotifier.setVisibleConversationId(manager.service, conversationId)
         MessageNotifier.cancel(this, conversationId, manager.service)
         com.lightdecoder.relay.ReadNotifier.cancel(this, manager.service, conversationId)
+        // A missed FaceTime call's notice goes with the chat being read.
+        if (manager.service == ChatService.IMESSAGE) com.lightdecoder.imessage.facetime.FaceTimeNotices.cancelMissed(this, conversationId)
         markCompanionVisible()
         // The setting may have been changed on the iMessage screen meanwhile.
         val threadsChanged = updateThreadsInChat()
@@ -680,6 +683,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         if (!lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return
         MessageNotifier.setVisibleConversationId(ChatService.IMESSAGE, companion)
         MessageNotifier.cancel(this, companion, ChatService.IMESSAGE)
+        com.lightdecoder.imessage.facetime.FaceTimeNotices.cancelMissed(this, companion)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -874,6 +878,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val junk: Boolean = false,
         /** The person's older iMessage chats shown here ([BlueBubblesLinks.alsoShown]) that are unread: read along with it. */
         val othersUnread: List<String> = emptyList(),
+        /** The iMessage chat a FaceTime call from here goes from ([faceTimeChat]), and what is known of whether its person can be called. */
+        val faceTimeChat: String? = null,
+        val faceTimeCapable: Boolean? = null,
     )
 
     /**
@@ -933,6 +940,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             val background = backgroundChat?.let { chat ->
                 runCatching { com.lightdecoder.imessage.direct.ChatBackgrounds(applicationContext).of(chat) }.getOrNull()
             }
+            // FaceTime: from this iMessage chat, or the person's shown here, when it is a chat with one person the library reaches.
+            val faceTimeChat = (if (link.service == ChatService.IMESSAGE) id else companion)
+                ?.takeIf { direct != null && it in reachable && direct.faceTimeTarget(it) != null }
             // Replies among the person's iMessages shown here quote from the iMessage archive.
             val known = HashMap<String, MessageRow>()
             val quotes = quotesFor(listOfNotNull(repo, imRepo), shown, known)
@@ -958,6 +968,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 memberPhotos = if (conversation?.isGroup == true) AvatarPhotos.members(applicationContext, people) else emptyMap(),
                 junk = link.service == ChatService.IMESSAGE && direct != null && direct.active && direct.junkReportable(id),
                 othersUnread = if (imRepo == null) emptyList() else chats.drop(1).filter { runCatching { imRepo.conversation(it)?.unread == true }.getOrDefault(false) },
+                faceTimeChat = faceTimeChat,
+                faceTimeCapable = faceTimeChat?.let { direct?.faceTimeCapableKnown(it) },
             )
         }
         if (grow) growPending = false
@@ -991,6 +1003,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             junkOffered = snapshot.junk
             invalidateOptionsMenu()
         }
+        showFaceTime(snapshot.faceTimeChat, snapshot.faceTimeCapable)
         renderJunk()
         renderConversation()
         renderBackground(snapshot.background)
@@ -3322,6 +3335,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     override fun onOpenThread(rootId: String) = openThread(rootId)
 
+    /** A FaceTime call's row tapped: call back, asked Video or Audio at the row. */
+    override fun onCallRowTap(row: MessageRow, anchor: View) {
+        chooseFaceTime(anchor)
+    }
+
     /** Opens the thread view for the thread whose first message is [rootId] ([ReplyThreadPanel]). */
     internal fun openThread(rootId: String) {
         if (!phoneStyle) return
@@ -4224,6 +4242,98 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private fun hasDetails(): Boolean =
         conversation != null && (manager.service == ChatService.IMESSAGE || (manager.service == ChatService.MESSAGES && companionId != null))
 
+    // --- FaceTime ------------------------------------------------------------------------------
+
+    /**
+     * The iMessage chat a FaceTime call from this conversation goes from: this chat, or the person's
+     * iMessage chat shown here, when it is a chat with one person the iMessage library reaches and
+     * "FaceTime" is on ([com.lightdecoder.imessage.direct.DirectLink.faceTimeTarget]); else null. As the last load found it.
+     */
+    @VisibleForTesting
+    internal var faceTimeChat: String? = null
+        private set
+
+    /** Whether Apple says that person can be called: true, false, or null while it is not known. */
+    private var faceTimeCapable: Boolean? = null
+
+    /** The chat Apple was last asked about, so each is asked once per screen. */
+    private var faceTimeAsked: String? = null
+
+    /** Whether the FaceTime buttons show ([com.lightdecoder.imessage.facetime.FaceTimeButtons]). */
+    @VisibleForTesting
+    internal fun faceTimeOffered(): Boolean = com.lightdecoder.imessage.facetime.FaceTimeButtons.shown(
+        faceTimeOn = com.lightdecoder.imessage.direct.DirectPrefs.faceTimeOn(this),
+        reachable = faceTimeChat != null,
+        oneToOne = conversation?.isGroup != true,
+        capable = faceTimeCapable,
+    )
+
+    /**
+     * What a load found of FaceTime for this conversation; when it is not known yet whether the
+     * person can be called, Apple is asked (through the library, once per chat and screen) and the
+     * buttons follow the answer.
+     */
+    private fun showFaceTime(chat: String?, capable: Boolean?) {
+        val changed = chat != faceTimeChat || capable != faceTimeCapable
+        faceTimeChat = chat
+        faceTimeCapable = capable
+        if (changed) invalidateOptionsMenu()
+        if (chat == null || capable != null || faceTimeAsked == chat) return
+        faceTimeAsked = chat
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(applicationContext)
+        lifecycleScope.launch {
+            val answer = withContext(Dispatchers.IO) { runCatching { direct.faceTimeCapable(chat) }.getOrNull() }
+            if (faceTimeChat == chat && answer != null && answer != faceTimeCapable) {
+                faceTimeCapable = answer
+                invalidateOptionsMenu()
+            }
+        }
+    }
+
+    /** "FaceTime Video" or "FaceTime Audio", asked at [anchor] (the bar's camera, or a call's row). */
+    @VisibleForTesting
+    internal fun chooseFaceTime(anchor: View): PopupMenu? {
+        if (!faceTimeOffered()) {
+            toast(getString(R.string.facetime_not_available))
+            return null
+        }
+        return PopupMenu(this, anchor).apply {
+            menu.add(0, FACETIME_VIDEO, 0, R.string.facetime_video)
+            menu.add(0, FACETIME_AUDIO, 1, R.string.facetime_audio)
+            setOnMenuItemClickListener { item ->
+                startFaceTime(video = item.itemId == FACETIME_VIDEO)
+                true
+            }
+            show()
+        }
+    }
+
+    /**
+     * Places a FaceTime call to this conversation's person: the call screen (in the iMessage part's
+     * process) is started with who to call; it asks for the microphone and the camera and places the call.
+     */
+    @VisibleForTesting
+    internal fun startFaceTime(video: Boolean) {
+        val chat = faceTimeChat ?: return toast(getString(R.string.facetime_not_available))
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(applicationContext)
+        lifecycleScope.launch {
+            val target = withContext(Dispatchers.IO) { direct.faceTimeTarget(chat) }
+            if (target == null) {
+                toast(getString(R.string.facetime_not_available))
+                return@launch
+            }
+            try {
+                startActivity(
+                    com.lightdecoder.ui.imessage.FaceTimeCallActivity.placeIntent(
+                        this@ThreadActivity, target.peer, target.name, video, target.from, target.conversationId, target.photo,
+                    ),
+                )
+            } catch (e: RuntimeException) {
+                toast(getString(R.string.facetime_not_available))
+            }
+        }
+    }
+
     private fun callNumber(): String? {
         if (manager.service == ChatService.GMAIL) return null
         return otherAddress()?.takeIf { it.count(Char::isDigit) >= MIN_CALL_DIGITS && !it.contains('@') }
@@ -4673,6 +4783,14 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             isChecked = VoicePrefs.readNewAloud(this@ThreadActivity)
         }
         menu.findItem(R.id.action_stop_reading)?.isVisible = readerInstance?.isSpeaking == true
+        // FaceTime: a camera in an iPhone-style chat's bar (as on an iPhone), the two calls in the menu elsewhere.
+        val faceTime = faceTimeOffered()
+        menu.findItem(R.id.action_facetime)?.apply {
+            isVisible = faceTime && phoneStyle
+            icon?.mutate()?.setTint(ContextCompat.getColor(this@ThreadActivity, R.color.phone_blue))
+        }
+        menu.findItem(R.id.action_facetime_video)?.isVisible = faceTime && !phoneStyle
+        menu.findItem(R.id.action_facetime_audio)?.isVisible = faceTime && !phoneStyle
         return super.onPrepareOptionsMenu(menu)
     }
 
@@ -4719,6 +4837,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             R.id.action_link_imessage -> chooseIMessageToLink()
             R.id.action_unlink_imessage -> confirmUnlinkIMessage()
             R.id.action_chat_background -> chooseBackground()
+            R.id.action_facetime -> chooseFaceTime(findViewById(R.id.action_facetime) ?: binding.toolbar)
+            R.id.action_facetime_video -> startFaceTime(video = true)
+            R.id.action_facetime_audio -> startFaceTime(video = false)
             R.id.action_check_imessage ->
                 if (com.lightdecoder.imessage.IMessageChecks.current.value?.let { it.running && it.conversationId == conversationId } == true) {
                     showIMessageCheck()
@@ -4957,6 +5078,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
         // iPhone-style chats ([PhoneStyle]): the bar's height, and the composer's pill.
         private const val PHONE_BAR_DP = 64
+
+        /** The two choices of the FaceTime menu ([chooseFaceTime]). */
+        private const val FACETIME_VIDEO = 1
+        private const val FACETIME_AUDIO = 2
         private const val PHONE_FIELD_SIDE_DP = 14
         private const val PHONE_FIELD_VERTICAL_DP = 8
         private const val PHONE_FIELD_LIFT_DP = 5

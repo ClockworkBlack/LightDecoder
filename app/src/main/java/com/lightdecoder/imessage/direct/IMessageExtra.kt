@@ -32,6 +32,8 @@ import org.json.JSONObject
  * @param stickers stickers people put on the message (iOS 17), each by the message that put it there
  * @param history an edited message's earlier texts (iOS 16's edit history), oldest first, each with
  *   when it became the text; the latest [MAX_HISTORY] of them, each at most [MAX_HISTORY_TEXT_CHARS]
+ * @param call    a FaceTime call's row ([com.lightdecoder.imessage.facetime.CallRows]): what the call
+ *   was, for its sign and for calling back
  *
  * Pure. Tested in IMessageExtraTest.
  */
@@ -51,7 +53,26 @@ data class IMessageExtra(
     val pollCards: List<String> = emptyList(),
     val stickers: List<PlacedSticker> = emptyList(),
     val history: List<Version> = emptyList(),
+    val call: CallInfo? = null,
 ) {
+    /**
+     * A FaceTime call, as its row keeps it: the call's guid, who placed it ([outgoing]: the user),
+     * audio or [video], how it ended ([outcome]: an [com.lightdecoder.imessage.facetime.Outcome]'s
+     * wire name) and, when it was talked in, for how long.
+     */
+    data class CallInfo(val guid: String, val outgoing: Boolean, val video: Boolean, val outcome: String, val durationMs: Long = 0) {
+        fun toJson(): JSONObject = JSONObject().put("guid", guid).put("outgoing", outgoing).put("video", video).put("outcome", outcome)
+            .apply { if (durationMs > 0) put("ms", durationMs) }
+
+        companion object {
+            fun fromJson(o: JSONObject): CallInfo? {
+                val guid = o.text("guid").takeIf { it.isNotBlank() && it.length <= 64 } ?: return null
+                val outcome = o.text("outcome").takeIf { it.isNotBlank() && it.length <= 32 } ?: return null
+                return CallInfo(guid, o.optBoolean("outgoing"), o.optBoolean("video"), outcome, o.optLong("ms").coerceAtLeast(0))
+            }
+        }
+    }
+
     /**
      * An earlier text of an edited message: what it read ([text]), from [atMs] on (when it was sent,
      * or edited to read that).
@@ -276,6 +297,7 @@ data class IMessageExtra(
         if (pollCards.isNotEmpty()) o.put("pollCards", JSONArray(pollCards))
         if (stickers.isNotEmpty()) o.put("stickers", JSONArray().apply { stickers.forEach { put(it.toJson()) } })
         if (history.isNotEmpty()) o.put("history", JSONArray().apply { history.forEach { put(it.toJson()) } })
+        call?.let { o.put("call", it.toJson()) }
         return if (o.length() == 0) "" else o.toString()
     }
 
@@ -401,6 +423,7 @@ data class IMessageExtra(
                     history = o.optJSONArray("history")?.let { a ->
                         (maxOf(0, a.length() - MAX_HISTORY) until a.length()).mapNotNull { a.optJSONObject(it)?.let(Version::fromJson) }
                     }.orEmpty(),
+                    call = o.optJSONObject("call")?.let(CallInfo::fromJson),
                 )
             } catch (e: JSONException) {
                 IMessageExtra()

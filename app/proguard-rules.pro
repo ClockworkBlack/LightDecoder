@@ -34,3 +34,12 @@
 -keep class * implements com.sun.jna.** { *; }
 -keep class uniffi.rust_bridge.** { *; }
 -dontwarn java.awt.**
+
+# FaceTime: librust_bridge.so binds its JNI functions to this class by name
+# (Java_com_localob_messaging_app_facetime_FaceTimeInCallService_*), calls its callback methods by
+# name and writes its isVideo field. Renamed, or with a callback removed (none has a Kotlin caller)
+# or the field folded away (nothing in Kotlin writes it), calls would fail in release builds only.
+-keep class com.localob.messaging.app.facetime.FaceTimeInCallService {
+    native <methods>;
+    *;
+}

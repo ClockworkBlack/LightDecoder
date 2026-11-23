@@ -33,6 +33,32 @@
         <item name="android:windowAnimationStyle">@android:style/Animation.Dialog</item>
     </style>
 
+    <!--
+        The FaceTime call screen: dark whatever the phone's theme (a call screen, and the other
+        side's picture, read best on black), edge to edge.
+    -->
+    <style name="Theme.LightDecoder.Call" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">@color/brand</item>
+        <item name="android:windowBackground">@color/call_screen</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+
+    <!-- The word under a round button of the call screen. -->
+    <style name="Widget.LightDecoder.CallLabel" parent="">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_marginTop">6dp</item>
+        <item name="android:gravity">center</item>
+        <item name="android:importantForAccessibility">no</item>
+        <item name="android:maxLines">1</item>
+        <item name="android:textColor">@color/call_on_screen</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:shadowColor">#99000000</item>
+        <item name="android:shadowRadius">4</item>
+    </style>
+
     <style name="ThemeOverlay.LightDecoder.MenuPopup" parent="ThemeOverlay.Material3">
         <item name="colorControlNormal">?attr/colorOnSurface</item>
         <item name="colorControlActivated">?attr/colorOnSurface</item>

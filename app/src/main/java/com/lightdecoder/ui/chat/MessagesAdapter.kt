@@ -10,6 +10,8 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.appcompat.content.res.AppCompatResources
+import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.accessibility.AccessibilityNodeInfoCompat.AccessibilityActionCompat
 import androidx.recyclerview.widget.DiffUtil
@@ -137,6 +139,9 @@ class MessagesAdapter(
 
         /** A poll's "Add Choice" tapped. */
         fun onPollAddChoice(row: MessageRow) = Unit
+
+        /** A FaceTime call's row tapped ([anchor]: the row's words): call back, with video or audio. */
+        fun onCallRowTap(row: MessageRow, anchor: View) = Unit
     }
 
     /** Messages whose invisible ink was tapped away, by id: their text shows. */
@@ -171,6 +176,9 @@ class MessagesAdapter(
         val padding = intArrayOf(
             binding.systemText.paddingStart, binding.systemText.paddingTop, binding.systemText.paddingEnd, binding.systemText.paddingBottom,
         )
+
+        /** The notice's own text colours, to go back to after a FaceTime call's row was drawn in this holder. */
+        var plainColors: android.content.res.ColorStateList? = null
     }
 
     /** Colours resolved once per holder from the theme, so light and dark both work. */
@@ -288,12 +296,44 @@ class MessagesAdapter(
         }
     }
 
-    /** A notice; in iPhone-style chats small, grey and upright in the middle (on a picture, in a pill). */
+    /**
+     * A notice; in iPhone-style chats small, grey and upright in the middle (on a picture, in a pill).
+     * A FaceTime call's ([com.lightdecoder.imessage.facetime.CallRows]) has the call's sign before its
+     * words (a missed one in red) and can be tapped to call back.
+     */
     private fun bindSystem(holder: SystemHolder, item: ThreadItem.Message) {
         val context = holder.binding.root.context
         val text = holder.binding.systemText
         text.text = item.row.text.ifBlank { context.getString(R.string.chat_system_message) }
         text.setTypeface(android.graphics.Typeface.DEFAULT, if (phoneStyle) android.graphics.Typeface.NORMAL else android.graphics.Typeface.ITALIC)
+        val call = if (com.lightdecoder.imessage.facetime.CallRows.isCallRow(item.row.id)) {
+            com.lightdecoder.imessage.direct.IMessageExtra.parse(item.row.extra).call
+        } else {
+            null
+        }
+        if (holder.plainColors == null) holder.plainColors = text.textColors
+        if (call != null) {
+            val missed = call.outcome == com.lightdecoder.imessage.facetime.Outcome.MISSED.wire && !call.outgoing
+            val color = if (missed) ContextCompat.getColor(context, R.color.phone_red) else holder.plainColors!!.defaultColor
+            val side = (CALL_SIGN_DP * context.resources.displayMetrics.density).toInt()
+            val sign = AppCompatResources.getDrawable(context, if (call.video) R.drawable.ic_ft_video else R.drawable.ic_ft_audio)?.mutate()?.apply {
+                setTint(color)
+                setBounds(0, 0, side, side)
+            }
+            text.setTextColor(color)
+            text.setCompoundDrawablesRelative(sign, null, null, null)
+            text.compoundDrawablePadding = side / 3
+            text.contentDescription = context.getString(
+                if (call.outgoing) R.string.facetime_row_outgoing_description else R.string.facetime_row_incoming_description, text.text,
+            )
+            text.setOnClickListener { callbacks.onCallRowTap(item.row, text) }
+        } else {
+            text.setTextColor(holder.plainColors)
+            text.setCompoundDrawablesRelative(null, null, null, null)
+            text.contentDescription = null
+            text.setOnClickListener(null)
+            text.isClickable = false
+        }
         val pill = phoneStyle && onPicture
         if (pill != (text.background != null)) {
             if (pill) {
@@ -1370,6 +1410,9 @@ class MessagesAdapter(
         const val TYPE_DAY = 1
         const val TYPE_MESSAGE = 2
         const val TYPE_SYSTEM = 3
+
+        /** The side of the sign before a FaceTime call's row. */
+        const val CALL_SIGN_DP = 15
 
         /** How Material dims a control that cannot be used. */
         const val DISABLED_ALPHA = 0.38f

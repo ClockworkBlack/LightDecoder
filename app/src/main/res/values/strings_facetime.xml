@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        FaceTime audio and video calls with iPhone users, through the iMessage library
+        (imessage/facetime; the call screen is ui/imessage/FaceTimeCallActivity).
+    -->
+    <string name="facetime_title">FaceTime</string>
+    <string name="facetime_video">FaceTime Video</string>
+    <string name="facetime_audio">FaceTime Audio</string>
+
+    <!-- Notification channels. -->
+    <string name="facetime_channel_incoming">Incoming FaceTime calls</string>
+    <string name="facetime_channel_incoming_description">Rings when someone calls you with FaceTime.</string>
+    <string name="facetime_channel_ongoing">FaceTime call in progress</string>
+    <string name="facetime_channel_ongoing_description">Shown while you are in a FaceTime call, with Hang up.</string>
+    <string name="facetime_channel_missed">Missed FaceTime calls</string>
+    <string name="facetime_channel_missed_description">FaceTime calls you did not answer. Tap one to open the chat.</string>
+
+    <!-- The incoming call, in its notification and on the call screen. -->
+    <string name="facetime_incoming_video">Incoming FaceTime Video</string>
+    <string name="facetime_incoming_audio">Incoming FaceTime Audio</string>
+    <string name="facetime_accept">Accept</string>
+    <string name="facetime_decline">Decline</string>
+    <string name="facetime_audio_only">Audio only</string>
+    <string name="facetime_missed_video">Missed FaceTime Video</string>
+    <string name="facetime_missed_audio">Missed FaceTime Audio</string>
+
+    <!-- The call screen. -->
+    <string name="facetime_calling">Calling…</string>
+    <string name="facetime_connecting">Connecting…</string>
+    <string name="facetime_no_answer">No answer</string>
+    <string name="facetime_declined">Declined</string>
+    <string name="facetime_failed">The call could not be connected</string>
+    <string name="facetime_end">End</string>
+    <string name="facetime_call_again">Call Again</string>
+    <string name="facetime_close">Close</string>
+    <string name="facetime_mute">Mute</string>
+    <string name="facetime_unmute">Unmute</string>
+    <string name="facetime_camera">Camera</string>
+    <string name="facetime_camera_on">Turn camera on</string>
+    <string name="facetime_camera_off">Turn camera off</string>
+    <string name="facetime_flip">Flip</string>
+    <string name="facetime_flip_description">Switch between the front and back camera</string>
+    <string name="facetime_speaker">Speaker</string>
+    <string name="facetime_audio_route">Audio</string>
+    <string name="facetime_route_earpiece">Phone</string>
+    <string name="facetime_route_speaker">Speaker</string>
+    <string name="facetime_route_wired">Headset</string>
+    <string name="facetime_route_bluetooth">Bluetooth</string>
+    <string name="facetime_message">Message</string>
+    <string name="facetime_minimize">Leave the call screen (the call goes on)</string>
+    <string name="facetime_own_camera">Your camera</string>
+    <!-- %1$s: who the call is with. -->
+    <string name="facetime_remote_video">Video from %1$s</string>
+
+    <!-- Asking for the microphone and the camera, and what happens without them. -->
+    <string name="facetime_mic_needed">FaceTime needs the microphone. Allow it to place and answer calls.</string>
+    <string name="facetime_open_settings">Open settings</string>
+    <string name="facetime_camera_denied">The camera is not allowed, so this call is audio only.</string>
+    <string name="facetime_camera_unavailable">The camera can\'t be used for this call. It goes on with audio only.</string>
+
+    <!-- Why a call was not started. -->
+    <string name="facetime_refused_off">FaceTime is off. Turn it on in the iMessage settings.</string>
+    <string name="facetime_refused_in_call">You are already in a FaceTime call.</string>
+    <string name="facetime_refused_phone_busy">A FaceTime call can\'t be started during another call.</string>
+    <string name="facetime_refused_not_callable">This person can\'t be called with FaceTime.</string>
+    <string name="facetime_refused_not_connected">iMessage is not connected.</string>
+    <string name="facetime_refused_gone">That call has ended.</string>
+    <string name="facetime_register_in_call">Finish the FaceTime call before registering again.</string>
+
+    <!-- A chat's FaceTime buttons. -->
+    <string name="facetime_button">FaceTime</string>
+    <string name="facetime_details_audio">audio</string>
+    <string name="facetime_details_video">video</string>
+    <string name="facetime_details_audio_description">FaceTime Audio call</string>
+    <string name="facetime_details_video_description">FaceTime Video call</string>
+    <string name="facetime_not_available">This person can\'t be reached with FaceTime.</string>
+
+    <!--
+        A call's row in the chat. %1$s: "FaceTime Video" or "FaceTime Audio"; %2$s: how long it was.
+    -->
+    <string name="facetime_row_answered">%1$s · %2$s</string>
+    <string name="facetime_row_missed">Missed %1$s</string>
+    <string name="facetime_row_cancelled">%1$s · Cancelled</string>
+    <string name="facetime_row_declined">%1$s · Declined</string>
+    <string name="facetime_row_unanswered">%1$s · No answer</string>
+    <string name="facetime_row_elsewhere">%1$s · Answered on another device</string>
+    <string name="facetime_row_failed">%1$s · Call failed</string>
+    <string name="facetime_duration_sec">%1$d sec</string>
+    <string name="facetime_duration_min">%1$d min</string>
+    <string name="facetime_duration_hr">%1$d hr %2$d min</string>
+    <!-- As TalkBack reads a call's row. %1$s: the row's text. -->
+    <string name="facetime_row_outgoing_description">Outgoing call: %1$s. Tap to call back.</string>
+    <string name="facetime_row_incoming_description">Incoming call: %1$s. Tap to call back.</string>
+
+    <!-- The iMessage screen's FaceTime settings. -->
+    <string name="facetime_setting">FaceTime</string>
+    <string name="facetime_setting_help">Place and receive FaceTime audio and video calls with iPhone users. When this is off, FaceTime calls to your number don\'t ring here and the chats\' FaceTime buttons are hidden.</string>
+    <string name="facetime_silence_unknown">Silence unknown FaceTime callers</string>
+    <string name="facetime_silence_unknown_help">A call from someone who is not in your contacts and whom you never wrote to or called here doesn\'t ring. It only shows as a missed call.</string>
+    <string name="facetime_full_screen_help">Android has not allowed LightDecoder to show an incoming FaceTime call over the lock screen. It still rings as a notification.</string>
+    <string name="facetime_notifications_off">LightDecoder\'s notifications are off, so FaceTime calls can\'t ring.</string>
+</resources>

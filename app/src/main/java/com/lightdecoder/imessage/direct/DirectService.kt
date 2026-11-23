@@ -22,8 +22,8 @@ import org.json.JSONObject
  * preview), unsend, reach, edit, react, typing, read, download, an iMessage app's update (a vote in a
  * poll too), a chat's background, Send Later taken back,
  * a group's name, members and photo, a chat marked unread, a junk report, the people of recent chats
- * told of the user's new device), and hands what Apple sends to the main process's
- * [DirectSinkService].
+ * told of the user's new device, who can be called with FaceTime), and hands what Apple sends to the
+ * main process's [DirectSinkService] (which also says who a FaceTime caller is).
  */
 class DirectService : Service() {
 
@@ -31,6 +31,9 @@ class DirectService : Service() {
     private val notice by lazy { ServiceNotice.Poster(this) }
     private lateinit var engine: DirectEngine
     private lateinit var sinkClient: DirectIpc.Client
+
+    /** FaceTime's lines for the main process's iMessage log, the oldest dropped when it cannot keep up. */
+    private val notes = kotlinx.coroutines.channels.Channel<String>(64, kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST)
 
     private val server = DirectIpc.Server { what, request ->
         when (what) {
@@ -124,6 +127,10 @@ class DirectService : Service() {
                 engine.invalidatePeers(DirectWire.PeersRequest.fromJson(request).groups)
                 DirectWire.ok()
             }
+            DirectWire.FT_CAPABLE -> {
+                val r = DirectWire.CapableRequest.fromJson(request)
+                DirectWire.capable(engine.faceTimeCapable(r.targets, r.from))
+            }
             else -> DirectWire.error("Unknown request $what")
         }
     }
@@ -140,6 +147,18 @@ class DirectService : Service() {
         engine.sink = DirectEngine.Sink { update ->
             val reply = sinkClient.call(DirectWire.UPDATE, DirectWire.encodeUpdate(update), SINK_TIMEOUT_MS)
             Delivery.of(reply)
+        }
+        // FaceTime: who is calling is the main process's to say (it has the contacts and the chats),
+        // and what the calls did goes to its iMessage log, in order.
+        engine.callerLookup = { handle ->
+            val reply = sinkClient.call(DirectWire.CALLER, DirectWire.caller(handle), CALLER_TIMEOUT_MS)
+            if (DirectWire.errorOf(reply) != null) null else DirectWire.callerInfo(reply)
+        }
+        com.lightdecoder.imessage.facetime.FaceTimeLog.sink = { line -> notes.trySend(line) }
+        scope.launch {
+            for (line in notes) {
+                runCatching { sinkClient.call(DirectWire.UPDATE, DirectWire.encode(DirectArchive.Update.Note(line)), NOTE_TIMEOUT_MS) }
+            }
         }
         scope.launch { engine.status.collect { update(it) } }
         // Bound by the main process for a send or unsend, even before a start command.
@@ -167,6 +186,8 @@ class DirectService : Service() {
 
     override fun onDestroy() {
         engine.sink = null
+        engine.callerLookup = null
+        com.lightdecoder.imessage.facetime.FaceTimeLog.sink = null
         sinkClient.close()
         server.close()
         scope.cancel()
@@ -185,6 +206,10 @@ class DirectService : Service() {
         const val CHANNEL = ServiceNotice.CHANNEL
         private const val NOTIFICATION_ID = ServiceNotice.NOTIFICATION_ID
         private const val SINK_TIMEOUT_MS = 30_000L
+
+        /** The main process's answer to "who is calling" is not waited for longer than the call engine would use it. */
+        private const val CALLER_TIMEOUT_MS = com.lightdecoder.imessage.facetime.FaceTimeCalls.LOOKUP_MS
+        private const val NOTE_TIMEOUT_MS = 5_000L
 
         fun ensureChannel(context: Context) = ServiceNotice.ensureChannel(context)
 

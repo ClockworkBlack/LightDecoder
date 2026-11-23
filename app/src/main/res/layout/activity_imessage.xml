@@ -270,6 +270,54 @@
                         android:textAppearance="?attr/textAppearanceBodySmall" />
 
                     <!-- iMessage games (DirectPrefs.gamesOn, read in the main process): OpenPigeon plays them. -->
+                    <!-- FaceTime calls (DirectPrefs.faceTimeOn, read by the call engine here and the chat screens in the main process). -->
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switchFaceTime"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:minHeight="48dp"
+                        android:text="@string/facetime_setting" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/facetime_setting_help"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                    <!-- What stands in the way of a call ringing, with FaceTime on: notifications off, or no call screen over the lock screen. -->
+                    <TextView
+                        android:id="@+id/faceTimeStatus"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:textAppearance="?attr/textAppearanceBodyMedium"
+                        android:visibility="gone" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/faceTimeFix"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:text="@string/facetime_open_settings"
+                        android:visibility="gone" />
+
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switchSilenceUnknown"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:minHeight="48dp"
+                        android:text="@string/facetime_silence_unknown" />
+
+                    <TextView
+                        android:id="@+id/silenceUnknownHelp"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/facetime_silence_unknown_help"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+
                     <com.google.android.material.materialswitch.MaterialSwitch
                         android:id="@+id/switchGames"
                         android:layout_width="match_parent"

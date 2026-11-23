@@ -940,6 +940,10 @@ class BlueBubblesScreenTest {
         }
         val notice = setOf(com.lightdecoder.imessage.direct.DirectWire.TYPING, com.lightdecoder.imessage.direct.DirectWire.READ)
         com.lightdecoder.imessage.direct.DirectLink.installForTesting(two.app, typingIdleMs, typingRepeatMs) { what, request, _ ->
+            // Whether the person can be called with FaceTime is looked up when a chat opens: nothing the user did.
+            if (what == com.lightdecoder.imessage.direct.DirectWire.FT_CAPABLE) {
+                return@installForTesting com.lightdecoder.imessage.direct.DirectWire.capable(emptyList())
+            }
             if (notices || what !in notice) asked += what to request
             answer(what)
         }

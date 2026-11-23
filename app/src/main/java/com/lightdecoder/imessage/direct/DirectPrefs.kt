@@ -151,6 +151,55 @@ object DirectPrefs {
     /** Turns link previews on or off (see [linkPreviews]). */
     fun setLinkPreviews(context: Context, on: Boolean) = setMarker(linkPreviewsOffMarker(context), !on)
 
+    private fun faceTimeOffMarker(context: Context) = File(context.filesDir, "imessage/facetime-off")
+
+    /**
+     * Whether FaceTime calls are placed and taken here ([com.lightdecoder.imessage.facetime]). On by
+     * default. Off: Apple's FaceTime events are acknowledged unread (nothing rings, nothing is noted
+     * as missed) and the chats' FaceTime buttons are hidden. A file, like [gamesOn]: the setup screen
+     * and the call engine (":imessage" process) and the chat screens (main process) all read it.
+     */
+    fun faceTimeOn(context: Context): Boolean = !faceTimeOffMarker(context).isFile
+
+    /** Turns FaceTime on or off (see [faceTimeOn]). */
+    fun setFaceTimeOn(context: Context, on: Boolean) = setMarker(faceTimeOffMarker(context), !on)
+
+    private fun silenceUnknownFaceTimeMarker(context: Context) = File(context.filesDir, "imessage/facetime-silence-unknown")
+
+    /**
+     * "Silence unknown FaceTime callers": a call from someone who is no contact and has no chat here
+     * does not ring; it only shows as a missed call. Off by default. A file, like [faceTimeOn].
+     */
+    fun silenceUnknownFaceTime(context: Context): Boolean = silenceUnknownFaceTimeMarker(context).isFile
+
+    /** Turns "Silence unknown FaceTime callers" on or off (see [silenceUnknownFaceTime]). */
+    fun setSilenceUnknownFaceTime(context: Context, on: Boolean) = setMarker(silenceUnknownFaceTimeMarker(context), on)
+
+    private fun liveFaceTimeCallFile(context: Context) = File(context.filesDir, "imessage/facetime-live-call")
+
+    /**
+     * The FaceTime call this phone holds (placed and ringing out, being joined, or joined), by its
+     * id; null for none. Noted by the call engine (":imessage" process) as a call begins and ends,
+     * so that after the process was stopped in a call (nothing told the other side then) the next
+     * start can leave it ([com.lightdecoder.imessage.facetime.CallRecovery]). Only ever a call's id.
+     */
+    fun liveFaceTimeCall(context: Context): String? =
+        runCatching { liveFaceTimeCallFile(context).takeIf { it.isFile && it.length() <= 64 }?.readText()?.trim() }.getOrNull()
+            ?.takeIf(com.lightdecoder.imessage.facetime.CallIds::isGuid)
+
+    /** Notes the call held now ([liveFaceTimeCall]); null: none. */
+    fun setLiveFaceTimeCall(context: Context, guid: String?) {
+        runCatching {
+            val f = liveFaceTimeCallFile(context)
+            if (guid == null) {
+                f.delete()
+            } else {
+                f.parentFile?.mkdirs()
+                f.writeText(guid)
+            }
+        }
+    }
+
     /** Puts [f] there ([present]) or takes it away, as a setting's marker. */
     private fun setMarker(f: File, present: Boolean) {
         runCatching {

@@ -15,6 +15,27 @@
         android:title="@string/chat_call"
         android:visible="false"
         app:showAsAction="always" />
+    <!--
+        FaceTime, for a chat with one person the iMessage library reaches (and whom Apple does not say
+        cannot be called), with "FaceTime" on. In iPhone-style chats a camera in the bar, which asks
+        Video or Audio; elsewhere the two in the menu.
+    -->
+    <item
+        android:id="@+id/action_facetime"
+        android:icon="@drawable/ic_ft_video"
+        android:title="@string/facetime_button"
+        android:visible="false"
+        app:showAsAction="always" />
+    <item
+        android:id="@+id/action_facetime_video"
+        android:title="@string/facetime_video"
+        android:visible="false"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_facetime_audio"
+        android:title="@string/facetime_audio"
+        android:visible="false"
+        app:showAsAction="never" />
     <!-- Only while something is being read aloud. -->
     <item
         android:id="@+id/action_stop_reading"

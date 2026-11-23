@@ -13,13 +13,21 @@ import org.json.JSONObject
 /**
  * Takes in what Apple sent, from the ":imessage" process, and stores it in the iMessage archive
  * (main process). One change at a time, in the order the other process sends them (Apple's).
+ * Also answers that process's question of who a FaceTime caller is ([DirectWire.CALLER]).
  */
 class DirectSinkService : Service() {
 
     private val server = DirectIpc.Server { what, request ->
-        if (what != DirectWire.UPDATE) return@Server DirectWire.error("Unknown request $what")
-        take(request) { update ->
-            synchronized(DirectSinkService::class.java) { DirectLink.get(this).apply(update) }
+        when (what) {
+            DirectWire.UPDATE -> take(request) { update ->
+                synchronized(DirectSinkService::class.java) { DirectLink.get(this).apply(update) }
+            }
+            // Who is calling (FaceTime): the contact's name, and whether they are known here. Only read.
+            DirectWire.CALLER -> {
+                val handle = DirectWire.callerOf(request) ?: return@Server DirectWire.error("No caller")
+                DirectWire.callerReply(DirectLink.get(this).callerInfo(handle))
+            }
+            else -> DirectWire.error("Unknown request $what")
         }
     }
 

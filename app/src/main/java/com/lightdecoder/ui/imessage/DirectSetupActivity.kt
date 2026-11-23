@@ -36,6 +36,8 @@ import kotlinx.coroutines.withContext
  * only once Apple reports the registration. iMessage conversations are then in the Messages tab.
  * Runs in the ":imessage" process, with the library's own settings (read receipts), and "iMessage
  * games" (a file the main process reads: [DirectPrefs.gamesOn]) with whether OpenPigeon is here.
+ * And FaceTime's: "FaceTime" ([DirectPrefs.faceTimeOn]) and "Silence unknown FaceTime callers"
+ * ([DirectPrefs.silenceUnknownFaceTime]), with what Android still has to allow for a call to ring.
  */
 class DirectSetupActivity : AppCompatActivity() {
 
@@ -101,6 +103,18 @@ class DirectSetupActivity : AppCompatActivity() {
         binding.switchLinkPreviews.setOnCheckedChangeListener { _, on -> DirectPrefs.setLinkPreviews(this, on) }
         binding.switchNotifyMentions.isChecked = DirectPrefs.notifyWhenMentioned(this)
         binding.switchNotifyMentions.setOnCheckedChangeListener { _, on -> DirectPrefs.setNotifyWhenMentioned(this, on) }
+        // FaceTime: on by default; the call engine (this process) and the chat screens (main process) read it.
+        binding.switchFaceTime.isChecked = DirectPrefs.faceTimeOn(this)
+        binding.switchFaceTime.setOnCheckedChangeListener { _, on ->
+            DirectPrefs.setFaceTimeOn(this, on)
+            // Turned on: from now on the library is told this phone's addresses (a call needs them).
+            engine.faceTimeSettingChanged()
+            showFaceTime()
+        }
+        // Off by default: an unknown caller rings like anyone else.
+        binding.switchSilenceUnknown.isChecked = DirectPrefs.silenceUnknownFaceTime(this)
+        binding.switchSilenceUnknown.setOnCheckedChangeListener { _, on -> DirectPrefs.setSilenceUnknownFaceTime(this, on) }
+        binding.faceTimeFix.setOnClickListener { fixFaceTime() }
         binding.getGames.setOnClickListener { MadridHost.openStore(this, MadridApps.OPENPIGEON) }
         // The service's status notice: turned off in its channel's settings, iMessage keeps running.
         binding.hideStatus.setOnClickListener { openStatusSettings() }
@@ -118,6 +132,62 @@ class DirectSetupActivity : AppCompatActivity() {
         super.onResume()
         // Back from the store, maybe with OpenPigeon installed.
         showGames()
+        // Back from Android's settings, maybe with notifications or the call screen allowed.
+        showFaceTime()
+    }
+
+    /** What keeps an incoming FaceTime call from ringing as it should, if anything; nothing while FaceTime is off. */
+    private enum class FaceTimeBlock { NONE, NOTIFICATIONS, FULL_SCREEN }
+
+    private fun faceTimeBlock(): FaceTimeBlock {
+        if (!DirectPrefs.faceTimeOn(this)) return FaceTimeBlock.NONE
+        if (!androidx.core.app.NotificationManagerCompat.from(this).areNotificationsEnabled()) return FaceTimeBlock.NOTIFICATIONS
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            val nm = getSystemService(android.app.NotificationManager::class.java)
+            // Not to be asked on every phone: then nothing is said of it.
+            val allowed = try {
+                nm == null || nm.canUseFullScreenIntent()
+            } catch (e: RuntimeException) {
+                true
+            }
+            if (!allowed) return FaceTimeBlock.FULL_SCREEN
+        }
+        return FaceTimeBlock.NONE
+    }
+
+    /** The FaceTime switches as they stand, and what Android still has to allow for a call to ring (with a way there). */
+    private fun showFaceTime() {
+        val on = DirectPrefs.faceTimeOn(this)
+        binding.switchSilenceUnknown.isEnabled = on
+        binding.silenceUnknownHelp.alpha = if (on) 1f else 0.5f
+        val block = faceTimeBlock()
+        binding.faceTimeStatus.visibility = if (block == FaceTimeBlock.NONE) View.GONE else View.VISIBLE
+        binding.faceTimeFix.visibility = binding.faceTimeStatus.visibility
+        when (block) {
+            FaceTimeBlock.NOTIFICATIONS -> binding.faceTimeStatus.setText(R.string.facetime_notifications_off)
+            FaceTimeBlock.FULL_SCREEN -> binding.faceTimeStatus.setText(R.string.facetime_full_screen_help)
+            FaceTimeBlock.NONE -> Unit
+        }
+    }
+
+    /** Android's own screen for what is missing: the app's notifications, or (Android 14) its full-screen notifications. */
+    private fun fixFaceTime() {
+        val intent = when (faceTimeBlock()) {
+            FaceTimeBlock.NOTIFICATIONS -> android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName)
+            FaceTimeBlock.FULL_SCREEN ->
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    android.content.Intent(android.provider.Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, android.net.Uri.fromParts("package", packageName, null))
+                } else {
+                    return
+                }
+            FaceTimeBlock.NONE -> return
+        }
+        try {
+            startActivity(intent)
+        } catch (e: android.content.ActivityNotFoundException) {
+            showError(getString(R.string.imessage_hide_status_help))
+        }
     }
 
     private fun openStatusSettings() {
@@ -174,6 +244,11 @@ class DirectSetupActivity : AppCompatActivity() {
         getString(R.string.imessage_library_unsupported, DirectLibrary.processAbi(), unpinned.joinToString(", "))
 
     private fun onRegister() {
+        // Registering again replaces the session a call is on: not during a call.
+        if (com.lightdecoder.imessage.facetime.FaceTimeCalls.peek()?.busy == true) {
+            showError(getString(R.string.facetime_register_in_call))
+            return
+        }
         val code = binding.relayCode.text?.toString().orEmpty().trim()
         if (code.isEmpty()) {
             showError(getString(R.string.imessage_relay_code_missing))

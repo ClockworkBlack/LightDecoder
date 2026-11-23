@@ -65,6 +65,70 @@
                 android:textColor="?attr/colorOnSurfaceVariant"
                 android:visibility="gone" />
 
+            <!-- FaceTime, as an iPhone's details have it: two round buttons, audio and video (a chat with one person the iMessage library reaches). -->
+            <LinearLayout
+                android:id="@+id/faceTimeRow"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginTop="16dp"
+                android:baselineAligned="false"
+                android:orientation="horizontal"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:layout_width="88dp"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_horizontal"
+                    android:orientation="vertical">
+
+                    <ImageButton
+                        android:id="@+id/faceTimeAudio"
+                        android:layout_width="56dp"
+                        android:layout_height="56dp"
+                        android:background="@drawable/bg_call_round"
+                        android:backgroundTint="@color/phone_plus"
+                        android:contentDescription="@string/facetime_details_audio_description"
+                        android:src="@drawable/ic_ft_audio"
+                        app:tint="@color/phone_blue" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:importantForAccessibility="no"
+                        android:text="@string/facetime_details_audio"
+                        android:textColor="@color/phone_blue"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="88dp"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_horizontal"
+                    android:orientation="vertical">
+
+                    <ImageButton
+                        android:id="@+id/faceTimeVideo"
+                        android:layout_width="56dp"
+                        android:layout_height="56dp"
+                        android:background="@drawable/bg_call_round"
+                        android:backgroundTint="@color/phone_plus"
+                        android:contentDescription="@string/facetime_details_video_description"
+                        android:src="@drawable/ic_ft_video"
+                        app:tint="@color/phone_blue" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:importantForAccessibility="no"
+                        android:text="@string/facetime_details_video"
+                        android:textColor="@color/phone_blue"
+                        android:textSize="12sp" />
+                </LinearLayout>
+            </LinearLayout>
+
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/changeNamePhoto"
                 style="@style/Widget.Material3.Button.TextButton"

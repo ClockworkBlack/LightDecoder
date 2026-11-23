@@ -15,6 +15,13 @@ import com.lightdecoder.chat.ChatService
 import com.lightdecoder.imessage.IMessageAddress
 import com.lightdecoder.imessage.IMessageLog
 import com.lightdecoder.imessage.IMessageManager
+import com.lightdecoder.imessage.facetime.CallIds
+import com.lightdecoder.imessage.facetime.CallRows
+import com.lightdecoder.imessage.facetime.CallerInfo
+import com.lightdecoder.imessage.facetime.CapabilityCache
+import com.lightdecoder.imessage.facetime.FaceTimeLog
+import com.lightdecoder.imessage.facetime.FaceTimeNotices
+import com.lightdecoder.imessage.facetime.Outcome
 import com.lightdecoder.relay.ConversationDto
 import com.lightdecoder.relay.Folder
 import com.lightdecoder.relay.MessageDto
@@ -1400,6 +1407,9 @@ class DirectLink private constructor(
                 if (repo.conversation(id)?.isGroup == true && !isMember(id, update.participantId)) return
                 manager.noteTyping(id, update.participantId, nameOf(update.participantId), update.typing)
             }
+            is DirectArchive.Update.Call -> call(update)
+            // What FaceTime did in the ":imessage" process: kinds and outcomes only (and through Redact again, in the log).
+            is DirectArchive.Update.Note -> IMessageLog.add(app, FaceTimeLog.PREFIX + loggableNote(update.line))
             is DirectArchive.Update.Dropped ->
                 IMessageLog.add(app, "an event from Apple was not taken (${loggableText(update.what, 40)}): ${loggableText(update.why, 160)}")
             is DirectArchive.Update.ReadElsewhere -> readElsewhere(update)
@@ -2087,6 +2097,10 @@ class DirectLink private constructor(
     /** Words the ":imessage" process gave for the log ([DirectArchive.Update.Dropped]): at most [max] characters, plain ones only. */
     private fun loggableText(text: String, max: Int): String =
         text.take(max).map { if (it.isLetterOrDigit() || it in " .,:;()/'_-") it else '?' }.joinToString("")
+
+    /** A line the ":imessage" process gave for the log ([DirectArchive.Update.Note]): cut to size, plain characters only (a call's tag has a "#"). */
+    private fun loggableNote(text: String): String =
+        text.take(DirectWire.MAX_NOTE_CHARS).map { if (it.isLetterOrDigit() || it in " .,:;()/'_-#") it else '?' }.joinToString("")
 
     /**
      * The archive's chat a background change is for: the group, when it is stored (it is not made
@@ -2999,6 +3013,158 @@ class DirectLink private constructor(
     /** What arrived for [messageId] before it was stored. */
     private fun replayHeld(messageId: String) {
         for (update in held.take(messageId, System.currentTimeMillis())) apply(update)
+    }
+
+    // --- FaceTime -------------------------------------------------------------------------------
+
+    /** Who can be called with FaceTime, as Apple last said ([faceTimeCapable]). */
+    private val faceTimeCapability = CapabilityCache()
+
+    /**
+     * Whom a FaceTime call from the chat [conversationId] goes to: the one other person of a chat
+     * the library reaches ([peer], their address as the library has it), from the address the chat
+     * is carried on, with the name and picture the chat shows them by.
+     */
+    data class FaceTimeTarget(val peer: String, val from: String?, val name: String, val conversationId: String, val photo: String?)
+
+    /**
+     * The FaceTime target of [conversationId], or null: "FaceTime" is off, the library is not set up
+     * or does not reach the chat, or it is no chat with one person. Reads the archive: not on the main thread.
+     */
+    fun faceTimeTarget(conversationId: String): FaceTimeTarget? {
+        if (!active || !DirectPrefs.faceTimeOn(app)) return null
+        return try {
+            val target = targetOf(conversationId) ?: return null
+            val peer = target.peer?.let(CallIds::handle) ?: return null
+            val other = repo.participants(conversationId).firstOrNull { !it.isMe }
+            val address = Handles.display(peer)
+            val name = other?.name?.takeIf { it.isNotBlank() && !IMessageAddress.same(it, address) } ?: nameOf(peer)
+            val photo = runCatching { com.lightdecoder.relay.ContactPhotos.get(app).forAddress(address)?.path }.getOrNull()
+            FaceTimeTarget(peer, target.from.takeIf { it.isNotBlank() }?.let(CallIds::handle), name, conversationId, photo)
+        } catch (e: RuntimeException) {
+            null
+        }
+    }
+
+    /**
+     * Whether the person of the chat [conversationId] can be called with FaceTime, as Apple says:
+     * asked through the library once in a while per person ([CapabilityCache]), remembered in
+     * between. False for a chat no call could go from ([faceTimeTarget]); null when Apple could not
+     * be asked (nothing is remembered then: the buttons stay, and a call says what is wrong).
+     */
+    suspend fun faceTimeCapable(conversationId: String, now: Long = System.currentTimeMillis()): Boolean? {
+        val target = faceTimeTarget(conversationId) ?: return false
+        val key = CallIds.key(target.peer)
+        faceTimeCapability.get(key, now)?.let { return it }
+        val reply = try {
+            requests.call(DirectWire.FT_CAPABLE, DirectWire.faceTimeCapable(listOf(target.peer), target.from), REACH_TIMEOUT_MS)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return null
+        }
+        if (DirectWire.errorOf(reply) != null) return null
+        val capable = DirectWire.capableOf(reply).any { CallIds.key(it) == key }
+        faceTimeCapability.put(key, capable, now)
+        return capable
+    }
+
+    /** What [faceTimeCapable] last learned of the chat's person, without asking: true, false, or null (not known). */
+    fun faceTimeCapableKnown(conversationId: String, now: Long = System.currentTimeMillis()): Boolean? =
+        faceTimeTarget(conversationId)?.let { faceTimeCapability.get(CallIds.key(it.peer), now) }
+
+    /**
+     * Who the caller [handle] (their address as the library has it) is, for the ":imessage" process
+     * ([DirectWire.CALLER]): the name the user knows them by, their chat here and their picture.
+     * Known: someone with a contact's name, or someone the user has written to (or called) in a chat
+     * here; a chat that only they wrote in makes nobody known (anyone can write first). Only read.
+     */
+    fun callerInfo(handle: String): CallerInfo {
+        val address = Handles.display(handle)
+        return try {
+            val chat = manager.conversationWith(address)
+            val person = chat?.let { id -> repo.participants(id).firstOrNull { !it.isMe } }
+            val named = if (person != null) knownName(person, handle) else nameOf(handle) != address
+            val name = when {
+                !named -> ""
+                person != null && person.name.isNotBlank() && !IMessageAddress.same(person.name, address) -> person.name
+                else -> nameOf(handle)
+            }
+            // Written to, or called.
+            val wroteTo = chat != null && (
+                repo.hasOutgoing(chat) ||
+                    repo.messagesWithExtra(chat, "\"call\"", CallRows.PREFIX, 20).any { IMessageExtra.parse(it.extra).call?.outgoing == true }
+                )
+            val photo = runCatching { com.lightdecoder.relay.ContactPhotos.get(app).forAddress(address)?.path }.getOrNull()
+            CallerInfo(name = name, known = named || wroteTo, conversationId = chat, photo = photo)
+        } catch (e: RuntimeException) {
+            CallerInfo(name = "", known = false)
+        }
+    }
+
+    /**
+     * A FaceTime call that ended, from the ":imessage" process: its row in the chat with the person
+     * (a line of the chat's own, [CallRows]), in the chat it was placed from when that is theirs,
+     * else in their chat as a message from them would find or make it. A missed call makes the chat
+     * unread and is told in a notice (a tap opens the chat). The same call again changes nothing,
+     * unless it says more than is stored ([CallRows.replaces]).
+     */
+    private fun call(update: DirectArchive.Update.Call) {
+        val outcome = Outcome.of(update.outcome) ?: return
+        val peer = CallIds.handle(update.peer) ?: return
+        if (!CallIds.isGuid(update.guid)) return
+        val id = CallRows.messageId(update.guid)
+        val existing = repo.message(id)
+        if (existing != null && !CallRows.replaces(IMessageExtra.parse(existing.extra).call?.let { Outcome.of(it.outcome) }, outcome)) return
+        val now = System.currentTimeMillis()
+        val startedMs = update.startedMs.takeIf { it > 0 }?.coerceAtMost(now + DirectArchive.MAX_FUTURE_MS) ?: now
+        val address = Handles.display(peer)
+        // The chat it was placed from, while that is still a chat with this person; else theirs.
+        val placedFrom = update.conversationId.takeIf { it.isNotEmpty() }?.takeIf { chat ->
+            repo.conversation(chat)?.let { !it.isGroup && it.folderEnum != Folder.DELETED } == true && isMember(chat, address)
+        }
+        val described = ConversationDto(
+            id = placedFrom ?: DirectArchive.conversationId(listOf(peer), emptySet(), null),
+            name = nameOf(peer),
+            type = DirectArchive.TRANSPORT,
+            participants = listOf(ParticipantDto(id = peer, name = nameOf(peer), number = address, formattedNumber = address)),
+            otherParticipantIds = listOf(peer),
+        )
+        val missed = outcome == Outcome.MISSED && !update.outgoing
+        // Their stored chat as it is (a Blue Bubbles one too); only where they have none, one is made as for
+        // a message from them (see [upsert]): its latest message moves with the row only.
+        val chatId = placedFrom ?: manager.conversationWith(address) ?: toArchive(described).let { conversation ->
+            repo.upsertConversation(conversation.copy(lastMessageTs = 0))
+            conversation.id
+        }
+        val onScreen = MessageNotifier.visibleConversationId(ChatService.IMESSAGE) == chatId
+        if (missed && existing == null && !onScreen) repo.markConversationUnread(chatId)
+        val text = CallRows.text(CallRows.ResourceTexts(app), update.video, outcome, update.durationMs)
+        repo.upsertMessage(
+            MessageDto(
+                id = id,
+                conversationId = chatId,
+                senderId = if (update.outgoing) "" else address,
+                senderName = if (update.outgoing) "" else nameOf(peer),
+                fromMe = update.outgoing,
+                timestampMs = startedMs,
+                direction = "system",
+                transport = IMessageManager.TRANSPORT,
+                text = text,
+                parts = listOf(PartDto(partId = "0", kind = "text", text = text)),
+                isOld = true,
+                extra = IMessageExtra(call = IMessageExtra.CallInfo(update.guid, update.outgoing, update.video, outcome.wire, update.durationMs)).toJson(),
+            ),
+        )
+        IMessageLog.add(app, "${IMessageLog.chatRef(chatId)}: FaceTime ${if (update.video) "video" else "audio"} call noted (${outcome.wire})")
+        // A missed call, told once; not for the chat on screen, and without a sound for one whose alerts are hidden.
+        if (missed && existing == null && !onScreen) {
+            val quiet = update.quiet || repo.conversation(chatId)?.muted == true
+            val person = repo.participants(chatId).firstOrNull { !it.isMe }
+            val name = person?.name?.takeIf { it.isNotBlank() } ?: nameOf(peer)
+            val photo = runCatching { com.lightdecoder.relay.ContactPhotos.get(app).forAddress(address) }.getOrNull()
+            FaceTimeNotices.postMissed(app, name, update.video, chatId, startedMs, quiet, photo)
+        }
     }
 
     /**

@@ -320,6 +320,32 @@ object DirectArchive {
         }
 
         /**
+         * A FaceTime call that ended ([com.lightdecoder.imessage.facetime.CallLogEntry]): its row in the
+         * chat with [peer] (their address as the library has it), whoever placed it ([outgoing]: the
+         * user), audio or [video], when it began and, for one that was talked in, how long it was;
+         * [outcome] is an [com.lightdecoder.imessage.facetime.Outcome]'s name on the wire. A missed
+         * one is also told in a notice ([quiet]: without a sound). [conversationId]: the chat it was
+         * placed from, when the ":imessage" process was told (else it is found by [peer]).
+         */
+        data class Call(
+            val guid: String,
+            val peer: String,
+            val outgoing: Boolean,
+            val video: Boolean,
+            val startedMs: Long,
+            val durationMs: Long,
+            val outcome: String,
+            val quiet: Boolean = false,
+            val conversationId: String = "",
+        ) : Update()
+
+        /**
+         * A line of the ":imessage" process for the iMessage log (what FaceTime did: kinds and
+         * outcomes only, [com.lightdecoder.imessage.facetime.FaceTimeLog]); the main process keeps the log.
+         */
+        data class Note(val line: String) : Update()
+
+        /**
          * An event from Apple the ":imessage" process did not take: [what] kind of event it was and
          * [why] (kinds and reasons only, never its text, names or addresses), for the iMessage log.
          */

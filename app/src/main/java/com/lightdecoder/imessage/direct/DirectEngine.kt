@@ -6,6 +6,13 @@ import androidx.annotation.StringRes
 import com.lightdecoder.R
 import com.lightdecoder.archive.MediaCache
 import com.lightdecoder.chat.ChatService
+import com.lightdecoder.imessage.facetime.CallBridge
+import com.lightdecoder.imessage.facetime.CallEvent
+import com.lightdecoder.imessage.facetime.CallLogEntry
+import com.lightdecoder.imessage.facetime.CallSessionInfo
+import com.lightdecoder.imessage.facetime.CallerInfo
+import com.lightdecoder.imessage.facetime.FaceTimeCalls
+import com.lightdecoder.imessage.facetime.LocalAddresses
 import com.lightdecoder.relay.ConversationDto
 import com.lightdecoder.relay.ParticipantDto
 import java.io.File
@@ -27,6 +34,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import uniffi.rust_bridge.AttachmentType
 import uniffi.rust_bridge.ChatRenameMessage
@@ -67,6 +75,9 @@ import uniffi.rust_bridge.UnsendMessage
  *   order, once the user's own addresses are known (else the user's messages would look like
  *   someone else's); each is acknowledged to the library only once the main process stored it,
  *   and the sender gets a delivery receipt first, as from an iPhone.
+ * - FaceTime: Apple's call events are handed to [FaceTimeCalls] as they come (queued there: no
+ *   message waits behind a call), and the library's call functions on the session are [callBridge].
+ *   With "FaceTime" off ([DirectPrefs.faceTimeOn]) the events are acknowledged unread, as before.
  */
 class DirectEngine private constructor(private val app: Context) {
 
@@ -177,6 +188,10 @@ class DirectEngine private constructor(private val app: Context) {
                 } else {
                     handle(event.v1)
                 }
+            } else if (event is PushEvent.FaceTime) {
+                // Only handed on (queued there): a ring waits for nothing here, nor anything for it.
+                // With "FaceTime" off it is acknowledged unread.
+                if (DirectPrefs.faceTimeOn(app)) FaceTimeCalls.get(app).onEvent(event.v1)
             }
         } catch (e: CancellationException) {
             throw e
@@ -374,6 +389,7 @@ class DirectEngine private constructor(private val app: Context) {
                     if (session == null) {
                         _status.value = Status.Working("Starting")
                         session = uniffi.rust_bridge.restoreSession(statePath, pipeline!!)
+                        sessionCameUp()
                     }
                     refreshStatus()
                 } catch (e: Throwable) {
@@ -416,6 +432,11 @@ class DirectEngine private constructor(private val app: Context) {
      */
     fun register(relayCode: String, relayHost: String, phone: PhoneVerifier) {
         scope.launch {
+            // Registering again puts a new session in the place of the one a call is on: not during a call.
+            if (FaceTimeCalls.peek()?.busy == true) {
+                Log.w(TAG, "not registering again during a FaceTime call")
+                return@launch
+            }
             lock.withLock {
                 try {
                     // Only an https:// address of a real server (the setup screen checks it too; a stored one from before is checked here).
@@ -455,9 +476,12 @@ class DirectEngine private constructor(private val app: Context) {
         val result = uniffi.rust_bridge.registerIds(statePath, config, conn, identity, users.map { uniffi.rust_bridge.duplicateUser(it) })
         result.alert?.let { throw ImessageError("Apple: ${it.title}. ${it.body}".trim()) }
         step("Starting iMessage")
-        session = uniffi.rust_bridge.startSession(
+        val started = uniffi.rust_bridge.startSession(
             statePath, config, conn, anisette, null, result.users ?: users, identity, null, pipeline!!,
         )
+        // Never while a call is being joined on the session this replaces ([callBridge]'s guard).
+        callBridge.guard.withLock { session = started }
+        sessionCameUp()
         refreshStatus()
     }
 
@@ -497,6 +521,134 @@ class DirectEngine private constructor(private val app: Context) {
         }
         return uniffi.rust_bridge.authPhone(conn, config, reply.number, reply.signature)
     }
+
+    // --- FaceTime -------------------------------------------------------------------------------
+
+    /** When the session came up ([android.os.SystemClock.elapsedRealtime]; 0: not yet). */
+    @Volatile
+    private var sessionUpAt = 0L
+
+    /** The session a call is being joined on, kept from being let go of meanwhile ([CallBridge.withNativeHandle]). */
+    @Volatile
+    private var pinnedSession: SharedPushStateHandle? = null
+
+    /** Asks the main process who a caller is ([DirectWire.CALLER]); set by [DirectService], with [sink]. */
+    @Volatile
+    var callerLookup: (suspend (String) -> CallerInfo?)? = null
+
+    /** Tells the library this phone's addresses again when its networks change (a call needs them). */
+    private val addressWatcher by lazy {
+        LocalAddresses.Watcher(app) {
+            scope.launch {
+                if (session != null && DirectPrefs.faceTimeOn(app)) runCatching { callBridge.setLocalInterfaces() }
+            }
+        }
+    }
+
+    /**
+     * The session is there: from now on its age tells an old event handed over again from a new
+     * one, and, with FaceTime on, the library is told this phone's network addresses (before any
+     * call: it takes the process down if it has to use them untold) and again whenever they change.
+     */
+    private fun sessionCameUp() {
+        sessionUpAt = android.os.SystemClock.elapsedRealtime()
+        // A call the process was stopped in (nothing told the other side then): left now, once.
+        scope.launch {
+            runCatching {
+                com.lightdecoder.imessage.facetime.CallRecovery.leaveRemembered(
+                    DirectPrefs.liveFaceTimeCall(app), FaceTimeCalls.peek()?.state?.value?.guid,
+                    forget = { guid -> if (DirectPrefs.liveFaceTimeCall(app) == guid) DirectPrefs.setLiveFaceTimeCall(app, null) },
+                    bridge = callBridge,
+                )
+            }
+        }
+        if (!DirectPrefs.faceTimeOn(app)) return
+        try {
+            addressWatcher.start()
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "network changes not watched (${e::class.java.simpleName})")
+        }
+        scope.launch { runCatching { callBridge.setLocalInterfaces() } }
+    }
+
+    /** "FaceTime" was turned on or off on the iMessage screen: the phone's addresses are told from now on, or no longer watched. */
+    fun faceTimeSettingChanged() {
+        if (!DirectPrefs.faceTimeOn(app)) {
+            runCatching { addressWatcher.stop() }
+            return
+        }
+        if (session == null) return
+        runCatching { addressWatcher.start() }
+        scope.launch { runCatching { callBridge.setLocalInterfaces() } }
+    }
+
+    /**
+     * The library's FaceTime functions on the live session, for [FaceTimeCalls] and
+     * [com.lightdecoder.imessage.facetime.NativeCall]. None of them runs on the main thread.
+     */
+    internal val callBridge: CallBridge = object : CallBridge {
+        override val guard = Mutex()
+
+        override val connected: Boolean get() = session != null && isRegistered
+
+        override val sinceStartMs: Long
+            get() = sessionUpAt.takeIf { it > 0 }?.let { android.os.SystemClock.elapsedRealtime() - it } ?: 0L
+
+        private fun live(): SharedPushStateHandle = session ?: throw ImessageError("iMessage is not connected.")
+
+        override suspend fun handles(): List<String> = myHandles.ifEmpty { uniffi.rust_bridge.getHandles(live()) }
+
+        override suspend fun setLocalInterfaces() {
+            val s = live()
+            val picked = withContext(Dispatchers.IO) { LocalAddresses.current(app) }
+            uniffi.rust_bridge.setLocalInterfaces(s, picked.default, picked.all)
+        }
+
+        override suspend fun createFacetime(guid: String, handle: String, participants: List<String>, video: Boolean) =
+            uniffi.rust_bridge.createFacetime(live(), guid, handle, participants, video)
+
+        override suspend fun cancelFacetime(guid: String) = guard.withLock { uniffi.rust_bridge.cancelFacetime(live(), guid) }
+
+        override suspend fun declineFacetime(guid: String) = guard.withLock { uniffi.rust_bridge.declineFacetime(live(), guid) }
+
+        override suspend fun sessions(): List<CallSessionInfo> = CallEvent.sessions(uniffi.rust_bridge.ftSessions(live()))
+
+        override suspend fun <T> withNativeHandle(block: (Long) -> T): T? {
+            val s = session ?: return null
+            // The handle is a pointer into this session: the session stays until the join it goes to returned.
+            pinnedSession = s
+            try {
+                val handle = uniffi.rust_bridge.facetimeNativeHandle(s).toLong()
+                // Straight into the join: the library takes the handle back there, once.
+                return block(handle)
+            } finally {
+                pinnedSession = null
+            }
+        }
+
+        override suspend fun capable(targets: List<String>, from: String?): List<String> = faceTimeCapable(targets, from)
+    }
+
+    /**
+     * Which of [targets] (addresses as the library has them) can be called with FaceTime, as Apple
+     * says ([uniffi.rust_bridge.validateTargetsFacetime]), asked from [from] when it is one of the
+     * user's addresses. Throws when Apple could not be asked. None while "FaceTime" is off.
+     */
+    suspend fun faceTimeCapable(targets: List<String>, from: String?): List<String> {
+        if (targets.isEmpty() || !DirectPrefs.faceTimeOn(app)) return emptyList()
+        val s = requireSession()
+        val sender = from?.takeIf { it in myHandles } ?: Handles.preferredSender(myHandles)
+            ?: throw ImessageError(app.getString(R.string.imessage_direct_no_own_address))
+        return call { uniffi.rust_bridge.validateTargetsFacetime(s, targets, sender) }.filter { it in targets }
+    }
+
+    /** A finished FaceTime call, for its row in the chat: handed to the main process as Apple's changes are ([store]). */
+    internal suspend fun storeCall(entry: CallLogEntry) = store(
+        DirectArchive.Update.Call(
+            entry.guid, entry.peer, entry.outgoing, entry.video, entry.startedMs, entry.durationMs, entry.outcome.wire, entry.quiet,
+            entry.conversationId.orEmpty(),
+        ),
+    )
 
     /** Waits (a little) for [start] to restore the session, for requests that arrive right after the process starts. */
     private suspend fun requireSession(): SharedPushStateHandle {

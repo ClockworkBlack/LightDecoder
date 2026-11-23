@@ -1,0 +1,412 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The FaceTime call screen (ui.imessage.FaceTimeCallActivity): a call that rings (either way), is
+    being joined, or is on. The other side's picture fills it; without one (an audio call, or before
+    there is a picture) the person's avatar, name and the call's state stand in the middle.
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/call_screen"
+    android:keepScreenOn="false">
+
+    <!-- The other side's camera: the library draws into this view's Surface. -->
+    <TextureView
+        android:id="@+id/remoteVideo"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- Covers it while there is no picture to show. -->
+    <View
+        android:id="@+id/backdrop"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@drawable/bg_call_backdrop"
+        android:importantForAccessibility="no" />
+
+    <!-- Over a picture: keeps the name at the top and the buttons at the bottom readable. -->
+    <View
+        android:id="@+id/scrimTop"
+        android:layout_width="match_parent"
+        android:layout_height="160dp"
+        android:layout_gravity="top"
+        android:background="@drawable/bg_call_scrim_top"
+        android:importantForAccessibility="no"
+        android:visibility="gone" />
+
+    <View
+        android:id="@+id/scrimBottom"
+        android:layout_width="match_parent"
+        android:layout_height="280dp"
+        android:layout_gravity="bottom"
+        android:background="@drawable/bg_call_scrim_bottom"
+        android:importantForAccessibility="no"
+        android:visibility="gone" />
+
+    <!-- Everything else keeps clear of the system bars. -->
+    <FrameLayout
+        android:id="@+id/content"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <ImageButton
+            android:id="@+id/minimize"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_gravity="top|start"
+            android:layout_marginStart="8dp"
+            android:layout_marginTop="8dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/facetime_minimize"
+            android:src="@drawable/ic_ft_minimize"
+            app:tint="@color/call_on_screen" />
+
+        <!-- The chat with this person; from a locked phone only after the unlock. -->
+        <ImageButton
+            android:id="@+id/message"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_gravity="top|end"
+            android:layout_marginTop="8dp"
+            android:layout_marginEnd="8dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/facetime_message"
+            android:src="@drawable/ic_ft_message"
+            android:visibility="gone"
+            app:tint="@color/call_on_screen" />
+
+        <!-- Who, and how the call stands. In the middle without a picture; at the top over one. -->
+        <LinearLayout
+            android:id="@+id/info"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top"
+            android:layout_marginTop="96dp"
+            android:gravity="center_horizontal"
+            android:orientation="vertical"
+            android:paddingHorizontal="32dp">
+
+            <TextView
+                android:id="@+id/avatar"
+                android:layout_width="120dp"
+                android:layout_height="120dp"
+                android:gravity="center"
+                android:importantForAccessibility="no"
+                android:maxLines="1"
+                android:textSize="44sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/name"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:ellipsize="end"
+                android:gravity="center"
+                android:maxLines="2"
+                android:shadowColor="#99000000"
+                android:shadowRadius="6"
+                android:textColor="@color/call_on_screen"
+                android:textSize="30sp" />
+
+            <TextView
+                android:id="@+id/status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:gravity="center"
+                android:shadowColor="#99000000"
+                android:shadowRadius="6"
+                android:textColor="@color/call_on_screen_dim"
+                android:textSize="17sp" />
+
+            <TextView
+                android:id="@+id/detail"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:ellipsize="middle"
+                android:gravity="center"
+                android:singleLine="true"
+                android:textColor="@color/call_on_screen_dim"
+                android:textSize="14sp"
+                android:visibility="gone" />
+        </LinearLayout>
+
+        <!-- The user's own camera, small, in a rounded corner. -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/previewCard"
+            android:layout_width="104dp"
+            android:layout_height="156dp"
+            android:layout_gravity="top|end"
+            android:layout_marginTop="72dp"
+            android:layout_marginEnd="16dp"
+            android:alpha="0"
+            android:contentDescription="@string/facetime_own_camera"
+            app:cardBackgroundColor="#FF1C1C1E"
+            app:cardCornerRadius="18dp"
+            app:cardElevation="6dp"
+            app:strokeColor="#40FFFFFF"
+            app:strokeWidth="1dp">
+
+            <TextureView
+                android:id="@+id/localPreview"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent" />
+        </com.google.android.material.card.MaterialCardView>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
+            android:orientation="vertical"
+            android:paddingBottom="28dp">
+
+            <!-- Something to say once: a permission not given, a camera that cannot be used. -->
+            <TextView
+                android:id="@+id/notice"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginHorizontal="32dp"
+                android:layout_marginBottom="12dp"
+                android:gravity="center"
+                android:textColor="@color/call_on_screen"
+                android:textSize="15sp"
+                android:visibility="gone" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/openSettings"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginBottom="16dp"
+                android:text="@string/facetime_open_settings"
+                android:visibility="gone" />
+
+            <!-- A joined call's buttons. -->
+            <LinearLayout
+                android:id="@+id/controls"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:baselineAligned="false"
+                android:gravity="center_horizontal"
+                android:orientation="horizontal"
+                android:paddingHorizontal="12dp"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:gravity="center_horizontal"
+                    android:orientation="vertical">
+
+                    <ImageButton
+                        android:id="@+id/mute"
+                        android:layout_width="60dp"
+                        android:layout_height="60dp"
+                        android:background="@drawable/bg_call_round"
+                        android:contentDescription="@string/facetime_mute"
+                        android:src="@drawable/ic_ft_mic" />
+
+                    <TextView
+                        android:id="@+id/muteLabel"
+                        style="@style/Widget.LightDecoder.CallLabel"
+                        android:text="@string/facetime_mute" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:gravity="center_horizontal"
+                    android:orientation="vertical">
+
+                    <ImageButton
+                        android:id="@+id/camera"
+                        android:layout_width="60dp"
+                        android:layout_height="60dp"
+                        android:background="@drawable/bg_call_round"
+                        android:contentDescription="@string/facetime_camera_on"
+                        android:src="@drawable/ic_ft_video" />
+
+                    <TextView
+                        style="@style/Widget.LightDecoder.CallLabel"
+                        android:text="@string/facetime_camera" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/flipColumn"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:gravity="center_horizontal"
+                    android:orientation="vertical">
+
+                    <ImageButton
+                        android:id="@+id/flip"
+                        android:layout_width="60dp"
+                        android:layout_height="60dp"
+                        android:background="@drawable/bg_call_round"
+                        android:contentDescription="@string/facetime_flip_description"
+                        android:src="@drawable/ic_ft_flip" />
+
+                    <TextView
+                        style="@style/Widget.LightDecoder.CallLabel"
+                        android:text="@string/facetime_flip" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:gravity="center_horizontal"
+                    android:orientation="vertical">
+
+                    <ImageButton
+                        android:id="@+id/speaker"
+                        android:layout_width="60dp"
+                        android:layout_height="60dp"
+                        android:background="@drawable/bg_call_round"
+                        android:contentDescription="@string/facetime_speaker"
+                        android:src="@drawable/ic_ft_speaker" />
+
+                    <TextView
+                        android:id="@+id/speakerLabel"
+                        style="@style/Widget.LightDecoder.CallLabel"
+                        android:text="@string/facetime_speaker" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- End: a placed call, one being joined, one that is on. -->
+            <LinearLayout
+                android:id="@+id/endColumn"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginTop="20dp"
+                android:gravity="center_horizontal"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <ImageButton
+                    android:id="@+id/end"
+                    android:layout_width="72dp"
+                    android:layout_height="72dp"
+                    android:background="@drawable/bg_call_round"
+                    android:backgroundTint="@color/call_end"
+                    android:contentDescription="@string/facetime_end"
+                    android:src="@drawable/ic_ft_end"
+                    app:tint="@color/call_on_control" />
+
+                <TextView
+                    style="@style/Widget.LightDecoder.CallLabel"
+                    android:text="@string/facetime_end" />
+            </LinearLayout>
+
+            <!-- A ringing call: Decline, Accept; for a video call also "Audio only". -->
+            <LinearLayout
+                android:id="@+id/incoming"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_horizontal"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/audioOnly"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="24dp"
+                    android:minHeight="48dp"
+                    android:text="@string/facetime_audio_only"
+                    android:visibility="gone"
+                    app:icon="@drawable/ic_ft_audio" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:baselineAligned="false"
+                    android:orientation="horizontal"
+                    android:paddingHorizontal="40dp">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:gravity="center_horizontal"
+                        android:orientation="vertical">
+
+                        <ImageButton
+                            android:id="@+id/decline"
+                            android:layout_width="72dp"
+                            android:layout_height="72dp"
+                            android:background="@drawable/bg_call_round"
+                            android:backgroundTint="@color/call_end"
+                            android:contentDescription="@string/facetime_decline"
+                            android:src="@drawable/ic_ft_end"
+                            app:tint="@color/call_on_control" />
+
+                        <TextView
+                            style="@style/Widget.LightDecoder.CallLabel"
+                            android:text="@string/facetime_decline" />
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:gravity="center_horizontal"
+                        android:orientation="vertical">
+
+                        <ImageButton
+                            android:id="@+id/accept"
+                            android:layout_width="72dp"
+                            android:layout_height="72dp"
+                            android:background="@drawable/bg_call_round"
+                            android:backgroundTint="@color/call_accept"
+                            android:contentDescription="@string/facetime_accept"
+                            android:src="@drawable/ic_ft_video"
+                            app:tint="@color/call_on_control" />
+
+                        <TextView
+                            style="@style/Widget.LightDecoder.CallLabel"
+                            android:text="@string/facetime_accept" />
+                    </LinearLayout>
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- A placed call nobody took. -->
+            <LinearLayout
+                android:id="@+id/unanswered"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_horizontal"
+                android:orientation="horizontal"
+                android:paddingHorizontal="24dp"
+                android:visibility="gone">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/close"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="12dp"
+                    android:minHeight="52dp"
+                    android:text="@string/facetime_close" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/callAgain"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:minHeight="52dp"
+                    android:text="@string/facetime_call_again"
+                    app:backgroundTint="@color/call_accept" />
+            </LinearLayout>
+        </LinearLayout>
+    </FrameLayout>
+</FrameLayout>

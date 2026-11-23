@@ -74,6 +74,34 @@
         android:required="false" />
 
     <!--
+        FaceTime calls through the iMessage library (imessage/facetime), only once iMessage is set
+        up there and "FaceTime" is on. The microphone (RECORD_AUDIO, above) and the camera are asked
+        for when the user places or answers a call, and used only during it, under a visible "in
+        call" notice (a foreground service of the microphone, camera and phone-call types;
+        MANAGE_OWN_CALLS is what lets an app that is not the dialer use the phone-call type). The
+        audio route (earpiece, speaker, headset) is the call's, the screen goes dark at the ear
+        (WAKE_LOCK: the proximity lock only), and an incoming call may show over the lock screen.
+        Phones without a camera still install: calls are then audio only.
+    -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.camera.front"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.camera.autofocus"
+        android:required="false" />
+
+    <!--
         Voice: the system's speech recogniser (the composer's dictation
         button is shown only when there is one) and text-to-speech engines
         (for reading messages aloud). Android 11+ hides both from apps that
@@ -299,6 +327,35 @@
         <service
             android:name=".imessage.direct.DirectSinkService"
             android:exported="false" />
+        <!--
+            FaceTime calls (imessage/facetime), in the ":imessage" process: the library's call is
+            a pointer into that process's session, and it records and plays the call's sound there.
+            The call screen (ringing, in a call) shows over the lock screen and turns the screen on,
+            as a phone call does; it shows the call only, and opening the chat from it asks for the
+            unlock first. The service keeps the call up under its "in call" notice; the receiver
+            takes that notice's Hang up and an incoming call's Decline. None is exported: only the
+            app's own screens and notifications reach them.
+        -->
+        <activity
+            android:name=".ui.imessage.FaceTimeCallActivity"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|uiMode|keyboardHidden"
+            android:exported="false"
+            android:launchMode="singleInstance"
+            android:process=":imessage"
+            android:showWhenLocked="true"
+            android:taskAffinity=":facetime"
+            android:theme="@style/Theme.LightDecoder.Call"
+            android:turnScreenOn="true"
+            tools:targetApi="o_mr1" />
+        <service
+            android:name=".imessage.facetime.FaceTimeCallService"
+            android:exported="false"
+            android:foregroundServiceType="microphone|camera|phoneCall"
+            android:process=":imessage" />
+        <receiver
+            android:name=".imessage.facetime.FaceTimeActionReceiver"
+            android:exported="false"
+            android:process=":imessage" />
         <activity
             android:name=".ui.messenger.MessengerActivity"
             android:exported="false" />

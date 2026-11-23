@@ -132,6 +132,28 @@ class DirectWordingTest {
             R.string.imessage_junk_banner, R.string.imessage_junk_report, R.string.imessage_junk_confirm_title,
             R.string.imessage_junk_confirm_body, R.string.imessage_junk_reported, R.string.imessage_junk_failed,
             R.string.imessage_junk_nothing, R.string.imessage_junk_not_offered,
+            // FaceTime calls: the call screen, the notices, a call's row, the settings.
+            R.string.facetime_title, R.string.facetime_video, R.string.facetime_audio, R.string.facetime_channel_incoming,
+            R.string.facetime_channel_incoming_description, R.string.facetime_channel_ongoing, R.string.facetime_channel_ongoing_description,
+            R.string.facetime_channel_missed, R.string.facetime_channel_missed_description, R.string.facetime_incoming_video,
+            R.string.facetime_incoming_audio, R.string.facetime_accept, R.string.facetime_decline, R.string.facetime_audio_only,
+            R.string.facetime_missed_video, R.string.facetime_missed_audio, R.string.facetime_calling, R.string.facetime_connecting,
+            R.string.facetime_no_answer, R.string.facetime_declined, R.string.facetime_failed, R.string.facetime_end,
+            R.string.facetime_call_again, R.string.facetime_close, R.string.facetime_mute, R.string.facetime_unmute, R.string.facetime_camera,
+            R.string.facetime_camera_on, R.string.facetime_camera_off, R.string.facetime_flip, R.string.facetime_flip_description,
+            R.string.facetime_speaker, R.string.facetime_audio_route, R.string.facetime_route_earpiece, R.string.facetime_route_speaker,
+            R.string.facetime_route_wired, R.string.facetime_route_bluetooth, R.string.facetime_message, R.string.facetime_minimize,
+            R.string.facetime_own_camera, R.string.facetime_remote_video, R.string.facetime_mic_needed, R.string.facetime_open_settings,
+            R.string.facetime_camera_denied, R.string.facetime_camera_unavailable, R.string.facetime_refused_off, R.string.facetime_refused_in_call,
+            R.string.facetime_refused_phone_busy, R.string.facetime_refused_not_callable, R.string.facetime_refused_not_connected,
+            R.string.facetime_refused_gone, R.string.facetime_register_in_call, R.string.facetime_button, R.string.facetime_details_audio,
+            R.string.facetime_details_video, R.string.facetime_details_audio_description, R.string.facetime_details_video_description,
+            R.string.facetime_not_available, R.string.facetime_row_answered, R.string.facetime_row_missed, R.string.facetime_row_cancelled,
+            R.string.facetime_row_declined, R.string.facetime_row_unanswered, R.string.facetime_row_elsewhere, R.string.facetime_row_failed,
+            R.string.facetime_duration_sec, R.string.facetime_duration_min, R.string.facetime_duration_hr,
+            R.string.facetime_row_outgoing_description, R.string.facetime_row_incoming_description, R.string.facetime_setting,
+            R.string.facetime_setting_help, R.string.facetime_silence_unknown, R.string.facetime_silence_unknown_help,
+            R.string.facetime_full_screen_help, R.string.facetime_notifications_off,
         )
         for (res in direct) {
             val text = context.getString(res)
@@ -161,6 +183,24 @@ class DirectWordingTest {
             val typing = context.resources.getQuantityString(R.plurals.imessage_typing_first_and_others, count, "Alice", count)
             assertFalse(typing, typing.contains("OpenBubbles"))
         }
+        // FaceTime, by its name; a call's row as it reads.
+        assertEquals("FaceTime Video", context.getString(R.string.facetime_video))
+        assertEquals("FaceTime Audio", context.getString(R.string.facetime_audio))
+        val rows = com.lightdecoder.imessage.facetime.CallRows.ResourceTexts(context)
+        assertEquals("FaceTime Video · 5 min", com.lightdecoder.imessage.facetime.CallRows.text(rows, true, com.lightdecoder.imessage.facetime.Outcome.ANSWERED, 5 * 60_000))
+        assertEquals("FaceTime Audio · 12 sec", com.lightdecoder.imessage.facetime.CallRows.text(rows, false, com.lightdecoder.imessage.facetime.Outcome.ANSWERED, 12_000))
+        assertEquals("FaceTime Video · 1 hr 5 min", com.lightdecoder.imessage.facetime.CallRows.text(rows, true, com.lightdecoder.imessage.facetime.Outcome.ANSWERED, 65 * 60_000))
+        assertEquals("Missed FaceTime Video", com.lightdecoder.imessage.facetime.CallRows.text(rows, true, com.lightdecoder.imessage.facetime.Outcome.MISSED, 0))
+        assertEquals("FaceTime Audio · Cancelled", com.lightdecoder.imessage.facetime.CallRows.text(rows, false, com.lightdecoder.imessage.facetime.Outcome.CANCELLED, 0))
+        assertEquals("FaceTime Video · Declined", com.lightdecoder.imessage.facetime.CallRows.text(rows, true, com.lightdecoder.imessage.facetime.Outcome.DECLINED, 0))
+        assertEquals("FaceTime Video · No answer", com.lightdecoder.imessage.facetime.CallRows.text(rows, true, com.lightdecoder.imessage.facetime.Outcome.UNANSWERED, 0))
+        for (outcome in com.lightdecoder.imessage.facetime.Outcome.entries) {
+            for (video in listOf(true, false)) {
+                val row = com.lightdecoder.imessage.facetime.CallRows.text(rows, video, outcome, 90_000)
+                assertFalse(row, row.contains("OpenBubbles"))
+            }
+        }
+        assertEquals("Silence unknown FaceTime callers", context.getString(R.string.facetime_silence_unknown))
         // As an iPhone words them.
         assertEquals("Not Delivered", context.getString(R.string.imessage_not_delivered))
         assertEquals("Try Again", context.getString(R.string.imessage_not_delivered_try_again))

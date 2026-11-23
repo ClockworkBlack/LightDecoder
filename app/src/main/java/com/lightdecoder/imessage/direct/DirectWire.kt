@@ -1,5 +1,8 @@
 package com.lightdecoder.imessage.direct
 
+import com.lightdecoder.imessage.facetime.CallIds
+import com.lightdecoder.imessage.facetime.CallerInfo
+import com.lightdecoder.imessage.facetime.Outcome
 import com.lightdecoder.relay.ConversationDto
 import com.lightdecoder.relay.MessageDto
 import org.json.JSONArray
@@ -11,11 +14,11 @@ import org.json.JSONObject
  * tested (DirectWireTest), so both sides always agree.
  *
  * Main -> :imessage: [SEND] (with its mentions and link preview), [UNSEND], [REACH], [EDIT], [REACT], [TYPING], [READ], [DOWNLOAD],
- * [EXTENSION], [BACKGROUND], [UNSCHEDULE], [RENAME], [MEMBERS], [GROUP_PHOTO], [MARK_UNREAD], [REPORT_JUNK], [PEERS]
+ * [EXTENSION], [BACKGROUND], [UNSCHEDULE], [RENAME], [MEMBERS], [GROUP_PHOTO], [MARK_UNREAD], [REPORT_JUNK], [PEERS], [FT_CAPABLE]
  * (requests, answered with the same request id; a failure is answered with [error]). Never raw media bytes: files are
  * passed by path, in the app's own storage.
- * :imessage -> main: [UPDATE] (an archive change from Apple), answered once it is stored; only
- * then does the library forget the event.
+ * :imessage -> main: [UPDATE] (an archive change from Apple, a FaceTime call's row), answered once it
+ * is stored; only then does the library forget the event. And [CALLER] (who is calling), answered at once.
  */
 object DirectWire {
 
@@ -83,6 +86,19 @@ object DirectWire {
      * answered with [ok] at once.
      */
     const val PEERS = 18
+
+    /**
+     * Asks Apple which of some addresses can be called with FaceTime ([faceTimeCapable]), answered with
+     * [capable] (those that can). For showing a chat's FaceTime buttons only: it places nothing.
+     */
+    const val FT_CAPABLE = 19
+
+    /**
+     * :imessage -> main, as [UPDATE] goes: who the caller of an incoming FaceTime call is ([caller],
+     * their address), answered with [callerReply]: their contact name, whether they are known (a
+     * contact, or someone with a chat here), their chat and picture. Nothing is stored by it.
+     */
+    const val CALLER = 20
 
     const val REPLY = 100
 
@@ -379,6 +395,63 @@ object DirectWire {
         }
     }
 
+    /**
+     * What an [FT_CAPABLE] request asks: which of [targets] (addresses as the library has them, at
+     * most [MAX_FT_TARGETS]; anything else is left out) can be called, asked from the user's address
+     * [from] (null: the one the user's messages go from).
+     */
+    data class CapableRequest(val targets: List<String>, val from: String?) {
+        companion object {
+            fun fromJson(o: JSONObject) = CapableRequest(
+                o.optJSONArray("targets")?.let { a -> (0 until minOf(a.length(), MAX_FT_TARGETS)).mapNotNull { CallIds.handle(a.optString(it)) } }.orEmpty().distinct(),
+                o.optStringOrNull("from")?.let(CallIds::handle),
+            )
+        }
+    }
+
+    /** Ask which of [targets] can be called with FaceTime, from the user's address [from]. */
+    fun faceTimeCapable(targets: List<String>, from: String?): JSONObject =
+        JSONObject().put("targets", JSONArray(targets)).apply { if (!from.isNullOrBlank()) put("from", from) }
+
+    /** An [FT_CAPABLE]'s answer: the addresses that can be called. */
+    fun capable(addresses: List<String>): JSONObject = ok().put("capable", JSONArray(addresses))
+
+    /** The addresses an [FT_CAPABLE]'s answer names (only addresses, at most [MAX_FT_TARGETS]). */
+    fun capableOf(o: JSONObject): List<String> =
+        o.optJSONArray("capable")?.let { a -> (0 until minOf(a.length(), MAX_FT_TARGETS)).mapNotNull { CallIds.handle(a.optString(it)) } }.orEmpty()
+
+    /** The most addresses one [FT_CAPABLE] asks about. */
+    const val MAX_FT_TARGETS = 8
+
+    /** Ask who the caller [handle] is ([CALLER]). */
+    fun caller(handle: String): JSONObject = JSONObject().put("handle", handle)
+
+    /** The address a [CALLER] request asks about, or null when it is none. */
+    fun callerOf(o: JSONObject): String? = CallIds.handle(o.optStringOrNull("handle"))
+
+    /** A [CALLER]'s answer. */
+    fun callerReply(info: CallerInfo): JSONObject = ok().put("name", info.name).put("known", info.known)
+        .apply { info.conversationId?.let { put("conversationId", it) } }
+        .apply { info.photo?.let { put("photo", it) } }
+
+    /** What a [CALLER]'s answer says, read with limits (a name is one line of [CallIds.MAX_NAME_CHARS] at most). */
+    fun callerInfo(o: JSONObject): CallerInfo = CallerInfo(
+        name = CallIds.name(o.optStringOrNull("name")),
+        known = o.optBoolean("known"),
+        conversationId = o.optStringOrNull("conversationId")?.takeIf { it.isNotBlank() && it.length <= MAX_CONVERSATION_ID_CHARS },
+        photo = o.optStringOrNull("photo")?.takeIf { it.isNotBlank() && it.length <= MAX_PATH_CHARS },
+    )
+
+    /** The longest conversation id and file path taken from the other process. */
+    const val MAX_CONVERSATION_ID_CHARS = 256
+    const val MAX_PATH_CHARS = 1024
+
+    /** The longest log line taken from the other process ([DirectArchive.Update.Note]). */
+    const val MAX_NOTE_CHARS = 300
+
+    /** The longest call a row says (a day): what is longer was not measured right. */
+    const val MAX_CALL_MS = 24 * 60 * 60 * 1000L
+
     /** The most messages a junk report carries (OpenBubbles reports the last five). */
     const val MAX_JUNK_MESSAGES = 5
 
@@ -665,6 +738,12 @@ object DirectWire {
             .put("groupGuid", u.groupGuid).put("version", u.version).put("path", u.path ?: JSONObject.NULL)
             .put("row", encode(u.row))
             .apply { if (u.file.isNotEmpty()) put("file", u.file) }
+        is DirectArchive.Update.Call -> JSONObject().put("kind", "call").put("guid", u.guid).put("peer", u.peer)
+            .put("outgoing", u.outgoing).put("video", u.video).put("startedMs", u.startedMs).put("durationMs", u.durationMs)
+            .put("outcome", u.outcome)
+            .apply { if (u.quiet) put("quiet", true) }
+            .apply { if (u.conversationId.isNotEmpty()) put("conversationId", u.conversationId) }
+        is DirectArchive.Update.Note -> JSONObject().put("kind", "note").put("line", u.line.take(MAX_NOTE_CHARS))
         is DirectArchive.Update.Dropped -> JSONObject().put("kind", "dropped").put("what", u.what).put("why", u.why)
         DirectArchive.Update.Ignore -> JSONObject().put("kind", "ignore")
     }
@@ -807,6 +886,23 @@ object DirectWire {
                 )
             }
         }
+        "call" -> {
+            // Only a call's id, an address and an outcome there is; times as a call could have them.
+            val guid = o.optStringOrNull("guid")?.takeIf(CallIds::isGuid)
+            val peer = CallIds.handle(o.optStringOrNull("peer"))
+            val outcome = Outcome.of(o.optStringOrNull("outcome"))
+            if (guid == null || peer == null || outcome == null) {
+                DirectArchive.Update.Ignore
+            } else {
+                DirectArchive.Update.Call(
+                    guid, peer, o.optBoolean("outgoing"), o.optBoolean("video"),
+                    o.optLong("startedMs").coerceAtLeast(0), o.optLong("durationMs").coerceIn(0, MAX_CALL_MS), outcome.wire,
+                    o.optBoolean("quiet"),
+                    o.optStringOrNull("conversationId")?.takeIf { it.length <= MAX_CONVERSATION_ID_CHARS }.orEmpty(),
+                )
+            }
+        }
+        "note" -> o.optStringOrNull("line")?.takeIf { it.isNotBlank() }?.let { DirectArchive.Update.Note(it.take(MAX_NOTE_CHARS)) } ?: DirectArchive.Update.Ignore
         "dropped" -> DirectArchive.Update.Dropped(o.optString("what"), o.optString("why"))
         else -> DirectArchive.Update.Ignore
     }
