@@ -51,23 +51,27 @@ sealed class CallEvent {
         /** What kind of event [e] is, for the log: its type's name, never what it holds. */
         fun kindOf(e: FaceTimeEvent): String = e::class.simpleName.orEmpty().ifEmpty { "event" }
 
-        /** The library's call list as the rules read it: only calls whose id is a call's, at most [MAX_SESSIONS] of them. */
-        fun sessions(list: List<FtSessionInfo>): List<CallSessionInfo> = list.asSequence()
-            .filter { CallIds.isGuid(it.groupId) }
-            .take(MAX_SESSIONS)
-            .map { s ->
-                CallSessionInfo(
-                    guid = s.groupId,
-                    myHandles = s.myHandles.take(MAX_MEMBERS).mapNotNull(CallIds::handle),
-                    members = s.members.take(MAX_MEMBERS).map { it.handle },
-                    startMs = s.startTime?.let { if (it > Long.MAX_VALUE.toULong()) Long.MAX_VALUE else it.toLong() },
-                    video = s.isVideo,
-                    active = s.isActive,
-                )
-            }.toList()
+        /**
+         * Call [guid] of the library's call list, as the rules read it, or null: not in it. The
+         * whole list is looked through, however long (anyone's message puts a call into it, so a
+         * cut-off list would let a stranger push a real call out of sight); only what is taken of
+         * the one call found is limited ([MAX_MEMBERS]).
+         */
+        fun session(list: List<FtSessionInfo>, guid: String): CallSessionInfo? {
+            if (!CallIds.isGuid(guid)) return null
+            return list.firstOrNull { it.groupId == guid }?.let(::read)
+        }
 
-        /** The most calls of the library's list that are looked at, and members of each. */
-        const val MAX_SESSIONS = 500
+        private fun read(s: FtSessionInfo) = CallSessionInfo(
+            guid = s.groupId,
+            myHandles = s.myHandles.take(MAX_MEMBERS).mapNotNull(CallIds::handle),
+            members = s.members.take(MAX_MEMBERS).map { it.handle },
+            startMs = s.startTime?.let { if (it > Long.MAX_VALUE.toULong()) Long.MAX_VALUE else it.toLong() },
+            video = s.isVideo,
+            active = s.isActive,
+        )
+
+        /** The most members of a call that are looked at. */
         const val MAX_MEMBERS = 64
     }
 }

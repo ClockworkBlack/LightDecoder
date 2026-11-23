@@ -5,6 +5,7 @@ import com.lightdecoder.imessage.direct.DirectWire
 import com.lightdecoder.imessage.direct.IMessageExtra
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlinx.coroutines.launch
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -61,12 +62,112 @@ class FaceTimeLogicTest {
             FtSessionInfo("not-a-call", listOf(ME), emptyList(), null, null, null, false, false),
             FtSessionInfo(OTHER, listOf("nonsense", ME), emptyList(), ULong.MAX_VALUE, null, FtMode.MISSED, false, false),
         )
-        val read = CallEvent.sessions(list)
-        assertEquals(listOf(GUID, OTHER), read.map { it.guid })
-        assertEquals(CallSessionInfo(GUID, listOf(ME), listOf(ALICE, ME), 1_700_000_000_000L, video = true, active = true), read[0])
-        assertEquals("only addresses are the user's own", listOf(ME), read[1].myHandles)
-        assertEquals(Long.MAX_VALUE, read[1].startMs)
-        assertEquals(CallEvent.MAX_SESSIONS, CallEvent.sessions(List(2_000) { list[0] }).size)
+        assertEquals(CallSessionInfo(GUID, listOf(ME), listOf(ALICE, ME), 1_700_000_000_000L, video = true, active = true), CallEvent.session(list, GUID))
+        val other = CallEvent.session(list, OTHER)!!
+        assertEquals("only addresses are the user's own", listOf(ME), other.myHandles)
+        assertEquals(Long.MAX_VALUE, other.startMs)
+        assertNull("no call's id finds nothing", CallEvent.session(list, "not-a-call"))
+        assertNull(CallEvent.session(list, "DDDDDDDD-0000-4000-8000-000000000004"))
+        // Only so many members of the one call are taken.
+        val crowded = FtSessionInfo(GUID, List(500) { ME }, List(500) { FtMember(null, ALICE) }, null, null, null, false, false)
+        assertEquals(CallEvent.MAX_MEMBERS, CallEvent.session(listOf(crowded), GUID)!!.members.size)
+        assertEquals(CallEvent.MAX_MEMBERS, CallEvent.session(listOf(crowded), GUID)!!.myHandles.size)
+    }
+
+    @Test
+    fun aCallIsFoundInTheLibrarysListHoweverManyOthersComeBeforeIt() {
+        // As many calls as the library keeps, made by anyone's messages, in front of the real one: it is still found.
+        fun junk(i: Int) = FtSessionInfo("EEEEEEEE-0000-4000-8000-%012d".format(i), listOf(ME), listOf(FtMember(null, "tel:+1555800%04d".format(i))), 1uL, null, null, false, true)
+        val real = FtSessionInfo(GUID, listOf(ME), listOf(FtMember(null, ALICE), FtMember(null, ME)), 1_700_000_000_000uL, null, FtMode.INCOMING, false, true)
+        val list = List(1_023) { junk(it) } + real
+        assertTrue(list.size > 500)
+        assertEquals(CallSessionInfo(GUID, listOf(ME), listOf(ALICE, ME), 1_700_000_000_000L, video = false, active = true), CallEvent.session(list, GUID))
+        assertEquals("EEEEEEEE-0000-4000-8000-000000000700", CallEvent.session(list, "EEEEEEEE-0000-4000-8000-000000000700")?.guid)
+    }
+
+    @Test
+    fun onlySoManyEventsAreTakenAMinute() {
+        val rate = EventRate(maxPerWindow = 3, windowMs = 1_000)
+        assertTrue(rate.allow(0) && rate.allow(1) && rate.allow(2))
+        assertFalse(rate.allow(3))
+        assertFalse(rate.allow(999))
+        assertTrue("the first one's second is over", rate.allow(1_000))
+        assertFalse(rate.allow(1_000))
+        // A clock set back blocks nothing for longer.
+        assertTrue(rate.allow(-5_000))
+        assertTrue(EventRate.MAX_PER_MINUTE in 30..600)
+    }
+
+    @Test
+    fun everyoneTogetherRingsAndIsNotedOnlySoOften() {
+        val limiter = RingLimiter(minGapMs = 10, maxRingsPerHour = 2, maxNoticesPerHour = 3, maxCallers = 50, windowMs = 1_000, maxAllRingsPerHour = 3, maxAllNoticesPerHour = 2, maxUnknownRingsPerHour = 2)
+        // A new address each time: three ring, then they are only noted, twice, then dropped.
+        assertEquals(RingLimiter.Verdict.RING, limiter.ring("a", "g1", 0))
+        assertEquals(RingLimiter.Verdict.RING, limiter.ring("b", "g2", 1))
+        assertEquals(RingLimiter.Verdict.RING, limiter.ring("c", "g3", 2))
+        assertEquals(RingLimiter.Verdict.MISSED_ONLY, limiter.ring("d", "g4", 3))
+        assertTrue(limiter.notice("e", "g5", 4))
+        assertEquals(RingLimiter.Verdict.DROP, limiter.ring("f", "g6", 5))
+        assertFalse(limiter.notice("g", "g7", 6))
+        // After the window, again.
+        assertEquals(RingLimiter.Verdict.RING, limiter.ring("h", "g8", 1_100))
+        // Callers nobody knows share their own, smaller allowance.
+        assertTrue(limiter.unknownRing(0) && limiter.unknownRing(1))
+        assertFalse(limiter.unknownRing(2))
+        assertTrue(limiter.unknownRing(1_001))
+        assertTrue(RingLimiter.MAX_UNKNOWN_RINGS_PER_HOUR < RingLimiter.MAX_ALL_RINGS_PER_HOUR)
+    }
+
+    @Test
+    fun missedCallsInTheMainProcessAreLimitedForEveryoneAndMoreForStrangers() {
+        val limits = MissedCallLimits(maxNoticesPerHour = 4, maxUnknownNoticesPerHour = 2, maxNewChatsPerHour = 2, windowMs = 1_000)
+        assertTrue(limits.notice(known = false, now = 0) && limits.notice(known = false, now = 1))
+        assertFalse("strangers' notices are used up", limits.notice(known = false, now = 2))
+        assertTrue(limits.notice(known = true, now = 3) && limits.notice(known = true, now = 4))
+        assertFalse("and everyone's", limits.notice(known = true, now = 5))
+        assertTrue(limits.notice(known = false, now = 1_005))
+        assertTrue(limits.newChat(0) && limits.newChat(1))
+        assertFalse(limits.newChat(2))
+        assertTrue(limits.newChat(1_000))
+        assertTrue(MissedCallLimits.MAX_UNKNOWN_NOTICES_PER_HOUR < MissedCallLimits.MAX_NOTICES_PER_HOUR)
+        // Quiet: as the call engine said, in a chat with hidden alerts, or from a stranger while strangers are silenced.
+        assertFalse(MissedCallLimits.quiet(engineQuiet = false, chatMuted = false, silenceUnknown = false, known = false))
+        assertFalse(MissedCallLimits.quiet(engineQuiet = false, chatMuted = false, silenceUnknown = true, known = true))
+        assertTrue(MissedCallLimits.quiet(engineQuiet = false, chatMuted = false, silenceUnknown = true, known = false))
+        assertTrue(MissedCallLimits.quiet(engineQuiet = true, chatMuted = false, silenceUnknown = false, known = true))
+        assertTrue(MissedCallLimits.quiet(engineQuiet = false, chatMuted = true, silenceUnknown = false, known = true))
+    }
+
+    @Test
+    fun aNewSessionWaitsForACallThatBeganMeanwhile() = kotlinx.coroutines.runBlocking {
+        assertEquals(SessionSwap.Decision.WAIT, SessionSwap.decide(callBusy = true))
+        assertEquals(SessionSwap.Decision.SWAP, SessionSwap.decide(callBusy = false))
+        val guard = kotlinx.coroutines.sync.Mutex()
+        // No call: at once, under the guard.
+        var swaps = 0
+        var guardHeld = false
+        assertFalse(SessionSwap.whenFree(guard, busy = { false }, pollMs = 1) { swaps++; guardHeld = guard.isLocked })
+        assertEquals(1, swaps)
+        assertTrue("the swap runs under the call code's guard", guardHeld)
+        assertFalse(guard.isLocked)
+        // A call that began after registering was started: asked again each time, swapped only once it is over, once.
+        var asked = 0
+        swaps = 0
+        val swapsWhileBusy = ArrayList<Int>()
+        val waited = SessionSwap.whenFree(guard, busy = { swapsWhileBusy += swaps; ++asked <= 3 }, pollMs = 1) { swaps++ }
+        assertTrue(waited)
+        assertEquals(4, asked)
+        assertEquals(1, swaps)
+        assertTrue("never while the call held the line", swapsWhileBusy.all { it == 0 })
+        // While a join holds the guard nothing is swapped either.
+        swaps = 0
+        guard.lock()
+        val pending = launch(kotlinx.coroutines.Dispatchers.Default) { SessionSwap.whenFree(guard, busy = { false }, pollMs = 1) { swaps++ } }
+        kotlinx.coroutines.delay(100)
+        assertEquals(0, swaps)
+        guard.unlock()
+        pending.join()
+        assertEquals(1, swaps)
     }
 
     // --- between the two processes ---------------------------------------------------------------

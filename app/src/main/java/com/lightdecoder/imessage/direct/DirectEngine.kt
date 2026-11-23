@@ -12,6 +12,9 @@ import com.lightdecoder.imessage.facetime.CallLogEntry
 import com.lightdecoder.imessage.facetime.CallSessionInfo
 import com.lightdecoder.imessage.facetime.CallerInfo
 import com.lightdecoder.imessage.facetime.FaceTimeCalls
+import com.lightdecoder.imessage.facetime.GUARD_WAIT_MS
+import com.lightdecoder.imessage.facetime.SessionSwap
+import com.lightdecoder.imessage.facetime.withLockWithin
 import com.lightdecoder.imessage.facetime.LocalAddresses
 import com.lightdecoder.relay.ConversationDto
 import com.lightdecoder.relay.ParticipantDto
@@ -479,8 +482,11 @@ class DirectEngine private constructor(private val app: Context) {
         val started = uniffi.rust_bridge.startSession(
             statePath, config, conn, anisette, null, result.users ?: users, identity, null, pipeline!!,
         )
-        // Never while a call is being joined on the session this replaces ([callBridge]'s guard).
-        callBridge.guard.withLock { session = started }
+        // Never while a call is being joined on the session this replaces ([callBridge]'s guard), nor
+        // while a call that began meanwhile holds the line: looked at again under the guard, and put
+        // off until that call is over.
+        val waited = SessionSwap.whenFree(callBridge.guard, busy = { FaceTimeCalls.peek()?.busy == true }) { session = started }
+        if (waited) Log.w(TAG, "the new session waited for a FaceTime call to end")
         sessionCameUp()
         refreshStatus()
     }
@@ -601,17 +607,21 @@ class DirectEngine private constructor(private val app: Context) {
         override suspend fun setLocalInterfaces() {
             val s = live()
             val picked = withContext(Dispatchers.IO) { LocalAddresses.current(app) }
-            uniffi.rust_bridge.setLocalInterfaces(s, picked.default, picked.all)
+            // The "default" address is nothing the library uses (it only writes it to its log): not given.
+            uniffi.rust_bridge.setLocalInterfaces(s, "", picked.all)
         }
 
         override suspend fun createFacetime(guid: String, handle: String, participants: List<String>, video: Boolean) =
             uniffi.rust_bridge.createFacetime(live(), guid, handle, participants, video)
 
-        override suspend fun cancelFacetime(guid: String) = guard.withLock { uniffi.rust_bridge.cancelFacetime(live(), guid) }
+        // Never while a join runs; and not waiting forever for one that does not come back.
+        override suspend fun cancelFacetime(guid: String) =
+            guard.withLockWithin(GUARD_WAIT_MS) { uniffi.rust_bridge.cancelFacetime(live(), guid) }
 
-        override suspend fun declineFacetime(guid: String) = guard.withLock { uniffi.rust_bridge.declineFacetime(live(), guid) }
+        override suspend fun declineFacetime(guid: String) =
+            guard.withLockWithin(GUARD_WAIT_MS) { uniffi.rust_bridge.declineFacetime(live(), guid) }
 
-        override suspend fun sessions(): List<CallSessionInfo> = CallEvent.sessions(uniffi.rust_bridge.ftSessions(live()))
+        override suspend fun session(guid: String): CallSessionInfo? = CallEvent.session(uniffi.rust_bridge.ftSessions(live()), guid)
 
         override suspend fun <T> withNativeHandle(block: (Long) -> T): T? {
             val s = session ?: return null

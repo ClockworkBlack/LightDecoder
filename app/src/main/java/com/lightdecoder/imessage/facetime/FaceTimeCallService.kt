@@ -39,6 +39,7 @@ class FaceTimeCallService : Service() {
     private val calls by lazy { FaceTimeCalls.get(this) }
     private var proximity: PowerManager.WakeLock? = null
     private var shownFor: Call? = null
+    private var shownEnding = false
 
     private val displays = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) = Unit
@@ -54,14 +55,18 @@ class FaceTimeCallService : Service() {
         super.onCreate()
         // In the foreground before anything else: Android takes the process down if a service started
         // for the foreground stops without ever having gone there.
-        foreground(heldCall() ?: placeholder())
+        foreground(heldCall() ?: calls.lingering.value ?: placeholder(), ending = heldCall() == null && calls.lingering.value != null)
         scope.launch {
-            combine(calls.state, calls.media) { call, media -> call to media }.collect { (call, media) ->
-                if (call == null || !call.live || call.incomingRing) {
-                    stopNow()
-                } else {
-                    show(call)
+            combine(calls.state, calls.media, calls.lingering) { call, media, lingering -> Triple(call, media, lingering) }.collect { (call, media, lingering) ->
+                if (call != null && call.live && !call.incomingRing) {
+                    show(call, ending = false)
                     holdProximity(call.phase == Phase.ACTIVE && !media.cameraOn && !media.remoteVideo && media.route == Route.EARPIECE)
+                } else if (lingering != null) {
+                    // Left while the library was still joining it (the join may yet open the microphone): the notice stays until that returned.
+                    holdProximity(false)
+                    show(lingering, ending = true)
+                } else {
+                    stopNow()
                 }
             }
         }
@@ -74,7 +79,7 @@ class FaceTimeCallService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val call = heldCall()
+        val call = heldCall() ?: calls.lingering.value
         if (call == null) {
             // Nothing to hold (the call ended as this started): its notice was shown, now it goes.
             foreground(placeholder())
@@ -82,7 +87,7 @@ class FaceTimeCallService : Service() {
             return START_NOT_STICKY
         }
         // Again on every start: with a permission just granted, its kind is added.
-        foreground(call)
+        foreground(call, ending = heldCall() == null)
         started.complete(Unit)
         return START_NOT_STICKY
     }
@@ -97,9 +102,10 @@ class FaceTimeCallService : Service() {
     )
 
     /** Into the foreground under [call]'s notice; again whenever a permission came (the kinds follow them). */
-    private fun foreground(call: Call) {
-        val notice = FaceTimeNotices.ongoing(this, call)
+    private fun foreground(call: Call, ending: Boolean = false) {
+        val notice = FaceTimeNotices.ongoing(this, call, ending)
         shownFor = call
+        shownEnding = ending
         val kinds = kinds(this)
         try {
             ServiceCompat.startForeground(this, FaceTimeNotices.ID_ONGOING, notice, kinds or phoneCallKind())
@@ -115,12 +121,13 @@ class FaceTimeCallService : Service() {
 
     /** The notice again when what it says changed (calling, connecting, in the call with its clock). */
     @android.annotation.SuppressLint("MissingPermission") // without the permission Android just does not show it
-    private fun show(call: Call) {
+    private fun show(call: Call, ending: Boolean) {
         val before = shownFor
-        if (before != null && before.guid == call.guid && before.phase == call.phase && before.video == call.video && before.name == call.name) return
+        if (before != null && shownEnding == ending && before.guid == call.guid && before.phase == call.phase && before.video == call.video && before.name == call.name) return
         shownFor = call
+        shownEnding = ending
         try {
-            NotificationManagerCompat.from(this).notify(FaceTimeNotices.ID_ONGOING, FaceTimeNotices.ongoing(this, call))
+            NotificationManagerCompat.from(this).notify(FaceTimeNotices.ID_ONGOING, FaceTimeNotices.ongoing(this, call, ending))
         } catch (e: RuntimeException) {
             // Notifications not allowed.
         }

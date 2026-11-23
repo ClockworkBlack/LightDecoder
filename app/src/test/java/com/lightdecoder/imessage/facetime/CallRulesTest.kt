@@ -168,8 +168,10 @@ class CallRulesTest {
         // A join for some other call is none of this one's.
         event(CallEvent.Join(OTHER, ALICE, ring = false))
         assertEquals(Phase.RINGING_OUT, state?.phase)
-        // A join that does not say whose it is, is taken as theirs (as OpenBubbles takes every join).
-        event(CallEvent.Join(OUT, "", ring = false))
+        // Nor is a join that does not say whose it is: nobody Apple vouches for answered.
+        assertTrue(event(CallEvent.Join(OUT, "", ring = false)).isEmpty())
+        assertEquals(Phase.RINGING_OUT, state?.phase)
+        event(CallEvent.Join(OUT, ALICE, ring = false))
         assertEquals(Phase.CONNECTING, state?.phase)
     }
 
@@ -547,8 +549,11 @@ class CallRulesTest {
         // And long after the start, a ring is a ring whenever the call began (someone adds the user to a call that has been going on).
         state = null
         t += 60_000
+        event(CallEvent.Join(THIRD, BOB, ring = false), listOf(session(THIRD, BOB, startMs = t - 30 * 60_000)), sinceStartMs = 3_600_000)
+        assertNull("a join that is no ring rings nothing", state)
         event(CallEvent.Invite(THIRD), listOf(session(THIRD, BOB, startMs = t - 30 * 60_000)), sinceStartMs = 3_600_000)
         assertEquals(Phase.SCREENING, state?.phase)
+        assertEquals("the invitation is from whoever was seen joining that call", BOB, state?.peer)
     }
 
     @Test
@@ -673,6 +678,130 @@ class CallRulesTest {
         assertNotNull(CallIds.handle("tel:+4915112345678"))
     }
 
+    // --- who calls: only whom Apple vouches for ------------------------------------------------------
+
+    @Test
+    fun aCallsMemberListNeverSaysWhoCalls() {
+        // A stranger's ring whose member list (which the stranger writes) puts a contact first: the caller is the stranger.
+        val spoofed = CallSessionInfo(IN, listOf(ME), listOf(ALICE, ME, MALLORY), t, false, true)
+        // A list with the stranger and the user only, the contact slipped in as the first "member" that is no address of the stranger's.
+        val out = event(CallEvent.Join(IN, MALLORY, ring = true), listOf(CallSessionInfo(IN, listOf(ME), listOf(ALICE, MALLORY, ME), t, false, true)))
+        // Three people: a group call, which does not ring; its missed call is the stranger's, never the contact's.
+        assertNull(state)
+        assertEquals(MALLORY, out.only<Effect.LogCall>().entry.peer)
+        assertFalse(out.has<Effect.LookupCaller>())
+        // The member list naming the contact only, the ring coming from the stranger: not in the call they ring for, so nothing.
+        t += 60_000
+        val absent = event(CallEvent.Join(OTHER, MALLORY, ring = true), listOf(session(OTHER, caller = ALICE)))
+        assertNull(state)
+        assertTrue(absent.toString(), absent.all { it is Effect.Note })
+        // An invitation (which names nobody) to a call the stranger joined, listed as the contact's: still the stranger's.
+        t += 60_000
+        event(CallEvent.Join(THIRD, MALLORY, ring = false), listOf(spoofed.copy(guid = THIRD)))
+        val invited = event(CallEvent.Invite(THIRD), listOf(spoofed.copy(guid = THIRD)))
+        assertNull(state)
+        assertEquals(listOf(MALLORY), (out + invited).filterIsInstance<Effect.LogCall>().map { it.entry.peer }.distinct())
+        // And one-to-one, with a list of the stranger and the user: the main process is asked about the stranger, nobody else.
+        t += 60_000
+        val honest = event(CallEvent.Join(guid(1), MALLORY, ring = true), listOf(session(guid(1), caller = MALLORY)))
+        assertEquals(MALLORY, honest.only<Effect.LookupCaller>().handle)
+        assertEquals(MALLORY, state?.peer)
+        // Nothing anywhere named the contact.
+        assertTrue(done.none { it is Effect.LookupCaller && it.handle == ALICE })
+        assertTrue(logged().none { it.peer == ALICE })
+    }
+
+    @Test
+    fun anInvitationWithoutAJoinSeenBeforeDoesNotRing() {
+        // The call is in the list, alive, its members say a contact calls: but nobody Apple vouches for was seen joining it.
+        val out = event(CallEvent.Invite(IN), listOf(session(IN, caller = ALICE)))
+        assertNull(state)
+        assertTrue(out.toString(), out.single() is Effect.Note)
+        assertFalse((out.single() as Effect.Note).text.contains("555"))
+        assertTrue(logged().isEmpty())
+        // A join of another call makes no caller for this one.
+        event(CallEvent.Join(OTHER, ALICE, ring = false), listOf(session(OTHER)))
+        assertTrue(event(CallEvent.Invite(IN), listOf(session(IN, caller = ALICE))).all { it is Effect.Note })
+        assertNull(state)
+        // Nor does a join that names nobody, or the user.
+        event(CallEvent.Join(IN, "", ring = false), listOf(session(IN)))
+        event(CallEvent.Join(IN, ME, ring = false), listOf(session(IN)))
+        assertTrue(event(CallEvent.Invite(IN), listOf(session(IN))).all { it is Effect.Note })
+        assertNull(state)
+        assertTrue(logged().isEmpty())
+    }
+
+    @Test
+    fun aRingFromTheUsersOwnAddressOrFromNobodyDoesNotRing() {
+        // A call the user placed on another of their devices: its join comes from their own address.
+        val own = event(CallEvent.Join(IN, ME, ring = true), listOf(session(IN, caller = ALICE)))
+        assertNull(state)
+        assertTrue(own.toString(), own.all { it is Effect.Note })
+        // An alias of the user's that only the call's own list knows of.
+        val alias = "mailto:me@example.com"
+        val aliased = event(CallEvent.Join(OTHER, "mailto:Me@Example.com", ring = true), listOf(CallSessionInfo(OTHER, listOf(ME, alias), listOf(ALICE, ME), t, false, true)))
+        assertNull(state)
+        assertTrue(aliased.all { it is Effect.Note })
+        // A ring that does not say who sent it is not the first member's.
+        val nobody = event(CallEvent.Join(THIRD, "", ring = true), listOf(session(THIRD, caller = ALICE)))
+        assertNull(state)
+        assertTrue(nobody.all { it is Effect.Note })
+        assertTrue("no row, no missed call", logged().isEmpty())
+        assertFalse(done.has<Effect.LookupCaller>())
+    }
+
+    @Test
+    fun aPlacedCallIsAnsweredOnlyByAJoinThatSaysWhose() {
+        place()
+        send(Input.Placed(OUT, ok = true, now = t))
+        assertTrue(event(CallEvent.Join(OUT, "", ring = false), listOf(session(OUT))).isEmpty())
+        assertTrue(event(CallEvent.Join(OUT, ME, ring = false), listOf(session(OUT))).isEmpty())
+        assertEquals(Phase.RINGING_OUT, state?.phase)
+        // Another address of the person called answers too.
+        assertTrue(event(CallEvent.Join(OUT, "mailto:alice@example.com", ring = false), listOf(session(OUT))).has<Effect.StartNative>())
+        assertEquals(Phase.CONNECTING, state?.phase)
+    }
+
+    @Test
+    fun onlySoManyCallersAreRememberedByTheirJoin() {
+        for (i in 0..CallRules.MAX_JOINERS) event(CallEvent.Join(guid(1000 + i), BOB, ring = false))
+        // The first one's is forgotten, the last one's is not.
+        assertTrue(event(CallEvent.Invite(guid(1000)), listOf(session(guid(1000), BOB))).all { it is Effect.Note })
+        assertNull(state)
+        event(CallEvent.Invite(guid(1000 + CallRules.MAX_JOINERS)), listOf(session(guid(1000 + CallRules.MAX_JOINERS), BOB)))
+        assertEquals(BOB, state?.peer)
+    }
+
+    // --- everyone together ---------------------------------------------------------------------------
+
+    @Test
+    fun strangersTogetherRingOnlySoOftenAnHourWhateverAddressTheyUse() {
+        var rung = 0
+        var quiet = 0
+        for (i in 1..RingLimiter.MAX_UNKNOWN_RINGS_PER_HOUR + 4) {
+            t += 20_000
+            val guid = guid(2000 + i)
+            val caller = "tel:+1555900%04d".format(i)
+            event(CallEvent.Join(guid, caller, ring = true), listOf(session(guid, caller)))
+            assertEquals(Phase.SCREENING, state?.phase)
+            val out = send(Input.Caller(guid, CallerInfo("", known = false), t, on))
+            if (out.has<Effect.ShowIncoming>()) {
+                rung++
+                send(Input.DeclineByUser(guid, t))
+            } else {
+                assertNull(state)
+                assertTrue("missed, without a sound", out.only<Effect.LogCall>().entry.quiet)
+                quiet++
+            }
+        }
+        assertEquals(RingLimiter.MAX_UNKNOWN_RINGS_PER_HOUR, rung)
+        assertEquals(4, quiet)
+        // Someone the user knows still rings.
+        t += 20_000
+        event(CallEvent.Join(guid(2999), ALICE, ring = true), listOf(session(guid(2999))))
+        assertTrue(send(Input.Caller(guid(2999), CallerInfo("Alice", known = true), t, on)).has<Effect.ShowIncoming>())
+    }
+
     private fun guid(n: Int): String = "0A1B2C3D-0000-4000-8000-%012d".format(n)
 
     private companion object {
@@ -680,5 +809,8 @@ class CallRulesTest {
         const val IN = "BBBBBBBB-0000-4000-8000-000000000002"
         const val OTHER = "CCCCCCCC-0000-4000-8000-000000000003"
         const val THIRD = "DDDDDDDD-0000-4000-8000-000000000004"
+
+        /** A stranger. */
+        const val MALLORY = "tel:+15559990000"
     }
 }

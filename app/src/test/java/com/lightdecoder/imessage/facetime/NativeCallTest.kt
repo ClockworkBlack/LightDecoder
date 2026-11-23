@@ -74,10 +74,67 @@ class NativeCallTest {
     @Test
     fun aBridgeThatThrowsIsAFailedStartAndTheJoinIsNeverReached() {
         val failing = object : CallBridge by bridge {
-            override suspend fun sessions(): List<CallSessionInfo> = throw IllegalStateException("not connected")
+            override suspend fun session(guid: String): CallSessionInfo? = throw IllegalStateException("not connected")
         }
         assertEquals(NativeCall.Start.Failed, start(NativeCall(GUID, native, failing)))
         assertTrue(native.calls.isEmpty())
+    }
+
+    @Test
+    fun aCallIsFoundAndJoinedHoweverManyOthersAreInTheLibrarysList() {
+        // Calls made by strangers' messages, more than was ever looked at before: the real one, last, is still joined.
+        for (i in 0 until 900) bridge.incoming("EEEEEEEE-0000-4000-8000-%012d".format(i), caller = FakeBridge.BOB)
+        bridge.incoming(GUID)
+        assertTrue(bridge.sessions.size > 500)
+        assertTrue(start() is NativeCall.Start.Up)
+        assertEquals(listOf("createAvc:$GUID"), native.calls.toList())
+    }
+
+    @Test
+    fun theCallIsLookedForAsTheLastThingBeforeTheJoinUnderTheGuard() {
+        bridge.incoming(GUID)
+        // What the library is asked, with whether the guard was held at that moment.
+        val guarded = ArrayList<Boolean>()
+        bridge.onSessionRead = { guarded += bridge.guard.isLocked }
+        assertTrue(start() is NativeCall.Start.Up)
+        assertEquals(listOf(true), guarded)
+        assertEquals("nothing between the look and the handle that goes into the join", listOf("sessions", "handle:1000"), bridge.log.takeLast(2))
+        assertFalse(bridge.guard.isLocked)
+        // Pushed out of the list by the time of that look (after everything else was ready): nothing is joined, no handle made.
+        val late = FakeNative()
+        val second = NativeCall(GUID, late, bridge)
+        bridge.onSessionRead = { bridge.sessions.removeAll { it.guid == GUID } }
+        assertEquals(NativeCall.Start.Gone, start(second))
+        assertTrue(late.calls.isEmpty())
+        assertEquals(1, bridge.handlesMade.size)
+        assertEquals(NativeCall.Leave.NEVER_JOINED, second.hangUp())
+    }
+
+    @Test
+    fun aJoinThatDoesNotComeBackDoesNotHoldADeclineOrATakeBackForever() {
+        bridge.incoming(GUID)
+        bridge.incoming(OTHER)
+        bridge.guardWaitMs = 200
+        native.gate = CountDownLatch(1)
+        runBlocking {
+            val joining = async(Dispatchers.IO) { call.start() }
+            assertTrue(native.entered.await(5, TimeUnit.SECONDS))
+            // The join holds the guard: neither is run while it does (the library would be asked about a call it is joining), and neither waits for good.
+            for (ask in listOf<suspend () -> Unit>({ bridge.declineFacetime(OTHER) }, { bridge.cancelFacetime(OTHER) })) {
+                val began = System.currentTimeMillis()
+                val thrown = runCatching { kotlinx.coroutines.withTimeout(5_000) { ask() } }.exceptionOrNull()
+                assertTrue("given up with ${thrown?.javaClass?.simpleName}", thrown is GuardBusy)
+                assertTrue(System.currentTimeMillis() - began < 4_000)
+            }
+            assertTrue("nothing reached the library", bridge.log.none { it.startsWith("declineFacetime") || it.startsWith("cancelFacetime") })
+            native.gate!!.countDown()
+            assertTrue(joining.await() is NativeCall.Start.Up)
+            // The join returned: now they run.
+            bridge.declineFacetime(OTHER)
+            bridge.cancelFacetime(OTHER)
+        }
+        assertEquals(listOf("declineFacetime:$OTHER", "cancelFacetime:$OTHER"), bridge.log.takeLast(2))
+        assertFalse(bridge.guard.isLocked)
     }
 
     @Test

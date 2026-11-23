@@ -8,9 +8,9 @@ import kotlinx.coroutines.withContext
  * One call's joined session in the library, and the only place the library's call functions are
  * called from. What makes them safe is here, as the library takes its process down on four inputs:
  *
- * - **A call that is not in its list**: [start] looks the call up right before it joins, under the
- *   bridge's [CallBridge.guard] (so nothing of the app's takes it out in between), and joins nothing
- *   that is not there.
+ * - **A call that is not in its list**: [start] looks the call up (in the whole list) as the last
+ *   thing before it joins, under the bridge's [CallBridge.guard] (so nothing of the app's takes it
+ *   out in between), and joins nothing that is not there.
  * - **A session handle used twice, or of a session that is gone**: the handle is made right before
  *   the join and handed to it once ([CallBridge.withNativeHandle]); [start] runs once per object.
  * - **An orientation outside 0..3**: [orientation] clamps.
@@ -81,10 +81,15 @@ class NativeCall(
         try {
             bridge.guard.withLock {
                 bridge.setLocalInterfaces()
-                // Right before the join, with nothing of the app's able to take the call out in between.
-                if (bridge.sessions().none { it.guid == guid }) return@withContext Start.Gone
                 val go = synchronized(lock) { wanted.also { joining = it } }
                 if (!go) return@withContext Start.Ended(wasJoined = false)
+                // The last thing before the join, under the same guard: the call is looked for in the
+                // whole of the library's list, with nothing of the app's able to take it out in between
+                // (what other people's phones send can still push it out; this keeps that moment as short as it can be).
+                if (bridge.session(guid) == null) {
+                    synchronized(lock) { joining = false }
+                    return@withContext Start.Gone
+                }
                 val made = try {
                     bridge.withNativeHandle { handle -> native.createAvc(guid, handle) } ?: 0L
                 } catch (e: Throwable) {

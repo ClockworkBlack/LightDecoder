@@ -71,6 +71,10 @@ class FaceTimeCalls internal constructor(
     private val connectWaitMs: Long = CONNECT_WAIT_MS,
     /** Notes the call that holds the line (null: none), for a start after the process was stopped in it ([CallRecovery]). */
     private val remember: (String?) -> Unit = {},
+    /** How many of Apple's FaceTime events are taken a minute, whatever they are ([EventRate]). */
+    private val eventRate: EventRate = EventRate(),
+    /** The most events that wait to be taken; the oldest makes way for one more. */
+    eventBacklog: Int = MAX_EVENT_BACKLOG,
 ) {
     private val failures = CoroutineExceptionHandler { _, e -> FaceTimeLog.note("call work failed (${e::class.java.simpleName})") }
     private val scope = scope ?: CoroutineScope(SupervisorJob() + Dispatchers.Default + failures)
@@ -100,7 +104,24 @@ class FaceTimeCalls internal constructor(
     val surfaces = CallSurfaces()
 
     private val inputs = Channel<CallRules.Input>(Channel.UNLIMITED)
-    private val events = Channel<FaceTimeEvent>(Channel.UNLIMITED)
+
+    /** When something about too many events was last said in the log, by what was said: once a minute each, however many come. */
+    private val saidAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /**
+     * Apple's events waiting to be taken: they come from other people's phones, so only so many
+     * wait (each may wait for the session, or for the library's call list); the oldest is dropped
+     * for one more, and that is said in the log.
+     */
+    private val events = Channel<FaceTimeEvent>(eventBacklog, BufferOverflow.DROP_OLDEST) {
+        sayRarely("backlog", "FaceTime events came faster than they could be taken: the oldest were dropped")
+    }
+
+    /** The events of the call there is have an allowance of their own: a flood about other calls does not take its hang-up away. */
+    private val ownEventRate = EventRate(eventRate.maxPerWindow, eventRate.windowMs)
+
+    /** An event waited for the session in vain: until it is up, none waits again. */
+    private var sessionWaitedFor = false
     private val timers = HashMap<String, Job>()
 
     /** The joined (or joining) call's library side. */
@@ -114,6 +135,26 @@ class FaceTimeCalls internal constructor(
     /** The library's encoder input for the camera's picture, while it has one; and whether the camera draws into it. */
     private var encoder: Surface? = null
     private var cameraRunning = false
+
+    /** The call screens that are visible now ([screenShown]); with none after one was, the camera is paused ([screenHidden]). */
+    private val screens = HashSet<Any>()
+
+    @Volatile
+    private var cameraPaused = false
+
+    private val foregroundLock = Any()
+
+    /** Joins of the library that have not returned yet, and whether the in-call notice is to go once they have. */
+    private var joinsRunning = 0
+    private var stopOwed = false
+
+    private val _lingering = MutableStateFlow<Call?>(null)
+
+    /**
+     * A call that was given up or left while the library's join for it had not returned: the join
+     * may still open the microphone, so the in-call notice stays up ("ending") until it has. Null: none.
+     */
+    val lingering: StateFlow<Call?> = _lingering
 
     /** The route the user picked in this call, if any. */
     private var pickedRoute: Route? = null
@@ -137,6 +178,18 @@ class FaceTimeCalls internal constructor(
         events.trySend(event)
     }
 
+    /** What a look into the library's call list found (null inside: the call is not there). */
+    private class Found(val session: CallSessionInfo?)
+
+    /** Says [text] in the log, at most once a minute for each [what]. */
+    private fun sayRarely(what: String, text: String) {
+        val t = now()
+        val last = saidAt[what]
+        if (last != null && t - last in 0 until UNTAKEN_NOTE_MS) return
+        saidAt[what] = t
+        FaceTimeLog.note(text)
+    }
+
     /** When an event that could not be taken was last said so in the log: once a minute at most, however many come. */
     private var saidUntaken = 0L
 
@@ -151,14 +204,27 @@ class FaceTimeCalls internal constructor(
             }
             return
         }
+        // Only so many a minute, whoever sends them: each costs a look into the library's call list.
+        val own = _state.value?.guid == mapped.guid
+        if (!(if (own) ownEventRate else eventRate).allow(now())) {
+            sayRarely("rate", "too many FaceTime events in a minute: some were dropped unread")
+            return
+        }
         try {
             // Handed over right as the process starts: the session it is about comes up in a moment.
-            if (!bridge.connected) withTimeoutOrNull(SESSION_WAIT_MS) { while (!bridge.connected) delay(200) }
-            val sessions = withTimeoutOrNull(LIBRARY_MS) { bridge.sessions() }
-            if (sessions == null) {
+            if (bridge.connected) {
+                sessionWaitedFor = false
+            } else if (!sessionWaitedFor) {
+                sessionWaitedFor = true
+                withTimeoutOrNull(SESSION_WAIT_MS) { while (!bridge.connected) delay(200) }
+            }
+            // The one call it is about, looked for in the whole of the library's list.
+            val found = withTimeoutOrNull(LIBRARY_MS) { Found(bridge.session(mapped.guid)) }
+            if (found == null) {
                 FaceTimeLog.note("a FaceTime event (${CallEvent.kindOf(event)}) was not taken: the call list could not be read")
                 return
             }
+            val sessions = listOfNotNull(found.session)
             val mine = withTimeoutOrNull(LIBRARY_MS) { bridge.handles() }.orEmpty().toSet()
             inputs.trySend(CallRules.Input.Event(mapped, sessions, mine, now(), bridge.sinceStartMs, settings()))
         } catch (e: kotlinx.coroutines.CancellationException) {
@@ -223,7 +289,8 @@ class FaceTimeCalls internal constructor(
         _media.update { it.copy(cameraOn = on, cameraFailed = if (on) false else it.cameraFailed) }
         if (on) {
             command { it.orientation(CallOrientation.forCamera(rotation, _media.value.cameraFront)) }
-            command { it.camera(true) }
+            // With the call screen away the camera waits for it ([screenHidden]).
+            command { if (!cameraPaused) it.camera(true) }
             // More of the foreground notice's kind now: the camera's.
             foreground.start()
             if (!call.video) inputs.trySend(CallRules.Input.BecameVideo(call.guid))
@@ -306,6 +373,37 @@ class FaceTimeCalls internal constructor(
         }
     }
 
+    /**
+     * The call screen [screen] is visible (its onStart): a camera that was paused because no screen
+     * was ([screenHidden]) is sent again, if the user still has it on.
+     */
+    fun screenShown(screen: Any) {
+        val resume = synchronized(mediaLock) {
+            screens.add(screen)
+            cameraPaused.also { cameraPaused = false }
+        }
+        if (resume && _media.value.cameraOn) {
+            command { it.camera(true) }
+            startCamera()
+        }
+    }
+
+    /**
+     * The call screen [screen] is no longer visible (its onStop: left for another app, or the phone
+     * locked): with no call screen to be seen, the camera stops sending this phone's picture, and
+     * stops running, until one is back. The call, its sound and its notice go on.
+     */
+    fun screenHidden(screen: Any) {
+        val pause = synchronized(mediaLock) {
+            screens.remove(screen)
+            (screens.isEmpty() && !cameraPaused).also { if (it) cameraPaused = true }
+        }
+        if (pause && _media.value.cameraOn) {
+            command { it.camera(false) }
+            stopCamera {}
+        }
+    }
+
     /** Whether the camera may be used: the permission is there. */
     fun cameraAllowed(): Boolean = ContextCompat.checkSelfPermission(app, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
 
@@ -320,7 +418,12 @@ class FaceTimeCalls internal constructor(
             return
         }
         _state.value = step.state
-        stateChanged(before, step.state)
+        try {
+            stateChanged(before, step.state)
+        } catch (e: Throwable) {
+            // Nothing thrown here may end the queue: every call after it would be lost.
+            FaceTimeLog.note("what follows a call's change could not be done (${e::class.java.simpleName})")
+        }
         for (effect in step.effects) {
             try {
                 perform(effect)
@@ -339,11 +442,15 @@ class FaceTimeCalls internal constructor(
             pickedRoute = null
             val routes = runCatching { audio.routes() }.getOrDefault(listOf(Route.EARPIECE, Route.SPEAKER))
             _media.value = Media(routes = routes, route = CallRoutePolicy.target(routes, after!!.video && after.withCamera, null))
+            synchronized(foregroundLock) { stopOwed = false }
+            _lingering.value = null
             foreground.start()
             runCatching { remember(after.guid) }
         }
         if (!held && wasHeld) {
-            foreground.stop()
+            // A join of the library's that has not returned may still open the microphone: its notice stays until it has.
+            val linger = synchronized(foregroundLock) { (joinsRunning > 0).also { stopOwed = it } }
+            if (linger) _lingering.value = before else foreground.stop()
             runCatching { remember(null) }
         }
         if (after != null && before != null && after.guid == before.guid && after.phase == Phase.ACTIVE && before.phase != Phase.ACTIVE) {
@@ -382,6 +489,8 @@ class FaceTimeCalls internal constructor(
                     bridge.cancelFacetime(effect.guid)
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
+                } catch (e: GuardBusy) {
+                    FaceTimeLog.note("${FaceTimeLog.ref(effect.guid)}: not taken back: a join in the library has not returned")
                 } catch (e: Throwable) {
                     // Nothing to take back (any more): as it should be.
                 }
@@ -391,6 +500,8 @@ class FaceTimeCalls internal constructor(
                     bridge.declineFacetime(effect.guid)
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
+                } catch (e: GuardBusy) {
+                    FaceTimeLog.note("${FaceTimeLog.ref(effect.guid)}: not declined: a join in the library has not returned")
                 } catch (e: Throwable) {
                     // The caller hung up first: nothing to decline.
                 }
@@ -440,7 +551,13 @@ class FaceTimeCalls internal constructor(
         scope.launch(io) {
             // Its notice is up before the microphone opens (the library opens it in the join).
             foreground.awaitStarted(FOREGROUND_WAIT_MS)
-            when (val result = native.start()) {
+            synchronized(foregroundLock) { joinsRunning++ }
+            val result = try {
+                native.start()
+            } finally {
+                joinReturned()
+            }
+            when (result) {
                 is NativeCall.Start.Up -> {
                     joinedUp(call, native, result.video)
                     inputs.trySend(CallRules.Input.NativeUp(call.guid, result.video, now()))
@@ -455,13 +572,25 @@ class FaceTimeCalls internal constructor(
         }
     }
 
+    /** A join of the library's returned (however): a notice kept up for it alone goes now. */
+    private fun joinReturned() {
+        val stop = synchronized(foregroundLock) {
+            joinsRunning--
+            (joinsRunning <= 0 && stopOwed).also { if (it) stopOwed = false }
+        }
+        if (stop) {
+            _lingering.value = null
+            runCatching { foreground.stop() }
+        }
+    }
+
     /** As OpenBubbles 2.0.0 does once the join returned: the orientation, the camera's state, the microphone's; then the phone's audio. */
     private fun joinedUp(call: Call, native: NativeCall, video: Boolean) {
         val cameraOn = video && call.withCamera && cameraAllowed() && (camera.has(true) || camera.has(false))
         val front = if (camera.has(true)) true else !camera.has(false)
         _media.update { it.copy(cameraOn = cameraOn, cameraFront = front) }
         native.orientation(CallOrientation.forCamera(rotation, front))
-        native.camera(cameraOn)
+        native.camera(cameraOn && !cameraPaused)
         native.microphone(!_media.value.muted)
         try {
             audio.enter { applyRoute() }
@@ -563,7 +692,7 @@ class FaceTimeCalls internal constructor(
     private fun startCamera() {
         val m = _media.value
         val target = synchronized(mediaLock) {
-            if (!m.cameraOn || cameraRunning || joined?.native?.isUp != true) return
+            if (!m.cameraOn || cameraPaused || cameraRunning || joined?.native?.isUp != true) return
             val e = encoder?.takeIf { it.isValid } ?: return
             cameraRunning = true
             e
@@ -640,6 +769,9 @@ class FaceTimeCalls internal constructor(
         private const val MAX_SIDE = 8_192
 
         private const val MAX_ID_CHARS = 256
+
+        /** The most of Apple's events that wait to be taken. */
+        const val MAX_EVENT_BACKLOG = 256
 
         @Volatile
         private var instance: FaceTimeCalls? = null

@@ -6,7 +6,6 @@ import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 
 /** The library's FaceTime functions, as a test wants them: what was asked is written down in [log], in order. */
 class FakeBridge : CallBridge {
@@ -49,21 +48,31 @@ class FakeBridge : CallBridge {
         sessions += CallSessionInfo(guid, myHandles, participants + handle, System.currentTimeMillis(), video, active = false)
     }
 
-    override suspend fun cancelFacetime(guid: String) = guard.withLock {
+    /** How long a take-back or a decline waits for a join that holds [guard] (the real one: [GUARD_WAIT_MS]). */
+    @Volatile
+    var guardWaitMs = GUARD_WAIT_MS
+
+    override suspend fun cancelFacetime(guid: String) = guard.withLockWithin(guardWaitMs) {
         log += "cancelFacetime:$guid"
         if (sessions.none { it.guid == guid }) throw IllegalStateException("no such call")
         sessions.removeAll { it.guid == guid }
         Unit
     }
 
-    override suspend fun declineFacetime(guid: String) = guard.withLock {
+    override suspend fun declineFacetime(guid: String) = guard.withLockWithin(guardWaitMs) {
         log += "declineFacetime:$guid"
         Unit
     }
 
-    override suspend fun sessions(): List<CallSessionInfo> {
+    /** Called as the call list is read (a test takes a call out at that very moment, or counts). */
+    @Volatile
+    var onSessionRead: (String) -> Unit = {}
+
+    override suspend fun session(guid: String): CallSessionInfo? {
         log += "sessions"
-        return sessions.toList()
+        onSessionRead(guid)
+        // The whole list, however long.
+        return sessions.toList().firstOrNull { it.guid == guid }
     }
 
     override suspend fun <T> withNativeHandle(block: (Long) -> T): T? {

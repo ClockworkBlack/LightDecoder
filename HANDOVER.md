@@ -8,6 +8,25 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
    had earlier chosen "build with a warning", then "pause on Discord", and has now asked for
    the web-view tab only, with no bridge). **Instagram: skipped** (ban risk, like Messenger).
 
+## 0.5.72 (versionCode 83) - FaceTime audio and video calls (one-to-one)
+- Owner asked for FaceTime. The bundled library has the signalling and the media engine; guide kept in
+  the session scratchpad (facetime-host.md). JNI contract class
+  `com.localob.messaging.app.facetime.FaceTimeInCallService` (11 natives, 8 callbacks, `isVideo`; keep
+  rule in proguard-rules.pro; `FaceTimeContractTest`). Everything FaceTime runs in ":imessage":
+  `imessage/facetime/` (CallRules, NativeCall, FaceTimeCalls, FaceTimeCallService, FaceTimeCamera,
+  FaceTimeAudioRoute, FaceTimeNotices, RingLimiter, EventRate, CallRecovery, SessionSwap) and
+  `ui/imessage/FaceTimeCallActivity`. Main process: FT_CAPABLE=19, CALLER=20, "call"/"note" updates,
+  call rows `ftcall:<guid>`, buttons in ThreadActivity/ChatDetailsActivity, MissedCallLimits.
+  Settings: FaceTime (on), Silence unknown FaceTime callers (off).
+- Security audit of it, all fixed: caller identity only from the authenticated JoinEvent handle (never
+  the member list), full session-list lookup, global ring/notice caps, camera paused when the screen
+  is hidden, no placing calls on a locked phone, notice kept until the native join returns.
+- **Never run on a phone or against an iPhone.** First thing to check if an iPhone's call does not
+  ring: the note "ring from someone who is not in the call" (CallRules.ring members check) in the
+  iMessage log; relax that check if real calls hit it. Not built: group calls, links, screen share,
+  picture-in-picture, Telecom.
+- Unit tests: 1574 (4 skipped: gated screenshots), all passing. Next version: 0.5.73 / 84.
+
 ## 0.5.71 (versionCode 82) - security audit and fixes; missing iPhone features
 - 0.5.70's composer swipe was removed again (5011c63): apps switch only by swiping the middle of the
   conversation list (0.5.69); inside a chat no swipe switches apps.
@@ -41,7 +60,7 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
   reports, peer invalidation) has been seen against a real iPhone yet.
 - Known flaky tests (timing races in untouched relay tests): RelayLimitsTest
   aConversationThePhoneDeletesCanBeRestoredOrPurgedHere / theLastSettingsAreKeptSeeded...
-- Unit tests: 1399 (3 skipped: gated screenshot tests), all passing. Next version: 0.5.72 / 83.
+- Unit tests: 1399 (3 skipped: gated screenshot tests), all passing.
 
 ## 0.5.70 (versionCode 81) - swipe over a chat's composer switches apps (removed in 0.5.71)
 - In ThreadActivity a sideways swipe starting over the composer, reply bar or attachment bar opens

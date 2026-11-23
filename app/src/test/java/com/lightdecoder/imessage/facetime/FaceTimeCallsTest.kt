@@ -74,8 +74,17 @@ class FaceTimeCallsTest {
         remember = { remembered += it },
     )
 
+    /** What the call engine said for the iMessage log. */
+    private val notes = java.util.Collections.synchronizedList(ArrayList<String>())
+
+    @org.junit.Before
+    fun setUp() {
+        FaceTimeLog.sink = { notes += it }
+    }
+
     @After
     fun tearDown() {
+        FaceTimeLog.sink = null
         scope.cancel()
     }
 
@@ -375,8 +384,12 @@ class FaceTimeCallsTest {
         await("the join begun") { natives.made.isNotEmpty() && natives.last.entered.count == 0L }
         calls.hangUp(IN)
         await("the hang-up taken") { calls.state.value == null }
+        settle()
+        assertTrue("the in-call notice stays until the join returned", foreground.running)
+        assertEquals(IN, calls.lingering.value?.guid)
         gate.countDown()
         await("what the join made destroyed") { natives.last.calls.toList() == listOf("createAvc:$IN", "destroyAvc:77") }
+        await("the notice gone") { !foreground.running && calls.lingering.value == null }
         settle()
         assertFalse("the phone's audio was never taken, or was given back", audio.entered)
         assertFalse(camera.running)
@@ -396,11 +409,16 @@ class FaceTimeCallsTest {
         timers.toList().first { it.first == CallRules.CONNECT_MS }.second.complete(Unit)
         await("the call given up") { phase() == Phase.UNANSWERED && calls.state.value?.unanswered == Unanswered.FAILED }
         await("its row") { main.logged.singleOrNull()?.outcome == Outcome.FAILED }
-        await("the in-call notice gone") { !foreground.running }
+        // The library is still in the join (it may yet open the microphone): the in-call notice stays up, as a call that is ending.
+        await("the call kept under its notice") { calls.lingering.value?.guid == IN }
+        settle()
+        assertTrue("the in-call notice stays while the join has not returned", foreground.running)
+        assertEquals(0, foreground.stops)
         assertFalse("nothing is destroyed while the join still runs", natives.last.calls.toList().any { it.startsWith("destroyAvc") })
         // The join comes back after all: what it made is left at once, and nothing of the phone was taken.
         gate.countDown()
         await("what the join made destroyed") { natives.last.calls.toList() == listOf("createAvc:$IN", "destroyAvc:77") }
+        await("the in-call notice gone, now that the join returned") { !foreground.running && calls.lingering.value == null }
         settle()
         assertEquals(Phase.UNANSWERED, phase())
         assertFalse(audio.entered)
@@ -651,8 +669,228 @@ class FaceTimeCallsTest {
         assertTrue(camera.starts.isEmpty())
     }
 
+    // --- what other people's phones cannot do --------------------------------------------------------
+
+    @Test
+    fun aCallListedAsAContactsButRungByAStrangerNeverShowsTheContact() {
+        // The main process knows Alice, and nobody else.
+        main.callers = { if (it == ALICE) CallerInfo("Alice Martin", known = true, conversationId = "imsg:tel:+15551234567") else CallerInfo("", known = false) }
+        // The stranger's call, its member list (which the stranger writes) naming Alice and the user: it rings for nobody.
+        bridge.sessions += CallSessionInfo(IN, listOf(ME), listOf(ALICE, ME), System.currentTimeMillis(), false, true)
+        calls.onEvent(FaceTimeEvent.JoinEvent(IN, 7uL, MALLORY, true))
+        calls.onEvent(FaceTimeEvent.Ring(IN))
+        calls.onEvent(FaceTimeEvent.AddMembers(IN, listOf(FtMember(null, ME)), true))
+        // With the stranger in the list too, Alice first: a call of three, which does not ring; its missed call is the stranger's.
+        bridge.sessions += CallSessionInfo(OTHER, listOf(ME), listOf(ALICE, MALLORY, ME), System.currentTimeMillis(), false, true)
+        calls.onEvent(FaceTimeEvent.JoinEvent(OTHER, 7uL, MALLORY, true))
+        await("the missed call") { main.logged.size == 1 }
+        // Listed honestly, it rings as the stranger: by their address, never by a contact's name.
+        bridge.incoming(THIRD, caller = MALLORY)
+        calls.onEvent(FaceTimeEvent.JoinEvent(THIRD, 7uL, MALLORY, true))
+        await("the ring") { phase() == Phase.RINGING_IN }
+        settle()
+        assertEquals("only the sender Apple vouches for is ever asked about", listOf(MALLORY), main.asked.toList())
+        assertEquals(listOf(MALLORY), main.logged.map { it.peer })
+        assertEquals(listOf(""), notices.shown.map { it.name })
+        assertEquals(listOf(MALLORY), notices.shown.map { it.peer })
+        assertNull(notices.shown.single().conversationId)
+        assertTrue("what was dropped is said without a number", notes.toList().any { it.contains("not in the call") } && notes.toList().none { it.contains("555") })
+    }
+
+    @Test
+    fun anInvitationWithNoJoinSeenAndTheUsersOwnJoinRingNothing() {
+        bridge.incoming(IN)
+        calls.onEvent(FaceTimeEvent.Ring(IN))
+        calls.onEvent(FaceTimeEvent.AddMembers(IN, listOf(FtMember(null, ME)), true))
+        // A call placed on another of the user's devices: joined (and "rung") from their own address.
+        bridge.incoming(OTHER)
+        calls.onEvent(FaceTimeEvent.JoinEvent(OTHER, 7uL, ME, true))
+        calls.onEvent(FaceTimeEvent.JoinEvent(OTHER, 7uL, "", true))
+        await("all of them looked at") { bridge.log.toList().count { it == "sessions" } == 4 }
+        settle()
+        assertNull(calls.state.value)
+        assertTrue(notices.shown.isEmpty())
+        assertTrue(main.asked.isEmpty())
+        assertTrue("no row either", main.logged.isEmpty())
+        // Once the caller was seen joining it, the invitation rings as theirs.
+        calls.onEvent(FaceTimeEvent.JoinEvent(IN, 7uL, ALICE, false))
+        calls.onEvent(FaceTimeEvent.Ring(IN))
+        await("the ring") { phase() == Phase.RINGING_IN }
+        assertEquals(listOf(ALICE), main.asked.toList())
+    }
+
+    @Test
+    fun aRingForACallBehindHundredsOfOthersInTheLibrarysListStillRings() {
+        for (i in 0 until 900) bridge.incoming("EEEEEEEE-0000-4000-8000-%012d".format(i), caller = FakeBridge.BOB)
+        ring()
+        calls.answer(IN, withCamera = false)
+        await("joined, though the call is far down the list") { phase() == Phase.ACTIVE }
+    }
+
+    /** Another call engine over the same fakes, with what a test wants different. */
+    private fun engine(
+        rate: EventRate = EventRate(),
+        backlog: Int = FaceTimeCalls.MAX_EVENT_BACKLOG,
+        fg: CallForeground = foreground,
+        clock: () -> Long = System::currentTimeMillis,
+    ) = FaceTimeCalls(
+        app, bridge, natives, main, notices, fg, audio, camera, ringback,
+        settings = { settings }, phoneBusy = { phoneBusy }, now = clock, scope = scope,
+        sleep = { CompletableDeferred<Unit>().await() }, connectWaitMs = 300, eventRate = rate, eventBacklog = backlog,
+    )
+
+    @Test
+    fun onlySoManyEventsAreLookedAtInAMinuteWhoeverSendsThem() {
+        var t = 1_000_000L
+        val limited = engine(rate = EventRate(maxPerWindow = 5, windowMs = 60_000), clock = { t })
+        for (i in 0 until 40) limited.onEvent(FaceTimeEvent.JoinEvent("EEEEEEEE-0000-4000-8000-%012d".format(i), 7uL, MALLORY, true))
+        await("the first ones looked at") { bridge.log.toList().count { it == "sessions" } == 5 }
+        settle()
+        assertEquals("the rest were dropped unread", 5, bridge.log.toList().count { it == "sessions" })
+        assertNull(limited.state.value)
+        assertEquals("said once, naming nobody", 1, notes.toList().count { it.contains("too many FaceTime events") })
+        assertTrue(notes.toList().none { it.contains("EEEEEEEE") || it.contains("5559990000") })
+        // A minute on, events are taken again: a real call rings.
+        t += 61_000
+        bridge.incoming(IN)
+        limited.onEvent(FaceTimeEvent.JoinEvent(IN, 7uL, ALICE, true))
+        await("the ring") { limited.state.value?.phase == Phase.RINGING_IN }
+        // The events of the call there is have their own allowance: a flood about others does not take its hang-up away.
+        for (i in 100 until 140) limited.onEvent(FaceTimeEvent.JoinEvent("EEEEEEEE-0000-4000-8000-%012d".format(i), 7uL, MALLORY, true))
+        limited.onEvent(FaceTimeEvent.LeaveEvent(IN, 7uL, ALICE))
+        await("the caller's giving up taken") { limited.state.value == null && main.logged.any { it.guid == IN && it.outcome == Outcome.MISSED } }
+    }
+
+    @Test
+    fun onlySoManyEventsWaitToBeTakenAndTheOldestMakeWay() {
+        // The session is not up: the first event waits for it, the others behind it.
+        bridge.connected = false
+        val small = engine(backlog = 8)
+        for (i in 0 until 300) small.onEvent(FaceTimeEvent.JoinEvent("EEEEEEEE-0000-4000-8000-%012d".format(i), 7uL, MALLORY, true))
+        bridge.incoming(IN)
+        small.onEvent(FaceTimeEvent.JoinEvent(IN, 7uL, ALICE, true))
+        settle()
+        assertTrue(bridge.log.isEmpty())
+        bridge.connected = true
+        // The newest (the real call) was kept and rings; of the three hundred before it only a handful were ever looked at.
+        await("the ring") { small.state.value?.phase == Phase.RINGING_IN }
+        settle()
+        val looked = bridge.log.toList().count { it == "sessions" }
+        assertTrue("$looked looked at", looked in 1..10)
+        assertEquals("said once", 1, notes.toList().count { it.contains("the oldest were dropped") })
+    }
+
+    @Test
+    fun whatFollowsACallsChangeThrowingDoesNotStopTheQueue() {
+        val broken = object : CallForeground {
+            override fun start(): Unit = throw IllegalStateException("no service")
+            override fun stop(): Unit = throw IllegalStateException("no service")
+            override suspend fun awaitStarted(timeoutMs: Long) = Unit
+        }
+        val engine = engine(fg = broken)
+        engine.place(ALICE, "Alice Martin", video = false, from = ME, conversationId = null)
+        await("the call placed all the same") { engine.state.value?.phase == Phase.RINGING_OUT && bridge.log.toList().any { it.startsWith("createFacetime") } }
+        // The queue goes on: the hang-up is taken, and a call after it too.
+        engine.hangUp()
+        await("the hang-up taken") { engine.state.value == null }
+        await("taken back") { bridge.log.toList().any { it.startsWith("cancelFacetime") } }
+        bridge.incoming(IN)
+        engine.onEvent(FaceTimeEvent.JoinEvent(IN, 7uL, ALICE, true))
+        await("a ring after it") { engine.state.value?.phase == Phase.RINGING_IN }
+    }
+
+    @Test
+    fun aDeclineWhileAnotherJoinHangsIsGivenUpNotWaitedForForever() {
+        bridge.guardWaitMs = 200
+        val gate = CountDownLatch(1)
+        natives.onMade = { it.gate = gate }
+        ring()
+        calls.answer(IN, withCamera = false)
+        await("the join begun, its time running") {
+            natives.made.isNotEmpty() && natives.last.entered.count == 0L && timers.toList().any { it.first == CallRules.CONNECT_MS }
+        }
+        // The join hangs; its time runs out; the call is given up.
+        timers.toList().first { it.first == CallRules.CONNECT_MS }.second.complete(Unit)
+        await("the call given up") { phase() == Phase.UNANSWERED }
+        // The guard is still the join's: a take-back asked for meanwhile comes back (refused) instead of hanging.
+        val began = System.currentTimeMillis()
+        val thrown = kotlinx.coroutines.runBlocking { runCatching { bridge.cancelFacetime(IN) }.exceptionOrNull() }
+        assertTrue(thrown is GuardBusy)
+        assertTrue(System.currentTimeMillis() - began < 5_000)
+        assertTrue(bridge.log.toList().none { it.startsWith("cancelFacetime") || it.startsWith("declineFacetime") })
+        assertTrue(foreground.running)
+        gate.countDown()
+        await("the notice gone once the join returned") { !foreground.running }
+    }
+
+    // --- the camera, with the call screen out of sight -----------------------------------------------
+
+    @Test
+    fun theCameraPausesWhileNoCallScreenIsInSightAndComesBackWithIt() {
+        shadowOf(app).grantPermissions(Manifest.permission.CAMERA)
+        val screen = Any()
+        calls.screenShown(screen)
+        ring(video = true)
+        natives.onMade = { it.isVideo = true }
+        calls.answer(IN, withCamera = true)
+        await("the join") { phase() == Phase.ACTIVE }
+        val native = natives.last
+        native.host!!.encoderSurface(surface(), 1)
+        await("the camera") { camera.running && camera.starts.size == 1 }
+        // The screen goes out of sight (another app, Home, the phone locked): nothing of this phone's picture is sent any more.
+        calls.screenHidden(screen)
+        await("the camera stopped and the library told") { !camera.running && native.calls.last() == "enableCamera:77:false:-1" }
+        assertTrue("the user still has it on: it comes back with the screen", calls.media.value.cameraOn)
+        assertEquals(Phase.ACTIVE, phase())
+        assertTrue("the call goes on under its notice", foreground.running)
+        assertTrue("and its sound", audio.entered)
+        // Nothing starts it meanwhile: not a new encoder from the library, not the preview's view going.
+        native.host.encoderSurface(surface(), 1)
+        settle()
+        assertFalse(camera.running)
+        assertEquals(1, camera.starts.size)
+        // Back in sight: sent again.
+        calls.screenShown(screen)
+        await("the camera again") { camera.running && camera.starts.size == 2 && native.calls.contains("enableCamera:77:true:-1") }
+        assertEquals("enableCamera:77:true:-1", native.calls.last { it.startsWith("enableCamera") })
+        // Turned off by the user, it stays off over a leave and a return.
+        calls.setCamera(false)
+        await("off") { !camera.running && !calls.media.value.cameraOn }
+        val before = native.calls.toList().count { it.startsWith("enableCamera") }
+        calls.screenHidden(screen)
+        calls.screenShown(screen)
+        settle()
+        assertFalse(camera.running)
+        assertEquals(before, native.calls.toList().count { it.startsWith("enableCamera") })
+        assertEquals(2, camera.starts.size)
+    }
+
+    @Test
+    fun aCallJoinedWithTheScreenOutOfSightSendsNoPictureUntilItIsBack() {
+        shadowOf(app).grantPermissions(Manifest.permission.CAMERA)
+        val screen = Any()
+        calls.screenShown(screen)
+        ring(video = true)
+        natives.onMade = { it.isVideo = true }
+        calls.answer(IN, withCamera = true)
+        calls.screenHidden(screen)
+        await("the join") { phase() == Phase.ACTIVE }
+        val native = natives.last
+        native.host!!.encoderSurface(surface(), 1)
+        settle()
+        assertTrue(native.calls.toList().toString(), native.calls.none { it == "enableCamera:77:true:-1" })
+        assertTrue(camera.starts.isEmpty())
+        calls.screenShown(screen)
+        await("the camera, now") { camera.running && native.calls.contains("enableCamera:77:true:-1") }
+    }
+
     private companion object {
         const val IN = "BBBBBBBB-0000-4000-8000-000000000002"
+        const val OTHER = "CCCCCCCC-0000-4000-8000-000000000003"
+        const val THIRD = "DDDDDDDD-0000-4000-8000-000000000004"
+
+        /** A stranger. */
+        const val MALLORY = "tel:+15559990000"
     }
 }
 

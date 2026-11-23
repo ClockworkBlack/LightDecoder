@@ -318,6 +318,7 @@
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/audioOnly"
+                    android:filterTouchesWhenObscured="true"
                     style="@style/Widget.Material3.Button.TonalButton"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
@@ -365,6 +366,7 @@
 
                         <ImageButton
                             android:id="@+id/accept"
+                            android:filterTouchesWhenObscured="true"
                             android:layout_width="72dp"
                             android:layout_height="72dp"
                             android:background="@drawable/bg_call_round"
@@ -401,6 +403,7 @@
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/callAgain"
+                    android:filterTouchesWhenObscured="true"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:minHeight="52dp"

@@ -4791,6 +4791,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
         menu.findItem(R.id.action_facetime_video)?.isVisible = faceTime && !phoneStyle
         menu.findItem(R.id.action_facetime_audio)?.isVisible = faceTime && !phoneStyle
+        // The bar's camera places a call: a tap that comes through another app's window over it is not taken.
+        if (faceTime && phoneStyle) binding.toolbar.post { findViewById<View>(R.id.action_facetime)?.filterTouchesWhenObscured = true }
         return super.onPrepareOptionsMenu(menu)
     }
 

@@ -137,8 +137,16 @@ object FaceTimeNotices {
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setOngoing(true)
             .setAutoCancel(false)
-            // As a phone call shows on the lock screen: who is calling, and nothing of any chat.
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            // On a locked phone that hides what notices say: that a call rings, not who calls (no name, no picture).
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(
+                NotificationCompat.Builder(context, CHANNEL_INCOMING)
+                    .setSmallIcon(if (call.video) R.drawable.ic_ft_video else R.drawable.ic_ft_audio)
+                    .setContentTitle(context.getString(R.string.facetime_incoming_public))
+                    .setCategory(NotificationCompat.CATEGORY_CALL)
+                    .setShowWhen(false)
+                    .build(),
+            )
             .setFullScreenIntent(screen, true)
             .setContentIntent(screen)
             .setShowWhen(false)
@@ -155,18 +163,23 @@ object FaceTimeNotices {
         return builder.build().apply { flags = flags or Notification.FLAG_INSISTENT }
     }
 
-    /** The in-call notice of [call] (the foreground service's): who, how it stands, the time once joined, and Hang up. */
-    fun ongoing(context: Context, call: Call): Notification {
+    /**
+     * The in-call notice of [call] (the foreground service's): who, how it stands, the time once
+     * joined, and Hang up. [ending]: the call was left while the library was still joining it; the
+     * notice stays until that is over.
+     */
+    fun ongoing(context: Context, call: Call, ending: Boolean = false): Notification {
         ensureCallChannels(context)
         val person = person(context, call)
         val hangUp = PendingIntent.getBroadcast(
             context, 5, FaceTimeActionReceiver.intent(context, FaceTimeActionReceiver.ACTION_HANG_UP, call.guid).setData(data("hangup", call.guid)), FLAGS,
         )
         val open = PendingIntent.getActivity(context, 6, FaceTimeCallActivity.showIntent(context), FLAGS)
-        val active = call.phase == Phase.ACTIVE && call.activeSinceMs > 0
-        val text = when (call.phase) {
-            Phase.RINGING_OUT -> context.getString(R.string.facetime_calling)
-            Phase.CONNECTING -> context.getString(R.string.facetime_connecting)
+        val active = !ending && call.phase == Phase.ACTIVE && call.activeSinceMs > 0
+        val text = when {
+            ending -> context.getString(R.string.facetime_ending)
+            call.phase == Phase.RINGING_OUT -> context.getString(R.string.facetime_calling)
+            call.phase == Phase.CONNECTING -> context.getString(R.string.facetime_connecting)
             else -> kind(context, call.video)
         }
         return NotificationCompat.Builder(context, CHANNEL_ONGOING)
@@ -179,7 +192,16 @@ object FaceTimeNotices {
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setSilent(true)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            // On a locked phone that hides what notices say: that there is a call, not with whom.
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(
+                NotificationCompat.Builder(context, CHANNEL_ONGOING)
+                    .setSmallIcon(if (call.video) R.drawable.ic_ft_video else R.drawable.ic_ft_audio)
+                    .setContentTitle(context.getString(R.string.facetime_ongoing_public))
+                    .setCategory(NotificationCompat.CATEGORY_CALL)
+                    .setShowWhen(false)
+                    .build(),
+            )
             .setContentIntent(open)
             .setUsesChronometer(active)
             .setShowWhen(active)

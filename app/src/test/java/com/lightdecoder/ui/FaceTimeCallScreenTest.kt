@@ -440,6 +440,113 @@ class FaceTimeCallScreenTest {
     }
 
     @Test
+    fun callAgainOnALockedPhonePlacesNothingUntilItIsUnlocked() {
+        grant(Manifest.permission.RECORD_AUDIO)
+        val keyguard = shadowOf(app.getSystemService(KeyguardManager::class.java))
+        ActivityScenario.launch<FaceTimeCallActivity>(placeIntent()).use { scenario ->
+            waitUntil("the call ringing its thirty seconds") { engine.timers.toList().any { it.first == CallRules.RING_OUT_MS } }
+            engine.runOut(CallRules.RING_OUT_MS)
+            scenario.waitFor("no answer") { calls.state.value?.phase == Phase.UNANSWERED && shown(it, R.id.callAgain) }
+            fun placed() = engine.bridge.log.toList().count { it.startsWith("createFacetime") }
+            assertEquals(1, placed())
+            // The phone locks with "No answer" on its screen (which shows over the lock screen): Call Again places nothing.
+            keyguard.setKeyguardLocked(true)
+            scenario.onActivity { click(it, R.id.callAgain) }
+            settle()
+            assertEquals("no call is placed from a locked phone", 1, placed())
+            assertEquals(Phase.UNANSWERED, calls.state.value?.phase)
+            // Tapped again and again: still nothing.
+            scenario.onActivity { click(it, R.id.callAgain) }
+            settle()
+            assertEquals(1, placed())
+            // Unlocked by the user: now the call is placed.
+            keyguard.setKeyguardLocked(false)
+            waitUntil("the second call, after the unlock") { placed() == 2 && calls.state.value?.phase == Phase.RINGING_OUT }
+            scenario.onActivity { click(it, R.id.end) }
+            waitUntil("the call taken back") { calls.state.value == null }
+        }
+    }
+
+    @Test
+    fun anIntentToPlaceACallOnALockedPhonePlacesNothingUntilItIsUnlocked() {
+        grant(Manifest.permission.RECORD_AUDIO)
+        val keyguard = shadowOf(app.getSystemService(KeyguardManager::class.java))
+        keyguard.setKeyguardLocked(true)
+        ActivityScenario.launch<FaceTimeCallActivity>(placeIntent()).use {
+            settle()
+            assertNull(calls.state.value)
+            assertTrue(engine.bridge.log.toList().none { it.startsWith("createFacetime") })
+            keyguard.setKeyguardLocked(false)
+            waitUntil("the call, after the unlock") { calls.state.value?.phase == Phase.RINGING_OUT }
+            calls.hangUp()
+            waitUntil("taken back") { calls.state.value == null }
+        }
+    }
+
+    @Test
+    fun theCameraStopsWhileTheCallScreenIsOutOfSightAndComesBackWithIt() {
+        grant(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA)
+        ring(video = true)
+        engine.natives.onMade = { it.isVideo = true }
+        launchIncoming().use { scenario ->
+            scenario.waitFor("the ringing screen") { shown(it, R.id.incoming) }
+            scenario.onActivity { click(it, R.id.accept) }
+            scenario.waitFor("the call") { calls.state.value?.phase == Phase.ACTIVE && shown(it, R.id.controls) }
+            val native = engine.natives.last
+            native.host!!.encoderSurface(surface(), 1)
+            waitUntil("the camera") { engine.camera.running && native.calls.contains("enableCamera:77:true:-1") }
+            // Home, another app, or the phone locked and dark: the screen is stopped.
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.CREATED)
+            waitUntil("the camera stopped") { !engine.camera.running && native.calls.toList().last { it.startsWith("enableCamera") } == "enableCamera:77:false:-1" }
+            assertEquals("the call goes on", Phase.ACTIVE, calls.state.value?.phase)
+            assertTrue("under its notice", engine.foreground.running)
+            assertTrue(native.calls.none { it.startsWith("destroyAvc") })
+            // Back: the camera again, as the user had it.
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
+            waitUntil("the camera again") { engine.camera.running && native.calls.toList().last { it.startsWith("enableCamera") } == "enableCamera:77:true:-1" }
+            scenario.waitFor("its button still on") { it.findViewById<View>(R.id.camera).isSelected }
+            // Only paused in front of something else (a permission question, the notification shade), it keeps running.
+            val starts = engine.camera.starts.size
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.STARTED)
+            settle()
+            assertTrue(engine.camera.running)
+            assertEquals(starts, engine.camera.starts.size)
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
+            calls.hangUp()
+            waitUntil("the end") { calls.state.value == null }
+        }
+    }
+
+    @Test
+    fun theButtonsThatAnswerOrPlaceACallTakeNoTapThroughAnotherAppsWindow() {
+        ring(video = true)
+        launchIncoming().use { scenario ->
+            scenario.waitFor("the ringing screen") { shown(it, R.id.incoming) }
+            scenario.onActivity { activity ->
+                for (id in listOf(R.id.accept, R.id.audioOnly, R.id.callAgain)) {
+                    assertTrue(activity.resources.getResourceEntryName(id), activity.findViewById<View>(id).filterTouchesWhenObscured)
+                }
+                // A tap that came through a window of another app over the button is not a click.
+                val accept = activity.findViewById<View>(R.id.accept)
+                val at = android.os.SystemClock.uptimeMillis()
+                fun touch(action: Int, flags: Int) = android.view.MotionEvent.obtain(
+                    at, at, action, 1,
+                    arrayOf(android.view.MotionEvent.PointerProperties().apply { id = 0; toolType = android.view.MotionEvent.TOOL_TYPE_FINGER }),
+                    arrayOf(android.view.MotionEvent.PointerCoords().apply { x = 5f; y = 5f; pressure = 1f; size = 1f }),
+                    0, 0, 1f, 1f, 0, 0, android.view.InputDevice.SOURCE_TOUCHSCREEN, flags,
+                )
+                val obscured = android.view.MotionEvent.FLAG_WINDOW_IS_OBSCURED
+                assertTrue("a tap that came straight to it is taken", accept.dispatchTouchEvent(touch(android.view.MotionEvent.ACTION_DOWN, 0)))
+                accept.dispatchTouchEvent(touch(android.view.MotionEvent.ACTION_CANCEL, 0))
+                assertFalse(accept.dispatchTouchEvent(touch(android.view.MotionEvent.ACTION_DOWN, obscured)))
+                assertFalse(accept.dispatchTouchEvent(touch(android.view.MotionEvent.ACTION_UP, obscured)))
+            }
+            settle()
+            assertEquals("still ringing: nothing was answered", Phase.RINGING_IN, calls.state.value?.phase)
+        }
+    }
+
+    @Test
     fun whyACallWasNotStartedIsSaid() {
         grant(Manifest.permission.RECORD_AUDIO)
         engine.settings = com.lightdecoder.imessage.facetime.FaceTimeSettings(on = false)

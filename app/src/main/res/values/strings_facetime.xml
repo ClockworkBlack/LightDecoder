@@ -28,6 +28,10 @@
     <!-- The call screen. -->
     <string name="facetime_calling">Calling…</string>
     <string name="facetime_connecting">Connecting…</string>
+    <string name="facetime_ending">Ending…</string>
+    <!-- What a locked phone shows of a call: that there is one, not with whom. -->
+    <string name="facetime_incoming_public">Incoming FaceTime call</string>
+    <string name="facetime_ongoing_public">FaceTime call</string>
     <string name="facetime_no_answer">No answer</string>
     <string name="facetime_declined">Declined</string>
     <string name="facetime_failed">The call could not be connected</string>

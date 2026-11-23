@@ -73,7 +73,10 @@ import kotlinx.coroutines.launch
  *   so; without the camera the call is audio only, and it says so. An intent to place or answer is
  *   acted on once, when it is new (never one the system brings back from the recent screens).
  * - It shows over the lock screen and turns the screen on, as a phone call does. It shows the call
- *   only: "Message" (the chat with this person) asks for the unlock first.
+ *   only: "Message" (the chat with this person) asks for the unlock first, and so does everything
+ *   that places a call ("Call Again" too): a ringing call can be answered on a locked phone, none placed.
+ * - While the screen is not in sight (another app, Home, the phone locked and dark) the camera does
+ *   not send this phone's picture; it does again when the screen is back, if it was on.
  * - Leaving the screen (Back, the arrow) leaves the call on, under its notice; it comes back from there.
  *
  * Not exported; started by the chat screens (main process), the call notices, and nothing else.
@@ -173,6 +176,18 @@ class FaceTimeCallActivity : AppCompatActivity() {
     override fun onStart() {
         super.onStart()
         tellRotation()
+        // Back in sight: a camera that was paused while it was not is sent again.
+        calls.screenShown(this)
+    }
+
+    /**
+     * No longer in sight (another app in front, Home, or the phone locked with the screen off): the
+     * camera stops sending this phone's picture until the screen is back ([onStart]). The call and
+     * its sound go on, under the in-call notice.
+     */
+    override fun onStop() {
+        calls.screenHidden(this)
+        super.onStop()
     }
 
     override fun onResume() {
@@ -283,7 +298,44 @@ class FaceTimeCallActivity : AppCompatActivity() {
 
     private fun hasCamera(): Boolean = packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)
 
+    /**
+     * Whether the phone is locked: this screen shows over the lock screen (a call rings there), but
+     * nothing places a call from there.
+     */
+    private fun locked(): Boolean = getSystemService(KeyguardManager::class.java)?.isKeyguardLocked == true
+
+    /** Runs [action] at once on an unlocked phone; on a locked one only once the user has unlocked it (never, if they do not). */
+    private fun afterUnlock(action: () -> Unit) {
+        val keyguard = getSystemService(KeyguardManager::class.java)
+        if (keyguard == null || !keyguard.isKeyguardLocked) {
+            action()
+            return
+        }
+        keyguard.requestDismissKeyguard(
+            this,
+            object : KeyguardManager.KeyguardDismissCallback() {
+                override fun onDismissSucceeded() {
+                    if (!isFinishing && !isDestroyed) action()
+                }
+
+                override fun onDismissCancelled() = notUnlocked()
+
+                override fun onDismissError() = notUnlocked()
+
+                /** Not unlocked: nothing is placed, and a screen with nothing to show goes. */
+                private fun notUnlocked() {
+                    if (calls.state.value == null && pending == null && !holdingNotice && awaiting == null) finishCall()
+                }
+            },
+        )
+    }
+
+    /** A call to place: never from a locked phone (the unlock comes first), whatever asked for it. */
     private fun place(request: Pending.Place) {
+        if (locked()) {
+            afterUnlock { place(request) }
+            return
+        }
         if (calls.busy) {
             refuse(Refusal.IN_CALL)
             return
@@ -346,7 +398,8 @@ class FaceTimeCallActivity : AppCompatActivity() {
             return
         }
         when (waiting) {
-            is Pending.Place -> placeNow(waiting)
+            // Locked while Android asked: the unlock first.
+            is Pending.Place -> if (locked()) afterUnlock { place(waiting) } else placeNow(waiting)
             is Pending.Answer -> answerNow(waiting.guid, waiting.withCamera)
         }
     }
@@ -365,6 +418,11 @@ class FaceTimeCallActivity : AppCompatActivity() {
     }
 
     private fun callAgain() {
+        // Over the lock screen "No answer" may show, but a call is not placed from there: the unlock first.
+        if (locked()) {
+            afterUnlock { callAgain() }
+            return
+        }
         val again = lastPlaced ?: shown.first?.takeIf { it.outgoing }?.let { Pending.Place(it.peer, it.name, it.video, it.from, it.conversationId, it.photo) } ?: return
         hadCall = false
         holdingNotice = true

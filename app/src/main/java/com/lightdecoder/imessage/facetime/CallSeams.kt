@@ -67,11 +67,16 @@ interface CallBridge {
      */
     suspend fun setLocalInterfaces()
     suspend fun createFacetime(guid: String, handle: String, participants: List<String>, video: Boolean)
+
+    /**
+     * Takes a placed call back, or declines an incoming one. Both wait for [guard], [GUARD_WAIT_MS]
+     * at most: with a join that does not come back they throw ([GuardBusy]) instead of waiting forever.
+     */
     suspend fun cancelFacetime(guid: String)
     suspend fun declineFacetime(guid: String)
 
-    /** The library's call list. */
-    suspend fun sessions(): List<CallSessionInfo>
+    /** Call [guid] of the library's call list, looked for in all of it; null when it is not there. */
+    suspend fun session(guid: String): CallSessionInfo?
 
     /**
      * Runs [block] with a session handle made for it: each handle is handed to [block] once and
@@ -88,4 +93,27 @@ interface CallBridge {
      * list, and the join) never runs while a take-back or a decline of the app's does.
      */
     val guard: kotlinx.coroutines.sync.Mutex
+}
+
+/** [CallBridge.guard] was not free in time: a join is still running in the library. */
+class GuardBusy : IllegalStateException("a FaceTime join is still running")
+
+/** How long a take-back or a decline waits for a join that holds [CallBridge.guard]. */
+const val GUARD_WAIT_MS = 10_000L
+
+/**
+ * Runs [block] under this lock, waiting for it [timeoutMs] at most: [GuardBusy] when it did not
+ * come free (nothing was run). The wait is all that is timed: [block] runs to its end.
+ */
+suspend fun <T> kotlinx.coroutines.sync.Mutex.withLockWithin(timeoutMs: Long, block: suspend () -> T): T {
+    val held = kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
+        lock()
+        true
+    } == true
+    if (!held) throw GuardBusy()
+    try {
+        return block()
+    } finally {
+        unlock()
+    }
 }

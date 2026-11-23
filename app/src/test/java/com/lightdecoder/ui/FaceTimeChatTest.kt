@@ -24,6 +24,7 @@ import com.lightdecoder.imessage.direct.DirectSinkService
 import com.lightdecoder.imessage.direct.DirectWire
 import com.lightdecoder.imessage.direct.IMessageExtra
 import com.lightdecoder.imessage.facetime.CallRows
+import com.lightdecoder.imessage.facetime.MissedCallLimits
 import com.lightdecoder.imessage.facetime.CallerInfo
 import com.lightdecoder.imessage.facetime.FaceTimeNotices
 import com.lightdecoder.relay.ContactDto
@@ -303,6 +304,57 @@ class FaceTimeChatTest {
     }
 
     @Test
+    fun withUnknownCallersSilencedAStrangersMissedCallMakesNoSoundHoweverItCameToBeMissed() {
+        directMode()
+        // The user wrote to Alice: she is known. Bob only ever wrote first: he is not.
+        message("M1", "See you", mine = true)
+        chat(BOB_CHAT, "+15557654321", "+15557654321")
+        message("B1", "Hi, it's me", mine = false, chat = BOB_CHAT)
+        fun sounds(n: Notification) = n.groupAlertBehavior != Notification.GROUP_ALERT_SUMMARY
+        // Without the setting, a stranger's missed call the call engine did not mark as quiet (a group call, one during
+        // another call, one the phone was busy for) sounds.
+        link.apply(callUpdate(guid = OTHER_CALL, peer = "tel:+15557654321", outcome = "missed", quiet = false))
+        assertTrue(sounds(shadowOf(nm).allNotifications.single()))
+        nm.cancelAll()
+        // With it, it does not: decided here, whatever the call engine said.
+        DirectPrefs.setSilenceUnknownFaceTime(two.app, true)
+        link.apply(callUpdate(guid = THIRD_CALL, peer = "tel:+15557654321", outcome = "missed", quiet = false))
+        assertFalse(sounds(shadowOf(nm).allNotifications.single()))
+        assertNotNull("its row is there all the same", imRepo.message(CallRows.messageId(THIRD_CALL)))
+        nm.cancelAll()
+        // Someone the user knows still sounds.
+        link.apply(callUpdate(guid = CALL, peer = ALICE, outcome = "missed", quiet = false))
+        assertTrue(sounds(shadowOf(nm).allNotifications.single()))
+    }
+
+    @Test
+    fun strangersMissedCallsMakeOnlySoManyNewChatsAndNoticesAnHour() {
+        directMode()
+        message("M1", "See you", mine = true)
+        fun call(i: Int) = "CCCCCCCC-0000-4000-8000-%012d".format(i)
+        fun stranger(i: Int) = "tel:+1555800%04d".format(i)
+        // Twenty strangers, each from an address of their own.
+        for (i in 1..20) link.apply(callUpdate(guid = call(i), peer = stranger(i), outcome = "missed"))
+        val made = (1..20).filter { imRepo.conversation("imsg:" + stranger(it)) != null }
+        assertEquals("only the first few made a chat", (1..MissedCallLimits.MAX_NEW_CHATS_PER_HOUR).toList(), made)
+        assertEquals(MissedCallLimits.MAX_NEW_CHATS_PER_HOUR, (1..20).count { imRepo.message(CallRows.messageId(call(it))) != null })
+        assertEquals(MissedCallLimits.MAX_NEW_CHATS_PER_HOUR, shadowOf(nm).allNotifications.size)
+        assertTrue(IMessageLog.read(two.app).any { it.contains("too many new chats") && !it.contains("5558") })
+        // A stranger who already has a chat here makes no new one: their rows are stored, their notices are limited too.
+        nm.cancelAll()
+        for (i in 21..40) link.apply(callUpdate(guid = call(i), peer = stranger(1), outcome = "missed"))
+        assertEquals(20, (21..40).count { imRepo.message(CallRows.messageId(call(it))) != null })
+        // (One notice a chat: counted by what the limit let through, in the log.)
+        val refused = IMessageLog.read(two.app).count { it.contains("notice was not shown") }
+        assertEquals(20 - (MissedCallLimits.MAX_UNKNOWN_NOTICES_PER_HOUR - MissedCallLimits.MAX_NEW_CHATS_PER_HOUR), refused)
+        // Someone the user knows is still told.
+        nm.cancelAll()
+        link.apply(callUpdate(guid = CALL, peer = ALICE, outcome = "missed"))
+        assertEquals("Alice Martin", shadowOf(nm).allNotifications.single().extras.getCharSequence(Notification.EXTRA_TITLE).toString())
+        assertNotNull(imRepo.message(CallRows.messageId(CALL)))
+    }
+
+    @Test
     fun whatTheCallEngineDidIsWrittenToTheIMessageLogWithoutNumbers() {
         directMode()
         val reply = DirectSinkService.take(DirectWire.encode(DirectArchive.Update.Note("call#3f9a1c: ringing (video) from tel:+15551234567"))) { link.apply(it) }
@@ -577,6 +629,7 @@ class FaceTimeChatTest {
             scenario.onActivity { activity ->
                 val audio = activity.findViewById<View>(R.id.faceTimeAudio)
                 val video = activity.findViewById<View>(R.id.faceTimeVideo)
+                assertTrue("a tap through another app's window places no call", audio.filterTouchesWhenObscured && video.filterTouchesWhenObscured)
                 assertTrue(audio.isShown && video.isShown)
                 assertEquals("FaceTime Audio call", audio.contentDescription.toString())
                 assertEquals("FaceTime Video call", video.contentDescription.toString())

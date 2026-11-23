@@ -84,9 +84,16 @@ class FaceTimeNoticesTest {
         assertFalse(n.flags and Notification.FLAG_AUTO_CANCEL != 0)
         assertTrue("gone by itself should the call engine be", n.timeoutAfter in CallRules.RING_IN_MS..CallRules.RING_IN_MS + 10_000)
         // Who is calling, and that it is FaceTime: nothing of any chat.
-        assertEquals(Notification.VISIBILITY_PUBLIC, n.visibility)
         assertEquals("Alice Martin", n.extras.getCharSequence(Notification.EXTRA_TITLE).toString())
         assertEquals("Incoming FaceTime Video", n.extras.getCharSequence(Notification.EXTRA_TEXT).toString())
+        // On a locked phone that hides what notices say: that a call rings, with no name, no address and no picture.
+        assertEquals(Notification.VISIBILITY_PRIVATE, n.visibility)
+        val public = n.publicVersion
+        assertEquals("Incoming FaceTime call", public.extras.getCharSequence(Notification.EXTRA_TITLE).toString())
+        assertNull(public.extras.getCharSequence(Notification.EXTRA_TEXT))
+        assertNull(public.getLargeIcon())
+        assertTrue(public.extras.getParcelableArrayList(Notification.EXTRA_PEOPLE_LIST, android.app.Person::class.java).isNullOrEmpty())
+        assertFalse(public.extras.toString().let { it.contains("Alice") || it.contains("5551234567") })
         // With the screen off or locked, the call screen itself; a tap opens it too. It only shows the call.
         assertOurs(n.fullScreenIntent, FaceTimeCallActivity::class.java)
         assertEquals(FaceTimeCallActivity.ACTION_SHOW, shadowOf(n.fullScreenIntent).savedIntent.action)
@@ -159,6 +166,17 @@ class FaceTimeNoticesTest {
         assertTrue(active.extras.getBoolean(Notification.EXTRA_SHOW_CHRONOMETER))
         assertEquals(1_700_000_050_000, active.`when`)
         assertEquals("Connecting…", FaceTimeNotices.ongoing(app, call(false, Phase.CONNECTING)).extras.getCharSequence(Notification.EXTRA_TEXT).toString())
+        // Left while the library was still joining it: the notice stays, and says so, without a clock.
+        val ending = FaceTimeNotices.ongoing(app, call(video = true, phase = Phase.ACTIVE, activeSince = 1_700_000_050_000), ending = true)
+        assertEquals("Ending…", ending.extras.getCharSequence(Notification.EXTRA_TEXT).toString())
+        assertFalse(ending.extras.getBoolean(Notification.EXTRA_SHOW_CHRONOMETER))
+        // On a locked phone that hides what notices say: that there is a call, not with whom.
+        for (n in listOf(calling, active, ending)) {
+            assertEquals(Notification.VISIBILITY_PRIVATE, n.visibility)
+            assertEquals("FaceTime call", n.publicVersion.extras.getCharSequence(Notification.EXTRA_TITLE).toString())
+            assertNull(n.publicVersion.getLargeIcon())
+            assertFalse(n.publicVersion.extras.toString().let { it.contains("Alice") || it.contains("5551234567") })
+        }
     }
 
     @Test

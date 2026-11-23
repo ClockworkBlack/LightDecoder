@@ -21,6 +21,7 @@ import com.lightdecoder.imessage.facetime.CallerInfo
 import com.lightdecoder.imessage.facetime.CapabilityCache
 import com.lightdecoder.imessage.facetime.FaceTimeLog
 import com.lightdecoder.imessage.facetime.FaceTimeNotices
+import com.lightdecoder.imessage.facetime.MissedCallLimits
 import com.lightdecoder.imessage.facetime.Outcome
 import com.lightdecoder.relay.ConversationDto
 import com.lightdecoder.relay.Folder
@@ -3017,6 +3018,9 @@ class DirectLink private constructor(
 
     // --- FaceTime -------------------------------------------------------------------------------
 
+    /** What missed FaceTime calls may do in an hour, whoever they are from ([MissedCallLimits]). */
+    private val missedCallLimits = MissedCallLimits()
+
     /** Who can be called with FaceTime, as Apple last said ([faceTimeCapable]). */
     private val faceTimeCapability = CapabilityCache()
 
@@ -3131,9 +3135,18 @@ class DirectLink private constructor(
             otherParticipantIds = listOf(peer),
         )
         val missed = outcome == Outcome.MISSED && !update.outgoing
+        // Whether the user knows who it was (a contact, or someone they wrote to or called), asked before the
+        // call's own row is there. Only a missed call's caller matters: every other call the user took part in.
+        val known = !missed || callerInfo(peer).known
         // Their stored chat as it is (a Blue Bubbles one too); only where they have none, one is made as for
         // a message from them (see [upsert]): its latest message moves with the row only.
-        val chatId = placedFrom ?: manager.conversationWith(address) ?: toArchive(described).let { conversation ->
+        val theirs = placedFrom ?: manager.conversationWith(address)
+        // Strangers' missed calls make only so many new chats an hour: addresses cost a caller nothing.
+        if (theirs == null && !known && !missedCallLimits.newChat(now)) {
+            IMessageLog.add(app, "a missed FaceTime call from an unknown caller was not noted: too many new chats from missed calls this hour")
+            return
+        }
+        val chatId = theirs ?: toArchive(described).let { conversation ->
             repo.upsertConversation(conversation.copy(lastMessageTs = 0))
             conversation.id
         }
@@ -3159,7 +3172,16 @@ class DirectLink private constructor(
         IMessageLog.add(app, "${IMessageLog.chatRef(chatId)}: FaceTime ${if (update.video) "video" else "audio"} call noted (${outcome.wire})")
         // A missed call, told once; not for the chat on screen, and without a sound for one whose alerts are hidden.
         if (missed && existing == null && !onScreen) {
-            val quiet = update.quiet || repo.conversation(chatId)?.muted == true
+            if (!missedCallLimits.notice(known, now)) {
+                IMessageLog.add(app, "${IMessageLog.chatRef(chatId)}: a missed FaceTime call's notice was not shown: too many this hour")
+                return
+            }
+            // Without a sound also for an unknown caller while those are silenced, however the call came to be
+            // missed (a group call, one during another call, one the phone was busy for): decided here, where it is known who is known.
+            val quiet = MissedCallLimits.quiet(
+                engineQuiet = update.quiet, chatMuted = repo.conversation(chatId)?.muted == true,
+                silenceUnknown = DirectPrefs.silenceUnknownFaceTime(app), known = known,
+            )
             val person = repo.participants(chatId).firstOrNull { !it.isMe }
             val name = person?.name?.takeIf { it.isNotBlank() } ?: nameOf(peer)
             val photo = runCatching { com.lightdecoder.relay.ContactPhotos.get(app).forAddress(address) }.getOrNull()

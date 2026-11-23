@@ -84,6 +84,7 @@
 
                     <ImageButton
                         android:id="@+id/faceTimeAudio"
+                        android:filterTouchesWhenObscured="true"
                         android:layout_width="56dp"
                         android:layout_height="56dp"
                         android:background="@drawable/bg_call_round"
@@ -110,6 +111,7 @@
 
                     <ImageButton
                         android:id="@+id/faceTimeVideo"
+                        android:filterTouchesWhenObscured="true"
                         android:layout_width="56dp"
                         android:layout_height="56dp"
                         android:background="@drawable/bg_call_round"
