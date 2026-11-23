@@ -325,7 +325,9 @@ object DirectArchive {
          * user), audio or [video], when it began and, for one that was talked in, how long it was;
          * [outcome] is an [com.lightdecoder.imessage.facetime.Outcome]'s name on the wire. A missed
          * one is also told in a notice ([quiet]: without a sound). [conversationId]: the chat it was
-         * placed from, when the ":imessage" process was told (else it is found by [peer]).
+         * placed from, when the ":imessage" process was told (else it is found by [peer]). A [group]
+         * call also says its people besides the user ([members]: whom it was placed to, or an incoming
+         * one's member list as its caller wrote it), only to find the group chat its row goes in.
          */
         data class Call(
             val guid: String,
@@ -337,7 +339,15 @@ object DirectArchive {
             val outcome: String,
             val quiet: Boolean = false,
             val conversationId: String = "",
+            val group: Boolean = false,
+            val members: List<String> = emptyList(),
         ) : Update()
+
+        /**
+         * Where FaceTime stands in the ":imessage" process ([FaceTimeState]): told whenever a call
+         * comes to hold the line or lets go of it, for the main process's "return to call" bar.
+         */
+        data class FaceTime(val state: FaceTimeState) : Update()
 
         /**
          * A line of the ":imessage" process for the iMessage log (what FaceTime did: kinds and

@@ -551,7 +551,7 @@ class DirectWireTest {
             "SEND" to 1, "UNSEND" to 2, "REACH" to 3, "EDIT" to 4, "REACT" to 5, "TYPING" to 6, "READ" to 7, "DOWNLOAD" to 8,
             "EXTENSION" to 9, "UPDATE" to 10, "BACKGROUND" to 11, "UNSCHEDULE" to 12, "RENAME" to 13, "MEMBERS" to 14,
             "GROUP_PHOTO" to 15, "MARK_UNREAD" to 16, "REPORT_JUNK" to 17, "PEERS" to 18, "FT_CAPABLE" to 19, "CALLER" to 20,
-            "ACCOUNT" to 21,
+            "ACCOUNT" to 21, "FT_STATE" to 22,
         )
         assertEquals(spec, DirectWire.REQUEST_CODES)
         assertEquals(DirectWire.REQUEST_CODES.size, DirectWire.REQUEST_CODES.values.toSet().size)
@@ -613,5 +613,70 @@ class DirectWireTest {
         assertEquals(AccountState.SIGNED_OUT.toJson().toString(), none.toString())
         for (bad in listOf("""{"restartPending":"true"}""", """{"restartPending":1}""", "{}")) assertFalse(bad, DirectWire.restartPendingOf(JSONObject(bad)))
         assertFalse(DirectWire.restartPendingOf(DirectWire.error("LightDecoder's iMessage part could not be reached.")))
+    }
+
+    // --- FaceTime II (SPEC2 B2) ---------------------------------------------------------------------
+
+    @Test
+    fun whereFaceTimeStandsIsAskedWithNothingAndAnsweredStrictly() {
+        assertEquals(22, DirectWire.FT_STATE)
+        assertEquals("{}", DirectWire.faceTimeState().toString())
+        val state = FaceTimeState(live = true, guid = CALL, title = "Alice · Group FaceTime", video = true, group = true, sinceMs = 1_700_000_000_000)
+        assertEquals(state, FaceTimeState.fromJson(JSONObject(state.toJson().toString())))
+        assertEquals(FaceTimeState.NONE, FaceTimeState.fromJson(JSONObject(FaceTimeState.NONE.toJson().toString())))
+        // Never an address or anything else in it.
+        assertEquals(setOf("live", "guid", "title", "video", "group", "sinceMs"), state.toJson().keys().asSequence().toSet())
+        assertEquals(setOf("live", "video", "group", "sinceMs"), FaceTimeState.NONE.toJson().keys().asSequence().toSet())
+        // Read strictly: live only for a real true and a call's id; a title of one short line; no time before none.
+        for (bad in listOf("""{"live":"true","guid":"$CALL"}""", """{"live":true}""", """{"live":true,"guid":"x"}""", """{"live":1,"guid":"$CALL"}""")) {
+            assertEquals(bad, FaceTimeState.NONE, FaceTimeState.fromJson(JSONObject(bad)))
+        }
+        val odd = FaceTimeState.fromJson(JSONObject().put("live", true).put("guid", CALL).put("title", "A\nB" + "c".repeat(500)).put("sinceMs", -5).put("video", "yes"))
+        assertEquals(com.lightdecoder.imessage.facetime.CallIds.MAX_NAME_CHARS, odd.title.length)
+        assertFalse(odd.title.contains('\n'))
+        assertEquals(0L, odd.sinceMs)
+        assertFalse(odd.video)
+        assertEquals(FaceTimeState.NONE, FaceTimeState.fromJson(DirectWire.error("not connected")))
+    }
+
+    @Test
+    fun whereFaceTimeStandsCrossesAsACallstateUpdate() {
+        val u = DirectArchive.Update.FaceTime(FaceTimeState(live = true, guid = CALL, title = "Alice", video = false, group = false, sinceMs = 5))
+        assertEquals(u, trip(u))
+        assertEquals("callstate", DirectWire.encodeUpdate(u).getString("kind"))
+        assertEquals(DirectArchive.Update.FaceTime(FaceTimeState.NONE), trip(DirectArchive.Update.FaceTime(FaceTimeState.NONE)))
+        assertEquals(DirectArchive.Update.FaceTime(FaceTimeState.NONE), DirectWire.decode(JSONObject("""{"kind":"callstate","live":true,"guid":"nope"}""")))
+    }
+
+    @Test
+    fun aGroupCallsRowCrossesWithItsPeopleOnly() {
+        val members = listOf("tel:+15551234567", "tel:+15557654321", "mailto:carol@example.com")
+        val u = DirectArchive.Update.Call(CALL, members[0], outgoing = false, video = true, startedMs = 5, durationMs = 0, outcome = "missed", group = true, members = members)
+        assertEquals(u, trip(u))
+        // A one-to-one call says nothing of members.
+        val one = u.copy(group = false, members = emptyList())
+        assertEquals(one, trip(one))
+        assertFalse(DirectWire.encode(one).has("members"))
+        assertEquals("members only with a group", one, DirectWire.decode(DirectWire.encode(u).put("group", false)))
+        // Only addresses, each once, a group call's worth at most.
+        val odd = DirectWire.decode(
+            DirectWire.encode(u).put("members", org.json.JSONArray(listOf("temp:x", "javascript:x", members[0], members[0]) + List(60) { "tel:+1555600%04d".format(it) })),
+        ) as DirectArchive.Update.Call
+        assertEquals(members[0], odd.members.first())
+        assertEquals(odd.members.distinct(), odd.members)
+        assertTrue(odd.members.size <= DirectWire.MAX_FT_TARGETS)
+        assertTrue(odd.members.all { com.lightdecoder.imessage.facetime.CallIds.handle(it) != null })
+    }
+
+    @Test
+    fun whoCanBeCalledIsAskedForAGroupsWorth() {
+        assertEquals(32, DirectWire.MAX_FT_TARGETS)
+        val many = List(40) { "tel:+1555600%04d".format(it) }
+        assertEquals(many.take(32), DirectWire.CapableRequest.fromJson(JSONObject(DirectWire.faceTimeCapable(many, null).toString())).targets)
+        assertEquals(many.take(32), DirectWire.capableOf(JSONObject(DirectWire.capable(many).toString())))
+    }
+
+    private companion object {
+        const val CALL = "BBBBBBBB-0000-4000-8000-000000000002"
     }
 }

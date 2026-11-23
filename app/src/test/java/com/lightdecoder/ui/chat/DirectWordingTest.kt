@@ -179,6 +179,16 @@ class DirectWordingTest {
             R.string.apple_account_sign_out_title, R.string.apple_account_sign_out_body, R.string.apple_account_signed_out,
             R.string.apple_account_notice_interrupted, R.string.apple_account_notice_signed_out,
             R.string.apple_account_notice_sign_in_again, R.string.apple_account_restart_pending, R.string.apple_account_restart_later,
+            // FaceTime II: group calls, the people sheet, a shared screen, the "return to call" bar, the FaceTime list (SPEC2 B2).
+            R.string.facetime_group, R.string.facetime_group_title, R.string.facetime_ignore, R.string.facetime_not_verified,
+            R.string.facetime_not_verified_short, R.string.facetime_guest, R.string.facetime_someone, R.string.facetime_people_open,
+            R.string.facetime_in_call, R.string.facetime_invited, R.string.facetime_ring, R.string.facetime_ring_description,
+            R.string.facetime_rung, R.string.facetime_ring_failed, R.string.facetime_nobody_invited, R.string.facetime_add_hint, R.string.facetime_names_and,
+            R.string.facetime_you, R.string.facetime_shared_screen, R.string.facetime_tile, R.string.facetime_return,
+            R.string.facetime_return_time, R.string.facetime_return_description, R.string.facetime_calls, R.string.facetime_calls_missed,
+            R.string.facetime_calls_new, R.string.facetime_calls_empty, R.string.facetime_calls_today, R.string.facetime_calls_yesterday,
+            R.string.facetime_calls_open_chat, R.string.facetime_calls_delete, R.string.facetime_calls_deleted,
+            R.string.facetime_calls_row_description, R.string.facetime_calls_new_hint, R.string.facetime_calls_start,
         )
         for (res in direct) {
             val text = context.getString(res)
@@ -207,7 +217,20 @@ class DirectWordingTest {
             }
             val typing = context.resources.getQuantityString(R.plurals.imessage_typing_first_and_others, count, "Alice", count)
             assertFalse(typing, typing.contains("OpenBubbles"))
+            for (plural in listOf(R.plurals.facetime_group_others, R.plurals.facetime_people)) {
+                val words = context.resources.getQuantityString(plural, count, count)
+                assertFalse(words, words.contains("OpenBubbles"))
+            }
         }
+        // Group FaceTime and the bar, as an iPhone words them.
+        assertEquals("Alice · Group FaceTime", context.getString(R.string.facetime_group_title, "Alice"))
+        assertEquals("Touch to return to call", context.getString(R.string.facetime_return))
+        assertEquals("Touch to return to call · 01:05", context.getString(R.string.facetime_return_time, "01:05"))
+        assertEquals("New FaceTime", context.getString(R.string.facetime_calls_new))
+        assertEquals("Everyone you add can see who else is in the call.", context.getString(R.string.facetime_calls_new_hint))
+        assertEquals("To add someone, start a new call with everyone.", context.getString(R.string.facetime_add_hint))
+        assertEquals("Alice & Bob", context.getString(R.string.facetime_names_and, "Alice", "Bob"))
+        assertEquals("and 2 others", context.resources.getQuantityString(R.plurals.facetime_group_others, 2, 2))
         // FaceTime, by its name; a call's row as it reads.
         assertEquals("FaceTime Video", context.getString(R.string.facetime_video))
         assertEquals("FaceTime Audio", context.getString(R.string.facetime_audio))

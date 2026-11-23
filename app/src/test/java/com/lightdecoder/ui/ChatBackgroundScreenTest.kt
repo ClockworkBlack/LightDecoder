@@ -63,6 +63,9 @@ class ChatBackgroundScreenTest {
     private lateinit var imRepo: ArchiveRepository
     private val asked = Collections.synchronizedList(ArrayList<Pair<Int, JSONObject>>())
 
+    /** What was asked so far, copied under the list's lock (the stand-in answers on another thread meanwhile). */
+    private val askedNow: List<Pair<Int, JSONObject>> get() = synchronized(asked) { asked.toList() }
+
     @Before
     fun setUp() {
         two = TwoServicesEnv()
@@ -229,8 +232,8 @@ class ChatBackgroundScreenTest {
             assertTrue(items.indexOfFirst { it is BackgroundPicker.Item.Tile && it.name == "Aurora" } > items.indexOfFirst { it == BackgroundPicker.Item.Header(R.string.imessage_background_section_dynamic) })
             tap(sheet) { it is BackgroundPicker.Item.Tile && it.pick == BackgroundPicker.Pick.Remove }
             assertFalse(sheet.isShowing)
-            two.waitUntil("taken off through Apple") { asked.any { it.first == DirectWire.BACKGROUND } }
-            val r = DirectWire.BackgroundRequest.fromJson(asked.single { it.first == DirectWire.BACKGROUND }.second)
+            two.waitUntil("taken off through Apple") { askedNow.any { it.first == DirectWire.BACKGROUND } }
+            val r = DirectWire.BackgroundRequest.fromJson(askedNow.single { it.first == DirectWire.BACKGROUND }.second)
             assertEquals(null, r.path)
             assertEquals(null, r.style)
             assertTrue(r.version > 1_000)
@@ -341,19 +344,19 @@ class ChatBackgroundScreenTest {
             val sunset = BackgroundPalettes.ALL.first { it.id == "sunset" }.style
             scenario.waitFor("previewed") { background(it).visibility == View.VISIBLE && background(it).tag == "gradient:${sunset.data}" }
             scenario.onActivity { assertEquals(View.VISIBLE, previewBar(it).visibility) }
-            assertTrue(asked.none { it.first == DirectWire.BACKGROUND })
+            assertTrue(askedNow.none { it.first == DirectWire.BACKGROUND })
             // Cancel: back to none, nothing sent.
             scenario.onActivity { assertTrue(it.findViewById<View>(R.id.backgroundPreviewCancel).performClick()) }
             scenario.waitFor("back to none") { background(it).visibility == View.GONE && previewBar(it).visibility == View.GONE }
             ShadowLooper.idleMainLooper(300, java.util.concurrent.TimeUnit.MILLISECONDS)
-            assertTrue(asked.none { it.first == DirectWire.BACKGROUND })
+            assertTrue(askedNow.none { it.first == DirectWire.BACKGROUND })
 
             // A design: drawn for the preview, then Set sends it as a photo.
             tap(openPicker(scenario), tile("Galaxy"))
             scenario.waitFor("the design previewed") { background(it).visibility == View.VISIBLE && background(it).tag == "theme:galaxy" }
             scenario.onActivity { assertTrue(it.findViewById<View>(R.id.backgroundPreviewSet).performClick()) }
-            two.waitUntil("sent") { asked.any { it.first == DirectWire.BACKGROUND } }
-            val theme = DirectWire.BackgroundRequest.fromJson(asked.single { it.first == DirectWire.BACKGROUND }.second)
+            two.waitUntil("sent") { askedNow.any { it.first == DirectWire.BACKGROUND } }
+            val theme = DirectWire.BackgroundRequest.fromJson(askedNow.single { it.first == DirectWire.BACKGROUND }.second)
             assertTrue(theme.path != null)
             assertEquals(null, theme.style)
             scenario.waitFor("kept and shown") { a ->
@@ -366,8 +369,8 @@ class ChatBackgroundScreenTest {
             tap(openPicker(scenario), tile("Aurora"))
             scenario.waitFor("aurora previewed") { drawableOf(it) is AuroraDrawable }
             scenario.onActivity { assertTrue(it.findViewById<View>(R.id.backgroundPreviewSet).performClick()) }
-            two.waitUntil("aurora sent") { asked.count { it.first == DirectWire.BACKGROUND } == 2 }
-            val aurora = DirectWire.BackgroundRequest.fromJson(asked.last { it.first == DirectWire.BACKGROUND }.second)
+            two.waitUntil("aurora sent") { askedNow.count { it.first == DirectWire.BACKGROUND } == 2 }
+            val aurora = DirectWire.BackgroundRequest.fromJson(askedNow.last { it.first == DirectWire.BACKGROUND }.second)
             assertEquals(BackgroundStyle.Dynamic("aurora_1"), aurora.style)
             assertEquals(null, aurora.path)
             two.waitUntil("stored") { ChatBackgrounds(two.app).of(ALICE_DIRECT).style == BackgroundStyle.Dynamic("aurora_1") }
@@ -414,12 +417,12 @@ class ChatBackgroundScreenTest {
             // Too soon: nothing goes, the text stays.
             scenario.onActivity { (it as ThreadActivity).sendLaterAt(System.currentTimeMillis() + 10_000) }
             assertEquals(two.app.getString(R.string.imessage_send_later_too_soon), ShadowToast.getTextOfLatestToast())
-            assertTrue(asked.none { it.first == DirectWire.SEND })
+            assertTrue(askedNow.none { it.first == DirectWire.SEND })
 
             val at = System.currentTimeMillis() + 3 * 60 * 60 * 1000L
             scenario.onActivity { (it as ThreadActivity).sendLaterAt(at) }
-            two.waitUntil("sent with its time") { asked.any { it.first == DirectWire.SEND } }
-            val sent = DirectWire.SendRequest.fromJson(asked.single { it.first == DirectWire.SEND }.second)
+            two.waitUntil("sent with its time") { askedNow.any { it.first == DirectWire.SEND } }
+            val sent = DirectWire.SendRequest.fromJson(askedNow.single { it.first == DirectWire.SEND }.second)
             assertEquals("Happy birthday", sent.text)
             assertEquals(at, sent.scheduledMs)
             scenario.waitFor("shown as Send Later") { a ->
@@ -439,8 +442,8 @@ class ChatBackgroundScreenTest {
             val cancel = actions.findViewById<View>(R.id.actionCancelSendLater)!!
             assertEquals(View.VISIBLE, cancel.visibility)
             cancel.performClick()
-            two.waitUntil("taken back through Apple") { asked.any { it.first == DirectWire.UNSCHEDULE } }
-            assertEquals("S1", asked.single { it.first == DirectWire.UNSCHEDULE }.second.getString("guid"))
+            two.waitUntil("taken back through Apple") { askedNow.any { it.first == DirectWire.UNSCHEDULE } }
+            assertEquals("S1", askedNow.single { it.first == DirectWire.UNSCHEDULE }.second.getString("guid"))
             scenario.waitFor("gone") { a -> shownTexts(a).none { it == "Happy birthday" } }
         }
     }

@@ -61,6 +61,25 @@ class RingLimiter(
     }
 
     /**
+     * What a ring of group call [guid] that names no sender (an invitation, which may come from any
+     * member of the call) may do at [now]: counted in a bucket of that call's own ([callKey]), never
+     * in the allowance of the person whose ring it follows, so nobody can use theirs up.
+     */
+    fun callRing(guid: String, now: Long): Verdict = ring(callKey(guid), guid, now)
+
+    /**
+     * Whether [caller] could ring at [now] by their own limits (not too soon after their last ring,
+     * under their rings and missed-call notes an hour). Counts nothing: an invitation of a group
+     * call is held to its caller's limits this way, and counted in the call's own bucket.
+     */
+    @Synchronized
+    fun allows(caller: String, now: Long): Boolean {
+        val c = prune(caller, now)
+        val tooSoon = c.rings.lastOrNull()?.let { now - it < minGapMs } == true
+        return !tooSoon && c.rings.size < maxRingsPerHour && c.notices.size < maxNoticesPerHour
+    }
+
+    /**
      * Whether a call from someone the main process does not know may ring at [now]: all such
      * callers share one allowance. Counted when it may.
      */
@@ -106,6 +125,9 @@ class RingLimiter(
     }
 
     companion object {
+        /** The bucket a group call's invitations are counted in ([callRing]): no address has this shape. */
+        fun callKey(guid: String): String = "call:$guid"
+
         const val MIN_GAP_MS = 10_000L
         const val MAX_RINGS_PER_HOUR = 6
         const val MAX_NOTICES_PER_HOUR = 20

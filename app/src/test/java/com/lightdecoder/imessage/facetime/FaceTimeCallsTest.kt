@@ -680,20 +680,26 @@ class FaceTimeCallsTest {
         calls.onEvent(FaceTimeEvent.JoinEvent(IN, 7uL, MALLORY, true))
         calls.onEvent(FaceTimeEvent.Ring(IN))
         calls.onEvent(FaceTimeEvent.AddMembers(IN, listOf(FtMember(null, ME)), true))
-        // With the stranger in the list too, Alice first: a call of three, which does not ring; its missed call is the stranger's.
-        bridge.sessions += CallSessionInfo(OTHER, listOf(ME), listOf(ALICE, MALLORY, ME), System.currentTimeMillis(), false, true)
-        calls.onEvent(FaceTimeEvent.JoinEvent(OTHER, 7uL, MALLORY, true))
-        await("the missed call") { main.logged.size == 1 }
+        // With another stranger in the list too, Alice first: a call of three (SPEC2 B2: a group call rings), rung as that stranger's own.
+        bridge.sessions += CallSessionInfo(OTHER, listOf(ME), listOf(ALICE, STRANGER, ME), System.currentTimeMillis(), false, true)
+        calls.onEvent(FaceTimeEvent.JoinEvent(OTHER, 7uL, STRANGER, true))
+        await("the group ring") { phase() == Phase.RINGING_IN && calls.state.value?.peer == STRANGER }
+        assertTrue(calls.state.value!!.group)
+        assertTrue("from someone unknown: ignored, never declined to the list", calls.state.value!!.ignoreOnly)
+        calls.decline(OTHER)
+        await("ignored") { calls.state.value == null && main.logged.size == 1 }
+        settle()
+        assertFalse("nothing was sent to the people it names", bridge.log.toList().any { it.startsWith("declineFacetime") })
         // Listed honestly, it rings as the stranger: by their address, never by a contact's name.
         bridge.incoming(THIRD, caller = MALLORY)
         calls.onEvent(FaceTimeEvent.JoinEvent(THIRD, 7uL, MALLORY, true))
         await("the ring") { phase() == Phase.RINGING_IN }
         settle()
-        assertEquals("only the sender Apple vouches for is ever asked about", listOf(MALLORY), main.asked.toList())
-        assertEquals(listOf(MALLORY), main.logged.map { it.peer })
-        assertEquals(listOf(""), notices.shown.map { it.name })
-        assertEquals(listOf(MALLORY), notices.shown.map { it.peer })
-        assertNull(notices.shown.single().conversationId)
+        assertEquals("only the senders Apple vouches for are ever asked about", listOf(STRANGER, MALLORY), main.asked.toList())
+        assertEquals(listOf(STRANGER), main.logged.map { it.peer })
+        assertEquals(listOf("", ""), notices.shown.map { it.name })
+        assertEquals(listOf(STRANGER, MALLORY), notices.shown.map { it.peer })
+        assertNull(notices.shown.last().conversationId)
         assertTrue("what was dropped is said without a number", notes.toList().any { it.contains("not in the call") } && notes.toList().none { it.contains("555") })
     }
 
@@ -855,7 +861,8 @@ class FaceTimeCallsTest {
         assertEquals("enableCamera:77:true:-1", native.calls.last { it.startsWith("enableCamera") })
         // Turned off by the user, it stays off over a leave and a return.
         calls.setCamera(false)
-        await("off") { !camera.running && !calls.media.value.cameraOn }
+        // Its own word to the library first (sent on the library's queue, after the camera stops here).
+        await("off") { !camera.running && !calls.media.value.cameraOn && native.calls.toList().lastOrNull { it.startsWith("enableCamera") } == "enableCamera:77:false:-1" }
         val before = native.calls.toList().count { it.startsWith("enableCamera") }
         calls.screenHidden(screen)
         calls.screenShown(screen)
@@ -889,8 +896,9 @@ class FaceTimeCallsTest {
         const val OTHER = "CCCCCCCC-0000-4000-8000-000000000003"
         const val THIRD = "DDDDDDDD-0000-4000-8000-000000000004"
 
-        /** A stranger. */
+        /** A stranger, and another. */
         const val MALLORY = "tel:+15559990000"
+        const val STRANGER = "tel:+15559990001"
     }
 }
 

@@ -2,13 +2,19 @@ package com.lightdecoder.ui.imessage
 
 import android.Manifest
 import android.app.KeyguardManager
+import android.app.PendingIntent
+import android.app.PictureInPictureParams
+import android.app.RemoteAction
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Matrix
 import android.graphics.SurfaceTexture
+import android.graphics.drawable.Icon
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
@@ -16,9 +22,8 @@ import android.os.Bundle
 import android.os.SystemClock
 import android.provider.Settings
 import android.text.format.DateUtils
-import android.view.GestureDetector
+import android.util.Rational
 import android.view.MotionEvent
-import android.view.ScaleGestureDetector
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
@@ -44,14 +49,21 @@ import com.lightdecoder.imessage.direct.DirectService
 import com.lightdecoder.imessage.direct.Handles
 import com.lightdecoder.imessage.facetime.Call
 import com.lightdecoder.imessage.facetime.CallIds
+import com.lightdecoder.imessage.facetime.CallLabels
 import com.lightdecoder.imessage.facetime.CallMessage
+import com.lightdecoder.imessage.facetime.CallSurfaces
+import com.lightdecoder.imessage.facetime.CallerInfo
+import com.lightdecoder.imessage.facetime.FaceTimeActionReceiver
 import com.lightdecoder.imessage.facetime.FaceTimeCalls
 import com.lightdecoder.imessage.facetime.FaceTimeCamera
 import com.lightdecoder.imessage.facetime.FaceTimeNotices
 import com.lightdecoder.imessage.facetime.Media
+import com.lightdecoder.imessage.facetime.MAX_PEOPLE
 import com.lightdecoder.imessage.facetime.Phase
+import com.lightdecoder.imessage.facetime.PipParams
 import com.lightdecoder.imessage.facetime.Refusal
 import com.lightdecoder.imessage.facetime.Route
+import com.lightdecoder.imessage.facetime.TileLayout
 import com.lightdecoder.imessage.facetime.Unanswered
 import com.lightdecoder.relay.RelayIntents
 import com.lightdecoder.ui.applySystemBarPadding
@@ -80,6 +92,17 @@ import kotlinx.coroutines.launch
  * - While the screen is not in sight (another app, Home, the phone locked and dark) the camera does
  *   not send this phone's picture; it does again when the screen is back, if it was on.
  * - Leaving the screen (Back, the arrow) leaves the call on, under its notice; it comes back from there.
+ *   A video call that is on, with a picture of the other side, floats on in a picture-in-picture
+ *   window instead (Home, Back, "Message"), with Mute, Camera Off and End: its camera goes on
+ *   sending there (as iPhone's), but stops at once when the screen goes off.
+ * - Someone's shared screen is shown whole, as the big picture; the other side's camera goes small.
+ * - A group call's people each have a tile (their camera, or their name): a tile tapped is big. Only
+ *   those who joined as Apple vouches for are named as the user knows them (and pictured); anyone
+ *   else is shown by the address the call reports, marked as not verified. The call's name (its
+ *   caller's, "· Group FaceTime", for one rung here) opens who is in it and who was invited, each of
+ *   those rung again with a tap of theirs; nobody can be added (a new call with everyone is).
+ * - A group ring from someone the user does not know offers Ignore (nothing is sent) and is
+ *   answered without the camera.
  *
  * Not exported; started by the chat screens (main process), the call notices, and nothing else.
  */
@@ -90,9 +113,39 @@ class FaceTimeCallActivity : AppCompatActivity() {
 
     /** What waits for the permissions' answer. */
     private sealed class Pending {
-        data class Place(val peer: String, val name: String, val video: Boolean, val from: String?, val conversationId: String?, val photo: String?) : Pending()
+        data class Place(
+            val peer: String,
+            val name: String,
+            val video: Boolean,
+            val from: String?,
+            val conversationId: String?,
+            val photo: String?,
+            val peers: List<String> = listOf(peer),
+        ) : Pending()
         data class Answer(val guid: String, val withCamera: Boolean) : Pending()
     }
+
+    /** In a picture-in-picture window now. */
+    @VisibleForTesting
+    internal var inPip = false
+        private set
+
+    /** The screen went off while it floated: its camera was paused for it ([screenOff]). */
+    private var pausedForScreenOff = false
+    private var screenOff: BroadcastReceiver? = null
+
+    /** What the window's buttons and shape were last set to ([updatePip]), so they are set again only when they change. */
+    private var pipSet: Any? = null
+
+    /** The group call's tiles, by participant id: their views, and which is big ([focused]). */
+    private val tileViews = LinkedHashMap<Long, Tile>()
+    private var focused: Long? = null
+    private var screenSurface: Surface? = null
+
+    /** The participant sheet, while it is open. */
+    @VisibleForTesting
+    internal var sheet: ParticipantSheet? = null
+        private set
 
     private var pending: Pending? = null
 
@@ -114,16 +167,12 @@ class FaceTimeCallActivity : AppCompatActivity() {
     private var remoteSurface: Surface? = null
     private var previewSurface: Surface? = null
 
-    /** The user's pinch, drag and double tap on the other side's picture. */
-    private val remoteZoom = VideoFit.Zoom()
-
-    /** The picture's decoder already turns it (its SurfaceTexture's transform says so): it is not turned again. */
-    private var textureTurned = false
-    private var textureChecked = false
-    private val textureMatrix = FloatArray(16)
-
-    /** The shape and turn the zoom was made for: another stream starts fresh. */
-    private var zoomFor: Triple<Int, Int, Int>? = null
+    /**
+     * The other side's picture and a shared screen, each turned upright by its stream, in its own
+     * shape, with the user's pinch, drag and double tap (a group call's tiles have one each too).
+     */
+    private val remoteFit by lazy { FittedVideo(binding.remoteVideo) }
+    private val screenFit by lazy { FittedVideo(binding.screenVideo, fixedFill = false) }
 
     /** How the camera in use is mounted, by side (read once). */
     private val sensors = HashMap<Boolean, Int?>()
@@ -152,7 +201,7 @@ class FaceTimeCallActivity : AppCompatActivity() {
         // The session's service is what hands the call's row and log lines to the main process.
         DirectService.start(this)
 
-        binding.accept.setOnClickListener { shown.first?.let { answer(it.guid, withCamera = it.video) } }
+        binding.accept.setOnClickListener { shown.first?.let { answer(it.guid, withCamera = it.video && !it.ignoreOnly) } }
         binding.audioOnly.setOnClickListener { shown.first?.let { answer(it.guid, withCamera = false) } }
         binding.decline.setOnClickListener { shown.first?.let { calls.decline(it.guid) } }
         binding.end.setOnClickListener { calls.hangUp(shown.first?.guid) }
@@ -168,6 +217,11 @@ class FaceTimeCallActivity : AppCompatActivity() {
         binding.remoteVideo.surfaceTextureListener = remoteListener
         binding.localPreview.surfaceTextureListener = previewListener
         setUpRemoteGestures()
+        binding.screenVideo.surfaceTextureListener = screenListener
+        // A group call's name opens who is in it (as iPhone's call info).
+        binding.info.setOnClickListener { if (shown.first?.let { it.group && it.joined } == true) openPeople() }
+        dragPreview()
+        binding.tiles.addOnLayoutChangeListener { _, l, t, r, b, ol, ot, or, ob -> if (r - l != or - ol || b - t != ob - ot) layoutTiles() }
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() = stepBack()
@@ -176,6 +230,12 @@ class FaceTimeCallActivity : AppCompatActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 combine(calls.state, calls.media) { call, media -> call to media }.collect { (call, media) -> render(call, media) }
+            }
+        }
+        // A group call's tiles follow what the library asks for and who it says is in the call, with what is known of them.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                combine(calls.surfaces.requested, calls.labels) { _, _ -> Unit }.collect { render(calls.state.value, calls.media.value) }
             }
         }
         lifecycleScope.launch {
@@ -236,10 +296,41 @@ class FaceTimeCallActivity : AppCompatActivity() {
         binding.root.post {
             fitRemote()
             fitPreview()
+            fitScreen()
         }
     }
 
+    /** Home pressed, or another app came in front, by the user: a video call that is on floats on. */
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        enterPip()
+    }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        pipChanged(isInPictureInPictureMode)
+    }
+
+    /** In or out of the window: the screen's buttons and texts go or come back, and the screen going off is watched while it floats. */
+    @VisibleForTesting
+    internal fun pipChanged(floating: Boolean) {
+        inPip = floating
+        // The window shows each picture whole in its shape, as the user left it unzoomed.
+        if (floating) {
+            remoteFit.zoom.reset()
+            screenFit.zoom.reset()
+            tileViews.values.forEach { it.video?.zoom?.reset() }
+        }
+        if (floating) watchScreenOff() else stopWatchingScreenOff()
+        // The small picture of the user's own camera is not in the window: the camera goes on into the call only, and is back with the screen.
+        previewSurface?.let { surface -> if (floating) calls.detachPreview(surface) {} else calls.attachPreview(surface) }
+        sheet?.dismiss()
+        render(calls.state.value, calls.media.value)
+    }
+
     override fun onDestroy() {
+        stopWatchingScreenOff()
+        sheet?.dismiss()
         ticker?.cancel()
         // A placed call's "no answer" goes with its screen.
         if (isFinishing && calls.state.value?.phase == Phase.UNANSWERED) calls.hangUp()
@@ -286,7 +377,11 @@ class FaceTimeCallActivity : AppCompatActivity() {
             if (calls.state.value == null) finishCall()
             return
         }
-        val peer = intent.getStringExtra(EXTRA_PEER)?.let { CallIds.handle(it) ?: Handles.normalize(it)?.let(CallIds::handle) }
+        fun callable(raw: String) = CallIds.handle(raw) ?: Handles.normalize(raw)?.let(CallIds::handle)
+        // A group call: everyone it goes to (each once, a group call's worth at most), the first first.
+        val peers = (listOfNotNull(intent.getStringExtra(EXTRA_PEER)) + intent.getStringArrayListExtra(EXTRA_PEERS).orEmpty().take(MAX_PEOPLE))
+            .mapNotNull(::callable).distinctBy(CallIds::key).take(MAX_PEOPLE)
+        val peer = peers.firstOrNull()
         if (peer == null) {
             refuse(Refusal.NOT_CALLABLE)
             return
@@ -299,6 +394,7 @@ class FaceTimeCallActivity : AppCompatActivity() {
             conversationId = intent.getStringExtra(EXTRA_CONVERSATION)?.takeIf { it.length <= MAX_ID_CHARS },
             // A picture only from the app's own files.
             photo = intent.getStringExtra(EXTRA_PHOTO)?.takeIf { DirectPaths.isAllowed(it, DirectPaths.forApp(this)) },
+            peers = peers,
         )
         place(request)
     }
@@ -374,7 +470,7 @@ class FaceTimeCallActivity : AppCompatActivity() {
         if (request.video && !video) say(getString(R.string.facetime_camera_denied))
         lastPlaced = request
         await()
-        calls.place(request.peer, request.name, video, request.from, request.conversationId, request.photo)
+        calls.place(request.peer, request.name, video, request.from, request.conversationId, request.photo, request.peers)
     }
 
     private fun answer(guid: String, withCamera: Boolean) {
@@ -440,7 +536,7 @@ class FaceTimeCallActivity : AppCompatActivity() {
             afterUnlock { callAgain() }
             return
         }
-        val again = lastPlaced ?: shown.first?.takeIf { it.outgoing }?.let { Pending.Place(it.peer, it.name, it.video, it.from, it.conversationId, it.photo) } ?: return
+        val again = lastPlaced ?: shown.first?.takeIf { it.outgoing }?.let { Pending.Place(it.peer, it.name, it.video, it.from, it.conversationId, it.photo, it.peers) } ?: return
         hadCall = false
         holdingNotice = true
         calls.hangUp(shown.first?.guid)
@@ -517,41 +613,55 @@ class FaceTimeCallActivity : AppCompatActivity() {
         awaiting?.cancel()
         awaiting = null
         if (holdingNotice && call.live) clearNotice()
-        val name = FaceTimeNotices.nameOf(call)
+        // A group call rung here is its caller's ("Alice · Group FaceTime"); a person's call, theirs.
+        val name = FaceTimeNotices.title(this, call)
         val address = Handles.display(call.peer)
-        // The other side's picture, or this phone's own camera, makes it a screen of pictures.
-        val pictures = call.joined && media.remoteVideo
-        Avatars.bind(binding.avatar, name, call.peer, "", call.photo?.takeIf { DirectPaths.isAllowed(it, DirectPaths.forApp(this)) }?.let(::File))
+        // A group call's people, each in a tile.
+        val tileIds = if (call.group && call.joined) tileIds(call, media) else emptyList()
+        renderTiles(call, media, tileIds)
+        val grid = tileIds.isNotEmpty()
+        // The other side's picture, a shared screen, a group's tiles, or this phone's own camera, make it a screen of pictures.
+        val pictures = call.joined && (media.remoteVideo || media.screenVideo || grid)
+        Avatars.bind(binding.avatar, FaceTimeNotices.nameOf(call), call.peer, "", call.photo?.takeIf { DirectPaths.isAllowed(it, DirectPaths.forApp(this)) }?.let(::File))
         binding.name.text = name
-        binding.detail.text = address
-        binding.detail.visibility = if (address != name && !pictures) View.VISIBLE else View.GONE
+        // Under a group ring's name, how many others its member list names (never who).
+        val detail = if (call.group && !call.outgoing) FaceTimeNotices.othersText(this, call).orEmpty() else address
+        binding.detail.text = detail
+        binding.detail.visibility = if (detail.isNotEmpty() && detail != name && !pictures) View.VISIBLE else View.GONE
         binding.remoteVideo.contentDescription = getString(R.string.facetime_remote_video, name)
+        binding.info.contentDescription = if (call.group && call.joined) getString(R.string.facetime_people_open) else null
+        binding.info.isClickable = call.group && call.joined
 
         binding.backdrop.visibility = if (pictures) View.GONE else View.VISIBLE
-        binding.scrimTop.visibility = if (pictures) View.VISIBLE else View.GONE
+        binding.scrimTop.visibility = if (pictures && !inPip) View.VISIBLE else View.GONE
         binding.scrimBottom.visibility = binding.scrimTop.visibility
         binding.avatar.visibility = if (pictures) View.GONE else View.VISIBLE
         (binding.info.layoutParams as FrameLayout.LayoutParams).topMargin = dp(if (pictures) 14 else 96)
         binding.info.requestLayout()
         binding.name.textSize = if (pictures) 20f else 30f
-        // Always there (its Surface is ready before the camera starts), seen only with the camera on.
-        binding.previewCard.alpha = if (call.joined && media.cameraOn) 1f else 0f
-        if (pictures) {
-            fitRemote()
-        } else if (remoteZoom.isZoomed || remoteZoom.fill != null || textureChecked) {
-            remoteZoom.reset()
-            remoteZoom.fill = null
-            textureChecked = false
-            textureTurned = false
-            zoomFor = null
-        }
+        // Always there (its Surface is ready before the camera starts), seen only with the camera on (not in the window).
+        binding.previewCard.alpha = if (call.joined && media.cameraOn && !inPip) 1f else 0f
+        // In the picture-in-picture window, the pictures only.
+        binding.content.visibility = if (inPip) View.INVISIBLE else View.VISIBLE
+        // A shared screen: the big picture, whole; the other side's camera small over it.
+        val screen = call.joined && media.screenVideo
+        binding.screenVideo.alpha = if (screen) 1f else 0f
+        binding.screenVideo.contentDescription = getString(R.string.facetime_shared_screen)
+        layoutRemote(small = screen && !call.group)
+        binding.remoteVideo.alpha = if (screen && !media.remoteVideo) 0f else 1f
+        if (screen) screenFit.fit(media.screen) else screenFit.forget()
+        if (pictures) fitRemote() else remoteFit.forget()
         // The camera's picture is laid out for that side's camera once it is known.
         if (call.joined && media.cameraOn) fitPreview()
 
         val ringingIn = call.phase == Phase.RINGING_IN || call.phase == Phase.SCREENING
         binding.incoming.visibility = if (ringingIn) View.VISIBLE else View.GONE
-        binding.audioOnly.visibility = if (ringingIn && call.video) View.VISIBLE else View.GONE
-        binding.accept.setImageResource(if (call.video) R.drawable.ic_ft_video else R.drawable.ic_ft_audio)
+        binding.audioOnly.visibility = if (ringingIn && call.video && !call.ignoreOnly) View.VISIBLE else View.GONE
+        // A group ring from someone the user does not know: Ignore (nothing is sent), and Accept answers without the camera.
+        binding.accept.setImageResource(if (call.video && !call.ignoreOnly) R.drawable.ic_ft_video else R.drawable.ic_ft_audio)
+        val dismiss = getString(if (call.ignoreOnly) R.string.facetime_ignore else R.string.facetime_decline)
+        binding.decline.contentDescription = dismiss
+        binding.declineLabel.text = dismiss
         val held = call.phase == Phase.RINGING_OUT || call.joined
         binding.endColumn.visibility = if (held) View.VISIBLE else View.GONE
         binding.controls.visibility = if (call.phase == Phase.ACTIVE) View.VISIBLE else View.GONE
@@ -579,7 +689,344 @@ class FaceTimeCallActivity : AppCompatActivity() {
         // The screen stays on while it rings and while there are pictures; an audio call's goes dark at the ear.
         val keepOn = ringingIn || call.phase == Phase.RINGING_OUT || call.phase == Phase.CONNECTING || (call.phase == Phase.ACTIVE && (pictures || media.cameraOn))
         if (keepOn) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        updatePip(call, media)
+        sheet?.update(call, calls.labels.value)
     }
+
+    // --- a group call's tiles ----------------------------------------------------------------------
+
+    /**
+     * One person's tile: their picture's view while the library asks for their camera (none past the
+     * camera tiles' cap), their name, and their initials (or, for someone who joined as Apple vouches
+     * for, their contact photo) while there is no picture.
+     */
+    private class Tile(val frame: FrameLayout, var video: FittedVideo?, val label: android.widget.TextView, val initials: android.widget.TextView) {
+        /** The Surface of [video]'s view, while the library has it. */
+        var surface: Surface? = null
+
+        /** The photo [initials] shows (null for initials only), so it is read once. */
+        var photo: String? = null
+    }
+
+    /**
+     * Who of the group call has a tile, in order: those the library asked to draw a camera for
+     * ([TileLayout.MAX_CAMERA_TILES] at most, with a picture), then the others it says are in the
+     * call (their name only), [MAX_TILES] in all.
+     */
+    private fun tileIds(call: Call, media: Media): List<Long> {
+        val cameras = cameraIds().take(TileLayout.MAX_CAMERA_TILES)
+        val others = call.inCall.map { it.id }.filter { it !in cameras }
+        return (cameras + others).distinct().take(MAX_TILES).also { if (media.tiles.isEmpty() && it.isEmpty()) focused = null }
+    }
+
+    /** The tiles of [ids]: made for whoever is new, let go of for whoever is gone, named and laid out. */
+    private fun renderTiles(call: Call, media: Media, ids: List<Long>) {
+        binding.tiles.visibility = if (ids.isEmpty()) View.GONE else View.VISIBLE
+        // Who gets a picture: those the library asks to draw a camera for now, the cap at most.
+        val withVideo = cameraIds().filter { it in ids }.take(TileLayout.MAX_CAMERA_TILES).toSet()
+        // Removing a tile's view tells the library first ([tileListener]), and only then lets go of its Surface.
+        for (gone in tileViews.keys.filter { it !in ids }) {
+            tileViews.remove(gone)?.let { binding.tiles.removeView(it.frame) }
+        }
+        if (focused != null && focused !in ids) focused = null
+        // Pictures no longer asked for go first, so the cap holds for those that are.
+        for ((id, tile) in tileViews) if (id !in withVideo) removeVideo(tile)
+        for (id in ids) {
+            val tile = tileViews[id] ?: makeTile(id).also {
+                tileViews[id] = it
+                binding.tiles.addView(it.frame)
+            }
+            if (id in withVideo && tile.video == null) addVideo(id, tile)
+            val known = calls.labels.value
+            val label = labelOf(id, call, known)
+            tile.label.text = label
+            // A contact photo only for someone who joined as Apple vouches for; else their initials.
+            val photo = photoOf(id, call, known)
+            // Read once (not again on every render, on the main thread); one that could not be read,
+            // or none, shows the initials exactly as a new tile does.
+            if (photo != null && photo != tile.photo) Avatars.bind(tile.initials, label, photo, "", File(photo))
+            tile.photo = photo
+            if (photo == null || tile.initials.background !is androidx.core.graphics.drawable.RoundedBitmapDrawable) plainInitials(tile, label)
+            tile.initials.visibility = if (id in media.tiles) View.GONE else View.VISIBLE
+            tile.frame.contentDescription = getString(R.string.facetime_tile, label)
+            // Each tile's picture as the big one's: upright by its stream, in its own shape, filled or whole by shape, zoomed as the user did.
+            tile.video?.let { v -> media.tiles[id]?.let(v::fit) ?: v.forget() }
+        }
+        layoutTiles()
+    }
+
+    /** [tile]'s initials alone, on no circle, as [makeTile] made them: whatever a photo's bind left is undone. */
+    private fun plainInitials(tile: Tile, label: String) {
+        tile.initials.background = null
+        tile.initials.backgroundTintList = null
+        tile.initials.setTextColor(ContextCompat.getColor(this, R.color.call_on_screen))
+        tile.initials.text = Avatars.initials(label)
+    }
+
+    /** Who the library asks to draw a camera for, in its order. */
+    private fun cameraIds(): List<Long> = calls.surfaces.requested.value
+        .filter { it.second == CallSurfaces.STREAM_CAMERA || it.second == CallSurfaces.STREAM_CAMERA_ALTERNATE }
+        .map { it.first }.distinct()
+
+    private fun makeTile(id: Long): Tile {
+        val frame = FrameLayout(this).apply {
+            background = ContextCompat.getDrawable(this@FaceTimeCallActivity, R.drawable.bg_call_backdrop)
+            clipToOutline = true
+            isClickable = true
+            setOnClickListener {
+                focused = if (focused == id) null else id
+                layoutTiles()
+            }
+        }
+        val initials = android.widget.TextView(this).apply {
+            gravity = android.view.Gravity.CENTER
+            textSize = 28f
+            setTextColor(ContextCompat.getColor(this@FaceTimeCallActivity, R.color.call_on_screen))
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
+        frame.addView(initials, FrameLayout.LayoutParams(dp(TILE_AVATAR_DP), dp(TILE_AVATAR_DP), android.view.Gravity.CENTER))
+        val label = android.widget.TextView(this).apply {
+            textSize = 13f
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setShadowLayer(6f, 0f, 0f, 0x99000000.toInt())
+            setTextColor(ContextCompat.getColor(this@FaceTimeCallActivity, R.color.call_on_screen))
+            setPadding(dp(8), dp(4), dp(8), dp(6))
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
+        frame.addView(label, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, android.view.Gravity.BOTTOM))
+        return Tile(frame, null, label, initials)
+    }
+
+    /** Gives [tile] a picture's view, under its initials and name: the library is given its Surface once there is one. */
+    private fun addVideo(id: Long, tile: Tile) {
+        val v = FittedVideo(TextureView(this))
+        v.view.surfaceTextureListener = tileListener(id, tile, v)
+        // A tap makes it the big one (or not), as the tile's own; pinch, drag and double tap as on the big picture.
+        v.gestures(this, active = { !inPip && id in shown.second.tiles }, tapped = { tile.frame.performClick() })
+        tile.video = v
+        tile.frame.addView(v.view, 0, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+    }
+
+    /** Takes [tile]'s picture's view away: its listener tells the library first, and only then lets go of the Surface. */
+    private fun removeVideo(tile: Tile) {
+        val v = tile.video ?: return
+        tile.video = null
+        tile.frame.removeView(v.view)
+    }
+
+    /**
+     * A tile's view: registered with the call engine once it has a Surface; told first (and only
+     * then let go of) when it goes. Holds its [tile] itself: the tile may already be out of
+     * [tileViews] when its view is taken away.
+     */
+    private fun tileListener(id: Long, holder: Tile, fitted: FittedVideo) = object : TextureView.SurfaceTextureListener {
+
+        override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
+            val surface = Surface(texture)
+            holder.surface = surface
+            calls.attachTile(id, surface)
+            calls.media.value.tiles[id]?.let(fitted::fit)
+        }
+
+        override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
+            calls.media.value.tiles[id]?.let(fitted::fit)
+        }
+
+        override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
+            val surface = holder.surface ?: return true
+            holder.surface = null
+            calls.detachTile(id, surface) {
+                surface.release()
+                texture.release()
+            }
+            return false
+        }
+
+        override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = fitted.frameDrawn(texture)
+    }
+
+    /** The tiles in their places ([TileLayout]): a grid, or the big one and the others small along the top; with a shared screen, all small over it. */
+    private fun layoutTiles() {
+        val w = binding.tiles.width
+        val h = binding.tiles.height
+        if (w <= 0 || h <= 0 || tileViews.isEmpty()) return
+        val ids = tileViews.keys.toList()
+        val screen = calls.media.value.screenVideo
+        val thumb = dp(if (inPip) 40 else 96)
+        val top = dp(if (inPip) 4 else 120)
+        val slots = when {
+            // The shared screen is the big picture: every tile goes small over it.
+            screen -> TileLayout.focused(ids.size + 1, 0, w, h, thumb, dp(TILE_GAP_DP), top).drop(1)
+            focused != null -> TileLayout.focused(ids.size, ids.indexOf(focused), w, h, thumb, dp(TILE_GAP_DP), top)
+            else -> TileLayout.slots(ids.size, w, h, dp(TILE_GAP_DP), dp(TILE_GAP_DP))
+        }
+        ids.forEachIndexed { i, id ->
+            val slot = slots.getOrNull(i) ?: return@forEachIndexed
+            val tile = tileViews[id] ?: return@forEachIndexed
+            tile.frame.layoutParams = FrameLayout.LayoutParams(slot.width, slot.height).apply {
+                leftMargin = slot.x
+                topMargin = slot.y
+            }
+            // The big one under the small ones.
+            if (id == focused && !screen) tile.frame.z = 0f else tile.frame.z = 1f
+        }
+    }
+
+    /**
+     * What a group call's tile [id] is called: as the user knows them (the main process's word) for
+     * someone who joined as Apple vouches for; else the address the call reports, marked as not
+     * verified; a FaceTime link's guest as a guest.
+     */
+    private fun labelOf(id: Long, call: Call, known: Map<String, CallerInfo>): String {
+        val reported = call.inCall.firstOrNull { it.id == id } ?: com.lightdecoder.imessage.facetime.InCall(id, "")
+        return labelText(CallLabels.of(listOf(reported), call.joiners).first(), known)
+    }
+
+    /**
+     * The contact photo tile [id] may show: only for someone who joined as Apple vouches for, as
+     * the main process knows them, and only a file of the app's own; never for anyone else.
+     */
+    private fun photoOf(id: Long, call: Call, known: Map<String, CallerInfo>): String? {
+        val reported = call.inCall.firstOrNull { it.id == id } ?: return null
+        val label = CallLabels.of(listOf(reported), call.joiners).first()
+        if (label.kind != CallLabels.Kind.VERIFIED) return null
+        val handle = label.handle ?: return null
+        return known[CallIds.key(handle)]?.photo?.takeIf { DirectPaths.isAllowed(it, DirectPaths.forApp(this)) }
+    }
+
+    private fun labelText(label: CallLabels.Label, known: Map<String, CallerInfo>): String = when (label.kind) {
+        CallLabels.Kind.VERIFIED -> label.handle?.let { h -> known[CallIds.key(h)]?.name?.takeIf { it.isNotBlank() } ?: Handles.display(h) } ?: getString(R.string.facetime_someone)
+        CallLabels.Kind.GUEST -> getString(R.string.facetime_guest)
+        CallLabels.Kind.NOT_VERIFIED -> CallIds.label(label.handle?.let(Handles::display) ?: label.reported).takeIf { it.isNotEmpty() }
+            ?.let { getString(R.string.facetime_not_verified, it) } ?: getString(R.string.facetime_not_verified_short)
+    }
+
+    /** Who is in the group call and who was invited (as iPhone's call info). */
+    private fun openPeople() {
+        val call = calls.state.value ?: return
+        sheet?.dismiss()
+        sheet = ParticipantSheet(this, calls, ::labelText).also { s ->
+            s.setOnDismissListener { if (sheet === s) sheet = null }
+            s.update(call, calls.labels.value)
+            s.show()
+        }
+    }
+
+    // --- picture in picture ------------------------------------------------------------------------
+
+    /** Whether the call floats on in a window when the screen is left: a video call that is on, with a picture of the other side. */
+    @VisibleForTesting
+    internal fun canPip(call: Call? = calls.state.value, media: Media = calls.media.value): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE) &&
+            call != null && call.phase == Phase.ACTIVE && call.video && media.anyPicture
+
+    /** Floats the call in a window, if it may; true when it does. */
+    private fun enterPip(): Boolean {
+        if (inPip || !canPip() || Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
+        return try {
+            enterPictureInPictureMode(pipParams(calls.state.value!!, calls.media.value))
+        } catch (e: RuntimeException) {
+            false
+        }
+    }
+
+    /** The window's shape (as the pictures are) and its buttons: Mute or Unmute, Camera Off while it is on, End. Never one that answers or places a call. */
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.O)
+    private fun pipParams(call: Call, media: Media): PictureInPictureParams {
+        val builder = PictureInPictureParams.Builder()
+            .setAspectRatio(Rational(pipAspect(call, media), PipParams.DENOMINATOR))
+            .setActions(pipActions(call, media))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) builder.setAutoEnterEnabled(canPip(call, media))
+        return builder.build()
+    }
+
+    /**
+     * The window's shape ([PipParams], over [PipParams.DENOMINATOR]): the picture as it is shown,
+     * turned upright by its stream as the call screen turns it (a shared screen's, the one person's,
+     * or a group call's only tile's); with several tiles, the grid's.
+     */
+    @VisibleForTesting
+    internal fun pipAspect(call: Call, media: Media): Int {
+        val tiles = if (call.group && !media.screenVideo) tileViews.size else 1
+        val (w, h) = when {
+            media.screenVideo -> media.screen.shown
+            call.group -> tileViews.keys.singleOrNull()?.let { media.tiles[it]?.shown } ?: (0 to 0)
+            else -> media.remoteShown
+        }
+        return PipParams.aspect(w, h, tiles)
+    }
+
+    @VisibleForTesting
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.O)
+    internal fun pipActions(call: Call, media: Media): List<RemoteAction> {
+        fun action(action: String, code: Int, icon: Int, title: Int): RemoteAction {
+            val intent = FaceTimeActionReceiver.intent(this, action, call.guid)
+                .setData(Uri.Builder().scheme(PIP_SCHEME).authority(action.substringAfterLast('.').lowercase()).appendPath(call.guid).build())
+            val pending = PendingIntent.getBroadcast(this, code, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+            val text = getString(title)
+            return RemoteAction(Icon.createWithResource(this, icon), text, text, pending)
+        }
+        return listOfNotNull(
+            action(FaceTimeActionReceiver.ACTION_TOGGLE_MIC, PIP_MUTE, if (media.muted) R.drawable.ic_ft_mic_off else R.drawable.ic_ft_mic, if (media.muted) R.string.facetime_unmute else R.string.facetime_mute),
+            if (media.cameraOn) action(FaceTimeActionReceiver.ACTION_CAMERA_OFF, PIP_CAMERA, R.drawable.ic_ft_video_off, R.string.facetime_camera_off) else null,
+            action(FaceTimeActionReceiver.ACTION_HANG_UP, PIP_END, R.drawable.ic_ft_end, R.string.facetime_end),
+        )
+    }
+
+    /** The window's buttons and shape follow the call (and, from Android 12, whether swiping Home floats it), set again only when they change. */
+    private fun updatePip(call: Call, media: Media) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        if (!packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) return
+        val key = listOf(canPip(call, media), media.muted, media.cameraOn, media.remoteShown, media.screenVideo, media.screen.shown, tileViews.size, media.tiles.values.map { it.shown }, call.guid)
+        if (key == pipSet) return
+        pipSet = key
+        try {
+            if (inPip || canPip(call, media) || Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) setPictureInPictureParams(pipParams(call, media))
+        } catch (e: RuntimeException) {
+            // A device that takes no window for it.
+        }
+    }
+
+    /**
+     * While the call floats, the screen going off pauses the camera at once (whatever the window
+     * does over the lock screen), and the unlock brings it back.
+     */
+    private fun watchScreenOff() {
+        if (screenOff != null) return
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                when (intent.action) {
+                    Intent.ACTION_SCREEN_OFF -> {
+                        pausedForScreenOff = true
+                        calls.screenHidden(this@FaceTimeCallActivity)
+                    }
+                    Intent.ACTION_USER_PRESENT -> if (pausedForScreenOff && lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                        pausedForScreenOff = false
+                        calls.screenShown(this@FaceTimeCallActivity)
+                    }
+                }
+            }
+        }
+        val filter = IntentFilter(Intent.ACTION_SCREEN_OFF).apply { addAction(Intent.ACTION_USER_PRESENT) }
+        try {
+            ContextCompat.registerReceiver(this, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+            screenOff = receiver
+        } catch (e: RuntimeException) {
+            // Not watched: the camera still pauses when the screen is stopped.
+        }
+    }
+
+    private fun stopWatchingScreenOff() {
+        val receiver = screenOff ?: return
+        screenOff = null
+        runCatching { unregisterReceiver(receiver) }
+    }
+
+    /** The screen-off receiver of the floating window, for tests. */
+    @VisibleForTesting
+    internal val screenOffReceiver: BroadcastReceiver? get() = screenOff
 
     private fun setStatus(text: String) {
         binding.status.text = text
@@ -647,10 +1094,17 @@ class FaceTimeCallActivity : AppCompatActivity() {
 
     // --- leaving -----------------------------------------------------------------------------------
 
-    /** Back, or the arrow: the call goes on under its notice; with no call to keep, the screen is closed. */
+    /**
+     * Back, or the arrow: a video call that is on floats on in its window; any other call goes on
+     * under its notice; with no call to keep, the screen is closed.
+     */
     private fun stepBack() {
         val call = calls.state.value
-        if (call != null && call.live) moveTaskToBack(true) else leave()
+        if (call != null && call.live) {
+            if (!enterPip()) moveTaskToBack(true)
+        } else {
+            leave()
+        }
     }
 
     /** Close: a "no answer" is dismissed, and the screen goes. */
@@ -675,6 +1129,8 @@ class FaceTimeCallActivity : AppCompatActivity() {
     @VisibleForTesting
     internal fun openChat(conversationId: String) {
         val open = Runnable {
+            // A video call floats on while the chat is open.
+            enterPip()
             try {
                 startActivity(RelayIntents.thread(this, conversationId, service = ChatService.IMESSAGE))
             } catch (e: RuntimeException) {
@@ -746,20 +1202,32 @@ class FaceTimeCallActivity : AppCompatActivity() {
         }
 
         /** Once per stream: whether the decoder turns the picture itself (then it is not turned again). */
-        override fun onSurfaceTextureUpdated(texture: SurfaceTexture) {
-            if (textureChecked) return
-            textureChecked = true
-            val turned = try {
-                texture.getTransformMatrix(textureMatrix)
-                VideoFit.textureIsTurned(textureMatrix)
-            } catch (e: RuntimeException) {
-                false
-            }
-            if (turned != textureTurned) {
-                textureTurned = turned
-                fitRemote()
-            }
+        override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = remoteFit.frameDrawn(texture)
+    }
+
+    private val screenListener = object : TextureView.SurfaceTextureListener {
+        override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
+            val surface = Surface(texture)
+            screenSurface = surface
+            calls.attachScreen(surface)
+            fitScreen()
         }
+
+        override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) = fitScreen()
+
+        /** The library is told first (it lets go of the Surface); only then is it released. */
+        override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
+            val surface = screenSurface
+            screenSurface = null
+            if (surface == null) return true
+            calls.detachScreen(surface) {
+                surface.release()
+                texture.release()
+            }
+            return false
+        }
+
+        override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = screenFit.frameDrawn(texture)
     }
 
     private val previewListener = object : TextureView.SurfaceTextureListener {
@@ -793,16 +1261,72 @@ class FaceTimeCallActivity : AppCompatActivity() {
      * chose with a double tap; then their pinch and drag.
      */
     private fun fitRemote() {
-        val view = binding.remoteVideo
         val m = calls.media.value
-        val key = Triple(m.remoteWidth, m.remoteHeight, m.remoteRotation)
-        if (zoomFor != key) {
-            // Another stream, or the other side turned their phone: back to fitted, and the decoder looked at again.
-            if (zoomFor != null && (zoomFor!!.first != key.first || zoomFor!!.second != key.second)) textureChecked = false
-            zoomFor = key
-            remoteZoom.reset()
+        remoteFit.fit(Media.Picture(m.remoteWidth, m.remoteHeight, m.remoteRotation))
+    }
+
+    /** A shared screen: always shown whole (until the user zooms it). */
+    private fun fitScreen() = screenFit.fit(calls.media.value.screen)
+
+    /** The other side's camera: the whole screen, or a small corner over a shared screen ([small]). */
+    private fun layoutRemote(small: Boolean) {
+        val params = binding.remoteVideo.layoutParams as FrameLayout.LayoutParams
+        val (width, height) = if (small) dp(if (inPip) 48 else 112) to dp(if (inPip) 64 else 150) else FrameLayout.LayoutParams.MATCH_PARENT to FrameLayout.LayoutParams.MATCH_PARENT
+        val top = if (small) dp(if (inPip) 4 else 120) else 0
+        val start = if (small) dp(if (inPip) 4 else 16) else 0
+        if (params.width == width && params.height == height && params.topMargin == top && params.marginStart == start) return
+        params.width = width
+        params.height = height
+        params.gravity = android.view.Gravity.TOP or android.view.Gravity.START
+        params.topMargin = top
+        params.marginStart = start
+        binding.remoteVideo.layoutParams = params
+    }
+
+    /** The user's own small picture can be dragged, and settles in the nearest corner (clear of the call's buttons). */
+    @android.annotation.SuppressLint("ClickableViewAccessibility")
+    private fun dragPreview() {
+        var downX = 0f
+        var downY = 0f
+        var startX = 0f
+        var startY = 0f
+        var dragging = false
+        binding.previewCard.setOnTouchListener { card, e ->
+            if (card.alpha == 0f) return@setOnTouchListener false
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = e.rawX
+                    downY = e.rawY
+                    startX = card.translationX
+                    startY = card.translationY
+                    dragging = false
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = e.rawX - downX
+                    val dy = e.rawY - downY
+                    if (!dragging && dx * dx + dy * dy > dp(8) * dp(8)) dragging = true
+                    if (dragging) {
+                        card.translationX = startX + dx
+                        card.translationY = startY + dy
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (dragging) {
+                        val area = binding.content
+                        val (x, y) = TileLayout.nearestCorner(
+                            card.left + card.translationX, card.top + card.translationY, area.width, area.height, card.width, card.height,
+                            margin = dp(16), top = dp(72), bottom = dp(PREVIEW_BOTTOM_DP),
+                        )
+                        card.animate().translationX((x - card.left).toFloat()).translationY((y - card.top).toFloat()).setDuration(180).start()
+                    }
+                    dragging = false
+                    true
+                }
+                else -> false
+            }
         }
-        view.setTransform(remoteTransform(view.width, view.height, m.remoteWidth, m.remoteHeight, m.remoteRotation, textureTurned, remoteZoom))
     }
 
     /** The small view of the user's own camera: the camera's picture, upright and in its shape, however the screen is turned and the camera mounted. */
@@ -813,44 +1337,12 @@ class FaceTimeCallActivity : AppCompatActivity() {
         view.setTransform(previewTransform(view.width, view.height, screenRotation() ?: Surface.ROTATION_0, sensor))
     }
 
-    /** Pinch to zoom the other side's picture, drag to look around it, double tap to switch between filled and whole. */
+    /** Pinch to zoom the other side's picture (or a shared screen), drag to look around it, double tap to switch between filled and whole. */
     private fun setUpRemoteGestures() {
-        val view = binding.remoteVideo
-        val scale = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
-            override fun onScale(detector: ScaleGestureDetector): Boolean {
-                remoteZoom.scaleBy(detector.scaleFactor, detector.focusX - view.width / 2f, detector.focusY - view.height / 2f)
-                fitRemote()
-                return true
-            }
-        })
-        val gestures = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
-            override fun onDown(e: MotionEvent): Boolean = true
-
-            override fun onScroll(e1: MotionEvent?, e2: MotionEvent, distanceX: Float, distanceY: Float): Boolean {
-                if (scale.isInProgress) return false
-                remoteZoom.panX -= distanceX
-                remoteZoom.panY -= distanceY
-                fitRemote()
-                return true
-            }
-
-            override fun onDoubleTap(e: MotionEvent): Boolean {
-                val m = calls.media.value
-                val (w, h) = VideoFit.upright(m.remoteWidth, m.remoteHeight, VideoFit.degreesForStream(m.remoteRotation))
-                val filled = remoteZoom.fill ?: VideoFit.fillsByDefault(view.width, view.height, w, h)
-                remoteZoom.fill = !filled
-                remoteZoom.reset()
-                fitRemote()
-                return true
-            }
-        })
-        view.setOnTouchListener { _, event ->
-            // Only while the other side's picture shows; otherwise the screen behind takes the touch as before.
-            if (binding.backdrop.visibility == View.VISIBLE) return@setOnTouchListener false
-            scale.onTouchEvent(event)
-            gestures.onTouchEvent(event)
-            true
-        }
+        // Only while the other side's picture shows; otherwise the screen behind takes the touch as before.
+        // (A group call's people are in tiles of their own: its big view is not used, and a shared screen under it takes the touch.)
+        remoteFit.gestures(this, active = { binding.backdrop.visibility != View.VISIBLE && !inPip && shown.first?.group != true })
+        screenFit.gestures(this, active = { binding.screenVideo.alpha > 0f && !inPip })
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
@@ -869,8 +1361,27 @@ class FaceTimeCallActivity : AppCompatActivity() {
         const val EXTRA_GUID = "com.lightdecoder.facetime.extra.GUID"
         const val EXTRA_WITH_CAMERA = "com.lightdecoder.facetime.extra.WITH_CAMERA"
 
+        /** Everyone a group call goes to (the first also as [EXTRA_PEER]). */
+        const val EXTRA_PEERS = "com.lightdecoder.facetime.extra.PEERS"
+
         /** A call is placed only for an intent made this recently (never one kept from before). */
         private const val PLACE_FRESH_MS = 20_000L
+
+        /** The most tiles a group call shows (the others are in its list of people). */
+        private const val MAX_TILES = 9
+        private const val TILE_GAP_DP = 4
+
+        /** The size of a tile's initials or contact photo. */
+        private const val TILE_AVATAR_DP = 88
+
+        /** The small picture's corners keep this far from the bottom (the call's buttons). */
+        private const val PREVIEW_BOTTOM_DP = 220
+
+        /** The picture-in-picture window's buttons: told apart by their data and their request codes. */
+        private const val PIP_SCHEME = "lightdecoder-facetime-pip"
+        private const val PIP_MUTE = 21
+        private const val PIP_CAMERA = 22
+        private const val PIP_END = 23
 
         /** The call engine is given this long to show a call it was asked for (it may first wait for the session). */
         private const val AWAIT_MS = FaceTimeCalls.CONNECT_WAIT_MS + 4_000L
@@ -902,6 +1413,20 @@ class FaceTimeCallActivity : AppCompatActivity() {
                 if (conversationId != null) putExtra(EXTRA_CONVERSATION, conversationId)
                 if (photo != null) putExtra(EXTRA_PHOTO, photo)
             }
+
+        /**
+         * Places one group FaceTime call to everyone of [peers] (their addresses) on the user's tap,
+         * from a group chat ([conversationId]) or the FaceTime list, called [name] there.
+         */
+        fun placeIntent(
+            context: Context,
+            peers: List<String>,
+            name: String,
+            video: Boolean,
+            from: String?,
+            conversationId: String?,
+        ): Intent = placeIntent(context, peers.first(), name, video, from, conversationId)
+            .putStringArrayListExtra(EXTRA_PEERS, ArrayList(peers.take(MAX_PEOPLE)))
 
         /** Answers the ringing call [guid] (the notice's Answer and "Audio only"). */
         fun answerIntent(context: Context, guid: String, withCamera: Boolean): Intent =

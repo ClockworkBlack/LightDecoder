@@ -30,6 +30,18 @@
             android:maxLines="1" />
     </com.google.android.material.textfield.TextInputLayout>
 
+    <!-- New FaceTime: everyone picked is in the call together, and sees who else is. -->
+    <TextView
+        android:id="@+id/faceTimeHint"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingHorizontal="16dp"
+        android:paddingTop="4dp"
+        android:text="@string/facetime_calls_new_hint"
+        android:textAppearance="?attr/textAppearanceBodySmall"
+        android:textColor="?attr/colorOnSurfaceVariant"
+        android:visibility="gone" />
+
     <HorizontalScrollView
         android:id="@+id/selectedScroll"
         android:layout_width="match_parent"

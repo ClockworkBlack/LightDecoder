@@ -395,6 +395,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         setContentView(binding.root)
         applySystemBarAndImePadding(binding.root)
         setSupportActionBar(binding.toolbar)
+        // A FaceTime call that goes on: back to it from the top (as iPhone's green bar).
+        returnToCall = ReturnToCallBar.attach(this, binding.root, binding.root.indexOfChild(binding.toolbar))
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
         manager = ScreenBackends.get(this, RelayIntents.serviceOf(intent))
         repo = manager.repo
@@ -942,9 +944,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             val background = backgroundChat?.let { chat ->
                 runCatching { com.lightdecoder.imessage.direct.ChatBackgrounds(applicationContext).of(chat) }.getOrNull()
             }
-            // FaceTime: from this iMessage chat, or the person's shown here, when it is a chat with one person the library reaches.
+            // FaceTime: from this iMessage chat, or the person's shown here, when it is a chat with one person the library reaches;
+            // or from an iMessage group chat, to its members (a group call needs no iMessage group id).
+            val faceTimeGroup = link.service == ChatService.IMESSAGE && conversation?.isGroup == true
             val faceTimeChat = (if (link.service == ChatService.IMESSAGE) id else companion)
-                ?.takeIf { direct != null && it in reachable && direct.faceTimeTarget(it) != null }
+                ?.takeIf { direct != null && if (faceTimeGroup) direct.faceTimeGroup(it) != null else it in reachable && direct.faceTimeTarget(it) != null }
             // Replies among the person's iMessages shown here quote from the iMessage archive.
             val known = HashMap<String, MessageRow>()
             val quotes = quotesFor(listOfNotNull(repo, imRepo), shown, known)
@@ -971,7 +975,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 junk = link.service == ChatService.IMESSAGE && direct != null && direct.active && direct.junkReportable(id),
                 othersUnread = if (imRepo == null) emptyList() else chats.drop(1).filter { runCatching { imRepo.conversation(it)?.unread == true }.getOrDefault(false) },
                 faceTimeChat = faceTimeChat,
-                faceTimeCapable = faceTimeChat?.let { direct?.faceTimeCapableKnown(it) },
+                faceTimeCapable = faceTimeChat?.let { if (faceTimeGroup) direct?.faceTimeGroupCapableKnown(it) else direct?.faceTimeCapableKnown(it) },
             )
         }
         if (grow) growPending = false
@@ -4246,6 +4250,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     // --- FaceTime ------------------------------------------------------------------------------
 
+    /** The "return to call" bar at the top. */
+    @VisibleForTesting
+    internal var returnToCall: ReturnToCallBar? = null
+        private set
+
     /**
      * The iMessage chat a FaceTime call from this conversation goes from: this chat, or the person's
      * iMessage chat shown here, when it is a chat with one person the iMessage library reaches and
@@ -4266,9 +4275,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     internal fun faceTimeOffered(): Boolean = com.lightdecoder.imessage.facetime.FaceTimeButtons.shown(
         faceTimeOn = com.lightdecoder.imessage.direct.DirectPrefs.faceTimeOn(this),
         reachable = faceTimeChat != null,
-        oneToOne = conversation?.isGroup != true,
         capable = faceTimeCapable,
     )
+
+    /** Whether a FaceTime call from here is a group's (to its members). */
+    private fun faceTimeIsGroup(): Boolean = manager.service == ChatService.IMESSAGE && conversation?.isGroup == true
 
     /**
      * What a load found of FaceTime for this conversation; when it is not known yet whether the
@@ -4283,8 +4294,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         if (chat == null || capable != null || faceTimeAsked == chat) return
         faceTimeAsked = chat
         val direct = com.lightdecoder.imessage.direct.DirectLink.get(applicationContext)
+        val group = faceTimeIsGroup()
         lifecycleScope.launch {
-            val answer = withContext(Dispatchers.IO) { runCatching { direct.faceTimeCapable(chat) }.getOrNull() }
+            val answer = withContext(Dispatchers.IO) { runCatching { if (group) direct.faceTimeGroupCapable(chat) else direct.faceTimeCapable(chat) }.getOrNull() }
             if (faceTimeChat == chat && answer != null && answer != faceTimeCapable) {
                 faceTimeCapable = answer
                 invalidateOptionsMenu()
@@ -4318,6 +4330,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     internal fun startFaceTime(video: Boolean) {
         val chat = faceTimeChat ?: return toast(getString(R.string.facetime_not_available))
         val direct = com.lightdecoder.imessage.direct.DirectLink.get(applicationContext)
+        if (faceTimeIsGroup()) return startGroupFaceTime(direct, chat, video)
         lifecycleScope.launch {
             val target = withContext(Dispatchers.IO) { direct.faceTimeTarget(chat) }
             if (target == null) {
@@ -4330,6 +4343,23 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                         this@ThreadActivity, target.peer, target.name, video, target.from, target.conversationId, target.photo,
                     ),
                 )
+            } catch (e: RuntimeException) {
+                toast(getString(R.string.facetime_not_available))
+            }
+        }
+    }
+
+    /** A group FaceTime call from the group chat [chat]: to its members who can be called, one call to all of them. */
+    private fun startGroupFaceTime(direct: com.lightdecoder.imessage.direct.DirectLink, chat: String, video: Boolean) {
+        lifecycleScope.launch {
+            val group = withContext(Dispatchers.IO) { direct.faceTimeGroup(chat) }
+            val peers = group?.let { direct.faceTimeCallable(it) }.orEmpty()
+            if (group == null || peers.isEmpty()) {
+                toast(getString(R.string.facetime_not_available))
+                return@launch
+            }
+            try {
+                startActivity(com.lightdecoder.ui.imessage.FaceTimeCallActivity.placeIntent(this@ThreadActivity, peers, group.name, video, group.from, group.conversationId))
             } catch (e: RuntimeException) {
                 toast(getString(R.string.facetime_not_available))
             }

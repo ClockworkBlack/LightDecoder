@@ -37,6 +37,12 @@
         android:title="@string/imessage_new_group"
         android:visible="false"
         app:showAsAction="never" />
+    <!-- Messages tab, through the iMessage library with FaceTime on: recent FaceTime calls (ui.chat.CallsActivity), with how many were missed. -->
+    <item
+        android:id="@+id/action_facetime_calls"
+        android:title="@string/facetime_calls"
+        android:visible="false"
+        app:showAsAction="never" />
     <item
         android:id="@+id/action_link_status"
         android:title="@string/chat_link_status"

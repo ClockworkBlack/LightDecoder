@@ -336,15 +336,22 @@
         <service
             android:name=".imessage.direct.DirectSinkService"
             android:exported="false" />
+        <!-- The FaceTime list (recent calls, New FaceTime), from the chats' menu: the app's own screen only. -->
+        <activity
+            android:name=".ui.chat.CallsActivity"
+            android:exported="false" />
         <!--
             FaceTime calls (imessage/facetime), in the ":imessage" process: the library's call is
             a pointer into that process's session, and it records and plays the call's sound there.
             The call screen (ringing, in a call) shows over the lock screen and turns the screen on,
             as a phone call does; it shows the call only, and opening the chat from it asks for the
-            unlock first. The service keeps the call up under its "in call" notice; the receiver
-            takes that notice's Hang up and an incoming call's Decline. None is exported: only the
-            app's own screens and notifications reach them (nor is anything else of the iMessage
-            process, the Apple Account's sign-in screen included).
+            unlock first. A video call that is on floats on in a picture-in-picture window when the
+            screen is left (its camera pauses at once when the screen goes off). The service keeps
+            the call up under its "in call" notice; the receiver takes that notice's Hang up, an
+            incoming call's Decline (Ignore), and the window's Mute, Camera Off and End (it never
+            answers or places a call). None is exported: only the app's own screens, notifications
+            and window reach them (nor is anything else of the iMessage process, the Apple Account's
+            sign-in screen included).
         -->
         <activity
             android:name=".ui.imessage.FaceTimeCallActivity"
@@ -353,6 +360,7 @@
             android:launchMode="singleInstance"
             android:process=":imessage"
             android:showWhenLocked="true"
+            android:supportsPictureInPicture="true"
             android:taskAffinity=":facetime"
             android:theme="@style/Theme.LightDecoder.Call"
             android:turnScreenOn="true"

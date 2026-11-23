@@ -48,6 +48,10 @@ class FakeBridge : CallBridge {
         sessions += CallSessionInfo(guid, myHandles, participants + handle, System.currentTimeMillis(), video, active = false)
     }
 
+    override suspend fun ringMembers(guid: String, handles: List<String>) {
+        log += "ringMembers:$guid:${handles.joinToString(",")}"
+    }
+
     /** How long a take-back or a decline waits for a join that holds [guard] (the real one: [GUARD_WAIT_MS]). */
     @Volatile
     var guardWaitMs = GUARD_WAIT_MS
@@ -371,6 +375,13 @@ class FakeCallEngine(app: android.content.Context) {
     /** A call from [caller] that the library lists and Apple just announced. */
     fun ring(guid: String, video: Boolean = false, caller: String = FakeBridge.ALICE) {
         bridge.incoming(guid, caller, video)
+        calls.onEvent(uniffi.rust_bridge.FaceTimeEvent.JoinEvent(guid, 7uL, caller, true))
+    }
+
+    /** A group call from [caller] (its member list also naming [others]) that the library lists and Apple just announced. */
+    fun ringGroup(guid: String, others: List<String>, video: Boolean = false, caller: String = FakeBridge.ALICE) {
+        bridge.sessions.removeAll { it.guid == guid }
+        bridge.sessions += CallSessionInfo(guid, bridge.myHandles, listOf(caller) + others + bridge.myHandles, System.currentTimeMillis(), video, true)
         calls.onEvent(uniffi.rust_bridge.FaceTimeEvent.JoinEvent(guid, 7uL, caller, true))
     }
 

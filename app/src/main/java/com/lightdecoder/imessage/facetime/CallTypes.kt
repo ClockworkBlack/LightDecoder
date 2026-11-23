@@ -64,7 +64,10 @@ enum class Unanswered { NO_ANSWER, DECLINED, FAILED }
 
 /**
  * The one call. [peer] is the other person's address as the library has it ("tel:+15551234567",
- * "mailto:a@b.c"); [name] what the screens call them ("" until known: their address then).
+ * "mailto:a@b.c"): for an incoming call the sender of its join as Apple vouches for it, for a placed
+ * one the first of [peers]; [name] what the screens call them ("" until known: their address then).
+ * A group call ([group]) was placed to several people ([peers]), or rung by [peer] for a call whose
+ * member list (written by whoever sent it, so only counted: [others]) names more people than them.
  */
 data class Call(
     val guid: String,
@@ -89,11 +92,42 @@ data class Call(
     /** [Phase.UNANSWERED]: why. */
     val unanswered: Unanswered? = null,
     /** How many other people the library says are in the call now, and whether it ever said one was. */
-    val peers: Int = 0,
+    val present: Int = 0,
     val peerSeen: Boolean = false,
     /** The other side left while the library was still joining: nobody is there to join. */
     val abandoned: Boolean = false,
+    /**
+     * Whom it was placed to (each an address [CallIds.handle] takes, [MAX_PEOPLE] at most), [peer]
+     * first; an incoming call's is its caller alone.
+     */
+    val peers: List<String> = listOf(peer),
+    /** A group call: placed to several people, or rung for a call of more than the caller and the user. */
+    val group: Boolean = false,
+    /** An incoming group call: how many other people its member list names besides the caller (a count only, [MAX_PEOPLE] at most). */
+    val others: Int = 0,
+    /**
+     * An incoming group call's member list besides the user, as the caller's phone wrote it: never
+     * shown as who calls, only held against a group chat's members to find where its row goes.
+     */
+    val listed: List<String> = emptyList(),
+    /** A placed group call: who said no so far (by [CallIds.key]); it ends only once every one of [peers] has. */
+    val declined: Set<String> = emptySet(),
+    /** The main process knows the caller (a contact, or a chat the user wrote in): as it said. */
+    val known: Boolean = false,
+    /**
+     * The joined call's people, as the library says them ([CallRules.Input.Participants]), in its
+     * order: their ids, and what it reports as each one's address (never taken as who they are).
+     */
+    val inCall: List<InCall> = emptyList(),
+    /** Who joined the call, by the participant id they joined with, as Apple vouches for it ([CallEvent.Join]): the only names labels are looked up for. */
+    val joiners: Map<Long, String> = emptyMap(),
 ) {
+    /**
+     * A group ring from someone the user does not know: dismissed, it is ignored (nothing is sent,
+     * as declining would tell every address its member list names), and answered without the camera.
+     */
+    val ignoreOnly: Boolean get() = group && !outgoing && !known
+
     /** Ringing here, or about to: nothing of the call is joined yet. */
     val incomingRing: Boolean get() = !outgoing && (phase == Phase.SCREENING || phase == Phase.RINGING_IN)
 
@@ -103,6 +137,12 @@ data class Call(
     /** Whether the library is joining or has joined it (its microphone may be open). */
     val joined: Boolean get() = phase == Phase.CONNECTING || phase == Phase.ACTIVE
 }
+
+/** One of the people of a joined call as the library reports them: its [id] for them, and the address it gives ("" for none). */
+data class InCall(val id: Long, val reported: String)
+
+/** The most people a call is placed to, or counted in it (the library's own lists are cut to this). */
+const val MAX_PEOPLE = 32
 
 /** One call of the library's list (`ftSessions`), as the rules need it. */
 data class CallSessionInfo(
@@ -130,6 +170,14 @@ data class CallLogEntry(
     val quiet: Boolean = false,
     /** The chat it belongs in, where the ":imessage" process was told (a placed call's); else it is found by [peer]. */
     val conversationId: String? = null,
+    /** A group call ([Call.group]). */
+    val group: Boolean = false,
+    /**
+     * A group call's people besides the user ([MAX_PEOPLE] at most): whom it was placed to, or, for
+     * an incoming one, its member list as the caller's phone wrote it. Only ever held against a
+     * group chat's members, to find whether the row goes there ([CallRows.groupRowChat]).
+     */
+    val members: List<String> = emptyList(),
 )
 
 /** What the main process knows of a caller: their contact name, whether they are known (a name, or a chat with them), and the chat. */
@@ -199,8 +247,33 @@ object CallIds {
     /** [name] as it is shown: one line, no control characters, [MAX_NAME_CHARS] at most. */
     fun name(name: String?): String {
         val clean = name.orEmpty().filter { !it.isISOControl() }.trim()
+        return cut(clean)
+    }
+
+    /**
+     * What someone else's phone wrote to be shown as it is (a member's nickname, an address the
+     * library reports for someone in the call): one line with no control characters and no format
+     * characters either (no text turned around, nothing invisible), [MAX_NAME_CHARS] at most. Never
+     * matched against the contacts.
+     */
+    fun label(raw: String?): String {
+        val clean = raw.orEmpty().filter { !it.isISOControl() && Character.getType(it) != Character.FORMAT.toInt() }.trim()
+        return cut(clean)
+    }
+
+    private fun cut(clean: String): String {
         if (clean.length <= MAX_NAME_CHARS) return clean
         val end = if (Character.isHighSurrogate(clean[MAX_NAME_CHARS - 1])) MAX_NAME_CHARS - 1 else MAX_NAME_CHARS
         return clean.substring(0, end)
     }
+
+    /**
+     * What the library reports as the address of someone in the call: kept as it was said (it is
+     * never taken as who they are), without control or format characters, [MAX_HANDLE_CHARS] at most.
+     */
+    fun reported(raw: String?): String =
+        raw.orEmpty().filter { !it.isISOControl() && Character.getType(it) != Character.FORMAT.toInt() }.trim().take(MAX_HANDLE_CHARS)
+
+    /** A FaceTime link's guest ("temp:..."): someone with no address of their own. */
+    fun isGuest(raw: String?): Boolean = raw?.trim()?.startsWith("temp:") == true
 }

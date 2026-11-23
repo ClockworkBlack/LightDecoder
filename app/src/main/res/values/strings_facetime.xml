@@ -104,4 +104,61 @@
     <string name="facetime_silence_unknown_help">A call from someone who is not in your contacts and whom you never wrote to or called here doesn\'t ring. It only shows as a missed call.</string>
     <string name="facetime_full_screen_help">Android has not allowed LightDecoder to show an incoming FaceTime call over the lock screen. It still rings as a notification.</string>
     <string name="facetime_notifications_off">LightDecoder\'s notifications are off, so FaceTime calls can\'t ring.</string>
+
+    <!-- Group FaceTime: a call rung here is its caller's, never named after what its member list says. %1$s: the caller. -->
+    <string name="facetime_group">Group FaceTime</string>
+    <string name="facetime_group_title">%1$s · Group FaceTime</string>
+    <plurals name="facetime_group_others">
+        <item quantity="one">and %d other</item>
+        <item quantity="other">and %d others</item>
+    </plurals>
+    <!-- A group ring from someone you don't know: dismissed without sending anything to the people it names. -->
+    <string name="facetime_ignore">Ignore</string>
+    <!-- Someone in the call only the call itself names (Apple does not vouch for it). %1$s: the address it gives. -->
+    <string name="facetime_not_verified">%1$s (not verified)</string>
+    <string name="facetime_not_verified_short">Not verified</string>
+    <!-- Someone who joined through a FaceTime link. -->
+    <string name="facetime_guest">Guest</string>
+    <string name="facetime_someone">Someone</string>
+    <!-- The call's people (the iPhone call screen's info panel), opened by tapping the call's name. -->
+    <string name="facetime_people_open">Show the people in this call</string>
+    <plurals name="facetime_people">
+        <item quantity="one">%d Person</item>
+        <item quantity="other">%d People</item>
+    </plurals>
+    <string name="facetime_in_call">In Call</string>
+    <string name="facetime_invited">Invited</string>
+    <string name="facetime_ring">Ring</string>
+    <string name="facetime_ring_description">Ring %1$s again</string>
+    <string name="facetime_rung">Ringing…</string>
+    <string name="facetime_ring_failed">They could not be rung.</string>
+    <string name="facetime_nobody_invited">Nobody else was invited to this call.</string>
+    <string name="facetime_add_hint">To add someone, start a new call with everyone.</string>
+    <!-- A call's name from the people picked for it, one more at a time: "Alice & Bob". -->
+    <string name="facetime_names_and">%1$s &amp; %2$s</string>
+    <string name="facetime_you">You</string>
+    <!-- Someone's shared screen, shown whole in the call screen. %1$s: who shares it, as their tile says. -->
+    <string name="facetime_shared_screen">Shared screen</string>
+    <string name="facetime_tile">Video from %1$s. Tap to make it big.</string>
+
+    <!-- The green bar at the top of the chats and a chat while a FaceTime call goes on (as iPhone's). %1$s: how long the call is on (mm:ss). -->
+    <string name="facetime_return">Touch to return to call</string>
+    <string name="facetime_return_time">Touch to return to call · %1$s</string>
+    <string name="facetime_return_description">Return to the FaceTime call with %1$s</string>
+
+    <!-- The FaceTime list: recent calls (as the FaceTime app's), from the chats' menu. -->
+    <string name="facetime_calls">FaceTime</string>
+    <string name="facetime_calls_missed">FaceTime (%1$d missed)</string>
+    <string name="facetime_calls_new">New FaceTime</string>
+    <string name="facetime_calls_empty">No recent calls. FaceTime calls you make or get show up here.</string>
+    <string name="facetime_calls_today">Today</string>
+    <string name="facetime_calls_yesterday">Yesterday</string>
+    <string name="facetime_calls_open_chat">Open Chat</string>
+    <string name="facetime_calls_delete">Delete</string>
+    <string name="facetime_calls_deleted">Call deleted</string>
+    <!-- As TalkBack reads a call in the list. %1$s: who; %2$s: what the call was; %3$s: when. -->
+    <string name="facetime_calls_row_description">%1$s, %2$s, %3$s. Tap to call. Touch and hold for more.</string>
+    <!-- New FaceTime: everyone picked is called together. -->
+    <string name="facetime_calls_new_hint">Everyone you add can see who else is in the call.</string>
+    <string name="facetime_calls_start">FaceTime</string>
 </resources>

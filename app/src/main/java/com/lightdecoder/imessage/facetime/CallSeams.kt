@@ -4,7 +4,7 @@ import com.localob.messaging.app.facetime.FaceTimeInCallService
 
 /**
  * The library's side of a joined call (its JNI functions, on [FaceTimeInCallService]), as the call
- * code uses it: only what a one-to-one call needs. Tests put a fake here; the library itself cannot
+ * code uses it: one camera, the microphone, the views. Tests put a fake here; the library itself cannot
  * run in them. Every one of these may throw (also an Error, when the library's functions are not
  * there): [NativeCall] is the only caller, and catches all of it.
  */
@@ -67,6 +67,9 @@ interface CallBridge {
      */
     suspend fun setLocalInterfaces()
     suspend fun createFacetime(guid: String, handle: String, participants: List<String>, video: Boolean)
+
+    /** Rings [handles] again in call [guid] (`ringFtMembers`): people on its member list who are not in it. */
+    suspend fun ringMembers(guid: String, handles: List<String>)
 
     /**
      * Takes a placed call back, or declines an incoming one. Both wait for [guard], [GUARD_WAIT_MS]

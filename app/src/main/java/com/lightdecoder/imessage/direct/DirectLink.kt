@@ -1527,6 +1527,7 @@ class DirectLink private constructor(
             is DirectArchive.Update.Dropped ->
                 IMessageLog.add(app, "an event from Apple was not taken (${loggableText(update.what, 40)}): ${loggableText(update.why, 160)}")
             is DirectArchive.Update.Account -> accountChanged(update.state, update.restarting)
+            is DirectArchive.Update.FaceTime -> faceTimeChanged(update.state)
             is DirectArchive.Update.ReadElsewhere -> readElsewhere(update)
             is DirectArchive.Update.MarkUnread -> markedUnreadElsewhere(update)
             DirectArchive.Update.PeerCacheInvalidate -> devicesChanged()
@@ -3138,6 +3139,61 @@ class DirectLink private constructor(
     /** Who can be called with FaceTime, as Apple last said ([faceTimeCapable]). */
     private val faceTimeCapability = CapabilityCache()
 
+    private val _faceTime = MutableStateFlow(FaceTimeState.NONE)
+
+    /**
+     * Where FaceTime stands in the ":imessage" process (a call that holds the line, as its screen
+     * calls it), for the "return to call" bar of the chats and a chat: told by that process whenever
+     * it changes ([DirectArchive.Update.FaceTime]), and asked of it ([faceTimeShown]).
+     */
+    val faceTime: StateFlow<FaceTimeState> get() = _faceTime
+
+    /**
+     * Whether the ":imessage" process ever told where FaceTime stands (kept, [FACETIME_PREFS]): only
+     * then is it asked ([faceTimeShown]). Someone who never had a FaceTime call is never asked.
+     */
+    private val faceTimePrefs by lazy { app.getSharedPreferences(FACETIME_PREFS, Context.MODE_PRIVATE) }
+
+    @Volatile
+    private var faceTimeSeen: Boolean? = null
+
+    private fun faceTimeSeen(): Boolean = faceTimeSeen ?: faceTimePrefs.getBoolean(KEY_FACETIME_SEEN, false).also { faceTimeSeen = it }
+
+    /** When where FaceTime stands was last asked ([faceTimeShown]). */
+    @Volatile
+    private var faceTimeAskedAt = 0L
+
+    /** The ":imessage" process says where FaceTime stands now. */
+    private fun faceTimeChanged(state: FaceTimeState) {
+        _faceTime.value = state
+        if (faceTimeSeen() != true) {
+            faceTimeSeen = true
+            faceTimePrefs.edit().putBoolean(KEY_FACETIME_SEEN, true).apply()
+        }
+    }
+
+    /**
+     * The chats or a chat came into sight (and when this process starts, their first): where
+     * FaceTime stands is asked of the ":imessage" process ([DirectWire.FT_STATE]), so the bar is
+     * right however it was told before. Only with iMessage set up and FaceTime on, once FaceTime was
+     * ever told of, and at most once in [FACETIME_ASK_MS] (the answer is what the bar shows).
+     */
+    fun faceTimeShown(now: Long = android.os.SystemClock.elapsedRealtime()) {
+        if (!active || !DirectPrefs.faceTimeOn(app) || !faceTimeSeen()) return
+        if (faceTimeAskedAt != 0L && now - faceTimeAskedAt in 0 until FACETIME_ASK_MS) return
+        faceTimeAskedAt = now
+        scope.launch {
+            val reply = try {
+                requests.call(DirectWire.FT_STATE, DirectWire.faceTimeState(), REACH_TIMEOUT_MS)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                return@launch
+            }
+            if (DirectWire.errorOf(reply) == null) _faceTime.value = FaceTimeState.fromJson(reply)
+        }
+    }
+
     /**
      * Whom a FaceTime call from the chat [conversationId] goes to: the one other person of a chat
      * the library reaches ([peer], their address as the library has it), from the address the chat
@@ -3192,6 +3248,82 @@ class DirectLink private constructor(
         faceTimeTarget(conversationId)?.let { faceTimeCapability.get(CallIds.key(it.peer), now) }
 
     /**
+     * Whom a group FaceTime call from the group chat [conversationId] goes to: its members besides
+     * the user ([peers]: their addresses as the library has them, [com.lightdecoder.imessage.facetime.MAX_PEOPLE]
+     * at most), from the address the chat is carried on, called by the chat's name. A FaceTime call
+     * needs no iMessage group id: a group chat from Blue Bubbles or the relay has one too.
+     */
+    data class FaceTimeGroup(val peers: List<String>, val from: String?, val name: String, val conversationId: String)
+
+    /**
+     * The group FaceTime call of [conversationId], or null: "FaceTime" is off, the library is not set
+     * up, it is no group chat (or one the user left, or deleted), or nobody of it has an address a
+     * call can go to. Reads the archive: not on the main thread.
+     */
+    fun faceTimeGroup(conversationId: String): FaceTimeGroup? {
+        if (!active || !DirectPrefs.faceTimeOn(app)) return null
+        return try {
+            val row = repo.conversation(conversationId) ?: return null
+            if (!row.isGroup || row.readOnly || row.folderEnum == Folder.DELETED) return null
+            val peers = faceTimeTargets(conversationId)
+            if (peers.isEmpty()) return null
+            val from = row.defaultOutgoingId.takeIf { it.isNotBlank() }?.let { Handles.normalize(it) }?.let(CallIds::handle)
+            FaceTimeGroup(peers, from, CallIds.name(row.name).ifBlank { peers.joinToString(", ") { nameOf(it) } }, conversationId)
+        } catch (e: RuntimeException) {
+            null
+        }
+    }
+
+    /** The addresses a group FaceTime call from [conversationId] goes to: its members' besides the user, each once (no iMessage group id needed). */
+    fun faceTimeTargets(conversationId: String): List<String> = try {
+        repo.participants(conversationId).filter { !it.isMe }
+            .mapNotNull { p -> Handles.normalize(p.number.ifBlank { p.id })?.let(CallIds::handle) }
+            .distinctBy(CallIds::key).take(com.lightdecoder.imessage.facetime.MAX_PEOPLE)
+    } catch (e: RuntimeException) {
+        emptyList()
+    }
+
+    /**
+     * Whether a group FaceTime call from [conversationId] can reach anyone, as Apple says: who of its
+     * members can be called is asked through the library (those not remembered, [CapabilityCache]),
+     * and it can when one of them can. False for a chat no group call could go from; null when Apple
+     * could not be asked and nobody is known to be callable.
+     */
+    suspend fun faceTimeGroupCapable(conversationId: String, now: Long = System.currentTimeMillis()): Boolean? {
+        val group = faceTimeGroup(conversationId) ?: return false
+        val unknown = group.peers.filter { faceTimeCapability.get(CallIds.key(it), now) == null }
+        if (unknown.isNotEmpty()) {
+            val reply = try {
+                requests.call(DirectWire.FT_CAPABLE, DirectWire.faceTimeCapable(unknown, group.from), REACH_TIMEOUT_MS)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                null
+            }
+            if (reply != null && DirectWire.errorOf(reply) == null) {
+                val capable = DirectWire.capableOf(reply).map(CallIds::key).toSet()
+                for (peer in unknown) faceTimeCapability.put(CallIds.key(peer), CallIds.key(peer) in capable, now)
+            }
+        }
+        return faceTimeGroupCapableKnown(conversationId, now)
+    }
+
+    /** What is known of a group chat's members, without asking: true when one can be called, false when none can, null otherwise. */
+    fun faceTimeGroupCapableKnown(conversationId: String, now: Long = System.currentTimeMillis()): Boolean? {
+        val group = faceTimeGroup(conversationId) ?: return false
+        val known = group.peers.map { faceTimeCapability.get(CallIds.key(it), now) }
+        return when {
+            known.any { it == true } -> true
+            known.all { it == false } -> false
+            else -> null
+        }
+    }
+
+    /** Of [group]'s members, those a call goes to: everyone but who Apple said cannot be called. */
+    fun faceTimeCallable(group: FaceTimeGroup, now: Long = System.currentTimeMillis()): List<String> =
+        group.peers.filter { faceTimeCapability.get(CallIds.key(it), now) != false }
+
+    /**
      * Who the caller [handle] (their address as the library has it) is, for the ":imessage" process
      * ([DirectWire.CALLER]): the name the user knows them by, their chat here and their picture.
      * Known: someone with a contact's name, or someone the user has written to (or called) in a chat
@@ -3237,10 +3369,11 @@ class DirectLink private constructor(
         val now = System.currentTimeMillis()
         val startedMs = update.startedMs.takeIf { it > 0 }?.coerceAtMost(now + DirectArchive.MAX_FUTURE_MS) ?: now
         val address = Handles.display(peer)
-        // The chat it was placed from, while that is still a chat with this person; else theirs.
+        // The chat it was placed from, while that is still a chat with this person (a group chat of
+        // theirs for a group call); else theirs.
         val placedFrom = update.conversationId.takeIf { it.isNotEmpty() }?.takeIf { chat ->
-            repo.conversation(chat)?.let { !it.isGroup && it.folderEnum != Folder.DELETED } == true && isMember(chat, address)
-        }
+            repo.conversation(chat)?.let { it.isGroup == update.group && it.folderEnum != Folder.DELETED } == true && isMember(chat, address)
+        } ?: groupChatOf(update, peer)
         val described = ConversationDto(
             id = placedFrom ?: DirectArchive.conversationId(listOf(peer), emptySet(), null),
             name = nameOf(peer),
@@ -3296,10 +3429,29 @@ class DirectLink private constructor(
                 engineQuiet = update.quiet, chatMuted = repo.conversation(chatId)?.muted == true,
                 silenceUnknown = DirectPrefs.silenceUnknownFaceTime(app), known = known,
             )
-            val person = repo.participants(chatId).firstOrNull { !it.isMe }
+            // In a group chat, the caller (as Apple vouches for them), never whoever is its first member.
+            val person = repo.participants(chatId).filter { !it.isMe }.let { people -> if (update.group) people.firstOrNull { isAddressOf(it, address) } else people.firstOrNull() }
             val name = person?.name?.takeIf { it.isNotBlank() } ?: nameOf(peer)
             val photo = runCatching { com.lightdecoder.relay.ContactPhotos.get(app).forAddress(address) }.getOrNull()
             FaceTimeNotices.postMissed(app, name, update.video, chatId, startedMs, quiet, photo)
+        }
+    }
+
+    /**
+     * The group chat a group call's row goes in when it was placed from none (an incoming one, or one
+     * from the FaceTime list): one with exactly the call's people, [peer] (its caller, as Apple vouches
+     * for them, or the first it was placed to) among them ([CallRows.groupRowChat]); else null (the
+     * chat with [peer] then). Never one in Deleted or Spam, nor one the user left.
+     */
+    private fun groupChatOf(update: DirectArchive.Update.Call, peer: String): String? {
+        if (!update.group || update.members.size < 2) return null
+        return try {
+            val candidates = repo.conversations(folder = null, limit = GROUP_ROW_CANDIDATES)
+                .filter { it.isGroup && !it.readOnly && it.folderEnum != Folder.DELETED && it.folderEnum != Folder.SPAM }
+                .map { chat -> chat.id to repo.participants(chat.id).filter { !it.isMe }.map { it.number.ifBlank { it.id } } }
+            CallRows.groupRowChat(peer, update.members, candidates) { a, b -> IMessageAddress.same(Handles.display(a), Handles.display(b)) }
+        } catch (e: RuntimeException) {
+            null
         }
     }
 
@@ -3355,6 +3507,8 @@ class DirectLink private constructor(
         fun screenShown(context: Context) {
             if (!DirectEngine.isSetUp(context)) return
             get(context).screenShown()
+            // And where FaceTime stands, for the "return to call" bar.
+            get(context).faceTimeShown()
         }
 
         /** The archive's id for the user (as Blue Bubbles stores it). */
@@ -3559,6 +3713,16 @@ class DirectLink private constructor(
 
         /** This process's own note that an Apple Account was told of ([accountSeen]): Booleans only. */
         private const val ACCOUNT_PREFS = "imessage_account_link"
+
+        /** Whether the ":imessage" process ever told where FaceTime stands ([faceTimeShown] asks only then). */
+        private const val FACETIME_PREFS = "imessage_facetime_link"
+        private const val KEY_FACETIME_SEEN = "seen"
+
+        /** Where FaceTime stands is asked at most this often. */
+        private const val FACETIME_ASK_MS = 2_000L
+
+        /** The most chats looked through for a group call's group chat. */
+        private const val GROUP_ROW_CANDIDATES = 500
         private const val KEY_ACCOUNT_SEEN = "seen"
 
         /** "Stopped typing" goes this long after the last keystroke, as on an iPhone. */

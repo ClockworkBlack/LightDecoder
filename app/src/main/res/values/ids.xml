@@ -6,4 +6,6 @@
     <item name="text_format_italic" type="id" />
     <item name="text_format_underline" type="id" />
     <item name="text_format_strikethrough" type="id" />
+    <!-- The "return to call" bar of the chats and a chat (ui.chat.ReturnToCallBar). -->
+    <item name="returnToCall" type="id" />
 </resources>

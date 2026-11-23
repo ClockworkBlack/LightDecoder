@@ -23,7 +23,7 @@ import org.json.JSONObject
  * poll too), a chat's background, Send Later taken back,
  * a group's name, members and photo, a chat marked unread, a junk report, the people of recent chats
  * told of the user's new device, who can be called with FaceTime, where the optional Apple Account
- * stands), and hands what Apple sends to the
+ * stands, where FaceTime stands), and hands what Apple sends to the
  * main process's [DirectSinkService] (which also says who a FaceTime caller is).
  */
 class DirectService : Service() {
@@ -134,6 +134,8 @@ class DirectService : Service() {
             }
             // The optional Apple Account: where it stands, Booleans only (never the Apple ID).
             DirectWire.ACCOUNT -> DirectWire.accountReply(engine.account.state.value, engine.account.restartPending)
+            // Where FaceTime stands, for the main process's "return to call" bar: only the call there is, if any (nothing is made to answer it).
+            DirectWire.FT_STATE -> com.lightdecoder.imessage.facetime.FaceTimeNotices.state(this, com.lightdecoder.imessage.facetime.FaceTimeCalls.peek()?.state?.value).toJson()
             else -> DirectWire.error("Unknown request $what")
         }
     }

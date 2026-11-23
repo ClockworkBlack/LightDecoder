@@ -12,8 +12,22 @@ import uniffi.rust_bridge.FtSessionInfo
 sealed class CallEvent {
     abstract val guid: String
 
-    /** A device joined the call: [handle] is whose ("" when it does not say); [ring]: it is an invitation to the user. */
-    data class Join(override val guid: String, val handle: String, val ring: Boolean) : CallEvent()
+    /**
+     * A device joined the call: [handle] is whose ("" when it does not say), as Apple vouches for it
+     * (the sender of the join); [ring]: it is an invitation to the user.
+     */
+    data class Join(override val guid: String, val handle: String, val ring: Boolean) : CallEvent() {
+        /**
+         * The id the device joined with (the joiner chose it: it only ever labels the joiner's own
+         * address). Carried along, not part of what makes two joins the same event.
+         */
+        var participant: Long = 0L
+            private set
+
+        constructor(guid: String, handle: String, ring: Boolean, participant: Long) : this(guid, handle, ring) {
+            this.participant = participant
+        }
+    }
 
     /** The user is rung without anyone joining: an explicit invitation, or the user was added to a call. */
     data class Invite(override val guid: String) : CallEvent()
@@ -27,21 +41,31 @@ sealed class CallEvent {
     /** Another of the user's devices answered. */
     data class Elsewhere(override val guid: String) : CallEvent()
 
+    /** People were taken out of the call ([handles]: their addresses, as the event names them; never empty). */
+    data class Removed(override val guid: String, val handles: List<String>) : CallEvent()
+
     companion object {
         /** [e] for the rules, or null: one they have no use for, or whose call id is no call's. */
         fun of(e: FaceTimeEvent): CallEvent? = when (e) {
-            is FaceTimeEvent.JoinEvent -> guid(e.guid)?.let { Join(it, handle(e.handle), e.ring) }
+            is FaceTimeEvent.JoinEvent -> guid(e.guid)?.let { Join(it, handle(e.handle), e.ring, participant(e.participant)) }
             is FaceTimeEvent.Ring -> guid(e.guid)?.let(::Invite)
             is FaceTimeEvent.AddMembers -> if (e.ring) guid(e.guid)?.let(::Invite) else null
             is FaceTimeEvent.Decline -> guid(e.guid)?.let { Decline(it, handle(e.handle)) }
             is FaceTimeEvent.LeaveEvent -> guid(e.guid)?.let { Leave(it, handle(e.handle)) }
             is FaceTimeEvent.RespondedElsewhere -> guid(e.guid)?.let(::Elsewhere)
-            // Not raised for anything a call's flow may depend on (Connected, Disconnected), or not a
-            // one-to-one call's (links, members taken out).
-            is FaceTimeEvent.Connected, is FaceTimeEvent.Disconnected, is FaceTimeEvent.RemoveMembers,
+            // Only ever used to stop the user's own ring: nothing when it names no address.
+            is FaceTimeEvent.RemoveMembers -> guid(e.guid)?.let { g ->
+                e.members.take(MAX_MEMBERS).mapNotNull { CallIds.handle(it.handle) }.takeIf { it.isNotEmpty() }?.let { Removed(g, it) }
+            }
+            // Not raised for anything a call's flow may depend on (Connected, Disconnected), or
+            // FaceTime links (none is ever made here).
+            is FaceTimeEvent.Connected, is FaceTimeEvent.Disconnected,
             is FaceTimeEvent.LinkChanged, is FaceTimeEvent.LetMeIn,
             -> null
         }
+
+        /** A participant id as the rules keep it ([Long]; the library's are unsigned 64-bit). */
+        private fun participant(raw: ULong): Long = raw.toLong()
 
         private fun guid(raw: String): String? = raw.takeIf(CallIds::isGuid)
 

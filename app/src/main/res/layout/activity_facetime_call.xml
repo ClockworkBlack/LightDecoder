@@ -12,6 +12,18 @@
     android:background="@color/call_screen"
     android:keepScreenOn="false">
 
+    <!--
+        Someone's shared screen, shown whole: the library draws into this view's Surface. Always
+        there (its Surface is ready before the library asks), seen only while a screen is shared;
+        then it is the big picture, and the other side's camera goes small over it.
+    -->
+    <TextureView
+        android:id="@+id/screenVideo"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:alpha="0"
+        android:contentDescription="@string/facetime_shared_screen" />
+
     <!-- The other side's camera: the library draws into this view's Surface. -->
     <TextureView
         android:id="@+id/remoteVideo"
@@ -25,6 +37,13 @@
         android:layout_height="match_parent"
         android:background="@drawable/bg_call_backdrop"
         android:importantForAccessibility="no" />
+
+    <!-- A group call's people, each in a tile of their own (ui.imessage.FaceTimeCallActivity lays them out). -->
+    <FrameLayout
+        android:id="@+id/tiles"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone" />
 
     <!-- Over a picture: keeps the name at the top and the buttons at the bottom readable. -->
     <View
@@ -353,6 +372,7 @@
                             app:tint="@color/call_on_control" />
 
                         <TextView
+                            android:id="@+id/declineLabel"
                             style="@style/Widget.LightDecoder.CallLabel"
                             android:text="@string/facetime_decline" />
                     </LinearLayout>

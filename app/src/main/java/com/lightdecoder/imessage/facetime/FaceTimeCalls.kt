@@ -24,6 +24,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import uniffi.rust_bridge.FaceTimeEvent
 
@@ -75,6 +76,8 @@ class FaceTimeCalls internal constructor(
     private val eventRate: EventRate = EventRate(),
     /** The most events that wait to be taken; the oldest makes way for one more. */
     eventBacklog: Int = MAX_EVENT_BACKLOG,
+    /** Told the call there is after every change (null: none), for the main process's "return to call" bar; it says only what changed. */
+    private val tell: (Call?) -> Unit = {},
 ) {
     private val failures = CoroutineExceptionHandler { _, e -> FaceTimeLog.note("call work failed (${e::class.java.simpleName})") }
     private val scope = scope ?: CoroutineScope(SupervisorJob() + Dispatchers.Default + failures)
@@ -102,6 +105,22 @@ class FaceTimeCalls internal constructor(
 
     /** The call screen's views. */
     val surfaces = CallSurfaces()
+
+    private val _labels = MutableStateFlow<Map<String, CallerInfo>>(emptyMap())
+
+    /**
+     * Who the people of a group call that joined as Apple vouches for are to the user (the main
+     * process's word: name, picture), by [CallIds.key] of their address; asked once each per call
+     * ([CallLabels.lookups]), never for anyone else.
+     */
+    val labels: StateFlow<Map<String, CallerInfo>> = _labels
+
+    /** The addresses asked about for [labels] in the call there is (by [CallIds.key]), and that call. */
+    private val labelsAsked = HashSet<String>()
+    private var labelsOf: String? = null
+
+    /** When each address of a group call was last rung again from the call screen ([ringMember]), by [CallIds.key]. */
+    private val rungAgain = HashMap<String, Long>()
 
     private val inputs = Channel<CallRules.Input>(Channel.UNLIMITED)
 
@@ -208,6 +227,8 @@ class FaceTimeCalls internal constructor(
             }
             return
         }
+        // Being taken out of a call is only of use to stop the ring there is: nothing is looked up for any other.
+        if (mapped is CallEvent.Removed && _state.value?.let { it.guid == mapped.guid && it.incomingRing } != true) return
         // Only so many a minute, whoever sends them: each costs a look into the library's call list.
         val own = _state.value?.guid == mapped.guid
         if (!(if (own) ownEventRate else eventRate).allow(now())) {
@@ -241,12 +262,14 @@ class FaceTimeCalls internal constructor(
     // --- the user ----------------------------------------------------------------------------------
 
     /**
-     * Places a call to [peer] (their address as the library has it, or as typed). Only ever from
-     * the call screen, on the user's tap. Why it was not started, if it was not, comes in [messages].
+     * Places a call to [peer] (their address as the library has it, or as typed), and with a group
+     * call to everyone of [peers]. Only ever from the call screen, on the user's tap. Why it was not
+     * started, if it was not, comes in [messages].
      */
-    fun place(peer: String, name: String, video: Boolean, from: String?, conversationId: String?, photo: String? = null) {
-        val to = CallIds.handle(peer) ?: Handles.normalize(peer)?.let(CallIds::handle)
-        if (to == null) {
+    fun place(peer: String, name: String, video: Boolean, from: String?, conversationId: String?, photo: String? = null, peers: List<String> = listOf(peer)) {
+        fun callable(raw: String) = CallIds.handle(raw) ?: Handles.normalize(raw)?.let(CallIds::handle)
+        val people = (listOf(peer) + peers).mapNotNull(::callable).distinctBy(CallIds::key).take(MAX_PEOPLE)
+        if (people.isEmpty()) {
             _messages.tryEmit(CallMessage.NotStarted(Refusal.NOT_CALLABLE))
             return
         }
@@ -257,8 +280,21 @@ class FaceTimeCalls internal constructor(
                 _messages.tryEmit(CallMessage.NotStarted(Refusal.NOT_CONNECTED))
                 return@launch
             }
+            // A group call goes to nobody of the user's own.
+            val to = if (people.size == 1) {
+                people
+            } else {
+                val mine = runCatching { withTimeoutOrNull(LIBRARY_MS) { bridge.handles() } }.getOrNull().orEmpty().map(CallIds::key).toSet()
+                people.filter { CallIds.key(it) !in mine }
+            }
+            if (to.isEmpty()) {
+                _messages.tryEmit(CallMessage.NotStarted(Refusal.NOT_CALLABLE))
+                return@launch
+            }
             inputs.trySend(
-                CallRules.Input.Place(CallIds.newGuid(), to, name, video, from, conversationId?.take(MAX_ID_CHARS), photo, now(), phoneBusy(), settings()),
+                CallRules.Input.Place(
+                    CallIds.newGuid(), to.first(), name, video, from, conversationId?.take(MAX_ID_CHARS), photo, now(), phoneBusy(), settings(), to,
+                ),
             )
         }
     }
@@ -281,6 +317,75 @@ class FaceTimeCalls internal constructor(
     fun setMuted(muted: Boolean) {
         _media.update { it.copy(muted = muted) }
         command { it.microphone(!muted) }
+    }
+
+    /**
+     * The picture-in-picture window's Mute (and Unmute) of call [guid]: only that call, only while it
+     * is joined. Nothing else (nothing is answered or placed by it).
+     */
+    fun toggleMuted(guid: String) {
+        val call = _state.value ?: return
+        if (call.guid != guid || !call.joined) return
+        setMuted(!_media.value.muted)
+    }
+
+    /** The picture-in-picture window's Camera Off of call [guid]: only that call, only while it is joined. Never turns the camera on. */
+    fun cameraOff(guid: String) {
+        val call = _state.value ?: return
+        if (call.guid != guid || !call.joined || !_media.value.cameraOn) return
+        setCamera(false)
+    }
+
+    /**
+     * Rings [handle] again in the group call there is (the participant sheet's "Ring": somebody who
+     * was invited and is not in it): one address a tap, only one the call's member list names, and
+     * the same one at most once in [RING_AGAIN_MS]. False when it was not asked of the library.
+     */
+    suspend fun ringMember(handle: String): Boolean {
+        val call = _state.value ?: return false
+        val who = CallIds.handle(handle) ?: return false
+        if (!call.group || !call.joined) return false
+        val key = CallIds.key(who)
+        val at = now()
+        synchronized(rungAgain) {
+            val last = rungAgain[key]
+            if (last != null && at - last in 0 until RING_AGAIN_MS) return false
+            rungAgain[key] = at
+        }
+        return try {
+            val session = withTimeoutOrNull(LIBRARY_MS) { bridge.session(call.guid) } ?: return false
+            val mine = withTimeoutOrNull(LIBRARY_MS) { bridge.handles() }.orEmpty().map(CallIds::key).toSet()
+            if (CallIds.key(who) in mine || session.members.none { CallIds.handle(it)?.let(CallIds::key) == key }) return false
+            withContext(io) { bridge.ringMembers(call.guid, listOf(who)) }
+            FaceTimeLog.note("${FaceTimeLog.ref(call.guid)}: someone invited was rung again")
+            true
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            FaceTimeLog.note("${FaceTimeLog.ref(call.guid)}: could not ring someone again (${e::class.java.simpleName})")
+            false
+        }
+    }
+
+    /**
+     * Who the group call there is invited and who is not in it, for the participant sheet: the
+     * addresses its member list names (whoever wrote it: they are shown as invited, never looked up),
+     * without the user's own and without those who joined as Apple vouches for. Empty for no group call.
+     */
+    suspend fun invited(): List<String> {
+        val call = _state.value ?: return emptyList()
+        if (!call.group || !call.live) return emptyList()
+        return try {
+            val session = withTimeoutOrNull(LIBRARY_MS) { bridge.session(call.guid) } ?: return emptyList()
+            val mine = (withTimeoutOrNull(LIBRARY_MS) { bridge.handles() }.orEmpty() + session.myHandles).map(CallIds::key).toSet()
+            val joined = _state.value?.takeIf { it.guid == call.guid }?.joiners?.values.orEmpty().map(CallIds::key).toSet()
+            session.members.mapNotNull(CallIds::handle).filter { CallIds.key(it) !in mine && CallIds.key(it) !in joined }
+                .distinctBy(CallIds::key).take(MAX_PEOPLE)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            emptyList()
+        }
     }
 
     /**
@@ -332,6 +437,42 @@ class FaceTimeCalls internal constructor(
     fun attachRemote(surface: Surface) {
         surfaces.setRemote(surface)
         command { it.refreshSurfaces() }
+    }
+
+    /** The call screen's view for a shared screen has a Surface: the library is asked again (a shared screen is drawn into it). */
+    fun attachScreen(surface: Surface) {
+        surfaces.setScreen(surface)
+        command { it.refreshSurfaces() }
+    }
+
+    /** The shared screen's view is going: the library is told first, and only then [released] is called. */
+    fun detachScreen(surface: Surface, released: () -> Unit) {
+        if (surfaces.isScreen(surface)) {
+            surfaces.setScreen(null)
+            _media.update { it.copy(screenVideo = false, screen = Media.Picture()) }
+        }
+        scope.launch(commands) {
+            joined?.native?.refreshSurfaces()
+            released()
+        }
+    }
+
+    /** A group call's tile for [participant] has a Surface: the library is asked again (their camera is drawn into it). */
+    fun attachTile(participant: Long, surface: Surface) {
+        surfaces.setTile(participant, surface)
+        command { it.refreshSurfaces() }
+    }
+
+    /** [participant]'s tile is going: the library is told first, and only then [released] is called. */
+    fun detachTile(participant: Long, surface: Surface, released: () -> Unit) {
+        if (surfaces.isTile(participant, surface)) {
+            surfaces.setTile(participant, null)
+            _media.update { it.copy(tiles = it.tiles - participant) }
+        }
+        scope.launch(commands) {
+            joined?.native?.refreshSurfaces()
+            released()
+        }
     }
 
     /**
@@ -441,7 +582,16 @@ class FaceTimeCalls internal constructor(
     private fun stateChanged(before: Call?, after: Call?) {
         val held = after != null && after.live && !after.incomingRing
         val wasHeld = before != null && before.live && !before.incomingRing
+        runCatching { tell(after) }
         if (held && (!wasHeld || before?.guid != after?.guid)) {
+            // A new call: its views as a call begins (a group's cameras each in a tile of their own).
+            surfaces.newCall(group = after!!.group)
+            synchronized(labelsAsked) {
+                labelsAsked.clear()
+                labelsOf = after.guid
+            }
+            _labels.value = emptyMap()
+            synchronized(rungAgain) { rungAgain.clear() }
             // A new call: its buttons as a call begins.
             pickedRoute = null
             val routes = runCatching { audio.routes() }.getOrDefault(listOf(Route.EARPIECE, Route.SPEAKER))
@@ -451,6 +601,7 @@ class FaceTimeCalls internal constructor(
             foreground.start()
             runCatching { remember(after.guid) }
         }
+        if (after != null && after.group && after.joined) lookUpLabels(after)
         if (!held && wasHeld) {
             // A join of the library's that has not returned may still open the microphone: its notice stays until it has.
             val linger = synchronized(foregroundLock) { (joinsRunning > 0).also { stopOwed = it } }
@@ -526,6 +677,31 @@ class FaceTimeCalls internal constructor(
         }
     }
 
+    /**
+     * The people of the group call [call] who joined as Apple vouches for and are not looked up yet:
+     * asked of the main process, once each in this call ([CallLabels.lookups]); nobody else ever is.
+     */
+    private fun lookUpLabels(call: Call) {
+        val ask = synchronized(labelsAsked) {
+            if (labelsOf != call.guid) return
+            CallLabels.lookups(CallLabels.of(call.inCall, call.joiners), labelsAsked).also { wanted ->
+                labelsAsked += wanted.map(CallIds::key)
+            }
+        }
+        for (handle in ask) {
+            scope.launch {
+                val info = try {
+                    withTimeoutOrNull(LOOKUP_MS) { main.caller(handle) }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    null
+                } ?: return@launch
+                if (_state.value?.guid == call.guid) _labels.update { it + (CallIds.key(handle) to info) }
+            }
+        }
+    }
+
     // --- placing -----------------------------------------------------------------------------------
 
     private fun create(call: Call) {
@@ -535,7 +711,7 @@ class FaceTimeCalls internal constructor(
                 val from = call.from?.takeIf { it in handles } ?: Handles.preferredSender(handles)
                     ?: throw IllegalStateException("no registered address")
                 bridge.setLocalInterfaces()
-                bridge.createFacetime(call.guid, from, listOf(call.peer), call.video)
+                bridge.createFacetime(call.guid, from, call.peers, call.video)
                 true
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -633,35 +809,54 @@ class FaceTimeCalls internal constructor(
 
         override fun buildSurface(participant: Long, stream: Int): Surface? {
             if (!current()) return null
-            val surface = surfaces.forStream(participant, stream)
-            if (surface != null) _media.update { it.copy(remoteVideo = true) }
+            val surface = surfaces.forStream(participant, stream) ?: return null
+            when {
+                surfaces.showsScreen(participant, stream) -> _media.update { it.copy(screenVideo = true) }
+                surfaces.showsTile(participant, stream) -> _media.update { m -> if (participant in m.tiles) m else m.copy(tiles = m.tiles + (participant to Media.Picture())) }
+                else -> _media.update { it.copy(remoteVideo = true) }
+            }
             return surface
         }
 
         override fun streamsRemoved(participant: Long, streams: IntArray) {
             if (!current()) return
+            val screenGone = streams.any { surfaces.showsScreen(participant, it) }
+            val tileGone = streams.any { surfaces.showsTile(participant, it) }
             if (surfaces.removed(participant, streams)) {
                 _media.update { it.copy(remoteVideo = false, remoteWidth = 0, remoteHeight = 0, remoteRotation = Media.ROTATION_NONE) }
             }
+            if (screenGone) _media.update { it.copy(screenVideo = false, screen = Media.Picture()) }
+            if (tileGone) _media.update { it.copy(tiles = it.tiles - participant) }
             command { it.refreshSurfaces() }
         }
 
         override fun videoSize(participant: Long, stream: Int, width: Int, height: Int) {
             if (!current() || width <= 0 || height <= 0 || width > MAX_SIDE || height > MAX_SIDE) return
-            if (surfaces.shows(participant, stream)) _media.update { it.copy(remoteWidth = width, remoteHeight = height) }
+            when {
+                surfaces.shows(participant, stream) -> _media.update { it.copy(remoteWidth = width, remoteHeight = height) }
+                surfaces.showsScreen(participant, stream) -> _media.update { it.copy(screen = it.screen.copy(width = width, height = height)) }
+                surfaces.showsTile(participant, stream) ->
+                    _media.update { m -> m.copy(tiles = m.tiles + (participant to (m.tiles[participant] ?: Media.Picture()).copy(width = width, height = height))) }
+            }
         }
 
         override fun streamRotation(participant: Long, stream: Int, rotation: Int) {
             if (!current() || rotation !in 0..3) return
-            if (surfaces.shows(participant, stream)) _media.update { it.copy(remoteRotation = rotation) }
+            when {
+                surfaces.shows(participant, stream) -> _media.update { it.copy(remoteRotation = rotation) }
+                surfaces.showsScreen(participant, stream) -> _media.update { it.copy(screen = it.screen.copy(rotation = rotation)) }
+                surfaces.showsTile(participant, stream) ->
+                    _media.update { m -> m.copy(tiles = m.tiles + (participant to (m.tiles[participant] ?: Media.Picture()).copy(rotation = rotation))) }
+            }
         }
 
         override fun participants(ids: LongArray, handles: Array<String?>) {
-            if (current()) inputs.trySend(CallRules.Input.Participants(guid, ids.size, now()))
+            if (current()) inputs.trySend(CallRules.Input.Participants.of(guid, ids, handles, now()))
         }
 
         override fun encoderSurface(surface: Surface, group: Int) {
-            // A shared screen's or a second camera's encoder: neither is used here.
+            // A shared screen's or a second camera's encoder: neither is used here (this phone's
+            // screen is never shared).
             if (group == CallSurfaces.GROUP_SCREEN || group == CallSurfaces.GROUP_SECOND_CAMERA || !current()) {
                 surface.release()
                 return
@@ -736,7 +931,7 @@ class FaceTimeCalls internal constructor(
         } catch (e: Throwable) {
             FaceTimeLog.note("the phone's audio could not be given back (${e::class.java.simpleName})")
         }
-        _media.update { it.copy(cameraOn = false, remoteVideo = false) }
+        _media.update { it.copy(cameraOn = false, remoteVideo = false, screenVideo = false, tiles = emptyMap()) }
     }
 
     private fun applyRoute(video: Boolean = _state.value?.video == true && _media.value.cameraOn) {
@@ -776,6 +971,9 @@ class FaceTimeCalls internal constructor(
 
         /** The most of Apple's events that wait to be taken. */
         const val MAX_EVENT_BACKLOG = 256
+
+        /** Somebody invited is rung again from the call screen at most this often. */
+        const val RING_AGAIN_MS = 15_000L
 
         @Volatile
         private var instance: FaceTimeCalls? = null

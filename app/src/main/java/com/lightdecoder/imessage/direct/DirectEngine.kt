@@ -701,6 +701,9 @@ class DirectEngine private constructor(private val app: Context) {
         override suspend fun createFacetime(guid: String, handle: String, participants: List<String>, video: Boolean) =
             uniffi.rust_bridge.createFacetime(live(), guid, handle, participants, video)
 
+        override suspend fun ringMembers(guid: String, handles: List<String>) =
+            uniffi.rust_bridge.ringFtMembers(live(), guid, handles)
+
         // Never while a join runs; and not waiting forever for one that does not come back.
         override suspend fun cancelFacetime(guid: String) =
             guard.withLockWithin(GUARD_WAIT_MS) { uniffi.rust_bridge.cancelFacetime(live(), guid) }
@@ -743,9 +746,38 @@ class DirectEngine private constructor(private val app: Context) {
     internal suspend fun storeCall(entry: CallLogEntry) = store(
         DirectArchive.Update.Call(
             entry.guid, entry.peer, entry.outgoing, entry.video, entry.startedMs, entry.durationMs, entry.outcome.wire, entry.quiet,
-            entry.conversationId.orEmpty(),
+            entry.conversationId.orEmpty(), entry.group, entry.members,
         ),
     )
+
+    /** Where FaceTime stands, as last said ([faceTimeChanged]), and as last told to the main process. */
+    private val faceTimeNow = MutableStateFlow(FaceTimeState.NONE)
+    private val faceTimeTelling = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * Where FaceTime stands, said after every change of the call there is (most say nothing new):
+     * the main process's "return to call" bar is told of each real change, in order, the newest
+     * winning when it cannot keep up. Nothing is told before a call ever held the line.
+     */
+    internal fun faceTimeChanged(state: FaceTimeState) {
+        faceTimeNow.value = state
+        if (!faceTimeTelling.compareAndSet(false, true)) return
+        scope.launch {
+            var told = FaceTimeState.NONE
+            faceTimeNow.collect { now ->
+                if (now == told) return@collect
+                told = now
+                try {
+                    val s = sink ?: return@collect
+                    withTimeoutOrNull(FACETIME_TELL_MS) { s.deliver(DirectArchive.Update.FaceTime(now)) }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    Log.w(TAG, "where FaceTime stands was not told (${e::class.java.simpleName})")
+                }
+            }
+        }
+    }
 
     /** Waits (a little) for [start] to restore the session, for requests that arrive right after the process starts. */
     private suspend fun requireSession(): SharedPushStateHandle {
@@ -1338,6 +1370,9 @@ class DirectEngine private constructor(private val app: Context) {
 
         /** How long the main process is given to take the Apple Account's state (it also asks for it). */
         private const val ACCOUNT_TELL_MS = 3_000L
+
+        /** The main process is given this long to take where FaceTime stands. */
+        private const val FACETIME_TELL_MS = 3_000L
 
         /** How long a restart waits for the event being read ([quiesce]). */
         private const val QUIESCE_MS = 3_000L

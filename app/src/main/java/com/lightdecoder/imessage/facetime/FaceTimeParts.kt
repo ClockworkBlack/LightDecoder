@@ -26,6 +26,8 @@ internal object FaceTimeParts {
             settings = { settings(app) },
             phoneBusy = { FaceTimeAudioRoute.phoneInCall(app) },
             remember = { DirectPrefs.setLiveFaceTimeCall(app, it) },
+            // The main process's "return to call" bar is told whenever where FaceTime stands changed.
+            tell = { call -> engine.faceTimeChanged(FaceTimeNotices.state(app, call)) },
         )
     }
 

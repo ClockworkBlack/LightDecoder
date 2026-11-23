@@ -349,12 +349,13 @@ class FaceTimeLogicTest {
 
     @Test
     fun aChatHasItsFaceTimeButtonsOnlyWhenACallCouldGoFromIt() {
-        assertTrue(FaceTimeButtons.shown(faceTimeOn = true, reachable = true, oneToOne = true, capable = true))
-        assertTrue("not known yet whether they can be called: shown", FaceTimeButtons.shown(true, true, true, null))
-        assertFalse("Apple says they cannot be called", FaceTimeButtons.shown(true, true, true, false))
-        assertFalse("FaceTime is off", FaceTimeButtons.shown(false, true, true, true))
-        assertFalse("not through the iMessage library", FaceTimeButtons.shown(true, false, true, true))
-        assertFalse("a group", FaceTimeButtons.shown(true, true, false, true))
+        assertTrue(FaceTimeButtons.shown(faceTimeOn = true, reachable = true, capable = true))
+        assertTrue("not known yet whether they can be called: shown", FaceTimeButtons.shown(true, true, null))
+        assertFalse("Apple says they cannot be called", FaceTimeButtons.shown(true, true, false))
+        assertFalse("FaceTime is off", FaceTimeButtons.shown(false, true, true))
+        assertFalse("not through the iMessage library", FaceTimeButtons.shown(true, false, true))
+        // A group too, since group calls (SPEC2 B2): its chat is reachable when one of its members can be called.
+        assertTrue("a group", FaceTimeButtons.shown(faceTimeOn = true, reachable = true, capable = true))
     }
 
     @Test

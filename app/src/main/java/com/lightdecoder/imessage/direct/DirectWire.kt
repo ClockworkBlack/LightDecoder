@@ -15,10 +15,10 @@ import org.json.JSONObject
  *
  * Main -> :imessage: [SEND] (with its mentions and link preview), [UNSEND], [REACH], [EDIT], [REACT], [TYPING], [READ], [DOWNLOAD],
  * [EXTENSION], [BACKGROUND], [UNSCHEDULE], [RENAME], [MEMBERS], [GROUP_PHOTO], [MARK_UNREAD], [REPORT_JUNK], [PEERS], [FT_CAPABLE],
- * [ACCOUNT] (requests, answered with the same request id; a failure is answered with [error]). Never raw media bytes: files are
- * passed by path, in the app's own storage; never credentials.
- * :imessage -> main: [UPDATE] (an archive change from Apple, a FaceTime call's row, the Apple Account's state), answered once it
- * is stored; only then does the library forget the event. And [CALLER] (who is calling), answered at once.
+ * [ACCOUNT], [FT_STATE] (requests, answered with the same request id; a failure is answered with [error]). Never raw media bytes:
+ * files are passed by path, in the app's own storage; never credentials.
+ * :imessage -> main: [UPDATE] (an archive change from Apple, a FaceTime call's row, the Apple Account's state, where FaceTime
+ * stands), answered once it is stored; only then does the library forget the event. And [CALLER] (who is calling), answered at once.
  */
 object DirectWire {
 
@@ -109,6 +109,14 @@ object DirectWire {
      */
     const val ACCOUNT = 21
 
+    /**
+     * Where FaceTime stands ([FaceTimeState]: whether a call holds the line, which, what it is called
+     * on the call screen, since when it is on), asked with an empty request ([faceTimeState]), for the
+     * main process's "return to call" bar. The ":imessage" process also tells it unasked, as an
+     * [UPDATE] of kind "callstate", whenever it changes.
+     */
+    const val FT_STATE = 22
+
     const val REPLY = 100
 
     /**
@@ -120,8 +128,11 @@ object DirectWire {
         "READ" to READ, "DOWNLOAD" to DOWNLOAD, "EXTENSION" to EXTENSION, "UPDATE" to UPDATE, "BACKGROUND" to BACKGROUND,
         "UNSCHEDULE" to UNSCHEDULE, "RENAME" to RENAME, "MEMBERS" to MEMBERS, "GROUP_PHOTO" to GROUP_PHOTO,
         "MARK_UNREAD" to MARK_UNREAD, "REPORT_JUNK" to REPORT_JUNK, "PEERS" to PEERS, "FT_CAPABLE" to FT_CAPABLE,
-        "CALLER" to CALLER, "ACCOUNT" to ACCOUNT,
+        "CALLER" to CALLER, "ACCOUNT" to ACCOUNT, "FT_STATE" to FT_STATE,
     )
+
+    /** The [FT_STATE] request: there is nothing to say. */
+    fun faceTimeState(): JSONObject = JSONObject()
 
     /** The [ACCOUNT] request: nothing to say, or that one of the main process's screens is in sight ([visible]). */
     fun account(visible: Boolean = false): JSONObject = JSONObject().apply { if (visible) put("visible", true) }
@@ -463,8 +474,8 @@ object DirectWire {
     fun capableOf(o: JSONObject): List<String> =
         o.optJSONArray("capable")?.let { a -> (0 until minOf(a.length(), MAX_FT_TARGETS)).mapNotNull { CallIds.handle(a.optString(it)) } }.orEmpty()
 
-    /** The most addresses one [FT_CAPABLE] asks about. */
-    const val MAX_FT_TARGETS = 8
+    /** The most addresses one [FT_CAPABLE] asks about: a group call's people. */
+    const val MAX_FT_TARGETS = com.lightdecoder.imessage.facetime.MAX_PEOPLE
 
     /** Ask who the caller [handle] is ([CALLER]). */
     fun caller(handle: String): JSONObject = JSONObject().put("handle", handle)
@@ -786,6 +797,8 @@ object DirectWire {
             .put("outcome", u.outcome)
             .apply { if (u.quiet) put("quiet", true) }
             .apply { if (u.conversationId.isNotEmpty()) put("conversationId", u.conversationId) }
+            .apply { if (u.group) put("group", true).put("members", JSONArray(u.members.take(MAX_FT_TARGETS))) }
+        is DirectArchive.Update.FaceTime -> u.state.toJson().put("kind", "callstate")
         is DirectArchive.Update.Note -> JSONObject().put("kind", "note").put("line", u.line.take(MAX_NOTE_CHARS))
         is DirectArchive.Update.Dropped -> JSONObject().put("kind", "dropped").put("what", u.what).put("why", u.why)
         is DirectArchive.Update.Account -> u.state.toJson().put("kind", "account").apply { if (u.restarting) put("restarting", true) }
@@ -938,14 +951,21 @@ object DirectWire {
             if (guid == null || peer == null || outcome == null) {
                 DirectArchive.Update.Ignore
             } else {
+                val group = o.opt("group") == true
                 DirectArchive.Update.Call(
                     guid, peer, o.optBoolean("outgoing"), o.optBoolean("video"),
                     o.optLong("startedMs").coerceAtLeast(0), o.optLong("durationMs").coerceIn(0, MAX_CALL_MS), outcome.wire,
                     o.optBoolean("quiet"),
                     o.optStringOrNull("conversationId")?.takeIf { it.length <= MAX_CONVERSATION_ID_CHARS }.orEmpty(),
+                    group = group,
+                    // Only addresses, each once, a group call's worth at most.
+                    members = if (!group) emptyList() else o.optJSONArray("members")?.let { a ->
+                        (0 until minOf(a.length(), MAX_FT_TARGETS)).mapNotNull { CallIds.handle(a.optString(it)) }
+                    }.orEmpty().distinctBy(CallIds::key),
                 )
             }
         }
+        "callstate" -> DirectArchive.Update.FaceTime(FaceTimeState.fromJson(o))
         "note" -> o.optStringOrNull("line")?.takeIf { it.isNotBlank() }?.let { DirectArchive.Update.Note(it.take(MAX_NOTE_CHARS)) } ?: DirectArchive.Update.Ignore
         "dropped" -> DirectArchive.Update.Dropped(o.optString("what"), o.optString("why"))
         "account" -> DirectArchive.Update.Account(AccountState.fromJson(o), restarting = o.opt("restarting") == true)
@@ -962,6 +982,45 @@ object DirectWire {
     private fun JSONObject.objects(key: String): List<JSONObject> {
         val a = optJSONArray(key) ?: return emptyList()
         return (0 until a.length()).mapNotNull { a.optJSONObject(it) }
+    }
+}
+
+/**
+ * Where FaceTime stands in the ":imessage" process, as the main process may know it ([DirectWire.FT_STATE],
+ * and the "callstate" update), for its "return to call" bar: [live] while a call holds the line (placed
+ * and ringing out, being joined, or on; not one only ringing here), which ([guid]), what the call screen
+ * calls it ([title]: the caller as Apple vouches for them, "· Group FaceTime" for a group call rung
+ * here; never what a call's member list says), whether it is a [video] or a [group] call, and since
+ * when it is on ([sinceMs]; 0 while it is not yet). Nothing else: no address of anyone.
+ */
+data class FaceTimeState(
+    val live: Boolean = false,
+    val guid: String? = null,
+    val title: String = "",
+    val video: Boolean = false,
+    val group: Boolean = false,
+    val sinceMs: Long = 0,
+) {
+    fun toJson(): JSONObject = JSONObject().put("live", live).put("video", video).put("group", group).put("sinceMs", sinceMs)
+        .apply { if (live && guid != null) put("guid", guid) }
+        .apply { if (live && title.isNotEmpty()) put("title", title) }
+
+    companion object {
+        val NONE = FaceTimeState()
+
+        /** [o] read strictly: live only for a real `true` with a call's id; a title of one short line; a time no earlier than none. */
+        fun fromJson(o: JSONObject): FaceTimeState {
+            val guid = (o.opt("guid") as? String)?.takeIf(CallIds::isGuid)
+            if (o.opt("live") != true || guid == null) return NONE
+            return FaceTimeState(
+                live = true,
+                guid = guid,
+                title = CallIds.name(o.opt("title") as? String),
+                video = o.opt("video") == true,
+                group = o.opt("group") == true,
+                sinceMs = (o.opt("sinceMs") as? Number)?.toLong()?.coerceAtLeast(0) ?: 0,
+            )
+        }
     }
 }
 

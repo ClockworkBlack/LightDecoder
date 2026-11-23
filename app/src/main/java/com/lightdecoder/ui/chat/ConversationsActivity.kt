@@ -138,6 +138,10 @@ class ConversationsActivity : AppCompatActivity() {
         setContentView(binding.root)
         applySystemBarPadding(binding.root)
         setSupportActionBar(binding.toolbar)
+        // A FaceTime call that goes on: back to it from the top (as iPhone's green bar).
+        (binding.toolbar.parent as? android.widget.LinearLayout)?.let { column ->
+            returnToCall = ReturnToCallBar.attach(this, column, column.indexOfChild(binding.toolbar))
+        }
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
         // The title is the app switcher.
         supportActionBar?.setDisplayShowTitleEnabled(false)
@@ -225,8 +229,32 @@ class ConversationsActivity : AppCompatActivity() {
         renderBadges()
     }
 
+    /** The "return to call" bar at the top. */
+    @androidx.annotation.VisibleForTesting
+    internal var returnToCall: ReturnToCallBar? = null
+        private set
+
+    /** Missed FaceTime calls since the FaceTime list was last opened (its menu entry says how many). */
+    @androidx.annotation.VisibleForTesting
+    internal var faceTimeMissed = 0
+        private set
+
+    /** Counts the missed FaceTime calls the list's menu entry shows ([CallsActivity.missedSinceOpened]). */
+    private fun countMissedCalls() {
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(this)
+        if (!direct.active || !com.lightdecoder.imessage.direct.DirectPrefs.faceTimeOn(this)) return
+        lifecycleScope.launch {
+            val missed = withContext(Dispatchers.IO) { runCatching { CallsActivity.missedSinceOpened(this@ConversationsActivity) }.getOrDefault(0) }
+            if (missed != faceTimeMissed) {
+                faceTimeMissed = missed
+                refreshMenu()
+            }
+        }
+    }
+
     override fun onResume() {
         super.onResume()
+        countMissedCalls()
         // Back from the notification-access setting Blue Bubbles sent the user to.
         blueBubbles.onResume()
         // Back from the iMessage library's setup (another process): a new registration shows its chats.
@@ -667,6 +695,12 @@ class ConversationsActivity : AppCompatActivity() {
         // iMessage groups start here only through the iMessage library (OpenBubbles' notifications start nothing).
         menu.findItem(R.id.action_new_imessage_group)?.isVisible =
             backend.service == ChatService.MESSAGES && com.lightdecoder.imessage.direct.DirectLink.get(this).active
+        // The FaceTime list, through the iMessage library with FaceTime on, saying how many calls were missed since it was opened.
+        menu.findItem(R.id.action_facetime_calls)?.let { item ->
+            item.isVisible = backend.service == ChatService.MESSAGES && com.lightdecoder.imessage.direct.DirectLink.get(this).active &&
+                com.lightdecoder.imessage.direct.DirectPrefs.faceTimeOn(this)
+            item.title = CallsActivity.menuTitle(this, faceTimeMissed)
+        }
         // The iMessage light: Messages tab, while Blue Bubbles is on.
         menu.findItem(R.id.action_imessage_light)?.let { item ->
             if (backend.service == ChatService.MESSAGES) IMessageLight.bind(this, item, IMessageLight.overall(this), hideWhenOff = true)
@@ -688,6 +722,10 @@ class ConversationsActivity : AppCompatActivity() {
             R.id.action_new_imessage_group -> startActivity(
                 Intent(this, NewConversationActivity::class.java).putExtra(RelayIntents.EXTRA_SERVICE, ChatService.IMESSAGE.key)
             )
+            R.id.action_facetime_calls -> {
+                faceTimeMissed = 0
+                startActivity(Intent(this, CallsActivity::class.java))
+            }
             R.id.action_link_status -> startActivity(ServiceUi.status(this, backend.service))
             R.id.action_delete_archive -> LocalArchive.confirmDelete(this, backend) { reload() }
             R.id.action_empty_deleted -> confirmEmptyDeleted()

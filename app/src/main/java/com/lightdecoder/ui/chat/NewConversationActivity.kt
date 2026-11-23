@@ -44,11 +44,17 @@ import kotlinx.coroutines.withContext
  * With [EXTRA_ADD_TO] (an iMessage group's id) it is a group's "Add Member" instead: the people
  * picked are added to that group ([com.lightdecoder.imessage.direct.DirectLink.addMembers], once
  * Apple says each of them is on iMessage); it closes once they are, and says why when they are not.
+ *
+ * With [EXTRA_FACETIME] it is "New FaceTime" (the FaceTime list's): everyone picked is called
+ * together (it says that each of them sees who else is in the call), Video or Audio asked first.
  */
 class NewConversationActivity : AppCompatActivity() {
 
     /** The iMessage group people are added to ([EXTRA_ADD_TO]), or null for a new conversation. */
     private var addTo: String? = null
+
+    /** "New FaceTime" ([EXTRA_FACETIME]): the people picked are called, not written to. */
+    private var faceTime = false
 
     private lateinit var binding: ActivityNewConversationBinding
     private lateinit var manager: ChatBackend
@@ -76,15 +82,23 @@ class NewConversationActivity : AppCompatActivity() {
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
         addTo = intent.getStringExtra(EXTRA_ADD_TO)?.takeIf { it.isNotEmpty() }
-        manager = ScreenBackends.get(this, if (addTo != null) ChatService.IMESSAGE else RelayIntents.serviceOf(intent))
+        faceTime = addTo == null && intent.getBooleanExtra(EXTRA_FACETIME, false)
+        manager = ScreenBackends.get(this, if (addTo != null || faceTime) ChatService.IMESSAGE else RelayIntents.serviceOf(intent))
         val iMessage = manager.service == ChatService.IMESSAGE
         contactsFrom = if (iMessage) ScreenBackends.get(this, ChatService.MESSAGES) else manager
         repo = contactsFrom.repo
-        groups = Capability.NEW_GROUP in manager.capabilities || addTo != null
+        groups = Capability.NEW_GROUP in manager.capabilities || addTo != null || faceTime
         if (iMessage) {
-            supportActionBar?.title = getString(if (addTo != null) R.string.chat_details_add_member else R.string.imessage_new_group)
+            supportActionBar?.title = getString(
+                when {
+                    addTo != null -> R.string.chat_details_add_member
+                    faceTime -> R.string.facetime_calls_new
+                    else -> R.string.imessage_new_group
+                },
+            )
             binding.queryLayout.hint = getString(R.string.imessage_to_hint)
         }
+        binding.faceTimeHint.visibility = if (faceTime) View.VISIBLE else View.GONE
 
         savedInstanceState?.getStringArrayList(STATE_NUMBERS)?.let { numbers ->
             val labels = savedInstanceState.getStringArrayList(STATE_LABELS).orEmpty()
@@ -211,6 +225,7 @@ class NewConversationActivity : AppCompatActivity() {
         binding.start.isEnabled = selected.isNotEmpty() && !starting
         binding.start.setText(
             when {
+                faceTime -> R.string.facetime_calls_start
                 addTo != null -> R.string.chat_details_add
                 selected.size > 1 -> R.string.chat_start_group
                 else -> R.string.chat_start
@@ -223,6 +238,10 @@ class NewConversationActivity : AppCompatActivity() {
     private fun start() {
         val numbers = selected.keys.toList()
         if (numbers.isEmpty()) return
+        if (faceTime) {
+            startFaceTime(numbers)
+            return
+        }
         addTo?.let { group ->
             addMembers(group, numbers)
             return
@@ -272,6 +291,49 @@ class NewConversationActivity : AppCompatActivity() {
     }
 
     /**
+     * "New FaceTime": Video or Audio, then one call to everyone at [numbers] (as the library takes
+     * their addresses), named after the people picked; the call screen asks for what it needs and
+     * says why when someone cannot be called.
+     */
+    private fun startFaceTime(numbers: List<String>) {
+        val peers = numbers.mapNotNull { com.lightdecoder.imessage.direct.Handles.normalize(it) }
+            .mapNotNull(com.lightdecoder.imessage.facetime.CallIds::handle)
+            .distinctBy(com.lightdecoder.imessage.facetime.CallIds::key)
+            .take(com.lightdecoder.imessage.facetime.MAX_PEOPLE)
+        if (peers.isEmpty()) {
+            Toast.makeText(this, R.string.facetime_refused_not_callable, Toast.LENGTH_LONG).show()
+            return
+        }
+        val name = selected.values.reduceOrNull { a, b -> getString(R.string.facetime_names_and, a, b) }.orEmpty()
+        android.widget.PopupMenu(this, binding.start).apply {
+            menu.add(0, 1, 0, R.string.facetime_video)
+            menu.add(0, 2, 1, R.string.facetime_audio)
+            setOnMenuItemClickListener { item ->
+                placeFaceTime(peers, name, video = item.itemId == 1)
+                true
+            }
+            show()
+        }
+    }
+
+    /** The call screen, to call [peers] together. */
+    @androidx.annotation.VisibleForTesting
+    internal fun placeFaceTime(peers: List<String>, name: String, video: Boolean) {
+        try {
+            startActivity(
+                if (peers.size == 1) {
+                    com.lightdecoder.ui.imessage.FaceTimeCallActivity.placeIntent(this, peers.single(), name, video, null, null)
+                } else {
+                    com.lightdecoder.ui.imessage.FaceTimeCallActivity.placeIntent(this, peers, name, video, null, null)
+                },
+            )
+            finish()
+        } catch (e: RuntimeException) {
+            Toast.makeText(this, R.string.facetime_not_available, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /**
      * "Add Member": the people at [numbers] go into the iMessage group [group] once Apple says each
      * of them is on iMessage; this closes once they are in it, and says why when they are not (who
      * is not on iMessage), keeping what was picked.
@@ -304,6 +366,15 @@ class NewConversationActivity : AppCompatActivity() {
 
         /** An iMessage group's conversation id: the screen adds people to it ("Add Member") instead of starting a conversation. */
         const val EXTRA_ADD_TO = "com.lightdecoder.ui.chat.extra.ADD_TO"
+
+        /** "New FaceTime": people picked to call together ([EXTRA_FACETIME]). */
+        const val EXTRA_FACETIME = "com.lightdecoder.ui.chat.extra.FACETIME"
+
+        /** "New FaceTime", from the FaceTime list. */
+        fun newFaceTime(context: android.content.Context): Intent =
+            Intent(context, NewConversationActivity::class.java)
+                .putExtra(EXTRA_FACETIME, true)
+                .putExtra(RelayIntents.EXTRA_SERVICE, ChatService.IMESSAGE.key)
 
         /** "Add Member" for the iMessage group [conversationId]. */
         fun addMembers(context: android.content.Context, conversationId: String): Intent =

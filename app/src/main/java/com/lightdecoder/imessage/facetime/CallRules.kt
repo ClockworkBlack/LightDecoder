@@ -26,16 +26,56 @@ import kotlin.math.abs
  * - **Ends**: the user's hang-up, the other side leaving (the library's participants going from
  *   someone to no one, [Input.Participants]), or the library giving up ([Input.Failed]). A device
  *   leaving ([CallEvent.Leave]) ends a ringing call only.
+ * - **Groups**: a call placed to several people ends unanswered only once every one of them said
+ *   no, and is answered by the join of one of them. An incoming group call rings only on the join
+ *   of its caller (as for one person), shown as theirs ("caller · Group FaceTime"): its member list
+ *   is the caller's word, so it is only counted. An invitation that names nobody rings a group call
+ *   only right after its caller's own ring ([RING_IN_MS]), counted in the call's own allowance.
+ *   Nobody leaving ([CallEvent.Leave], which any member can say of anyone) stops or ends a group
+ *   call; being taken out of it ([CallEvent.Removed]) stops its ring. Dismissed, a group ring from
+ *   someone the user does not know is ignored, not declined ([Call.ignoreOnly]).
+ *
+ * [blocked] says whom the user blocked: their rings are dropped before anything else is done.
  */
-class CallRules(private val limiter: RingLimiter = RingLimiter()) {
+class CallRules(
+    private val limiter: RingLimiter = RingLimiter(),
+    private val blocked: (String) -> Boolean = { false },
+) {
 
     /**
-     * Who last joined each call, by its guid: the sender of a join as Apple's servers vouch for it
-     * ([CallEvent.Join.handle]), never the user's own. The only word on who a call is from that is
-     * taken: what a call's member list says is written by whoever sent it. At most [MAX_JOINERS]
-     * calls, the one longest unheard of forgotten first. Only touched from [reduce] (one queue).
+     * Who joined each call, by its guid, and with which participant id: the sender of a join as
+     * Apple's servers vouch for it ([CallEvent.Join.handle]), never the user's own. The only word on
+     * who a call is from that is taken: what a call's member list says is written by whoever sent
+     * it. At most [MAX_JOINERS] calls (the one longest unheard of forgotten first), and per call
+     * [MAX_JOINERS_PER_CALL] people ([MAX_PEOPLE] for the call there is), the last to join last.
+     * Only touched from [reduce] (one queue).
      */
-    private val joiners = LinkedHashMap<String, String>(16, 0.75f, true)
+    private val joiners = LinkedHashMap<String, LinkedHashMap<Long, String>>(16, 0.75f, true)
+
+    /**
+     * The caller's own ring of each call ([CallEvent.Join] with a ring) that could not be checked
+     * yet (the library did not list the call, or it had not begun): who, and when. A group call's
+     * invitation ([CallEvent.Invite]) rings only within [RING_IN_MS] of it, once. Forgotten as soon
+     * as that ring is decided any other way (rung, not rung, noted as missed, dropped), so an
+     * invitation never rings a call its caller's own ring was not allowed to, nor one the user
+     * already dismissed.
+     */
+    private val ringJoins = LinkedHashMap<String, Pair<String, Long>>(16, 0.75f, true)
+
+    /** Who last joined call [guid] (the latest of [joiners]), or null. */
+    private fun lastJoiner(guid: String): String? = joiners[guid]?.values?.lastOrNull()
+
+    private fun remember(guid: String, participant: Long, handle: String, state: Call?) {
+        val people = joiners.getOrPut(guid) { LinkedHashMap() }
+        people.remove(participant)
+        people[participant] = handle
+        val cap = if (state != null && state.guid == guid && state.live) MAX_PEOPLE else MAX_JOINERS_PER_CALL
+        while (people.size > cap) people.remove(people.keys.first())
+        while (joiners.size > MAX_JOINERS) joiners.remove(joiners.keys.first())
+    }
+
+    /** Who joined call [guid], by participant id, as the screens may label them. */
+    private fun joinedOf(guid: String): Map<Long, String> = joiners[guid]?.toMap().orEmpty()
 
     /** What happened. [now] is the time (ms). */
     sealed class Input {
@@ -56,7 +96,10 @@ class CallRules(private val limiter: RingLimiter = RingLimiter()) {
         /** The main process's word on who is calling ([info] null: it did not answer). [phoneBusy]: the phone is in another call. */
         data class Caller(val guid: String, val info: CallerInfo?, val now: Long, val settings: FaceTimeSettings, val phoneBusy: Boolean = false) : Input()
 
-        /** The user places a call to [peer]. [phoneBusy]: the phone is in another call. */
+        /**
+         * The user places a call to [peer], and with a group call to everyone of [peers] ([peer]
+         * first). [phoneBusy]: the phone is in another call.
+         */
         data class Place(
             val guid: String,
             val peer: String,
@@ -68,6 +111,7 @@ class CallRules(private val limiter: RingLimiter = RingLimiter()) {
             val now: Long,
             val phoneBusy: Boolean,
             val settings: FaceTimeSettings,
+            val peers: List<String> = listOf(peer),
         ) : Input()
 
         /** The library placed call [guid] (it rings on the other side now), or could not. */
@@ -91,8 +135,24 @@ class CallRules(private val limiter: RingLimiter = RingLimiter()) {
         /** The library could not join call [guid] (it is gone, or the join failed). */
         data class NativeFailed(val guid: String, val now: Long) : Input()
 
-        /** The library's count of the other people in call [guid]. */
-        data class Participants(val guid: String, val count: Int, val now: Long) : Input()
+        /**
+         * The library's word on the other people in call [guid]: how many ([count]), their ids and the
+         * address it reports for each ([handles], in the same order; never taken as who they are).
+         */
+        data class Participants(
+            val guid: String,
+            val count: Int,
+            val now: Long,
+            val ids: List<Long> = emptyList(),
+            val handles: List<String?> = emptyList(),
+        ) : Input() {
+            companion object {
+                /** From the library's arrays, as they come ([MAX_PEOPLE] at most are kept, all are counted). */
+                fun of(guid: String, ids: LongArray, handles: Array<String?>, now: Long) = Participants(
+                    guid, ids.size, now, ids.take(MAX_PEOPLE), List(minOf(ids.size, MAX_PEOPLE)) { handles.getOrNull(it) },
+                )
+            }
+        }
 
         /** The library gave up on call [guid]. */
         data class Failed(val guid: String, val now: Long) : Input()
@@ -147,7 +207,15 @@ class CallRules(private val limiter: RingLimiter = RingLimiter()) {
 
     data class Step(val state: Call?, val effects: List<Effect> = emptyList())
 
-    fun reduce(state: Call?, input: Input): Step = when (input) {
+    fun reduce(state: Call?, input: Input): Step {
+        val step = step(state, input)
+        // A call that was here and is no longer (declined, hung up, missed, ended): its caller's ring
+        // was handled, so no invitation that follows rings it again.
+        if (state != null && step.state?.guid != state.guid) ringJoins.remove(state.guid)
+        return step
+    }
+
+    private fun step(state: Call?, input: Input): Step = when (input) {
         is Input.Event -> event(state, input)
         is Input.Caller -> caller(state, input)
         is Input.Place -> place(state, input)
@@ -174,39 +242,75 @@ class CallRules(private val limiter: RingLimiter = RingLimiter()) {
                 // Remembered on every join, a ring or not: an invitation that names nobody is this one's.
                 val joiner = e.handle.takeIf { it.isNotEmpty() && !isMine(it) }
                 if (joiner != null) {
-                    joiners[e.guid] = joiner
-                    while (joiners.size > MAX_JOINERS) joiners.remove(joiners.keys.first())
+                    remember(e.guid, e.participant, joiner, state)
+                    if (e.ring) {
+                        ringJoins[e.guid] = joiner to input.now
+                        while (ringJoins.size > MAX_JOINERS) ringJoins.remove(ringJoins.keys.first())
+                    }
                 }
+                // The call there is learns who joined it (its screen labels only them by name).
+                val seen = if (joiner != null && current != null) current.copy(joiners = joinedOf(e.guid)) else null
+                val now = seen ?: state
                 when {
                     // The other person's device joined the call the user placed: answered. Only a join
                     // that says whose it is, and is not the user's own (the person called, or another
-                    // address of theirs: which those are is not known here).
-                    current != null && current.outgoing && current.phase == Phase.RINGING_OUT && joiner != null -> {
-                        val next = current.copy(phase = Phase.CONNECTING)
+                    // address of theirs: which those are is not known here); in a group call, one of
+                    // the people it was placed to.
+                    seen != null && seen.outgoing && seen.phase == Phase.RINGING_OUT && joiner != null &&
+                        (!seen.group || seen.peers.any { CallIds.key(it) == CallIds.key(joiner) }) -> {
+                        val next = seen.copy(phase = Phase.CONNECTING)
                         Step(next, listOf(Effect.StartTimer(e.guid, Phase.CONNECTING, CONNECT_MS), Effect.Ringback(false), Effect.StartNative(next)))
                     }
-                    !e.ring -> Step(state)
-                    !input.settings.on -> Step(state)
-                    state != null && state.guid == e.guid && state.live -> Step(state)
+                    !e.ring -> Step(now)
+                    !input.settings.on -> { ringJoins.remove(e.guid); Step(now) }
+                    // This call is already ringing, answered or the user's own: the ring is handled.
+                    now != null && now.guid == e.guid && now.live -> { ringJoins.remove(e.guid); Step(now) }
                     // A ring is from its sender, and from nobody else: none named, or the user's own
                     // (a call placed on another of their devices), is no call for here.
-                    joiner == null -> Step(state, listOf(Effect.Note("a FaceTime ring that names no sender, or the user's own address, was ignored")))
-                    else -> ring(state, e.guid, joiner, input, mine)
+                    joiner == null -> Step(now, listOf(Effect.Note("a FaceTime ring that names no sender, or the user's own address, was ignored")))
+                    else -> ring(now, e.guid, joiner, input, mine, invite = false)
                 }
             }
             is CallEvent.Invite -> when {
                 !input.settings.on -> Step(state)
                 state != null && state.guid == e.guid && state.live -> Step(state)
+                // A group call's invitation may come from any of its members (it names nobody): only
+                // right after its caller's own ring, and in the call's own allowance.
+                isGroup(input.sessions.firstOrNull { it.guid == e.guid }, mine) -> {
+                    val rung = ringJoins[e.guid]
+                    if (rung == null || input.now - rung.second !in 0..RING_IN_MS) {
+                        Step(state, listOf(Effect.Note("a Group FaceTime invitation that did not follow its caller's own ring was ignored")))
+                    } else {
+                        ring(state, e.guid, rung.first, input, mine, invite = true)
+                    }
+                }
                 // An invitation names nobody: it is from whoever joined that call before, as Apple said.
-                else -> when (val joiner = joiners[e.guid]) {
+                else -> when (val joiner = lastJoiner(e.guid)) {
                     null -> Step(state, listOf(Effect.Note("a FaceTime invitation to a call nobody was seen joining was ignored")))
-                    else -> ring(state, e.guid, joiner, input, mine)
+                    else -> ring(state, e.guid, joiner, input, mine, invite = false)
                 }
             }
             is CallEvent.Decline -> when {
                 current == null -> Step(state)
                 // The one person a placed call went to said no.
-                current.outgoing && current.phase == Phase.RINGING_OUT && !isMine(e.handle) -> unanswered(current, Unanswered.DECLINED, Outcome.DECLINED, input.now)
+                current.outgoing && current.phase == Phase.RINGING_OUT && !current.group && !isMine(e.handle) ->
+                    unanswered(current, Unanswered.DECLINED, Outcome.DECLINED, input.now)
+                // One of the people of a placed group call said no: it ends once everyone has. A no
+                // that says nobody's, or not of someone it went to, says nothing.
+                current.outgoing && current.phase == Phase.RINGING_OUT && current.group -> {
+                    val key = e.handle.takeIf { it.isNotEmpty() && !isMine(it) }?.let(CallIds::key)
+                    when {
+                        key == null || current.peers.none { CallIds.key(it) == key } -> Step(state)
+                        else -> {
+                            val next = current.copy(declined = current.declined + key)
+                            if (next.peers.all { CallIds.key(it) in next.declined }) {
+                                unanswered(next, Unanswered.DECLINED, Outcome.DECLINED, input.now)
+                            } else {
+                                Step(next)
+                            }
+                        }
+                    }
+                }
                 // Declined on another of the user's devices: it stops ringing here, and is no missed call.
                 current.incomingRing && isMine(e.handle) ->
                     Step(null, ringDown(current) + Effect.LogCall(entry(current, Outcome.DECLINED, input.now)))
@@ -214,11 +318,14 @@ class CallRules(private val limiter: RingLimiter = RingLimiter()) {
             }
             is CallEvent.Leave -> when {
                 current == null || isMine(e.handle) -> Step(state)
+                // In a group any member can say anyone left: nothing is stopped or ended by it (the
+                // library's own word on who is in the call does that, [Input.Participants]).
+                current.group -> Step(state)
                 // The caller gave up.
                 current.incomingRing -> Step(null, ringDown(current) + Effect.LogCall(entry(current, Outcome.MISSED, input.now)))
                 // A device leaving does not end a call that is joined: several of a person's devices
                 // may come and go. Only when the library itself says that nobody is in it any more.
-                current.joined && current.peers == 0 && input.sessions.firstOrNull { it.guid == e.guid }?.active == false ->
+                current.joined && current.present == 0 && input.sessions.firstOrNull { it.guid == e.guid }?.active == false ->
                     if (current.phase == Phase.ACTIVE) ended(current, input.now) else Step(current.copy(abandoned = true))
                 else -> Step(state)
             }
@@ -228,31 +335,59 @@ class CallRules(private val limiter: RingLimiter = RingLimiter()) {
                 } else {
                     Step(state)
                 }
+            // The user was taken out of a call that rings here: it stops.
+            is CallEvent.Removed ->
+                if (current != null && current.incomingRing && e.handles.any(::isMine)) {
+                    Step(null, ringDown(current) + Effect.LogCall(entry(current, Outcome.MISSED, input.now)))
+                } else {
+                    Step(state)
+                }
         }
     }
+
+    /** The other people [session]'s member list names (the caller's word), each once: none for no session. */
+    private fun othersOf(session: CallSessionInfo?, mine: Set<String>): List<String> =
+        session?.members.orEmpty().mapNotNull(CallIds::handle).filter { CallIds.key(it) !in mine }.distinctBy(CallIds::key)
+
+    /** Whether [session]'s member list names more people than the caller and the user. */
+    private fun isGroup(session: CallSessionInfo?, mine: Set<String>): Boolean = othersOf(session, mine).size > 1
 
     /**
      * A ring for call [guid] from [caller] (the sender Apple vouches for, never the user's own):
      * screened, then at most a missed call, unless everything says it is a call ringing now that
      * may ring here (see the class's notes). The call's member list never says who calls: it is
-     * only held against the caller (who must be in it, where it names anyone) and counted.
+     * only held against the caller (who must be in it, where it names anyone) and counted. [invite]:
+     * rung by an invitation that named nobody, after the caller's own ring of a group call: counted
+     * in that call's allowance, not the caller's.
      */
-    private fun ring(state: Call?, guid: String, caller: String, input: Input.Event, mine: Set<String>): Step {
+    private fun ring(state: Call?, guid: String, caller: String, input: Input.Event, mine: Set<String>, invite: Boolean): Step {
         if (!input.settings.on) return Step(state)
         // This call already: ringing, answered, or the user's own.
         if (state != null && state.guid == guid && state.live) return Step(state)
         // Only a call the library knows, and that began (said in the log: it would explain a call that never rang).
+        // These two leave the caller's ring to be checked again by an invitation ([ringJoins]).
         val session = input.sessions.firstOrNull { it.guid == guid }
             ?: return Step(state, listOf(Effect.Note("a FaceTime ring for a call that is not in the library's list was ignored")))
         val startMs = session.startMs
             ?: return Step(state, listOf(Effect.Note("a FaceTime ring for a call that has not begun was ignored")))
+        // Decided from here on, whichever way: no invitation rings it again.
+        ringJoins.remove(guid)
         val members = session.members.mapNotNull(CallIds::handle)
         val others = members.filter { CallIds.key(it) !in mine }.distinctBy(CallIds::key)
         if (members.isNotEmpty() && members.none { CallIds.key(it) == CallIds.key(caller) }) {
             return Step(state, listOf(Effect.Note("a FaceTime ring from someone who is not in the call was ignored")))
         }
-        val who = CallIds.key(caller)
-        val missed = CallLogEntry(guid, caller, outgoing = false, video = session.video, startedMs = input.now, durationMs = 0, outcome = Outcome.MISSED)
+        // Someone the user blocked: no ring, no row, no notice.
+        if (runCatching { blocked(caller) }.getOrDefault(false)) {
+            return Step(state, listOf(Effect.Note("a FaceTime ring from a blocked caller was dropped")))
+        }
+        val group = others.size > 1
+        val who = if (invite && group) RingLimiter.callKey(guid) else CallIds.key(caller)
+        val listed = if (group) others.take(MAX_PEOPLE) else emptyList()
+        val missed = CallLogEntry(
+            guid, caller, outgoing = false, video = session.video, startedMs = input.now, durationMs = 0, outcome = Outcome.MISSED,
+            group = group, members = listed,
+        )
         fun notRung(why: String, quiet: Boolean): Step =
             if (limiter.notice(who, guid, input.now)) {
                 Step(state, listOf(Effect.LogCall(missed.copy(quiet = quiet)), Effect.Note(why)))
@@ -260,14 +395,16 @@ class CallRules(private val limiter: RingLimiter = RingLimiter()) {
                 Step(state, listOf(Effect.Note("$why; not noted as missed either (it was already, or too many from this caller)")))
             }
         return when {
-            others.size > 1 -> notRung("a group FaceTime call was not rung: group calls are not answered here yet", quiet = false)
             // Nobody is in it any more: a ring that comes late.
             !session.active -> notRung("a FaceTime ring for a call nobody is in any more was not rung", quiet = true)
             // Handed over again after a restart, for a call that began long before.
             input.sinceStartMs < REPLAY_WINDOW_MS && abs(input.now - startMs) > MAX_RING_AGE_MS ->
                 notRung("an old FaceTime ring handed over after a restart was not rung", quiet = true)
             state != null && state.live -> notRung("a FaceTime call during another call was not rung", quiet = false)
-            else -> when (limiter.ring(who, guid, input.now)) {
+            // An invitation rings no call its caller could not ring here now: their own limits hold.
+            invite && group && !limiter.allows(CallIds.key(caller), input.now) ->
+                Step(state, listOf(Effect.Note("a Group FaceTime invitation past its caller's limit was not rung")))
+            else -> when (if (invite && group) limiter.callRing(guid, input.now) else limiter.ring(who, guid, input.now)) {
                 RingLimiter.Verdict.DROP -> Step(state, listOf(Effect.Note("a FaceTime ring was dropped: the same call again, or too many from this caller")))
                 RingLimiter.Verdict.MISSED_ONLY ->
                     Step(state, listOf(Effect.LogCall(missed.copy(quiet = true)), Effect.Note("a FaceTime ring past the caller's limit was not rung")))
@@ -275,6 +412,7 @@ class CallRules(private val limiter: RingLimiter = RingLimiter()) {
                     val call = Call(
                         guid = guid, peer = caller, name = "", video = session.video, outgoing = false, phase = Phase.SCREENING,
                         from = session.myHandles.firstOrNull() ?: input.myHandles.firstOrNull(), startedMs = input.now,
+                        group = group, others = (others.size - 1).coerceIn(0, MAX_PEOPLE), listed = listed, joiners = joinedOf(guid),
                     )
                     // A placed call's "not answered" left on screen makes way.
                     Step(call, listOfNotNull(state?.let { Effect.StopTimer(it.guid) }, Effect.LookupCaller(guid, caller)))
@@ -319,6 +457,7 @@ class CallRules(private val limiter: RingLimiter = RingLimiter()) {
             name = CallIds.name(info?.name),
             conversationId = info?.conversationId,
             photo = info?.photo,
+            known = info?.known == true,
         )
         return Step(call, listOf(Effect.ShowIncoming(call), Effect.StartTimer(call.guid, Phase.RINGING_IN, RING_IN_MS)))
     }
@@ -332,10 +471,13 @@ class CallRules(private val limiter: RingLimiter = RingLimiter()) {
         if (input.phoneBusy) return refuse(Refusal.PHONE_BUSY)
         val peer = CallIds.handle(input.peer) ?: return refuse(Refusal.NOT_CALLABLE)
         if (!CallIds.isGuid(input.guid)) return refuse(Refusal.NOT_CALLABLE)
+        // Everyone it goes to, each once, [MAX_PEOPLE] at most, the first first.
+        val people = (listOf(peer) + input.peers.mapNotNull(CallIds::handle)).distinctBy(CallIds::key).take(MAX_PEOPLE)
         val call = Call(
             guid = input.guid, peer = peer, name = CallIds.name(input.name), video = input.video, outgoing = true,
             phase = Phase.RINGING_OUT, from = input.from?.let(CallIds::handle), conversationId = input.conversationId,
             photo = input.photo, startedMs = input.now, withCamera = input.video,
+            peers = people, group = people.size > 1, joiners = joinedOf(input.guid),
         )
         return Step(
             call,
@@ -362,12 +504,21 @@ class CallRules(private val limiter: RingLimiter = RingLimiter()) {
 
     private fun answer(state: Call?, input: Input.Answer): Step {
         if (state == null || state.guid != input.guid || state.phase != Phase.RINGING_IN) return Step(state, listOf(Effect.Refused(Refusal.GONE)))
-        val next = state.copy(phase = Phase.CONNECTING, withCamera = input.withCamera && state.video)
+        // A group ring from someone the user does not know is answered without the camera (it can be turned on in the call).
+        val next = state.copy(phase = Phase.CONNECTING, withCamera = input.withCamera && state.video && !state.ignoreOnly)
         return Step(next, listOf(Effect.HideIncoming(next.guid), Effect.StartTimer(next.guid, Phase.CONNECTING, CONNECT_MS), Effect.StartNative(next)))
     }
 
+    /**
+     * The user declined the ringing [call]. A group ring from someone they do not know is ignored
+     * instead: nothing is sent (a decline goes to every address its member list names).
+     */
     private fun declined(call: Call, now: Long): Step =
-        Step(null, ringDown(call) + listOf(Effect.DeclineCall(call.guid), Effect.LogCall(entry(call, Outcome.DECLINED, now))))
+        if (call.ignoreOnly) {
+            Step(null, ringDown(call) + listOf(Effect.LogCall(entry(call, Outcome.DECLINED, now)), Effect.Note("a Group FaceTime ring was ignored (nothing was sent)")))
+        } else {
+            Step(null, ringDown(call) + listOf(Effect.DeclineCall(call.guid), Effect.LogCall(entry(call, Outcome.DECLINED, now))))
+        }
 
     private fun hangUp(state: Call?, input: Input.HangUp): Step {
         val call = state?.takeIf { input.guid == null || it.guid == input.guid } ?: return Step(state)
@@ -413,7 +564,7 @@ class CallRules(private val limiter: RingLimiter = RingLimiter()) {
     private fun nativeUp(state: Call?, input: Input.NativeUp): Step {
         val call = state?.takeIf { it.guid == input.guid && it.phase == Phase.CONNECTING } ?: return Step(state)
         // The other side left while it was joining, and nobody is in it: there is no call to be in.
-        if (call.peers == 0 && (call.abandoned || call.peerSeen)) {
+        if (call.present == 0 && (call.abandoned || call.peerSeen)) {
             val outcome = if (call.outgoing) Outcome.DECLINED else Outcome.MISSED
             return Step(null, listOf(Effect.StopTimer(call.guid), Effect.EndNative(call), Effect.LogCall(entry(call, outcome, input.now))))
         }
@@ -434,7 +585,8 @@ class CallRules(private val limiter: RingLimiter = RingLimiter()) {
     private fun participants(state: Call?, input: Input.Participants): Step {
         val call = state?.takeIf { it.guid == input.guid && it.joined } ?: return Step(state)
         val count = input.count.coerceAtLeast(0)
-        val next = call.copy(peers = count, peerSeen = call.peerSeen || count > 0, abandoned = call.abandoned && count == 0)
+        val inCall = input.ids.take(MAX_PEOPLE).mapIndexed { i, id -> InCall(id, CallIds.reported(input.handles.getOrNull(i))) }
+        val next = call.copy(present = count, peerSeen = call.peerSeen || count > 0, abandoned = call.abandoned && count == 0, inCall = inCall)
         // Someone was in it, and now nobody is: the other side hung up.
         if (call.phase == Phase.ACTIVE && count == 0 && call.peerSeen) return ended(next, input.now)
         return Step(next)
@@ -490,6 +642,8 @@ class CallRules(private val limiter: RingLimiter = RingLimiter()) {
         durationMs = if (outcome == Outcome.ANSWERED && call.activeSinceMs > 0) (now - call.activeSinceMs).coerceAtLeast(0) else 0,
         outcome = outcome,
         conversationId = call.conversationId,
+        group = call.group,
+        members = if (!call.group) emptyList() else if (call.outgoing) call.peers else call.listed,
     )
 
     companion object {
@@ -514,7 +668,10 @@ class CallRules(private val limiter: RingLimiter = RingLimiter()) {
         /** A ring handed over then rings only for a call that began no longer ago than this. */
         const val MAX_RING_AGE_MS = 2 * 60_000L
 
-        /** The most calls whose last joiner is remembered. */
+        /** The most calls whose joiners are remembered. */
         const val MAX_JOINERS = 256
+
+        /** The most joiners remembered of a call other than the one there is (of that one, [MAX_PEOPLE]). */
+        const val MAX_JOINERS_PER_CALL = 8
     }
 }

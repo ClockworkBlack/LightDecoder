@@ -100,6 +100,29 @@ object FaceTimeNotices {
     /** What a call's person is called: their name, else their address without its scheme. */
     fun nameOf(call: Call): String = call.name.ifBlank { Handles.display(call.peer) }
 
+    /**
+     * What the call screen and the notices call [call]: its person ([nameOf]); a group call rung
+     * here is its caller's ("Alice · Group FaceTime"), never named after what its member list says.
+     */
+    fun title(context: Context, call: Call): String =
+        if (call.group && !call.outgoing) context.getString(R.string.facetime_group_title, nameOf(call)) else nameOf(call)
+
+    /** A group call rung here: "and 2 others" (its member list's count only), or null for none. */
+    fun othersText(context: Context, call: Call): String? =
+        call.others.takeIf { call.group && !call.outgoing && it > 0 }?.let { context.resources.getQuantityString(R.plurals.facetime_group_others, it, it) }
+
+    /**
+     * Where FaceTime stands, for the main process's "return to call" bar ([com.lightdecoder.imessage.direct.DirectWire.FT_STATE]):
+     * a call that holds the line (not one only ringing here), as the call screen calls it.
+     */
+    fun state(context: Context, call: Call?): com.lightdecoder.imessage.direct.FaceTimeState {
+        if (call == null || !call.live || call.incomingRing) return com.lightdecoder.imessage.direct.FaceTimeState.NONE
+        return com.lightdecoder.imessage.direct.FaceTimeState(
+            live = true, guid = call.guid, title = CallIds.name(title(context, call)), video = call.video, group = call.group,
+            sinceMs = if (call.phase == Phase.ACTIVE) call.activeSinceMs else 0,
+        )
+    }
+
     /** "FaceTime Video" or "FaceTime Audio". */
     fun kind(context: Context, video: Boolean): String = context.getString(if (video) R.string.facetime_video else R.string.facetime_audio)
 
@@ -115,7 +138,11 @@ object FaceTimeNotices {
 
     private fun data(what: String, id: String): Uri = Uri.Builder().scheme(SCHEME).authority(what).appendPath(id).build()
 
-    /** The ringing notice of [call]. */
+    /**
+     * The ringing notice of [call]. A group call rung here is its caller's ("Alice · Group FaceTime",
+     * "and 2 others"); one from someone the user does not know offers Ignore (nothing is sent) and
+     * an answer without the camera, instead of Decline and Answer ([Call.ignoreOnly]).
+     */
     fun incoming(context: Context, call: Call): Notification {
         ensureCallChannels(context)
         val person = person(context, call)
@@ -124,14 +151,22 @@ object FaceTimeNotices {
         )
         // Answering opens the call screen: it asks for the microphone if it has to, and joins from a screen in front.
         val answer = PendingIntent.getActivity(
-            context, 2, FaceTimeCallActivity.answerIntent(context, call.guid, withCamera = call.video).setData(data("answer", call.guid)), FLAGS,
+            context, 2, FaceTimeCallActivity.answerIntent(context, call.guid, withCamera = call.video && !call.ignoreOnly).setData(data("answer", call.guid)), FLAGS,
         )
         val screen = PendingIntent.getActivity(context, 3, FaceTimeCallActivity.incomingIntent(context, call.guid).setData(data("show", call.guid)), FLAGS)
+        val kindText = context.getString(if (call.video) R.string.facetime_incoming_video else R.string.facetime_incoming_audio)
         val builder = NotificationCompat.Builder(context, CHANNEL_INCOMING)
             .setSmallIcon(if (call.video) R.drawable.ic_ft_video else R.drawable.ic_ft_audio)
-            .setContentTitle(nameOf(call))
-            .setContentText(context.getString(if (call.video) R.string.facetime_incoming_video else R.string.facetime_incoming_audio))
-            .setStyle(NotificationCompat.CallStyle.forIncomingCall(person, decline, answer).setIsVideo(call.video))
+            .setContentTitle(title(context, call))
+            .setContentText(othersText(context, call)?.let { "$kindText · $it" } ?: kindText)
+            .apply {
+                if (call.ignoreOnly) {
+                    addAction(NotificationCompat.Action.Builder(R.drawable.ic_ft_end, context.getString(R.string.facetime_ignore), decline).build())
+                    addAction(NotificationCompat.Action.Builder(R.drawable.ic_ft_audio, context.getString(R.string.facetime_accept), answer).build())
+                } else {
+                    setStyle(NotificationCompat.CallStyle.forIncomingCall(person, decline, answer).setIsVideo(call.video))
+                }
+            }
             .addPerson(person)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_MAX)
@@ -154,7 +189,7 @@ object FaceTimeNotices {
             .setTimeoutAfter(CallRules.RING_IN_MS + 5_000)
             .setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE), android.media.AudioManager.STREAM_RING)
             .setVibrate(VIBRATION)
-        if (call.video) {
+        if (call.video && !call.ignoreOnly) {
             val audioOnly = PendingIntent.getActivity(
                 context, 4, FaceTimeCallActivity.answerIntent(context, call.guid, withCamera = false).setData(data("answer-audio", call.guid)), FLAGS,
             )
@@ -184,7 +219,7 @@ object FaceTimeNotices {
         }
         return NotificationCompat.Builder(context, CHANNEL_ONGOING)
             .setSmallIcon(if (call.video) R.drawable.ic_ft_video else R.drawable.ic_ft_audio)
-            .setContentTitle(nameOf(call))
+            .setContentTitle(title(context, call))
             .setContentText(text)
             .setStyle(NotificationCompat.CallStyle.forOngoingCall(person, hangUp).setIsVideo(call.video))
             .addPerson(person)

@@ -77,6 +77,10 @@ class FaceTimeChatTest {
     @Volatile
     private var capable: Boolean? = true
 
+    /** With [capable] true, only these can be called (null: everyone asked about). */
+    @Volatile
+    private var capableOnly: Set<String>? = null
+
     @Before
     fun setUp() {
         two = TwoServicesEnv()
@@ -118,7 +122,7 @@ class FaceTimeChatTest {
             when {
                 what != DirectWire.FT_CAPABLE -> DirectWire.ok()
                 capable == null -> DirectWire.error("iMessage is not connected.")
-                capable == true -> DirectWire.capable(DirectWire.CapableRequest.fromJson(request).targets)
+                capable == true -> DirectWire.capable(DirectWire.CapableRequest.fromJson(request).targets.filter { capableOnly?.contains(it) ?: true })
                 else -> DirectWire.capable(emptyList())
             }
         }
@@ -521,24 +525,29 @@ class FaceTimeChatTest {
     @Test
     fun thereAreNoFaceTimeButtonsWhereNoCallCouldGo() {
         directMode()
-        group()
+        // A group none of whose members has an address a call can go to (SPEC2 B2: a group with some has them, see below).
+        imRepo.upsertConversation(
+            ConversationDto(
+                id = GROUP, name = "Hikers", isGroup = true, type = IMessageManager.TRANSPORT, defaultOutgoingId = ME,
+                participants = listOf(ParticipantDto(id = "me", isMe = true), ParticipantDto(id = "Trail news", name = "Trail news"), ParticipantDto(id = "Hikers bot", name = "Bot")),
+            ),
+        )
         message("G1", "Hello all", mine = true, chat = GROUP)
         message("M1", "See you", mine = true)
         fun assertNone(activity: ThreadActivity, why: String) {
             assertFalse(why, activity.faceTimeOffered())
             for (id in listOf(R.id.action_facetime, R.id.action_facetime_video, R.id.action_facetime_audio)) assertFalse(why, menu(activity).findItem(id).isVisible)
         }
-        // A group.
         launch(GROUP).use { scenario ->
             scenario.waitFor("the group") { shownTexts(it).contains("Hello all") }
             two.settle()
             scenario.onActivity { activity ->
-                assertNone(activity, "a group")
+                assertNone(activity, "a group nobody of which can be called")
                 assertNull(activity.faceTimeChat)
                 assertNull("and asking says so instead of calling", activity.chooseFaceTime(activity.findViewById(R.id.toolbar)))
             }
         }
-        assertTrue("Apple is not asked about a group", asks(DirectWire.FT_CAPABLE).isEmpty())
+        assertTrue("Apple is not asked about such a group", asks(DirectWire.FT_CAPABLE).isEmpty())
         // Someone Apple says cannot be called: the buttons go once the answer is in.
         capable = false
         launch(ALICE_CHAT).use { scenario ->
@@ -619,6 +628,58 @@ class FaceTimeChatTest {
         }
     }
 
+    @Test
+    fun aGroupChatHasFaceTimeForItsMembersAndCallsOnlyThoseWhoCanBeCalledAtOnce() {
+        directMode()
+        group()
+        message("G1", "Hello all", mine = true, chat = GROUP)
+        // Apple says only Alice can be called.
+        capableOnly = setOf(ALICE)
+        launch(GROUP).use { scenario ->
+            scenario.waitFor("the group and Apple's word") { shownTexts(it).contains("Hello all") && asks(DirectWire.FT_CAPABLE).isNotEmpty() && it.faceTimeOffered() }
+            scenario.onActivity { activity ->
+                assertEquals(GROUP, activity.faceTimeChat)
+                assertTrue(menu(activity).findItem(R.id.action_facetime).isVisible)
+                activity.startFaceTime(video = true)
+            }
+            two.waitUntil("the call screen started") { shadowOf(two.app).peekNextStartedActivity() != null }
+            val started = shadowOf(two.app).nextStartedActivity
+            assertEquals(FaceTimeCallActivity.ACTION_PLACE, started.action)
+            assertEquals("only who can be called", listOf(ALICE), started.getStringArrayListExtra(FaceTimeCallActivity.EXTRA_PEERS))
+            assertEquals(GROUP, started.getStringExtra(FaceTimeCallActivity.EXTRA_CONVERSATION))
+        }
+        // Apple was asked about all its members at once, from the address the chat is carried on.
+        val request = DirectWire.CapableRequest.fromJson(asks(DirectWire.FT_CAPABLE).first())
+        assertEquals(listOf(ALICE, BOB), request.targets)
+        assertEquals(ME, request.from)
+        // Nobody of it can be called: no buttons.
+        DirectLink.resetForTesting()
+        directMode()
+        capable = false
+        launch(GROUP).use { scenario ->
+            scenario.waitFor("Apple's answer") { shownTexts(it).contains("Hello all") && asks(DirectWire.FT_CAPABLE).size >= 2 && !it.faceTimeOffered() }
+        }
+    }
+
+    @Test
+    fun aGroupCallsRowGoesInTheGroupChatOfExactlyItsPeopleAndNowhereElse() {
+        directMode()
+        group()
+        // An incoming group call from Alice, its list naming the group's people: in the group chat.
+        link.apply(DirectWire.decode(JSONObject(DirectWire.encode(DirectArchive.Update.Call(CALL, ALICE, false, true, System.currentTimeMillis() - 5_000, 0, "missed", group = true, members = listOf(ALICE, BOB))).toString())))
+        assertEquals(GROUP, imRepo.message(CallRows.messageId(CALL))!!.conversationId)
+        // A stranger naming the group's people, or a list of other people: never there.
+        link.apply(DirectWire.decode(JSONObject(DirectWire.encode(DirectArchive.Update.Call(OTHER_CALL, MALLORY, false, true, System.currentTimeMillis() - 4_000, 0, "missed", group = true, members = listOf(MALLORY, ALICE, BOB))).toString())))
+        assertEquals("imsg:$MALLORY", imRepo.message(CallRows.messageId(OTHER_CALL))!!.conversationId)
+        link.apply(DirectWire.decode(JSONObject(DirectWire.encode(DirectArchive.Update.Call(THIRD_CALL, ALICE, false, true, System.currentTimeMillis() - 3_000, 0, "missed", group = true, members = listOf(ALICE, MALLORY))).toString())))
+        assertTrue("in a chat of Alice's own", imRepo.message(CallRows.messageId(THIRD_CALL))!!.conversationId in setOf(ALICE_CHAT, OTHER_ALICE_CHAT))
+        assertEquals(1, imRepo.messages(GROUP, limit = 10).size)
+        // A placed one goes where it was placed from.
+        val placed = "EEEEEEEE-0000-4000-8000-000000000005"
+        link.apply(DirectWire.decode(JSONObject(DirectWire.encode(DirectArchive.Update.Call(placed, ALICE, true, false, System.currentTimeMillis(), 60_000, "answered", conversationId = GROUP, group = true, members = listOf(ALICE, BOB))).toString())))
+        assertEquals(GROUP, imRepo.message(CallRows.messageId(placed))!!.conversationId)
+    }
+
     // --- a chat's details ------------------------------------------------------------------------
 
     @Test
@@ -646,14 +707,25 @@ class FaceTimeChatTest {
     }
 
     @Test
-    fun aGroupsDetailsAndAChatsWithFaceTimeOffHaveNone() {
+    fun aGroupsDetailsCallItsMembersAndAChatsWithFaceTimeOffHaveNone() {
         directMode()
         group()
+        // SPEC2 B2: a group's details have the two round buttons too, for one call to its members.
         ActivityScenario.launch<ChatDetailsActivity>(ChatDetailsActivity.intent(two.app, GROUP, ChatService.IMESSAGE)).use { scenario ->
-            scenario.waitFor("the details") { it.details != null }
-            two.settle()
-            scenario.onActivity { assertFalse(it.findViewById<View>(R.id.faceTimeRow).isShown) }
+            scenario.waitFor("the details") { it.details?.faceTimeGroup != null && it.findViewById<View>(R.id.faceTimeRow).isShown }
+            scenario.onActivity { activity ->
+                assertNull(activity.details!!.faceTime)
+                activity.findViewById<View>(R.id.faceTimeVideo).performClick()
+                val started = shadowOf(two.app).nextStartedActivity
+                assertEquals(FaceTimeCallActivity.ACTION_PLACE, started.action)
+                assertEquals(listOf(ALICE, BOB), started.getStringArrayListExtra(FaceTimeCallActivity.EXTRA_PEERS))
+                assertEquals(GROUP, started.getStringExtra(FaceTimeCallActivity.EXTRA_CONVERSATION))
+                assertEquals("Hikers", started.getStringExtra(FaceTimeCallActivity.EXTRA_NAME))
+            }
         }
+        // Apple's word on the group's members is forgotten for what follows.
+        DirectLink.resetForTesting()
+        directMode()
         DirectPrefs.setFaceTimeOn(two.app, false)
         ActivityScenario.launch<ChatDetailsActivity>(ChatDetailsActivity.intent(two.app, ALICE_CHAT, ChatService.IMESSAGE)).use { scenario ->
             scenario.waitFor("the details") { it.details != null }
@@ -677,6 +749,8 @@ class FaceTimeChatTest {
         const val IM_DB = "facetime-chat-test.db"
         const val ME = "tel:+15550000001"
         const val ALICE = "tel:+15551234567"
+        const val BOB = "tel:+15557654321"
+        const val MALLORY = "tel:+15559990000"
         const val ALICE_CHAT = "imsg:tel:+15551234567"
         const val OTHER_ALICE_CHAT = "iMessage;-;+15551234567"
         const val BOB_CHAT = "imsg:tel:+15557654321"

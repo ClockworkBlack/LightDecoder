@@ -93,6 +93,30 @@ object CallRows {
         Outcome.MISSED -> 0
         else -> 1
     }
+
+    /**
+     * The group chat a group call's row goes in, of [candidates] (each a group chat's id and its
+     * members' addresses besides the user), or null for none (it goes in the chat with [caller]
+     * then): only one [caller] is a member of whose members are exactly the call's [members]
+     * (besides the user; [same] tells two spellings of one address). A call's member list is its
+     * caller's word: so only someone who is in a group chat can put a call's row there, and only
+     * for a call of exactly its people.
+     */
+    fun groupRowChat(
+        caller: String,
+        members: List<String>,
+        candidates: List<Pair<String, List<String>>>,
+        same: (String, String) -> Boolean,
+    ): String? {
+        val people = members.distinctBy(CallIds::key)
+        if (people.size < 2 || people.none { same(it, caller) }) return null
+        return candidates.firstOrNull { (_, chat) ->
+            val chatPeople = chat.filter { it.isNotBlank() }
+            chatPeople.any { same(it, caller) } &&
+                chatPeople.all { c -> people.any { same(it, c) } } &&
+                people.all { m -> chatPeople.any { same(it, m) } }
+        }?.first
+    }
 }
 
 /**
@@ -129,13 +153,13 @@ class CapabilityCache(
     fun clear() = known.clear()
 }
 
-/** When a chat shows its FaceTime buttons. Pure; tested in FaceTimeButtonsTest. */
+/** When a chat shows its FaceTime buttons. Pure; tested in FaceTimeLogicTest. */
 object FaceTimeButtons {
     /**
-     * Shown for a chat with one person that goes through the iMessage library ([reachable]: the
-     * library is set up and can send to it), with "FaceTime" on, unless Apple said that person
-     * cannot be called ([capable] false; null: not known yet, so shown). Never for a group.
+     * Shown for a chat a call can go from through the iMessage library ([reachable]: the library is
+     * set up, and the chat has someone a call can go to), a group too, with "FaceTime" on, unless
+     * Apple said nobody of it can be called ([capable] false; null: not known yet, so shown).
      */
-    fun shown(faceTimeOn: Boolean, reachable: Boolean, oneToOne: Boolean, capable: Boolean?): Boolean =
-        faceTimeOn && reachable && oneToOne && capable != false
+    fun shown(faceTimeOn: Boolean, reachable: Boolean, capable: Boolean?): Boolean =
+        faceTimeOn && reachable && capable != false
 }

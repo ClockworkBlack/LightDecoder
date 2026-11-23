@@ -77,6 +77,8 @@ class ChatDetailsActivity : AppCompatActivity() {
         val groupName: String,
         /** Whom a FaceTime call from here goes to; null where there are no FaceTime buttons (a group, not through the library, "FaceTime" off, or Apple says they cannot be called). */
         val faceTime: DirectLink.FaceTimeTarget? = null,
+        /** A group's FaceTime call (its members); null where it has none (not a group, not through the library, "FaceTime" off, or Apple says nobody of it can be called). */
+        val faceTimeGroup: DirectLink.FaceTimeGroup? = null,
     )
 
     @VisibleForTesting
@@ -180,24 +182,37 @@ class ChatDetailsActivity : AppCompatActivity() {
      * library; remembered there), and the buttons go if they cannot.
      */
     private fun askFaceTime(d: Details) {
-        val chat = d.faceTime?.conversationId ?: return
+        val group = d.faceTimeGroup
+        val chat = d.faceTime?.conversationId ?: group?.conversationId ?: return
         if (faceTimeAsked == chat) return
         faceTimeAsked = chat
         val library = direct
         lifecycleScope.launch {
-            val capable = withContext(Dispatchers.IO) { runCatching { library.faceTimeCapable(chat) }.getOrNull() }
+            val capable = withContext(Dispatchers.IO) {
+                runCatching { if (group != null) library.faceTimeGroupCapable(chat) else library.faceTimeCapable(chat) }.getOrNull()
+            }
             if (capable == false) load()
         }
     }
 
-    /** Places a FaceTime call to the chat's person: the call screen is started with who to call, and does the rest. */
+    /**
+     * Places a FaceTime call to the chat's person, or a group's to the members who can be called:
+     * the call screen is started with who to call, and does the rest.
+     */
     @VisibleForTesting
     internal fun startFaceTime(video: Boolean) {
-        val target = details?.faceTime ?: return
+        val target = details?.faceTime
+        val group = details?.faceTimeGroup
         try {
-            startActivity(
-                com.lightdecoder.ui.imessage.FaceTimeCallActivity.placeIntent(this, target.peer, target.name, video, target.from, target.conversationId, target.photo),
-            )
+            when {
+                target != null -> startActivity(
+                    com.lightdecoder.ui.imessage.FaceTimeCallActivity.placeIntent(this, target.peer, target.name, video, target.from, target.conversationId, target.photo),
+                )
+                group != null -> {
+                    val peers = direct.faceTimeCallable(group).ifEmpty { return toast(getString(R.string.facetime_not_available)) }
+                    startActivity(com.lightdecoder.ui.imessage.FaceTimeCallActivity.placeIntent(this, peers, group.name, video, group.from, group.conversationId))
+                }
+            }
         } catch (e: RuntimeException) {
             toast(getString(R.string.facetime_not_available))
         }
@@ -232,7 +247,13 @@ class ChatDetailsActivity : AppCompatActivity() {
             // FaceTime: for the chat with one person the library reaches, unless Apple said they cannot be called.
             faceTime = chat?.takeIf { !row.isGroup }?.let { library.faceTimeTarget(it) }?.takeIf { target ->
                 com.lightdecoder.imessage.facetime.FaceTimeButtons.shown(
-                    faceTimeOn = true, reachable = true, oneToOne = true, capable = library.faceTimeCapableKnown(target.conversationId),
+                    faceTimeOn = true, reachable = true, capable = library.faceTimeCapableKnown(target.conversationId),
+                )
+            },
+            // A group: its members, unless Apple said nobody of it can be called.
+            faceTimeGroup = chat?.takeIf { row.isGroup && iMessage }?.let { library.faceTimeGroup(it) }?.takeIf { group ->
+                com.lightdecoder.imessage.facetime.FaceTimeButtons.shown(
+                    faceTimeOn = true, reachable = true, capable = library.faceTimeGroupCapableKnown(group.conversationId),
                 )
             },
         )
@@ -249,7 +270,7 @@ class ChatDetailsActivity : AppCompatActivity() {
         binding.subtitle.text = subtitle
         binding.subtitle.visibility = if (subtitle.isEmpty()) View.GONE else View.VISIBLE
         binding.changeNamePhoto.visibility = if (d.rules.manageable) View.VISIBLE else View.GONE
-        binding.faceTimeRow.visibility = if (d.faceTime != null) View.VISIBLE else View.GONE
+        binding.faceTimeRow.visibility = if (d.faceTime != null || d.faceTimeGroup != null) View.VISIBLE else View.GONE
         renderMembers(d)
         binding.hideAlerts.isChecked = d.muted
         binding.readReceipts.visibility = if (d.receipts != null) View.VISIBLE else View.GONE

@@ -483,6 +483,22 @@ class ArchiveRepository private constructor(
         return withMedia(rows)
     }
 
+    /**
+     * The FaceTime calls' rows of every chat ([com.lightdecoder.imessage.facetime.CallRows]: their ids
+     * are "ftcall:<guid>", so the primary key's order finds them), newest first, at most [limit], each
+     * with its chat; none of a chat in [Folder.DELETED] or [Folder.SPAM].
+     */
+    fun calls(limit: Int): List<Pair<MessageRow, ConversationRow>> {
+        val rows = query(
+            "SELECT * FROM messages WHERE message_id >= ? AND message_id < ? AND conversation_id IN " +
+                "(SELECT conversation_id FROM conversations WHERE folder != ? AND folder != ?) " +
+                "ORDER BY timestamp_ms DESC, rowid DESC LIMIT ${limit.coerceAtLeast(0)}",
+            arrayOf(CALL_ROWS_FROM, CALL_ROWS_TO, Folder.DELETED.wire, Folder.SPAM.wire),
+        ) { it.toMessage() }
+        val chats = HashMap<String, ConversationRow?>()
+        return rows.mapNotNull { row -> chats.getOrPut(row.conversationId) { conversation(row.conversationId) }?.let { row to it } }
+    }
+
     /** Like [latestMessageId], among the messages other people sent. */
     fun latestIncomingMessageId(conversationId: String, prefix: String = "imsg:"): String? = query(
         "SELECT message_id FROM messages WHERE conversation_id = ? AND substr(message_id, 1, ${prefix.length}) = ? " +
@@ -1390,6 +1406,10 @@ class ArchiveRepository private constructor(
 
         /** Forgets the process instances of every service (tests only); the next [get] opens one for the current app. */
         internal fun resetForTesting() = instances.clear()
+
+        /** The range of message ids the FaceTime calls' rows have ("ftcall:" up to the next character after ':'). */
+        private const val CALL_ROWS_FROM = "ftcall:"
+        private const val CALL_ROWS_TO = "ftcall;"
 
         /**
          * Turns what the user typed into an FTS4 query that cannot be misread

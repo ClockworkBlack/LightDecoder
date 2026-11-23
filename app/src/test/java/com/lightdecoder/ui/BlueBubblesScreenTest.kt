@@ -567,8 +567,11 @@ class BlueBubblesScreenTest {
                 activity.findViewById<EditText>(R.id.input).setText("A green one")
                 activity.findViewById<View>(R.id.send).performClick()
             }
+            // The line is written once the send has gone its way (off the main thread).
+            val why = "sent as a TEXT (green): no iMessage chat with this person in OpenBubbles yet"
+            two.waitUntil("the log line") { com.lightdecoder.imessage.IMessageLog.read(two.app).any { it.contains(why) } }
             val log = com.lightdecoder.imessage.IMessageLog.read(two.app)
-            assertTrue(log.joinToString("\n"), log.any { it.contains("sent as a TEXT (green): no iMessage chat with this person in OpenBubbles yet") })
+            assertTrue(log.joinToString("\n"), log.any { it.contains(why) })
             assertTrue(log.none { it.contains("Bob") || it.contains("5559876543") || it.contains("A green one") })
         }
     }

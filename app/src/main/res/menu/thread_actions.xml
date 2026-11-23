@@ -17,8 +17,9 @@
         app:showAsAction="always" />
     <!--
         FaceTime, for a chat with one person the iMessage library reaches (and whom Apple does not say
-        cannot be called), with "FaceTime" on. In iPhone-style chats a camera in the bar, which asks
-        Video or Audio; elsewhere the two in the menu.
+        cannot be called), or a group chat (one call to its members who can be called), with
+        "FaceTime" on. In iPhone-style chats a camera in the bar, which asks Video or Audio; elsewhere
+        the two in the menu.
     -->
     <item
         android:id="@+id/action_facetime"

@@ -574,11 +574,28 @@ class CallRulesTest {
     }
 
     @Test
-    fun aGroupCallDoesNotRingHereYet() {
-        val out = event(CallEvent.Join(IN, ALICE, ring = true), listOf(session(IN, others = listOf(BOB))))
-        assertNull(state)
-        assertFalse(out.has<Effect.LookupCaller>())
-        assertEquals(Outcome.MISSED, out.only<Effect.LogCall>().entry.outcome)
+    fun aGroupCallRingsAsItsCallerWithOnlyHowManyOthersItsMemberListNames() {
+        // SPEC2 B2 changed this: a group call rings (in 0.5.72 it was only noted as missed).
+        val out = event(CallEvent.Join(IN, ALICE, ring = true, participant = 7L), listOf(session(IN, others = listOf(BOB, MALLORY))))
+        assertEquals(Phase.SCREENING, state?.phase)
+        assertEquals("only the caller Apple vouches for is asked about", ALICE, out.only<Effect.LookupCaller>().handle)
+        val call = state!!
+        assertTrue(call.group)
+        assertEquals(ALICE, call.peer)
+        assertEquals("the member list is counted, never shown as who calls", 2, call.others)
+        assertEquals(listOf(ALICE), call.peers)
+        assertEquals(mapOf(7L to ALICE), call.joiners)
+        val rung = send(Input.Caller(IN, CallerInfo("Alice Martin", known = true, conversationId = "imsg:tel:+15551234567"), t, on))
+        val shown = rung.only<Effect.ShowIncoming>().call
+        assertEquals("Alice Martin", shown.name)
+        assertTrue(shown.group)
+        assertFalse("from someone known: Decline, as any ring", shown.ignoreOnly)
+        assertTrue(done.none { it is Effect.LookupCaller && it.handle != ALICE })
+        // Declined, it is told (the user knows the caller).
+        assertEquals(IN, send(Input.DeclineByUser(IN, t)).only<Effect.DeclineCall>().guid)
+        val row = logged().single()
+        assertTrue(row.group)
+        assertEquals("its row goes where its people say (only ever held against a group chat's)", listOf(ALICE, BOB, MALLORY), row.members)
     }
 
     @Test
@@ -686,10 +703,13 @@ class CallRulesTest {
         val spoofed = CallSessionInfo(IN, listOf(ME), listOf(ALICE, ME, MALLORY), t, false, true)
         // A list with the stranger and the user only, the contact slipped in as the first "member" that is no address of the stranger's.
         val out = event(CallEvent.Join(IN, MALLORY, ring = true), listOf(CallSessionInfo(IN, listOf(ME), listOf(ALICE, MALLORY, ME), t, false, true)))
-        // Three people: a group call, which does not ring; its missed call is the stranger's, never the contact's.
+        // Three people: a group call (SPEC2 B2: it rings now), rung as the stranger's own, never as the contact's.
+        assertEquals(MALLORY, out.only<Effect.LookupCaller>().handle)
+        assertEquals(MALLORY, state?.peer)
+        send(Input.Caller(IN, CallerInfo("", known = false), t, on))
+        val ignored = send(Input.DeclineByUser(IN, t))
         assertNull(state)
-        assertEquals(MALLORY, out.only<Effect.LogCall>().entry.peer)
-        assertFalse(out.has<Effect.LookupCaller>())
+        assertEquals(MALLORY, ignored.only<Effect.LogCall>().entry.peer)
         // The member list naming the contact only, the ring coming from the stranger: not in the call they ring for, so nothing.
         t += 60_000
         val absent = event(CallEvent.Join(OTHER, MALLORY, ring = true), listOf(session(OTHER, caller = ALICE)))
@@ -700,7 +720,7 @@ class CallRulesTest {
         event(CallEvent.Join(THIRD, MALLORY, ring = false), listOf(spoofed.copy(guid = THIRD)))
         val invited = event(CallEvent.Invite(THIRD), listOf(spoofed.copy(guid = THIRD)))
         assertNull(state)
-        assertEquals(listOf(MALLORY), (out + invited).filterIsInstance<Effect.LogCall>().map { it.entry.peer }.distinct())
+        assertEquals(listOf(MALLORY), (out + ignored + invited).filterIsInstance<Effect.LogCall>().map { it.entry.peer }.distinct())
         // And one-to-one, with a list of the stranger and the user: the main process is asked about the stranger, nobody else.
         t += 60_000
         val honest = event(CallEvent.Join(guid(1), MALLORY, ring = true), listOf(session(guid(1), caller = MALLORY)))
@@ -802,6 +822,291 @@ class CallRulesTest {
         assertTrue(send(Input.Caller(guid(2999), CallerInfo("Alice", known = true), t, on)).has<Effect.ShowIncoming>())
     }
 
+    // --- group calls (SPEC2 B2) -----------------------------------------------------------------------
+
+    private fun groupSession(guid: String, caller: String = ALICE, others: List<String> = listOf(BOB, CAROL), video: Boolean = false) =
+        session(guid, caller, video = video, others = others)
+
+    @Test
+    fun aGroupCallIsPlacedToEveryoneAtOnce() {
+        val out = send(Input.Place(OUT, ALICE, "Hikers", true, ME, "imsg:group:G", null, t, false, on, peers = listOf(ALICE, BOB, "temp:guest", "mailto:Bob@Example.com", BOB)))
+        val call = out.only<Effect.CreateCall>().call
+        assertEquals("each once, only addresses, the first first", listOf(ALICE, BOB, "mailto:Bob@Example.com"), call.peers)
+        assertTrue(call.group)
+        assertEquals(ALICE, call.peer)
+        assertEquals(Phase.RINGING_OUT, state?.phase)
+        // Only so many.
+        state = null
+        val many = send(Input.Place(OTHER, ALICE, "", false, ME, null, null, t, false, on, peers = List(50) { "tel:+1555700%04d".format(it) }))
+        assertEquals(MAX_PEOPLE, many.only<Effect.CreateCall>().call.peers.size)
+        // One person through the group path is a one-to-one call.
+        state = null
+        assertFalse(send(Input.Place(THIRD, ALICE, "", false, ME, null, null, t, false, on, peers = listOf(ALICE))).only<Effect.CreateCall>().call.group)
+    }
+
+    @Test
+    fun aPlacedGroupCallEndsDeclinedOnlyOnceEveryoneSaidNo() {
+        send(Input.Place(OUT, ALICE, "", false, ME, null, null, t, false, on, peers = listOf(ALICE, BOB)))
+        send(Input.Placed(OUT, ok = true, now = t))
+        // One no: it goes on ringing for the other.
+        assertTrue(event(CallEvent.Decline(OUT, ALICE)).isEmpty())
+        assertEquals(Phase.RINGING_OUT, state?.phase)
+        assertEquals(setOf(ALICE), state!!.declined)
+        // A no that says nobody's, or someone's it never went to, says nothing.
+        assertTrue(event(CallEvent.Decline(OUT, "")).isEmpty())
+        assertTrue(event(CallEvent.Decline(OUT, MALLORY)).isEmpty())
+        assertTrue(event(CallEvent.Decline(OUT, ME)).isEmpty())
+        assertEquals(Phase.RINGING_OUT, state?.phase)
+        assertEquals(setOf(ALICE), state!!.declined)
+        // The same no twice is still one.
+        event(CallEvent.Decline(OUT, ALICE))
+        assertEquals(Phase.RINGING_OUT, state?.phase)
+        // Everyone said no: taken back, and shown as declined.
+        val out = event(CallEvent.Decline(OUT, BOB))
+        assertEquals(Phase.UNANSWERED, state?.phase)
+        assertEquals(Unanswered.DECLINED, state?.unanswered)
+        assertEquals(OUT, out.only<Effect.CancelCall>().guid)
+        val row = out.only<Effect.LogCall>().entry
+        assertEquals(Outcome.DECLINED, row.outcome)
+        assertTrue(row.group)
+        assertEquals(listOf(ALICE, BOB), row.members)
+    }
+
+    @Test
+    fun aOneToOneCallStillEndsAtItsOnlyPersonsNo() {
+        place()
+        // As in 0.5.72: any no that is not the user's own ends a one-to-one call.
+        event(CallEvent.Decline(OUT, ""))
+        assertEquals(Unanswered.DECLINED, state?.unanswered)
+    }
+
+    @Test
+    fun aPlacedGroupCallIsAnsweredOnlyByOneOfThePeopleItWentTo() {
+        send(Input.Place(OUT, ALICE, "", false, ME, null, null, t, false, on, peers = listOf(ALICE, BOB)))
+        send(Input.Placed(OUT, ok = true, now = t))
+        assertTrue(event(CallEvent.Join(OUT, MALLORY, ring = false)).none { it is Effect.StartNative })
+        assertTrue(event(CallEvent.Join(OUT, "", ring = false)).isEmpty())
+        assertTrue(event(CallEvent.Join(OUT, ME, ring = false)).isEmpty())
+        assertEquals(Phase.RINGING_OUT, state?.phase)
+        val joined = event(CallEvent.Join(OUT, BOB, ring = false, participant = 9L))
+        assertEquals(Phase.CONNECTING, state?.phase)
+        assertTrue(joined.has<Effect.StartNative>())
+        assertEquals("who joined is known by the id they joined with", BOB, state!!.joiners[9L])
+    }
+
+    @Test
+    fun anInvitationRingsAGroupCallOnlyRightAfterItsCallersOwnRingAndInTheCallsOwnAllowance() {
+        val strict = CallRules(RingLimiter(maxRingsPerHour = 2))
+        fun go(input: Input): List<Effect> = strict.reduce(state, input).also { state = it.state; done += it.effects }.effects
+        fun at(e: CallEvent, sessions: List<CallSessionInfo> = listOf(groupSession(IN))) = go(Input.Event(e, sessions, setOf(ME), t, 10 * 60_000L, on))
+        // Alice's own ring comes before the library has the call: not decided yet.
+        assertTrue(at(CallEvent.Join(IN, ALICE, ring = true), emptyList()).all { it is Effect.Note })
+        assertNull(state)
+        // Fifteen seconds on, an invitation (from any member: it names nobody) rings it, as Alice's.
+        t += 15_000
+        assertTrue(at(CallEvent.Invite(IN)).has<Effect.LookupCaller>())
+        assertEquals(ALICE, state?.peer)
+        go(Input.Caller(IN, CallerInfo("Alice", known = true), t, on))
+        go(Input.DeclineByUser(IN, t))
+        // Declined: another invitation does not ring it again, even within the thirty seconds.
+        t += 11_000
+        val again = at(CallEvent.Invite(IN))
+        assertNull(state)
+        assertTrue(again.toString(), again.all { it is Effect.Note })
+        // Thirty-one seconds after Alice's own ring: no more either.
+        t += 16_000
+        assertTrue(at(CallEvent.Invite(IN)).all { it is Effect.Note })
+        assertNull(state)
+        // A one-to-one call's invitation rings whenever (as in 0.5.72): its joiner is remembered.
+        t += 60_000
+        at(CallEvent.Join(OTHER, BOB, ring = false), listOf(session(OTHER, BOB)))
+        t += 5 * 60_000
+        assertTrue(at(CallEvent.Invite(OTHER), listOf(session(OTHER, BOB))).has<Effect.LookupCaller>())
+    }
+
+    @Test
+    fun aGroupInvitationNeverRingsWhatItsCallersOwnRingCouldNot() {
+        val strict = CallRules(RingLimiter(maxRingsPerHour = 1))
+        fun go(input: Input): List<Effect> = strict.reduce(state, input).also { state = it.state; done += it.effects }.effects
+        fun at(e: CallEvent, guid: String, sessions: List<CallSessionInfo> = listOf(groupSession(guid))) =
+            go(Input.Event(e, sessions, setOf(ME), t, 10 * 60_000L, on))
+        // Alice uses her one ring of the hour.
+        at(CallEvent.Join(IN, ALICE, ring = true), IN)
+        go(Input.Caller(IN, CallerInfo("Alice", known = true), t, on))
+        go(Input.DeclineByUser(IN, t))
+        assertNull(state)
+        // A new group call: her own ring is past her limit (a missed call at most) ...
+        t += 60_000
+        val g2 = "9C7E1F2A-0000-4000-8000-00000000A002"
+        assertFalse(at(CallEvent.Join(g2, ALICE, ring = true), g2).has<Effect.LookupCaller>())
+        assertNull(state)
+        // ... and an invitation for it eleven seconds later does not ring it either.
+        t += 11_000
+        val invited = at(CallEvent.Invite(g2), g2)
+        assertNull(state)
+        assertTrue(invited.toString(), invited.all { it is Effect.Note })
+        // Nor does one that follows a ring the library could not check yet: her limit holds.
+        t += 60_000
+        val g3 = "9C7E1F2A-0000-4000-8000-00000000A003"
+        at(CallEvent.Join(g3, ALICE, ring = true), g3, emptyList())
+        t += 5_000
+        val late = at(CallEvent.Invite(g3), g3)
+        assertNull(state)
+        assertTrue(late.toString(), late.all { it is Effect.Note })
+    }
+
+    @Test
+    fun aGroupInvitationsAllowanceIsTheCallsNotTheCallers() {
+        val limiter = RingLimiter(minGapMs = 10, maxRingsPerHour = 1, windowMs = 1_000)
+        assertEquals(RingLimiter.Verdict.RING, limiter.ring("alice", "g1", 0))
+        // The call's invitations, in a bucket of their own.
+        assertEquals(RingLimiter.Verdict.RING, limiter.callRing("g1", 20))
+        assertEquals("the call's own allowance is used up", RingLimiter.Verdict.MISSED_ONLY, limiter.callRing("g1", 40))
+        // Alice's own was used once, by her ring only.
+        assertEquals(RingLimiter.Verdict.MISSED_ONLY, limiter.ring("alice", "g2", 60))
+        assertEquals(RingLimiter.Verdict.RING, limiter.ring("bob", "g3", 80))
+        assertFalse("no address has the bucket's shape", CallIds.handle(RingLimiter.callKey("g1")) != null)
+    }
+
+    @Test
+    fun aGroupInvitationWithNoRingOfItsCallerBeforeIsDropped() {
+        // Ring and AddMembers(ring): no sender, no remembered ring of its caller.
+        val out = event(CallEvent.Invite(IN), listOf(groupSession(IN)))
+        assertNull(state)
+        assertTrue(out.single() is Effect.Note)
+        // A join that is no ring does not make one.
+        event(CallEvent.Join(IN, ALICE, ring = false), listOf(groupSession(IN)))
+        assertTrue(event(CallEvent.Invite(IN), listOf(groupSession(IN))).all { it is Effect.Note })
+        assertNull(state)
+        assertTrue(logged().isEmpty())
+    }
+
+    @Test
+    fun aSecondRingOfACallThenDeclinedOrHungUpLeavesNoInvitationToRingItAgain() {
+        // Declined: a second ring of the call while it rings is no ring to be invited by.
+        event(CallEvent.Join(IN, ALICE, ring = true), listOf(groupSession(IN)))
+        send(Input.Caller(IN, CallerInfo("Alice", true), t, on))
+        assertEquals(Phase.RINGING_IN, state?.phase)
+        t += 1_000
+        event(CallEvent.Join(IN, ALICE, ring = true), listOf(groupSession(IN)))
+        t += 4_000
+        send(Input.DeclineByUser(IN, t))
+        assertNull(state)
+        t += 7_000
+        assertTrue(event(CallEvent.Invite(IN), listOf(groupSession(IN))).all { it is Effect.Note })
+        assertNull(state)
+        // Answered, rung again while in it, then hung up with others still there: the same.
+        t += 60 * 60_000
+        event(CallEvent.Join(OTHER, BOB, ring = true), listOf(groupSession(OTHER, caller = BOB)))
+        send(Input.Caller(OTHER, CallerInfo("Bob", true), t, on))
+        send(Input.Answer(OTHER, false, t))
+        send(Input.NativeUp(OTHER, false, t))
+        t += 1_000
+        event(CallEvent.Join(OTHER, BOB, ring = true), listOf(groupSession(OTHER, caller = BOB)))
+        t += 4_000
+        send(Input.HangUp(OTHER, t))
+        assertNull(state)
+        t += 7_000
+        assertTrue(event(CallEvent.Invite(OTHER), listOf(groupSession(OTHER, caller = BOB))).all { it is Effect.Note })
+        assertNull(state)
+    }
+
+    @Test
+    fun inAGroupNobodyLeavingStopsTheRingButInOneToOneTheCallerGivingUpDoes() {
+        event(CallEvent.Join(IN, ALICE, ring = true), listOf(groupSession(IN)))
+        send(Input.Caller(IN, CallerInfo("Alice", true), t, on))
+        // Any member can say anyone left: nothing.
+        assertTrue(event(CallEvent.Leave(IN, ALICE), listOf(groupSession(IN))).isEmpty())
+        assertTrue(event(CallEvent.Leave(IN, BOB), listOf(groupSession(IN))).isEmpty())
+        assertEquals(Phase.RINGING_IN, state?.phase)
+        // Joined: nobody leaving ends it either, only the library's own word that nobody is there.
+        send(Input.Answer(IN, false, t))
+        send(Input.NativeUp(IN, false, t))
+        send(Input.Participants.of(IN, longArrayOf(7, 8), arrayOf(ALICE, BOB), t))
+        assertTrue(event(CallEvent.Leave(IN, ALICE), listOf(groupSession(IN).copy(active = false))).isEmpty())
+        assertEquals(Phase.ACTIVE, state?.phase)
+        // One to one: the caller giving up stops it (as in 0.5.72).
+        state = null
+        t += 60_000
+        ringing(guid = OTHER, caller = BOB)
+        assertEquals(Outcome.MISSED, event(CallEvent.Leave(OTHER, BOB)).only<Effect.LogCall>().entry.outcome)
+        assertNull(state)
+    }
+
+    @Test
+    fun beingTakenOutOfACallStopsItsRing() {
+        event(CallEvent.Join(IN, ALICE, ring = true), listOf(groupSession(IN)))
+        send(Input.Caller(IN, CallerInfo("Alice", true), t, on))
+        // Someone else taken out: nothing.
+        assertTrue(event(CallEvent.Removed(IN, listOf(BOB)), listOf(groupSession(IN))).isEmpty())
+        assertEquals(Phase.RINGING_IN, state?.phase)
+        val out = event(CallEvent.Removed(IN, listOf(BOB, ME)), listOf(groupSession(IN)))
+        assertNull(state)
+        assertEquals(IN, out.only<Effect.HideIncoming>().guid)
+        assertEquals(Outcome.MISSED, out.only<Effect.LogCall>().entry.outcome)
+        assertFalse("nothing is sent", out.has<Effect.DeclineCall>())
+    }
+
+    @Test
+    fun aGroupRingFromSomeoneUnknownIsIgnoredNotDeclinedAndAnsweredWithoutTheCamera() {
+        event(CallEvent.Join(IN, MALLORY, ring = true), listOf(groupSession(IN, caller = MALLORY, video = true)))
+        val shown = send(Input.Caller(IN, CallerInfo("", known = false), t, on)).only<Effect.ShowIncoming>().call
+        assertTrue(shown.ignoreOnly)
+        // Ignore: nothing is sent to the people its member list names.
+        val ignored = send(Input.DeclineByUser(IN, t))
+        assertNull(state)
+        assertFalse(ignored.has<Effect.DeclineCall>())
+        assertEquals(Outcome.DECLINED, ignored.only<Effect.LogCall>().entry.outcome)
+        // The hang-up of a ring is the same.
+        t += 60_000
+        event(CallEvent.Join(OTHER, MALLORY, ring = true), listOf(groupSession(OTHER, caller = MALLORY, video = true)))
+        assertFalse(send(Input.HangUp(OTHER, t)).has<Effect.DeclineCall>())
+        // Answered, with the camera asked for: without it.
+        t += 60_000
+        event(CallEvent.Join(THIRD, MALLORY, ring = true), listOf(groupSession(THIRD, caller = MALLORY, video = true)))
+        send(Input.Caller(THIRD, CallerInfo("", known = false), t, on))
+        send(Input.Answer(THIRD, withCamera = true, now = t))
+        assertFalse(state!!.withCamera)
+        assertTrue(state!!.video)
+        // A one-to-one ring from someone unknown is declined as before.
+        state = null
+        t += 60_000
+        event(CallEvent.Join(guid(5), MALLORY, ring = true), listOf(session(guid(5), MALLORY)))
+        send(Input.Caller(guid(5), CallerInfo("", known = false), t, on))
+        assertFalse(state!!.ignoreOnly)
+        assertTrue(send(Input.DeclineByUser(guid(5), t)).has<Effect.DeclineCall>())
+    }
+
+    @Test
+    fun theLibrarysParticipantsAreKeptWithWhatItReportsAndTheHangUpRuleStays() {
+        event(CallEvent.Join(IN, ALICE, ring = true, participant = 7L), listOf(groupSession(IN)))
+        send(Input.Caller(IN, CallerInfo("Alice", true), t, on))
+        send(Input.Answer(IN, false, t))
+        send(Input.NativeUp(IN, false, t))
+        send(Input.Participants.of(IN, longArrayOf(7, 8, 9), arrayOf(ALICE, "tel:+1555\u202E0000", null), t))
+        assertEquals(3, state!!.present)
+        assertEquals(listOf(InCall(7, ALICE), InCall(8, "tel:+15550000"), InCall(9, "")), state!!.inCall)
+        assertEquals(mapOf(7L to ALICE), state!!.joiners)
+        // Only so many are kept, all are counted.
+        send(Input.Participants.of(IN, LongArray(40) { it.toLong() }, arrayOfNulls(3), t))
+        assertEquals(40, state!!.present)
+        assertEquals(MAX_PEOPLE, state!!.inCall.size)
+        // Someone was there, now nobody is: over.
+        t += 4_000
+        val ended = send(Input.Participants.of(IN, LongArray(0), arrayOfNulls(0), t))
+        assertNull(state)
+        assertEquals(Outcome.ANSWERED, ended.only<Effect.LogCall>().entry.outcome)
+    }
+
+    @Test
+    fun aBlockedCallerNeverRingsNorMakesARow() {
+        val rules = CallRules(blocked = { it == MALLORY })
+        val out = rules.reduce(null, Input.Event(CallEvent.Join(IN, MALLORY, ring = true), listOf(session(IN, MALLORY)), setOf(ME), t, 10 * 60_000L, on))
+        assertNull(out.state)
+        assertTrue(out.effects.toString(), out.effects.all { it is Effect.Note })
+        assertTrue(rules.reduce(null, Input.Event(CallEvent.Join(OTHER, ALICE, ring = true), listOf(session(OTHER)), setOf(ME), t, 10 * 60_000L, on)).effects.any { it is Effect.LookupCaller })
+    }
+
     private fun guid(n: Int): String = "0A1B2C3D-0000-4000-8000-%012d".format(n)
 
     private companion object {
@@ -812,5 +1117,6 @@ class CallRulesTest {
 
         /** A stranger. */
         const val MALLORY = "tel:+15559990000"
+        const val CAROL = "tel:+15553334444"
     }
 }
