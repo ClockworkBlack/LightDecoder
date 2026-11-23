@@ -23,6 +23,12 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
 - Own camera: the preview and the orientation sent to the library now use the camera's real
   `SENSOR_ORIENTATION` (`FaceTimeCamera.sensorOrientationOf`, `CallCamera.sensorOrientation`);
   usual phones (90 back / 270 front) give exactly OpenBubbles' old table.
+- **Camera keeps sending in other apps (owner's request).** Before, the camera paused whenever
+  the call screen was out of sight (from the 0.5.71/72 audit). Now it pauses only while the phone
+  is locked or dark: `FaceTimeCalls.screenHidden(screen, phoneInUse)` (the screen's onStop passes
+  "on and unlocked") and `phoneInUse(...)` from `FaceTimeCallService`'s SCREEN_OFF / USER_PRESENT
+  receiver. The in-call notice and Android's camera dot stay up meanwhile. Tests in
+  `FaceTimeCallsTest` and `FaceTimeCallScreenTest`.
 - **Not run on a phone.** If the other side's picture is upside down when they hold the phone
   upright, swap 0 and 1 in `VideoFit.degreesForStream`. Tests: `VideoFitTest`, `NativeCallTest`.
   Next version: 0.5.74 / 85.

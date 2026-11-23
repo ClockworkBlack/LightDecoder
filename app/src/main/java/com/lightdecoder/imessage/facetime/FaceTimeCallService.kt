@@ -49,6 +49,17 @@ class FaceTimeCallService : Service() {
         }
     }
 
+    /** The phone locked or dark, and unlocked again: the camera pauses and resumes with it while the call screen is away. */
+    private val lockWatch = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                Intent.ACTION_SCREEN_OFF -> calls.phoneInUse(false)
+                Intent.ACTION_USER_PRESENT -> calls.phoneInUse(true)
+            }
+        }
+    }
+    private var watchingLock = false
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -76,6 +87,16 @@ class FaceTimeCallService : Service() {
             FaceTimeLog.note("the screen's rotation is not watched (${e::class.java.simpleName})")
         }
         tellRotation()
+        try {
+            val filter = android.content.IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_OFF)
+                addAction(Intent.ACTION_USER_PRESENT)
+            }
+            ContextCompat.registerReceiver(this, lockWatch, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+            watchingLock = true
+        } catch (e: RuntimeException) {
+            FaceTimeLog.note("the phone's lock is not watched (${e::class.java.simpleName})")
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -169,6 +190,10 @@ class FaceTimeCallService : Service() {
 
     override fun onDestroy() {
         holdProximity(false)
+        if (watchingLock) {
+            watchingLock = false
+            runCatching { unregisterReceiver(lockWatch) }
+        }
         try {
             getSystemService(DisplayManager::class.java)?.unregisterDisplayListener(displays)
         } catch (e: RuntimeException) {

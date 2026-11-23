@@ -203,8 +203,15 @@ class FaceTimeCallActivity : AppCompatActivity() {
      * its sound go on, under the in-call notice.
      */
     override fun onStop() {
-        calls.screenHidden(this)
+        calls.screenHidden(this, phoneInUse = phoneInUse())
         super.onStop()
+    }
+
+    /** The phone is on and unlocked: leaving the screen is going to another app, not putting the phone away. */
+    private fun phoneInUse(): Boolean = try {
+        getSystemService(android.os.PowerManager::class.java)?.isInteractive == true && !locked()
+    } catch (e: RuntimeException) {
+        false
     }
 
     override fun onResume() {

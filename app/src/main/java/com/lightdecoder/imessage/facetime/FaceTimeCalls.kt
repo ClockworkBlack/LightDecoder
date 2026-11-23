@@ -142,6 +142,9 @@ class FaceTimeCalls internal constructor(
     @Volatile
     private var cameraPaused = false
 
+    /** The phone is on and unlocked, as last told ([screenHidden], [phoneInUse]); under [mediaLock]. */
+    private var phoneInUse = false
+
     private val foregroundLock = Any()
 
     /** Joins of the library that have not returned yet, and whether the in-call notice is to go once they have. */
@@ -378,33 +381,61 @@ class FaceTimeCalls internal constructor(
     }
 
     /**
-     * The call screen [screen] is visible (its onStart): a camera that was paused because no screen
-     * was ([screenHidden]) is sent again, if the user still has it on.
+     * The call screen [screen] is visible (its onStart): a camera that was paused ([screenHidden],
+     * [phoneInUse]) is sent again, if the user still has it on.
      */
     fun screenShown(screen: Any) {
-        val resume = synchronized(mediaLock) {
-            screens.add(screen)
-            cameraPaused.also { cameraPaused = false }
-        }
-        if (resume && _media.value.cameraOn) {
-            command { it.camera(true) }
-            startCamera()
-        }
+        synchronized(mediaLock) { screens.add(screen) }
+        reconsiderPause()
     }
 
     /**
-     * The call screen [screen] is no longer visible (its onStop: left for another app, or the phone
-     * locked): with no call screen to be seen, the camera stops sending this phone's picture, and
-     * stops running, until one is back. The call, its sound and its notice go on.
+     * The call screen [screen] is no longer visible (its onStop). [phoneInUse]: the phone is on and
+     * unlocked, the user only went to another app (or Home): the camera goes on sending, as the
+     * owner asked, under the in-call notice and Android's camera dot. Otherwise (the phone locked or
+     * dark) the camera stops sending this phone's picture, and stops running, until the call screen
+     * is back or the phone is unlocked again. The call, its sound and its notice go on either way.
      */
-    fun screenHidden(screen: Any) {
-        val pause = synchronized(mediaLock) {
+    fun screenHidden(screen: Any, phoneInUse: Boolean = false) {
+        synchronized(mediaLock) {
             screens.remove(screen)
-            (screens.isEmpty() && !cameraPaused).also { if (it) cameraPaused = true }
+            this.phoneInUse = phoneInUse
+        }
+        reconsiderPause()
+    }
+
+    /**
+     * The phone was locked or its screen went dark (false), or it was unlocked (true): with no call
+     * screen in sight the camera pauses while it is locked and goes on once it is unlocked.
+     */
+    fun phoneInUse(inUse: Boolean) {
+        synchronized(mediaLock) { phoneInUse = inUse }
+        reconsiderPause()
+    }
+
+    /** Pauses or resumes the camera: paused only with no call screen in sight and the phone locked or dark. */
+    private fun reconsiderPause() {
+        val (pause, resume) = synchronized(mediaLock) {
+            val wanted = screens.isEmpty() && !phoneInUse
+            when {
+                wanted && !cameraPaused -> {
+                    cameraPaused = true
+                    true to false
+                }
+                !wanted && cameraPaused -> {
+                    cameraPaused = false
+                    false to true
+                }
+                else -> false to false
+            }
         }
         if (pause && _media.value.cameraOn) {
             command { it.camera(false) }
             stopCamera {}
+        }
+        if (resume && _media.value.cameraOn) {
+            command { it.camera(true) }
+            startCamera()
         }
     }
 

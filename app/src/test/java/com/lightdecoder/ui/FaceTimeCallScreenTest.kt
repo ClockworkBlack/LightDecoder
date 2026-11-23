@@ -495,13 +495,30 @@ class FaceTimeCallScreenTest {
             val native = engine.natives.last
             native.host!!.encoderSurface(surface(), 1)
             waitUntil("the camera") { engine.camera.running && native.calls.contains("enableCamera:77:true:-1") }
-            // Home, another app, or the phone locked and dark: the screen is stopped.
+            // Another app or Home, with the phone on and unlocked: the camera goes on (the owner asked for it).
+            val power = shadowOf(app.getSystemService(android.os.PowerManager::class.java))
+            power.setIsInteractive(true)
+            val running = engine.camera.starts.size
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.CREATED)
+            settle()
+            assertTrue("still sending from another app", engine.camera.running)
+            assertEquals(running, engine.camera.starts.size)
+            assertEquals("enableCamera:77:true:-1", native.calls.toList().last { it.startsWith("enableCamera") })
+            // Locked from there (the screen goes dark): it pauses; unlocked: it goes on again.
+            calls.phoneInUse(false)
+            waitUntil("paused while locked") { !engine.camera.running }
+            calls.phoneInUse(true)
+            waitUntil("back once unlocked") { engine.camera.running && native.calls.toList().last { it.startsWith("enableCamera") } == "enableCamera:77:true:-1" }
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
+            // The phone locked and dark with the call screen up: the screen is stopped, the camera pauses.
+            power.setIsInteractive(false)
             scenario.moveToState(androidx.lifecycle.Lifecycle.State.CREATED)
             waitUntil("the camera stopped") { !engine.camera.running && native.calls.toList().last { it.startsWith("enableCamera") } == "enableCamera:77:false:-1" }
             assertEquals("the call goes on", Phase.ACTIVE, calls.state.value?.phase)
             assertTrue("under its notice", engine.foreground.running)
             assertTrue(native.calls.none { it.startsWith("destroyAvc") })
             // Back: the camera again, as the user had it.
+            power.setIsInteractive(true)
             scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
             waitUntil("the camera again") { engine.camera.running && native.calls.toList().last { it.startsWith("enableCamera") } == "enableCamera:77:true:-1" }
             scenario.waitFor("its button still on") { it.findViewById<View>(R.id.camera).isSelected }

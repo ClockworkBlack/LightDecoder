@@ -866,6 +866,35 @@ class FaceTimeCallsTest {
     }
 
     @Test
+    fun theCameraGoesOnInAnotherAppAndPausesOnlyWhileThePhoneIsLocked() {
+        shadowOf(app).grantPermissions(Manifest.permission.CAMERA)
+        val screen = Any()
+        calls.screenShown(screen)
+        ring(video = true)
+        natives.onMade = { it.isVideo = true }
+        calls.answer(IN, withCamera = true)
+        await("the join") { phase() == Phase.ACTIVE }
+        val native = natives.last
+        native.host!!.encoderSurface(surface(), 1)
+        await("the camera") { camera.running && camera.starts.size == 1 }
+        // To another app, the phone on and unlocked: still sending.
+        calls.screenHidden(screen, phoneInUse = true)
+        settle()
+        assertTrue(camera.running)
+        assertEquals(1, camera.starts.size)
+        assertTrue(native.calls.none { it == "enableCamera:77:false:-1" })
+        // Locked there: paused. Unlocked: sending again, though the call screen is still away.
+        calls.phoneInUse(false)
+        await("paused") { !camera.running && native.calls.last() == "enableCamera:77:false:-1" }
+        calls.phoneInUse(true)
+        await("again") { camera.running && native.calls.last { it.startsWith("enableCamera") } == "enableCamera:77:true:-1" }
+        // Back to the call screen and away again with the phone locked: paused, as before.
+        calls.screenShown(screen)
+        calls.screenHidden(screen)
+        await("paused again") { !camera.running }
+    }
+
+    @Test
     fun aCallJoinedWithTheScreenOutOfSightSendsNoPictureUntilItIsBack() {
         shadowOf(app).grantPermissions(Manifest.permission.CAMERA)
         val screen = Any()
