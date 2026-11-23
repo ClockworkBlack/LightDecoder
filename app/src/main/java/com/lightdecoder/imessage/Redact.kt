@@ -4,7 +4,9 @@ package com.lightdecoder.imessage
  * Takes phone numbers and email addresses (Apple IDs are one or the other) out of text that is
  * logged or goes into the problem report: Apple's and the iMessage library's own error messages can
  * name the registered number or Apple ID, or someone else's. What stays says what went wrong.
- * Dates, times and long hex strings (hashes) are left as they are. Pure; tested in RedactTest.
+ * Dates, times and long hex strings (hashes) are left as they are by [text]; [secrets], for the Apple
+ * Account's errors, also takes out tokens, keys and anything else that looks encoded. Pure; tested
+ * in RedactTest.
  */
 object Redact {
 
@@ -37,13 +39,65 @@ object Redact {
     private const val CLOSE = '\uE001'
     private val MARKER = Regex("$OPEN([\uE010-\uE019]+)$CLOSE")
 
-    fun text(text: String): String {
-        if (text.isEmpty() || text.none { it.isDigit() || it == '@' || it == ':' }) return text
-        var out = URI.replace(text) { m ->
+    const val SECRET = "<secret>"
+
+    /** A quoted string, with what is escaped in it. */
+    private const val QUOTED = "\"(?:[^\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*'"
+
+    /** What Rust writes in brackets, maybe after a name: an option, a record, a list (`Some(…)`, `Token { … }`, `[18, 52]`). */
+    private const val GROUPED = "(?:[A-Za-z_][A-Za-z0-9_:]*\\s*)?" +
+        "(?:\\((?:$QUOTED|[^)\"'])*\\)|\\{(?:$QUOTED|[^}\"'])*}|\\[(?:$QUOTED|[^\\]\"'])*])"
+
+    /**
+     * A value written after a name that says it is secret: `token`, `pet`, `password`, `dsid`, `adsid`
+     * or an `X-Apple-` header, the name also inside a longer one (`hashed_password`, `mmeAuthToken`,
+     * `X-Apple-I-MD-M`), after a ":" or "=" (and the name's closing quote, as JSON has it). The value
+     * goes whole as it is written: quoted (`password: "…"`, `{"token":"…"}`), in brackets as Rust
+     * writes it ([GROUPED]), or up to the next space. The name stays, so the text still says what it
+     * was; a name with no value after it (in words: "password incorrect") stays as it is.
+     */
+    private val KEYED = Regex(
+        "(?i)(token|pet|password|adsid|dsid|x-apple-)([A-Za-z0-9_\\-]*)[\"']?\\s*[:=]\\s*" +
+            "(?:$QUOTED|$GROUPED|[^\\s\"',;)\\]}]+)",
+    )
+
+    /** A run of 16 or more characters that hex or base64 (standard or URL-safe) is written with, with its padding. */
+    private val ENCODED = Regex("(?<![A-Za-z0-9+/_\\-])[A-Za-z0-9+/_\\-]{16,}={0,2}(?![A-Za-z0-9+/_=\\-])")
+    private val HEX = Regex("[0-9A-Fa-f]+")
+
+    /**
+     * [text] for the Apple Account's and iCloud's errors, which can carry live credentials: as [text]
+     * redacts it (numbers, email addresses), and also without what [KEYED] names, and without any run
+     * of 16 characters or more that looks encoded (hex, or base64 with a digit, a "+" or "/" in it, or
+     * both cases of letters): tokens, hashes and identifiers. An error's own words (all one case, like
+     * "MOBILEME_TERMS_OF_SERVICE_UPDATE") stay. Unlike [text], long hex runs do not stay.
+     */
+    fun secrets(text: String): String {
+        if (text.isEmpty()) return text
+        var out = KEYED.replace(text) { m -> m.groupValues[1] + m.groupValues[2] + "=" + SECRET }
+        // Addresses before encoded runs: a long run in an Apple ID's own part ("john.smith1990abcdef@…")
+        // would otherwise go as encoded and leave the rest of the address (its domain) behind.
+        out = addresses(out)
+        out = ENCODED.replace(out) { m -> if (looksEncoded(m.value.trimEnd('='))) SECRET else m.value }
+        return text(out)
+    }
+
+    private fun looksEncoded(run: String): Boolean =
+        HEX.matches(run) || run.any { it.isDigit() || it == '+' || it == '/' } || (run.any { it.isLowerCase() } && run.any { it.isUpperCase() })
+
+    /** [text]'s first step: addresses after a scheme (`tel:`, `mailto:`, …), then email addresses. */
+    private fun addresses(text: String): String {
+        if (text.none { it == '@' || it == ':' }) return text
+        val out = URI.replace(text) { m ->
             val scheme = m.groupValues[1]
             scheme + m.groupValues[2] + if (scheme.equals("mailto", ignoreCase = true) || '@' in m.value) EMAIL else NUMBER
         }
-        out = EMAIL_ADDRESS.replace(out, EMAIL)
+        return EMAIL_ADDRESS.replace(out, EMAIL)
+    }
+
+    fun text(text: String): String {
+        if (text.isEmpty() || text.none { it.isDigit() || it == '@' || it == ':' }) return text
+        var out = addresses(text)
         // Then numbers, with dates, times and hashes set aside first.
         val kept = ArrayList<String>()
         out = KEEP.replace(out) { m ->

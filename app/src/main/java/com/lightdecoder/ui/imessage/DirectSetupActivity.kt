@@ -15,6 +15,8 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.lightdecoder.R
 import com.lightdecoder.databinding.ActivityImessageBinding
+import com.lightdecoder.imessage.direct.AccountNotice
+import com.lightdecoder.imessage.direct.AppleAccount
 import com.lightdecoder.imessage.direct.Handles
 import com.lightdecoder.imessage.direct.DirectEngine
 import com.lightdecoder.imessage.direct.DirectEngine.Status
@@ -38,12 +40,18 @@ import kotlinx.coroutines.withContext
  * games" (a file the main process reads: [DirectPrefs.gamesOn]) with whether OpenPigeon is here.
  * And FaceTime's: "FaceTime" ([DirectPrefs.faceTimeOn]) and "Silence unknown FaceTime callers"
  * ([DirectPrefs.silenceUnknownFaceTime]), with what Android still has to allow for a call to ring.
+ * Once registered, the optional Apple Account ([AppleAccount]): "Apple Account (optional)" to sign in
+ * ([AppleAccountActivity]), or who is signed in, whether iCloud's features are on, and Sign Out.
  */
 class DirectSetupActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityImessageBinding
     private val engine by lazy { DirectEngine.get(this) }
     private val prefs by lazy { DirectPrefs.prefs(this) }
+    private val accountOnce = lazy { AppleAccount.of(this) }
+    private val account by accountOnce
+    private var accountShown: kotlinx.coroutines.Job? = null
+    private var noticeOnScreen: AccountNotice? = null
 
     private val pickFiles = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isEmpty()) return@registerForActivityResult
@@ -118,12 +126,19 @@ class DirectSetupActivity : AppCompatActivity() {
         binding.getGames.setOnClickListener { MadridHost.openStore(this, MadridApps.OPENPIGEON) }
         // The service's status notice: turned off in its channel's settings, iMessage keeps running.
         binding.hideStatus.setOnClickListener { openStatusSettings() }
+        binding.appleAccountAction.setOnClickListener { onAppleAccountAction() }
 
         showLibrary()
         engine.start()
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                engine.status.collect { showStatus(it) }
+                launch {
+                    engine.status.collect {
+                        showStatus(it)
+                        showAccount()
+                    }
+                }
+                launch { account.state.collect { showAccount() } }
             }
         }
     }
@@ -134,7 +149,127 @@ class DirectSetupActivity : AppCompatActivity() {
         showGames()
         // Back from Android's settings, maybe with notifications or the call screen allowed.
         showFaceTime()
+        // Signed in or out, and the restart for it not made yet (kept back by a FaceTime call, or not
+        // allowed while no screen of LightDecoder's was in sight): this screen in sight may start
+        // iMessage's service, so it is made now. A start or a registration under way is let finish
+        // by the restart itself; a call still on keeps it back, said in the section; and never under
+        // the "Signed out" message still to be read ([AppleAccount.reading]): its "OK" makes it.
+        if (account.restartPending) account.screenShown()
     }
+
+    override fun onDestroy() {
+        // Gone with its "Signed out" message unread: no longer in the way of the restart.
+        if (accountOnce.isInitialized()) account.reading(this, false)
+        super.onDestroy()
+    }
+
+    // --- the optional Apple Account --------------------------------------------------------------
+
+    /** The Apple Account's section, once this phone's number is registered: sign in, or who is signed in and Sign Out. */
+    private fun showAccount() {
+        val registered = engine.status.value is Status.Registered
+        binding.appleAccountCard.visibility = if (registered) View.VISIBLE else View.GONE
+        if (!registered) return
+        val state = account.state.value
+        accountShown?.cancel()
+        accountShown = lifecycleScope.launch {
+            val name = if (state.signedIn) account.maskedName() else null
+            // Said once: kept on this screen while it is open, and forgotten.
+            val fresh = withContext(Dispatchers.IO) { account.notice() }
+            if (fresh != null) {
+                noticeOnScreen = fresh
+                account.noticeShown()
+            }
+            val notice = noticeOnScreen
+            binding.appleAccountNotice.visibility = if (notice != null) View.VISIBLE else View.GONE
+            notice?.let {
+                binding.appleAccountNotice.setText(
+                    when (it) {
+                        AccountNotice.INTERRUPTED -> R.string.apple_account_notice_interrupted
+                        AccountNotice.SIGNED_OUT -> R.string.apple_account_notice_signed_out
+                        AccountNotice.SIGN_IN_AGAIN -> R.string.apple_account_notice_sign_in_again
+                    },
+                )
+            }
+            binding.appleAccountIcloud.visibility = if (state.signedIn && !state.attention) View.VISIBLE else View.GONE
+            binding.appleAccountIcloud.setText(if (state.icloud) R.string.apple_account_icloud_on else R.string.apple_account_icloud_off)
+            when {
+                !state.signedIn -> {
+                    binding.appleAccountBody.setText(R.string.apple_account_row_help)
+                    binding.appleAccountAction.setText(R.string.apple_account_sign_in_row)
+                }
+                state.attention -> {
+                    binding.appleAccountBody.setText(R.string.apple_account_again_body)
+                    binding.appleAccountAction.setText(R.string.apple_account_sign_in_row)
+                }
+                else -> {
+                    binding.appleAccountBody.text = name?.let { getString(R.string.apple_account_signed_in_as, it) } ?: getString(R.string.apple_account_signed_in)
+                    binding.appleAccountAction.setText(R.string.apple_account_sign_out)
+                }
+            }
+            if (account.restartPending) binding.appleAccountIcloud.apply {
+                visibility = View.VISIBLE
+                text = restartPendingText()
+            }
+        }
+    }
+
+    private fun onAppleAccountAction() {
+        val state = account.state.value
+        if (state.signedIn && !state.attention) {
+            confirmSignOut()
+        } else {
+            startActivity(android.content.Intent(this, AppleAccountActivity::class.java))
+        }
+    }
+
+    /** Sign Out, asked first: on this phone only; iMessage restarts for it. */
+    private fun confirmSignOut() {
+        val dialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.apple_account_sign_out_title)
+            .setMessage(R.string.apple_account_sign_out_body)
+            .setPositiveButton(R.string.apple_account_sign_out) { _, _ -> signOut() }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+        dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE)?.filterTouchesWhenObscured = true
+    }
+
+    private fun signOut() {
+        lifecycleScope.launch {
+            when (account.signOut()) {
+                AppleAccount.SignOut.Done -> {
+                    // What to do at Apple, read first: nothing else restarts iMessage under it meanwhile
+                    // (this screen coming back, a chat or the call screen), which would take it away.
+                    account.reading(this@DirectSetupActivity, true)
+                    MaterialAlertDialogBuilder(this@DirectSetupActivity)
+                        .setMessage(R.string.apple_account_signed_out)
+                        .setPositiveButton(android.R.string.ok, null)
+                        // Read: iMessage restarts without the account.
+                        .setOnDismissListener {
+                            account.reading(this@DirectSetupActivity, false)
+                            restartForAccount()
+                        }
+                        .show()
+                }
+                AppleAccount.SignOut.NotSignedIn -> showAccount()
+                is AppleAccount.SignOut.Refused -> showError(getString(R.string.apple_account_busy))
+            }
+        }
+    }
+
+    /** "Signed out" read: iMessage restarts now, or says when it will. */
+    private fun restartForAccount() {
+        lifecycleScope.launch {
+            if (!account.restartNow()) {
+                showError(restartPendingText())
+                showAccount()
+            }
+        }
+    }
+
+    /** When a restart still pending is made: once the FaceTime call that kept it back is over, or the next time LightDecoder is open. */
+    private fun restartPendingText(): String =
+        getString(if (account.restartHeldByCall) R.string.apple_account_restart_pending else R.string.apple_account_restart_later)
 
     /** What keeps an incoming FaceTime call from ringing as it should, if anything; nothing while FaceTime is off. */
     private enum class FaceTimeBlock { NONE, NOTIFICATIONS, FULL_SCREEN }

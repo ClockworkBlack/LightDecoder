@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A code by text message (AppleAccountActivity): the trusted number to send it to, then the code. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:visibility="gone">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:accessibilityHeading="true"
+        android:text="@string/apple_account_text_title"
+        android:textAppearance="?attr/textAppearanceHeadlineSmall" />
+
+    <!-- The numbers, when there are several. -->
+    <LinearLayout
+        android:id="@+id/numbersPart"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/apple_account_text_pick"
+            android:textAppearance="?attr/textAppearanceBodyMedium" />
+
+        <RadioGroup
+            android:id="@+id/numbers"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/sendText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="end"
+            android:layout_marginTop="8dp"
+            android:enabled="false"
+            android:filterTouchesWhenObscured="true"
+            android:text="@string/apple_account_text_send" />
+    </LinearLayout>
+
+    <!-- The code. -->
+    <LinearLayout
+        android:id="@+id/codePart"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/textBody"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:textAppearance="?attr/textAppearanceBodyMedium" />
+
+        <FrameLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginTop="16dp">
+
+            <LinearLayout
+                android:id="@+id/textBoxes"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:importantForAccessibility="noHideDescendants"
+                android:orientation="horizontal" />
+
+            <EditText
+                android:id="@+id/textCode"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:autofillHints="smsOTPCode"
+                android:background="@null"
+                android:contentDescription="@string/apple_account_code"
+                android:cursorVisible="false"
+                android:imeOptions="flagNoPersonalizedLearning|actionDone"
+                android:inputType="number"
+                android:maxLength="6"
+                android:saveEnabled="false"
+                android:textColor="@android:color/transparent"
+                android:textIsSelectable="false" />
+        </FrameLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:gravity="center_vertical|end"
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/resend"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:filterTouchesWhenObscured="true"
+                android:text="@string/apple_account_resend" />
+
+            <View
+                android:layout_width="0dp"
+                android:layout_height="0dp"
+                android:layout_weight="1" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/textVerify"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:filterTouchesWhenObscured="true"
+                android:text="@string/apple_account_verify" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/textError"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:accessibilityLiveRegion="polite"
+        android:textAppearance="?attr/textAppearanceBodyMedium"
+        android:textColor="?attr/colorError"
+        android:visibility="gone" />
+</LinearLayout>

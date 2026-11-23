@@ -312,10 +312,19 @@
             screen (from the Messages tab's menu) is there too. The Messages
             archive stays in the main process, which takes in what Apple sent
             through DirectSinkService. Nothing here is exported: only the
-            app's own two processes can bind to either service.
+            app's own two processes can bind to either service. The optional
+            Apple Account's sign-in screen (from the setup screen) is in the
+            ":imessage" process too, where the sign-in runs: not exported,
+            never over the lock screen, and kept out of screenshots
+            (FLAG_SECURE); the password never leaves that process.
         -->
         <activity
             android:name=".ui.imessage.DirectSetupActivity"
+            android:exported="false"
+            android:process=":imessage"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".ui.imessage.AppleAccountActivity"
             android:exported="false"
             android:process=":imessage"
             android:windowSoftInputMode="adjustResize" />
@@ -334,7 +343,8 @@
             as a phone call does; it shows the call only, and opening the chat from it asks for the
             unlock first. The service keeps the call up under its "in call" notice; the receiver
             takes that notice's Hang up and an incoming call's Decline. None is exported: only the
-            app's own screens and notifications reach them.
+            app's own screens and notifications reach them (nor is anything else of the iMessage
+            process, the Apple Account's sign-in screen included).
         -->
         <activity
             android:name=".ui.imessage.FaceTimeCallActivity"

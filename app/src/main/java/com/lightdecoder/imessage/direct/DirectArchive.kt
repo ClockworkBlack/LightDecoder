@@ -351,6 +351,14 @@ object DirectArchive {
          */
         data class Dropped(val what: String, val why: String) : Update()
 
+        /**
+         * Where the optional Apple Account now stands ([AccountState], Booleans only), told by the
+         * ":imessage" process when it changes: nothing of the archive's, for the main process's gating.
+         * [restarting]: told right before that process ends for its restart (the main process checks
+         * that it came back, [DirectLink]).
+         */
+        data class Account(val state: AccountState, val restarting: Boolean = false) : Update()
+
         object Ignore : Update()
     }
 

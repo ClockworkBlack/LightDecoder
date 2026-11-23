@@ -654,6 +654,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         com.lightdecoder.relay.ReadNotifier.cancel(this, manager.service, conversationId)
         // A missed FaceTime call's notice goes with the chat being read.
         if (manager.service == ChatService.IMESSAGE) com.lightdecoder.imessage.facetime.FaceTimeNotices.cancelMissed(this, conversationId)
+        // In sight: an Apple Account's restart of iMessage still pending may be made now (none without one).
+        com.lightdecoder.imessage.direct.DirectLink.screenShown(this)
         markCompanionVisible()
         // The setting may have been changed on the iMessage screen meanwhile.
         val threadsChanged = updateThreadsInChat()

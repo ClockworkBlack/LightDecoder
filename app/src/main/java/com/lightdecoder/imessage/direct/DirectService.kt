@@ -22,7 +22,8 @@ import org.json.JSONObject
  * preview), unsend, reach, edit, react, typing, read, download, an iMessage app's update (a vote in a
  * poll too), a chat's background, Send Later taken back,
  * a group's name, members and photo, a chat marked unread, a junk report, the people of recent chats
- * told of the user's new device, who can be called with FaceTime), and hands what Apple sends to the
+ * told of the user's new device, who can be called with FaceTime, where the optional Apple Account
+ * stands), and hands what Apple sends to the
  * main process's [DirectSinkService] (which also says who a FaceTime caller is).
  */
 class DirectService : Service() {
@@ -35,7 +36,7 @@ class DirectService : Service() {
     /** FaceTime's lines for the main process's iMessage log, the oldest dropped when it cannot keep up. */
     private val notes = kotlinx.coroutines.channels.Channel<String>(64, kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST)
 
-    private val server = DirectIpc.Server { what, request ->
+    private val server = DirectIpc.Server(afterReply = ::afterReply) { what, request ->
         when (what) {
             DirectWire.SEND -> {
                 val r = DirectWire.SendRequest.fromJson(request)
@@ -131,8 +132,20 @@ class DirectService : Service() {
                 val r = DirectWire.CapableRequest.fromJson(request)
                 DirectWire.capable(engine.faceTimeCapable(r.targets, r.from))
             }
+            // The optional Apple Account: where it stands, Booleans only (never the Apple ID).
+            DirectWire.ACCOUNT -> DirectWire.accountReply(engine.account.state.value, engine.account.restartPending)
             else -> DirectWire.error("Unknown request $what")
         }
+    }
+
+    /**
+     * Once a request's answer has gone. Only an [DirectWire.ACCOUNT] request that says one of the main
+     * process's screens is in sight lets the Apple Account's pending restart be made (Android allows
+     * iMessage's service to be started then); no other request ever does, and with nothing pending it
+     * does nothing at all.
+     */
+    private fun afterReply(what: Int, request: JSONObject) {
+        if (restartsAfter(what, request)) engine.account.screenInSight()
     }
 
     private fun target(request: JSONObject) = DirectWire.Target.fromJson(request.getJSONObject("target"))
@@ -143,6 +156,8 @@ class DirectService : Service() {
         super.onCreate()
         ensureChannel(this)
         engine = DirectEngine.get(this)
+        // A restart for the Apple Account waits for the main process's requests being answered here.
+        engine.requests = server.requests
         sinkClient = DirectIpc.Client(this, DirectSinkService::class.java)
         engine.sink = DirectEngine.Sink { update ->
             val reply = sinkClient.call(DirectWire.UPDATE, DirectWire.encodeUpdate(update), SINK_TIMEOUT_MS)
@@ -185,6 +200,7 @@ class DirectService : Service() {
     }
 
     override fun onDestroy() {
+        if (engine.requests === server.requests) engine.requests = null
         engine.sink = null
         engine.callerLookup = null
         com.lightdecoder.imessage.facetime.FaceTimeLog.sink = null
@@ -212,6 +228,10 @@ class DirectService : Service() {
         private const val NOTE_TIMEOUT_MS = 5_000L
 
         fun ensureChannel(context: Context) = ServiceNotice.ensureChannel(context)
+
+        /** Whether the answered request [what] lets a pending restart be made: only an ACCOUNT one with `"visible": true`. */
+        internal fun restartsAfter(what: Int, request: JSONObject): Boolean =
+            what == DirectWire.ACCOUNT && DirectWire.AccountRequest.fromJson(request).visible
 
         /** Starts the service if iMessage is set up (from either process). False if Android refused. */
         fun start(context: Context): Boolean {

@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- "Before you sign in" (AppleAccountActivity): what signing in does, every time, and "I understand". -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:visibility="gone">
+
+    <TextView
+        android:id="@+id/introTitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:accessibilityHeading="true"
+        android:text="@string/apple_account_intro_title"
+        android:textAppearance="?attr/textAppearanceHeadlineSmall" />
+
+    <!-- Filled by the screen: one line each, with what Apple will see named. -->
+    <LinearLayout
+        android:id="@+id/bullets"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:orientation="vertical" />
+
+    <com.google.android.material.checkbox.MaterialCheckBox
+        android:id="@+id/understand"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:minHeight="48dp"
+        android:text="@string/apple_account_understand" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:gravity="end"
+        android:orientation="horizontal">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/notNow"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/apple_account_not_now" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/introContinue"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:enabled="false"
+            android:filterTouchesWhenObscured="true"
+            android:text="@string/apple_account_continue" />
+    </LinearLayout>
+</LinearLayout>

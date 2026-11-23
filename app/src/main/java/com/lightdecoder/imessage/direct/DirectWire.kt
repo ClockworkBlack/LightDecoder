@@ -14,10 +14,10 @@ import org.json.JSONObject
  * tested (DirectWireTest), so both sides always agree.
  *
  * Main -> :imessage: [SEND] (with its mentions and link preview), [UNSEND], [REACH], [EDIT], [REACT], [TYPING], [READ], [DOWNLOAD],
- * [EXTENSION], [BACKGROUND], [UNSCHEDULE], [RENAME], [MEMBERS], [GROUP_PHOTO], [MARK_UNREAD], [REPORT_JUNK], [PEERS], [FT_CAPABLE]
- * (requests, answered with the same request id; a failure is answered with [error]). Never raw media bytes: files are
- * passed by path, in the app's own storage.
- * :imessage -> main: [UPDATE] (an archive change from Apple, a FaceTime call's row), answered once it
+ * [EXTENSION], [BACKGROUND], [UNSCHEDULE], [RENAME], [MEMBERS], [GROUP_PHOTO], [MARK_UNREAD], [REPORT_JUNK], [PEERS], [FT_CAPABLE],
+ * [ACCOUNT] (requests, answered with the same request id; a failure is answered with [error]). Never raw media bytes: files are
+ * passed by path, in the app's own storage; never credentials.
+ * :imessage -> main: [UPDATE] (an archive change from Apple, a FaceTime call's row, the Apple Account's state), answered once it
  * is stored; only then does the library forget the event. And [CALLER] (who is calling), answered at once.
  */
 object DirectWire {
@@ -100,7 +100,50 @@ object DirectWire {
      */
     const val CALLER = 20
 
+    /**
+     * Where the optional Apple Account stands ([AccountState]: Booleans only, never the Apple ID),
+     * asked with an empty request ([account]), or with `{"visible": true}` when one of the main
+     * process's screens came into sight ([AccountRequest]): only that one, of every request, lets a
+     * restart the account still has pending be made (once it is answered). The ":imessage" process
+     * also tells where it stands unasked, as an [UPDATE] of kind "account", whenever it changes.
+     */
+    const val ACCOUNT = 21
+
     const val REPLY = 100
+
+    /**
+     * Every request code, by name: one table for both sides (SPEC2 §3), each its own and none [REPLY]
+     * (DirectWireTest holds them to it).
+     */
+    val REQUEST_CODES: Map<String, Int> = linkedMapOf(
+        "SEND" to SEND, "UNSEND" to UNSEND, "REACH" to REACH, "EDIT" to EDIT, "REACT" to REACT, "TYPING" to TYPING,
+        "READ" to READ, "DOWNLOAD" to DOWNLOAD, "EXTENSION" to EXTENSION, "UPDATE" to UPDATE, "BACKGROUND" to BACKGROUND,
+        "UNSCHEDULE" to UNSCHEDULE, "RENAME" to RENAME, "MEMBERS" to MEMBERS, "GROUP_PHOTO" to GROUP_PHOTO,
+        "MARK_UNREAD" to MARK_UNREAD, "REPORT_JUNK" to REPORT_JUNK, "PEERS" to PEERS, "FT_CAPABLE" to FT_CAPABLE,
+        "CALLER" to CALLER, "ACCOUNT" to ACCOUNT,
+    )
+
+    /** The [ACCOUNT] request: nothing to say, or that one of the main process's screens is in sight ([visible]). */
+    fun account(visible: Boolean = false): JSONObject = JSONObject().apply { if (visible) put("visible", true) }
+
+    /** An [ACCOUNT] request, read strictly: [visible] only for a real `true`. */
+    data class AccountRequest(val visible: Boolean) {
+        companion object {
+            fun fromJson(o: JSONObject): AccountRequest = AccountRequest(visible = o.opt("visible") == true)
+        }
+    }
+
+    /**
+     * The [ACCOUNT] answer: [state], and `"restartPending": true` while a restart for the account is
+     * still to be made (so the main process goes on saying when its screens are in sight). Booleans only.
+     */
+    fun accountReply(state: AccountState, restartPending: Boolean): JSONObject =
+        state.toJson().apply { if (restartPending) put(KEY_RESTART_PENDING, true) }
+
+    /** Whether an [ACCOUNT] answer says a restart is still pending: only a real `true`; an error answer, never. */
+    fun restartPendingOf(reply: JSONObject): Boolean = reply.opt(KEY_RESTART_PENDING) == true
+
+    private const val KEY_RESTART_PENDING = "restartPending"
 
     const val KEY_ID = "id"
     const val KEY_JSON = "json"
@@ -745,6 +788,7 @@ object DirectWire {
             .apply { if (u.conversationId.isNotEmpty()) put("conversationId", u.conversationId) }
         is DirectArchive.Update.Note -> JSONObject().put("kind", "note").put("line", u.line.take(MAX_NOTE_CHARS))
         is DirectArchive.Update.Dropped -> JSONObject().put("kind", "dropped").put("what", u.what).put("why", u.why)
+        is DirectArchive.Update.Account -> u.state.toJson().put("kind", "account").apply { if (u.restarting) put("restarting", true) }
         DirectArchive.Update.Ignore -> JSONObject().put("kind", "ignore")
     }
 
@@ -904,6 +948,7 @@ object DirectWire {
         }
         "note" -> o.optStringOrNull("line")?.takeIf { it.isNotBlank() }?.let { DirectArchive.Update.Note(it.take(MAX_NOTE_CHARS)) } ?: DirectArchive.Update.Ignore
         "dropped" -> DirectArchive.Update.Dropped(o.optString("what"), o.optString("why"))
+        "account" -> DirectArchive.Update.Account(AccountState.fromJson(o), restarting = o.opt("restarting") == true)
         else -> DirectArchive.Update.Ignore
     }
 
@@ -917,5 +962,42 @@ object DirectWire {
     private fun JSONObject.objects(key: String): List<JSONObject> {
         val a = optJSONArray(key) ?: return emptyList()
         return (0 until a.length()).mapNotNull { a.optJSONObject(it) }
+    }
+}
+
+/**
+ * Where the optional Apple Account stands, as the main process may know it ([DirectWire.ACCOUNT], and
+ * the "account" update): Booleans only. [signedIn]: an account is on this phone; [attention]: it needs
+ * the user to sign in again; [icloud]: the session has iCloud's services (`hasIcloudServices`);
+ * [clique], [focus], [history]: the iCloud Keychain joined, Focus status, Messages in iCloud (later).
+ */
+data class AccountState(
+    val signedIn: Boolean = false,
+    val attention: Boolean = false,
+    val icloud: Boolean = false,
+    val clique: Boolean = false,
+    val focus: Boolean = false,
+    val history: Boolean = false,
+) {
+    fun toJson(): JSONObject = JSONObject()
+        .put("signedIn", signedIn).put("attention", attention).put("icloud", icloud)
+        .put("clique", clique).put("focus", focus).put("history", history)
+
+    companion object {
+        val SIGNED_OUT = AccountState()
+
+        /** [o] read strictly: only a real `true` is true; everything else, an error answer too, is false. */
+        fun fromJson(o: JSONObject): AccountState {
+            fun flag(key: String) = o.opt(key) == true
+            val signedIn = flag("signedIn")
+            return AccountState(
+                signedIn = signedIn,
+                attention = signedIn && flag("attention"),
+                icloud = signedIn && flag("icloud"),
+                clique = signedIn && flag("clique"),
+                focus = signedIn && flag("focus"),
+                history = signedIn && flag("history"),
+            )
+        }
     }
 }

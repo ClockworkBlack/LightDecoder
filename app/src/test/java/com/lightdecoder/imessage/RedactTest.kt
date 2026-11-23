@@ -78,4 +78,90 @@ class RedactTest {
         assertTrue(out, out.endsWith("at 2026-11-20 10:30"))
         assertEquals("registerIds failed for tel:<number> and <email> (also <number>) at 2026-11-20 10:30", out)
     }
+
+    // --- secrets(): the Apple Account's and iCloud's errors -----------------------------------------
+
+    private fun s(text: String) = Redact.secrets(text)
+
+    @Test
+    fun secretsTakesOutEncodedRunsOfSixteenOrMore() {
+        val sha = "b6dfe8ce44395ca48e041657dc990a534fdaa7acfda1c1d8f2e269d8e332c997"
+        assertEquals("hash ${Redact.SECRET}", s("hash $sha"))
+        assertEquals("id ${Redact.SECRET}.", s("id 0123456789abcdef."))
+        assertEquals("pet ${Redact.SECRET}", s("pet AAAAB3NzaC1yc2EAAAADAQABAAAB"))
+        assertEquals("b64 ${Redact.SECRET} end", s("b64 dGhpcyBpcyBhIHRva2Vu+/== end"))
+        assertEquals("url-safe ${Redact.SECRET}", s("url-safe dGhpc_isA-tokenXyZ"))
+        // Fifteen: an error's own number stays; a word of one case stays, however long.
+        assertEquals("ref Ab1Cd2Ef3Gh4Ij5", s("ref Ab1Cd2Ef3Gh4Ij5"))
+        assertEquals("login failed: MOBILEME_TERMS_OF_SERVICE_UPDATE", s("login failed: MOBILEME_TERMS_OF_SERVICE_UPDATE"))
+        assertEquals("internationalization failed", s("internationalization failed"))
+    }
+
+    @Test
+    fun secretsTakesOutWhatFollowsTheNamesOfSecrets() {
+        assertEquals("token=${Redact.SECRET} next", s("token=abc123 next"))
+        assertEquals("X-Apple-I-MD=${Redact.SECRET} rest", s("X-Apple-I-MD: AAAAAA== rest"))
+        assertEquals("x-apple-i-md-m=${Redact.SECRET}", s("x-apple-i-md-m=qwerty"))
+        assertEquals("password=${Redact.SECRET}", s("password=hunter2"))
+        assertEquals("dsid=${Redact.SECRET}, adsid=${Redact.SECRET}", s("dsid=12345, adsid=ABCDE"))
+        assertEquals("PET=${Redact.SECRET}", s("PET: AbCd"))
+        // The names alone, in words, stay.
+        assertEquals("tokens expired; password incorrect", s("tokens expired; password incorrect"))
+    }
+
+    @Test
+    fun secretsTakesOutQuotedValuesAsJsonAndRustWriteThem() {
+        // Quoted: the whole value, spaces and escaped quotes in it too.
+        assertEquals("password=${Redact.SECRET}", s("password: \"hunter2\""))
+        assertEquals("password=${Redact.SECRET} next", s("password: \"correct horse 9!\" next"))
+        assertEquals("token=${Redact.SECRET}", s("token=\"abc\""))
+        assertEquals("token=${Redact.SECRET}", s("token='a\\'b c'"))
+        assertEquals("dsid=${Redact.SECRET}", s("dsid: \"123\""))
+        // JSON: the name's closing quote, then the value.
+        assertEquals("{\"token=${Redact.SECRET}}", s("{\"token\":\"abc123\"}"))
+        assertEquals("{\"pet=${Redact.SECRET}, \"ok\": 1}", s("{\"pet\": \"abcdefgh\", \"ok\": 1}"))
+        // Rust's Debug: an option, a list of bytes, a record.
+        assertEquals("hashed_password=${Redact.SECRET} }", s("hashed_password: [18, 52, 86, 120] }"))
+        assertEquals("hashed_password=${Redact.SECRET}", s("hashed_password=Some(\"deadbeef\")"))
+        assertEquals("Account { dsid=${Redact.SECRET}, user: x }", s("Account { dsid: Some(12345), user: x }"))
+        assertEquals("token=${Redact.SECRET}", s("token: Token { value: abc }"))
+        for (text in listOf("password: \"hunter2\"", "{\"token\":\"abc123\"}", "dsid: \"123\"", "hashed_password: [18, 52]")) {
+            val out = s(text)
+            for (secret in listOf("hunter2", "abc123", "123", "18", "52")) assertFalse("$text -> $out", out.contains(secret))
+        }
+    }
+
+    @Test
+    fun secretsFindsTheNamesInsideLongerOnes() {
+        assertEquals("mme_token=${Redact.SECRET}", s("mme_token=abc"))
+        assertEquals("mmeAuthToken=${Redact.SECRET}", s("mmeAuthToken=abc"))
+        assertEquals("\"mmeFMIPToken=${Redact.SECRET}", s("\"mmeFMIPToken\": \"x\""))
+        assertEquals("X-Apple-Token=${Redact.SECRET}", s("X-Apple-Token: Zm9v"))
+        // A name of 16 characters or more in both cases goes too, as anything that looks encoded: the value never stays.
+        assertEquals("${Redact.SECRET}${Redact.SECRET}", s("X-Apple-GS-Token: Zm9v"))
+        // Words with them inside, and no value after them, stay.
+        assertEquals("the competition is over; tokens expire", s("the competition is over; tokens expire"))
+    }
+
+    @Test
+    fun secretsAlsoTakesOutAddressesAndNumbers() {
+        val out = s("Bad auth for jane@icloud.com (+1 555 123 4567): token=abcdef0123456789abcdef X-Apple-I-MD: AAAAABBBBBCCCCC123==")
+        assertEquals("Bad auth for <email> (<number>): token=${Redact.SECRET} X-Apple-I-MD=${Redact.SECRET}", out)
+        for (secret in listOf("jane", "4567", "abcdef0123456789abcdef", "AAAAABBBBBCCCCC123")) assertFalse(out, out.contains(secret))
+        assertEquals("", s(""))
+        assertEquals("Your Apple Account or password was incorrect.", s("Your Apple Account or password was incorrect."))
+    }
+
+    @Test
+    fun secretsTakesOutAnAppleIdWholeHoweverLongItsOwnPart() {
+        // A long run in the address's own part is no token: the address goes whole, its domain with it, as text() has it.
+        for (id in listOf("john.smith1234567890abcdef@icloud.com", "firstname_lastname1990@smithfamily.net", "j.doe-work2020abcdefg@company.example")) {
+            assertEquals(Redact.text(id), s(id))
+            assertEquals("no account for <email>.", s("no account for $id."))
+            assertEquals("mailto:<email> failed", s("mailto:$id failed"))
+            val out = s("login of $id failed: token=abc")
+            assertEquals("login of <email> failed: token=${Redact.SECRET}", out)
+            for (part in id.split('@', '.')) assertFalse("$part in $out", out.contains(part))
+        }
+    }
 }

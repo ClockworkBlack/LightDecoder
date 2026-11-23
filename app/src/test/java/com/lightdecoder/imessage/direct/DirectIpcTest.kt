@@ -104,6 +104,74 @@ class DirectIpcTest {
         server.close()
     }
 
+    /** Runs the main looper until [condition] holds. */
+    private fun until(what: String, condition: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + 10_000
+        while (!condition()) {
+            if (System.currentTimeMillis() > deadline) throw AssertionError("timed out waiting for $what")
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(10)
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+    @Test
+    fun aRequestIsCountedUntilItsAnswerHasGoneAndTheHookRunsOnlyAfter() {
+        val inHandler = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val after = java.util.Collections.synchronizedList(ArrayList<String>())
+        lateinit var server: DirectIpc.Server
+        server = DirectIpc.Server(afterReply = { what, request -> after += "$what visible=${request.optBoolean("visible")} counted=${server.requests.inFlight}" }) { what, _ ->
+            if (what == DirectWire.DOWNLOAD) {
+                inHandler.complete(Unit)
+                release.await()
+            }
+            DirectWire.ok()
+        }
+        bind(server)
+        val client = DirectIpc.Client(app, DirectSinkService::class.java)
+        val slow = GlobalScope.async(Dispatchers.IO) { client.call(DirectWire.DOWNLOAD, JSONObject(), 5_000) }
+        until("the request being answered") { inHandler.isCompleted }
+        assertEquals("counted while it is answered", 1, server.requests.inFlight)
+        assertTrue("no hook before its answer", after.isEmpty())
+        release.complete(Unit)
+        assertEquals(true, await(slow).optBoolean("ok"))
+        until("its hook") { after.size == 1 }
+        assertEquals("${DirectWire.DOWNLOAD} visible=false counted=0", after.single())
+        assertEquals(0, server.requests.inFlight)
+        assertEquals(true, await(GlobalScope.async(Dispatchers.IO) { client.call(DirectWire.ACCOUNT, DirectWire.account(visible = true), 5_000) }).optBoolean("ok"))
+        until("its hook") { after.size == 2 }
+        assertEquals("${DirectWire.ACCOUNT} visible=true counted=0", after[1])
+        client.close()
+        server.close()
+    }
+
+    @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+    @Test
+    fun whileClosedForARestartARequestIsNotTakenAndAnsweredThatItDidNotGo() {
+        val handled = java.util.concurrent.atomic.AtomicInteger()
+        val after = java.util.concurrent.atomic.AtomicInteger()
+        val server = DirectIpc.Server(afterReply = { _, _ -> after.incrementAndGet() }) { _, _ ->
+            handled.incrementAndGet()
+            DirectWire.ok()
+        }
+        bind(server)
+        val client = DirectIpc.Client(app, DirectSinkService::class.java)
+        kotlinx.coroutines.runBlocking { assertTrue(server.requests.close(0)) }
+        val refused = await(GlobalScope.async(Dispatchers.IO) { client.call(DirectWire.SEND, JSONObject(), 5_000) })
+        assertEquals(DirectIpc.Client.UNREACHABLE, DirectWire.errorOf(refused))
+        assertTrue("certainly not gone through", !DirectWire.unconfirmed(refused))
+        assertEquals(0, handled.get())
+        assertEquals("no hook for a request not taken", 0, after.get())
+        assertEquals(0, server.requests.inFlight)
+        // The restart did not happen: taken again.
+        server.requests.open()
+        assertEquals(true, await(GlobalScope.async(Dispatchers.IO) { client.call(DirectWire.SEND, JSONObject(), 5_000) }).optBoolean("ok"))
+        assertEquals(1, handled.get())
+        client.close()
+        server.close()
+    }
+
     @Test
     fun aRequestFromAnotherAppIsDropped() {
         val handled = java.util.concurrent.atomic.AtomicInteger()

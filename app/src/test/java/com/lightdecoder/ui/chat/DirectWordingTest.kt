@@ -154,6 +154,31 @@ class DirectWordingTest {
             R.string.facetime_row_outgoing_description, R.string.facetime_row_incoming_description, R.string.facetime_setting,
             R.string.facetime_setting_help, R.string.facetime_silence_unknown, R.string.facetime_silence_unknown_help,
             R.string.facetime_full_screen_help, R.string.facetime_notifications_off,
+            // The optional Apple Account: its sign-in screen and its section of the iMessage screen.
+            R.string.apple_account_row, R.string.apple_account_row_help, R.string.apple_account_sign_in_row, R.string.apple_account_title,
+            R.string.apple_account_bullet, R.string.apple_account_intro_title, R.string.apple_account_intro_optional,
+            R.string.apple_account_intro_unlocks, R.string.apple_account_intro_where, R.string.apple_account_intro_relay,
+            R.string.apple_account_intro_device, R.string.apple_account_intro_device_unknown, R.string.apple_account_intro_adp,
+            R.string.apple_account_intro_key, R.string.apple_account_intro_limits, R.string.apple_account_intro_sign_out,
+            R.string.apple_account_understand, R.string.apple_account_continue, R.string.apple_account_not_now,
+            R.string.apple_account_id_hint, R.string.apple_account_password_hint, R.string.apple_account_sign_in,
+            R.string.apple_account_continue_as, R.string.apple_account_again_body, R.string.apple_account_forgot,
+            R.string.apple_account_device_code_title, R.string.apple_account_device_code_body, R.string.apple_account_code,
+            R.string.apple_account_no_code, R.string.apple_account_text_me, R.string.apple_account_send_again,
+            R.string.apple_account_try_again, R.string.apple_account_timed_out, R.string.apple_account_not_sent,
+            R.string.apple_account_text_title, R.string.apple_account_text_pick, R.string.apple_account_text_send,
+            R.string.apple_account_text_body, R.string.apple_account_text_body_unnamed, R.string.apple_account_resend,
+            R.string.apple_account_resend_in, R.string.apple_account_verify, R.string.apple_account_terms, R.string.apple_account_ok,
+            R.string.apple_account_done, R.string.apple_account_working, R.string.apple_account_missing, R.string.apple_account_too_many,
+            R.string.apple_account_code_wait, R.string.apple_account_code_wait_long, R.string.apple_account_wrong_password,
+            R.string.apple_account_enter_password, R.string.apple_account_expired, R.string.apple_account_incomplete,
+            R.string.apple_account_no_numbers, R.string.apple_account_code_format, R.string.apple_account_failed,
+            R.string.apple_account_busy, R.string.apple_account_not_registered, R.string.apple_account_already,
+            R.string.apple_account_not_started, R.string.apple_account_signed_in_as, R.string.apple_account_signed_in,
+            R.string.apple_account_icloud_on, R.string.apple_account_icloud_off, R.string.apple_account_sign_out,
+            R.string.apple_account_sign_out_title, R.string.apple_account_sign_out_body, R.string.apple_account_signed_out,
+            R.string.apple_account_notice_interrupted, R.string.apple_account_notice_signed_out,
+            R.string.apple_account_notice_sign_in_again, R.string.apple_account_restart_pending, R.string.apple_account_restart_later,
         )
         for (res in direct) {
             val text = context.getString(res)
@@ -201,6 +226,13 @@ class DirectWordingTest {
             }
         }
         assertEquals("Silence unknown FaceTime callers", context.getString(R.string.facetime_silence_unknown))
+        // The Apple Account, as an iPhone words it.
+        assertEquals("Apple Account (optional)", context.getString(R.string.apple_account_row))
+        assertEquals("Sign in with your Apple Account", context.getString(R.string.apple_account_intro_title))
+        assertEquals("Sign Out", context.getString(R.string.apple_account_sign_out))
+        assertEquals("Signed in as j•••@icloud.com", context.getString(R.string.apple_account_signed_in_as, "j•••@icloud.com"))
+        assertEquals("Finish your FaceTime call first.", context.getString(R.string.apple_account_busy))
+        assertEquals("Signed in. iMessage restarts for a moment to turn on iCloud features.", context.getString(R.string.apple_account_done))
         // As an iPhone words them.
         assertEquals("Not Delivered", context.getString(R.string.imessage_not_delivered))
         assertEquals("Try Again", context.getString(R.string.imessage_not_delivered_try_again))

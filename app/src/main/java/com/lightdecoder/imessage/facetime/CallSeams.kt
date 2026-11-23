@@ -101,16 +101,33 @@ class GuardBusy : IllegalStateException("a FaceTime join is still running")
 /** How long a take-back or a decline waits for a join that holds [CallBridge.guard]. */
 const val GUARD_WAIT_MS = 10_000L
 
+/** How often [lockWithin] looks whether the lock came free. */
+const val LOCK_POLL_MS = 20L
+
+/**
+ * Takes this lock, waiting for it [timeoutMs] at most: true when it is taken (the caller unlocks
+ * it), false when it did not come free (nothing is held). It looks with [tryLock] every [pollMs]:
+ * never `lock()` under a time limit, which can run out after the lock was taken and leave it held
+ * with nobody to let go of it. Cancelled while it waits, nothing is held either.
+ */
+suspend fun kotlinx.coroutines.sync.Mutex.lockWithin(timeoutMs: Long, pollMs: Long = LOCK_POLL_MS): Boolean {
+    var waited = 0L
+    while (!tryLock()) {
+        if (waited >= timeoutMs) return false
+        val step = minOf(pollMs.coerceAtLeast(1), timeoutMs - waited)
+        kotlinx.coroutines.delay(step)
+        waited += step
+    }
+    return true
+}
+
 /**
  * Runs [block] under this lock, waiting for it [timeoutMs] at most: [GuardBusy] when it did not
- * come free (nothing was run). The wait is all that is timed: [block] runs to its end.
+ * come free (nothing was run, nothing held). The wait is all that is timed: [block] runs to its
+ * end, and the lock is let go of however it ends.
  */
 suspend fun <T> kotlinx.coroutines.sync.Mutex.withLockWithin(timeoutMs: Long, block: suspend () -> T): T {
-    val held = kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
-        lock()
-        true
-    } == true
-    if (!held) throw GuardBusy()
+    if (!lockWithin(timeoutMs)) throw GuardBusy()
     try {
         return block()
     } finally {

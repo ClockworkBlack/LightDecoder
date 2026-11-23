@@ -81,6 +81,8 @@ import uniffi.rust_bridge.UnsendMessage
  * - FaceTime: Apple's call events are handed to [FaceTimeCalls] as they come (queued there: no
  *   message waits behind a call), and the library's call functions on the session are [callBridge].
  *   With "FaceTime" off ([DirectPrefs.faceTimeOn]) the events are acknowledged unread, as before.
+ * - The optional Apple Account ([account]): signed in and out from its own screen, on this session.
+ *   Without one, nothing of it runs: the session comes up with no account, as it always did.
  */
 class DirectEngine private constructor(private val app: Context) {
 
@@ -153,10 +155,66 @@ class DirectEngine private constructor(private val app: Context) {
     /** Events from Apple not handled yet, in the order Apple sent them, by journal id. */
     private val events = Channel<Pair<String, PushEvent>>(Channel.UNLIMITED)
 
+    /** Events are taken through it ([consume]); stopped while the process restarts ([restartForAccount]). */
+    private val gate = EventGate()
+
     @Volatile
     var sink: Sink? = null
 
     val isRegistered: Boolean get() = _status.value is Status.Registered
+
+    /**
+     * The optional Apple Account (its sign-in screen and the iMessage screen use it here, in this
+     * process): run under this engine's lock, on this session.
+     */
+    val account: AppleAccount by lazy {
+        AppleAccount(
+            AccountFiles.of(app, statePath),
+            NativeAccountBridge { session },
+            lock,
+            object : AppleAccount.Hooks {
+                override val busy: Boolean get() = FaceTimeCalls.peek()?.busy == true
+                override val registered: Boolean get() = isRegistered && session != null
+                override val relayHost: String
+                    get() = DirectPrefs.prefs(app).getString(DirectPrefs.KEY_HOST, null)?.takeIf { it.isNotBlank() } ?: DEFAULT_RELAY_HOST
+
+                override suspend fun restart(wanted: () -> Boolean, last: suspend () -> Unit): ProcessRestart.Outcome = restartForAccount(wanted, last)
+
+                override suspend fun tell(state: AccountState, restarting: Boolean) {
+                    val s = sink ?: return
+                    withTimeoutOrNull(ACCOUNT_TELL_MS) { s.deliver(DirectArchive.Update.Account(state, restarting)) }
+                }
+
+                override fun deleteAccountKeys() = AccountKeys.delete()
+            },
+        )
+    }
+
+    /** The main process's requests being answered by [DirectService] (set while it runs): a restart waits for them. */
+    @Volatile
+    internal var requests: RequestGate? = null
+
+    /**
+     * Restarts this process for the Apple Account (§4.4): iMessage's service started first (should
+     * Android refuse, nothing else is done); then never in the middle of a start or a registration
+     * (they hold [lock]), nor while a FaceTime call is on, looked at again under the calls' guard (nor
+     * while a join holds it, nor once a call began during its waits), nor under a request of the main
+     * process being answered ([requests]); the event being read is let finish (kept back when it does
+     * not in time), and should the restart then not happen, the requests and Apple's events are taken
+     * again ([ProcessRestart.whenFree], [EventGate]).
+     */
+    internal suspend fun restartForAccount(wanted: () -> Boolean, last: suspend () -> Unit): ProcessRestart.Outcome =
+        ProcessRestart.whenFree(
+            start = { ProcessRestart.startService(app) },
+            engineLock = lock,
+            guard = callBridge.guard,
+            busy = { FaceTimeCalls.peek()?.busy == true },
+            wanted = wanted,
+            requests = requests,
+            quiesce = { gate.quiesce(QUIESCE_MS) },
+            resume = { gate.resume() },
+            last = last,
+        ) { ProcessRestart.exit() }
 
     init {
         // Numbers written without their country code are read in this phone's country.
@@ -171,7 +229,9 @@ class DirectEngine private constructor(private val app: Context) {
      */
     private fun consume() {
         scope.launch {
-            for ((id, event) in events) take(id, event)
+            // While the process is about to restart, the gate holds the next one back (it, and the rest,
+            // wait in the library's journal); should the restart not happen, they are taken again.
+            for ((id, event) in events) gate.take { take(id, event) }
         }.invokeOnCompletion { e -> if (e != null && e !is CancellationException) consume() }
     }
 
@@ -184,17 +244,21 @@ class DirectEngine private constructor(private val app: Context) {
      */
     private suspend fun take(id: String, event: PushEvent) {
         try {
-            if (event is PushEvent.Message) {
-                if (!attempts.start(id)) {
-                    Log.w(TAG, "an event that took the iMessage process down is skipped (${kindOf(event.v1)})")
-                    store(DirectArchive.Update.Dropped(kindOf(event.v1), "reading it took the iMessage process down ${EventAttempts.MAX_DEATHS} times"))
-                } else {
-                    handle(event.v1)
+            when (routeOf(event)) {
+                EventRoute.MESSAGE -> {
+                    val inst = (event as PushEvent.Message).v1
+                    if (!attempts.start(id)) {
+                        Log.w(TAG, "an event that took the iMessage process down is skipped (${kindOf(inst)})")
+                        store(DirectArchive.Update.Dropped(kindOf(inst), "reading it took the iMessage process down ${EventAttempts.MAX_DEATHS} times"))
+                    } else {
+                        handle(inst)
+                    }
                 }
-            } else if (event is PushEvent.FaceTime) {
                 // Only handed on (queued there): a ring waits for nothing here, nor anything for it.
                 // With "FaceTime" off it is acknowledged unread.
-                if (DirectPrefs.faceTimeOn(app)) FaceTimeCalls.get(app).onEvent(event.v1)
+                EventRoute.FACETIME -> if (DirectPrefs.faceTimeOn(app)) FaceTimeCalls.get(app).onEvent((event as PushEvent.FaceTime).v1)
+                // The rest (an Apple Account's sign-in requests, Find My, shared albums, ...) unread, and never logged.
+                EventRoute.ACKNOWLEDGE -> Unit
             }
         } catch (e: CancellationException) {
             throw e
@@ -389,12 +453,18 @@ class DirectEngine private constructor(private val app: Context) {
                 }
                 try {
                     initLibrary()
+                    var restored = false
                     if (session == null) {
                         _status.value = Status.Working("Starting")
+                        // The optional Apple Account: what an interrupted sign-in or commit left is put
+                        // right before the session is built from disk (nothing at all without one).
+                        account.atStartLocked()
                         session = uniffi.rust_bridge.restoreSession(statePath, pipeline!!)
                         sessionCameUp()
+                        restored = session != null
                     }
                     refreshStatus()
+                    if (restored) account.sessionUpLocked()
                 } catch (e: Throwable) {
                     fail(e)
                 }
@@ -465,7 +535,8 @@ class DirectEngine private constructor(private val app: Context) {
         val config = uniffi.rust_bridge.configFromRelay(code, host, token)
         step("Creating this device's identity")
         val identity = uniffi.rust_bridge.newNgmIdentity()
-        uniffi.rust_bridge.setIdentity(statePath, config, identity)
+        // A new device: an Apple Account saved for the old one is wiped first (S10).
+        account.newDeviceLocked { uniffi.rust_bridge.setIdentity(statePath, config, identity) }
         step("Connecting to Apple")
         val push = uniffi.rust_bridge.setupPush(config, identity, null, statePath)
         push.error?.let { Log.w(TAG, "push setup reported: $it") }
@@ -478,6 +549,7 @@ class DirectEngine private constructor(private val app: Context) {
         val users = listOf(user)
         val result = uniffi.rust_bridge.registerIds(statePath, config, conn, identity, users.map { uniffi.rust_bridge.duplicateUser(it) })
         result.alert?.let { throw ImessageError("Apple: ${it.title}. ${it.body}".trim()) }
+        keepPhoneUser((result.users ?: users).firstOrNull())
         step("Starting iMessage")
         val started = uniffi.rust_bridge.startSession(
             statePath, config, conn, anisette, null, result.users ?: users, identity, null, pipeline!!,
@@ -487,8 +559,23 @@ class DirectEngine private constructor(private val app: Context) {
         // off until that call is over.
         val waited = SessionSwap.whenFree(callBridge.guard, busy = { FaceTimeCalls.peek()?.busy == true }) { session = started }
         if (waited) Log.w(TAG, "the new session waited for a FaceTime call to end")
+        // Built with no account: a restart the Apple Account still had pending is not needed now.
+        account.sessionReplacedLocked()
         sessionCameUp()
         refreshStatus()
+    }
+
+    /**
+     * This phone's number as registered, kept encrypted ([PhoneUserStore]) so that a later change of
+     * the Apple Account never needs a new text message. Never in the way of the registration.
+     */
+    private fun keepPhoneUser(user: uniffi.rust_bridge.IdsUser?) {
+        if (user == null) return
+        try {
+            PhoneUserStore.of(app).save(uniffi.rust_bridge.saveUser(user))
+        } catch (e: Throwable) {
+            Log.w(TAG, "the phone's iMessage user was not kept (${e::class.java.simpleName})")
+        }
     }
 
     /**
@@ -1248,6 +1335,34 @@ class DirectEngine private constructor(private val app: Context) {
         /** Added to the error when Apple's text gateway stays silent and the SIM route is not allowed yet. */
         const val NEEDS_SIM = "If this keeps happening, your carrier may verify the number with the SIM instead of a text."
         private const val SESSION_WAIT_MS = 20_000L
+
+        /** How long the main process is given to take the Apple Account's state (it also asks for it). */
+        private const val ACCOUNT_TELL_MS = 3_000L
+
+        /** How long a restart waits for the event being read ([quiesce]). */
+        private const val QUIESCE_MS = 3_000L
+
+        /** What is done with each of Apple's events ([take]). */
+        internal enum class EventRoute {
+            /** A message (or a group's event): read and stored. */
+            MESSAGE,
+
+            /** A FaceTime call's event: handed to the calls. */
+            FACETIME,
+
+            /**
+             * Acknowledged unread, and never logged: also the ones an Apple Account brings (other
+             * devices' sign-in requests and their teardown, two-factor notices, the iCloud Keychain's,
+             * Find My locations and shares, shared albums): nothing here acts on them.
+             */
+            ACKNOWLEDGE,
+        }
+
+        internal fun routeOf(event: PushEvent): EventRoute = when (event) {
+            is PushEvent.Message -> EventRoute.MESSAGE
+            is PushEvent.FaceTime -> EventRoute.FACETIME
+            else -> EventRoute.ACKNOWLEDGE
+        }
 
         /** The public registration relay the iPhone relay apps use by default, and its public token. */
         const val DEFAULT_RELAY_HOST = "https://registration-relay.beeper.com"

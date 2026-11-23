@@ -232,6 +232,8 @@ class ConversationsActivity : AppCompatActivity() {
         // Back from the iMessage library's setup (another process): a new registration shows its chats.
         val wasOn = blueBubbles.isOn()
         com.lightdecoder.imessage.direct.DirectLink.onAppStart(this)
+        // In sight: an Apple Account's restart of iMessage still pending may be made now (none without one).
+        com.lightdecoder.imessage.direct.DirectLink.screenShown(this)
         if (!wasOn && blueBubbles.isOn()) {
             com.lightdecoder.imessage.IMessageManager.get(this).refreshState()
             reload()

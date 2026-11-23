@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The code shown on the user's other Apple devices (AppleAccountActivity): six boxes over one field. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:visibility="gone">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:accessibilityHeading="true"
+        android:text="@string/apple_account_device_code_title"
+        android:textAppearance="?attr/textAppearanceHeadlineSmall" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="@string/apple_account_device_code_body"
+        android:textAppearance="?attr/textAppearanceBodyMedium" />
+
+    <FrameLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center_horizontal"
+        android:layout_marginTop="16dp">
+
+        <LinearLayout
+            android:id="@+id/deviceBoxes"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:importantForAccessibility="noHideDescendants"
+            android:orientation="horizontal" />
+
+        <EditText
+            android:id="@+id/deviceCode"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@null"
+            android:contentDescription="@string/apple_account_code"
+            android:cursorVisible="false"
+            android:imeOptions="flagNoPersonalizedLearning|actionDone"
+            android:inputType="number"
+            android:maxLength="6"
+            android:saveEnabled="false"
+            android:textColor="@android:color/transparent"
+            android:textIsSelectable="false" />
+    </FrameLayout>
+
+    <TextView
+        android:id="@+id/deviceError"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:accessibilityLiveRegion="polite"
+        android:textAppearance="?attr/textAppearanceBodyMedium"
+        android:textColor="?attr/colorError"
+        android:visibility="gone" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:gravity="center_vertical|end"
+        android:orientation="horizontal">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/noCode"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:filterTouchesWhenObscured="true"
+            android:text="@string/apple_account_no_code" />
+
+        <View
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/deviceVerify"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:filterTouchesWhenObscured="true"
+            android:text="@string/apple_account_verify" />
+    </LinearLayout>
+
+    <!-- "Didn't get a code?", and after Apple did not confirm one in time. -->
+    <LinearLayout
+        android:id="@+id/deviceOptions"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="end"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/textMe"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:filterTouchesWhenObscured="true"
+            android:text="@string/apple_account_text_me" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/sendAgain"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:filterTouchesWhenObscured="true"
+            android:text="@string/apple_account_send_again" />
+    </LinearLayout>
+</LinearLayout>

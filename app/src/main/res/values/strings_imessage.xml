@@ -570,4 +570,90 @@
         <item quantity="one">%1$s and %2$d other are typing</item>
         <item quantity="other">%1$s and %2$d others are typing</item>
     </plurals>
+
+    <!-- The optional Apple Account (ui/imessage/AppleAccountActivity, and its section of the iMessage screen). -->
+    <string name="apple_account_row">Apple Account (optional)</string>
+    <string name="apple_account_row_help">Sign in to see the names and photos people share and their Focus status. iMessage keeps working with your phone number without it.</string>
+    <string name="apple_account_sign_in_row">Sign In</string>
+    <string name="apple_account_title">Apple Account</string>
+    <!-- One line of "Before you sign in". %1$s: the line. -->
+    <string name="apple_account_bullet">•  %1$s</string>
+    <string name="apple_account_intro_title">Sign in with your Apple Account</string>
+    <string name="apple_account_intro_optional">Optional. iMessage on this phone keeps working with your phone number whether or not you sign in.</string>
+    <string name="apple_account_intro_unlocks">Turns on: names and photos people share, Focus status, and later importing older messages from iCloud.</string>
+    <string name="apple_account_intro_where">Your Apple Account and password go only to Apple. The sign-in is made on this phone by LightDecoder\'s built-in iMessage library; no other company\'s sign-in server is used.</string>
+    <!-- %1$s: the relay's address, as the user set it up. -->
+    <string name="apple_account_intro_relay">The iPhone relay you set up for iMessage (%1$s) is contacted while signing in. It sees when you sign in and this phone\'s internet address, not your Apple Account.</string>
+    <!-- %1$s: the device's name; %2$s: its system; %3$s: its serial number (the relay iPhone's). -->
+    <string name="apple_account_intro_device">Apple will see a new device: %1$s, %2$s, serial %3$s. That is your relay iPhone\'s serial number. If the relay iPhone is not yours, its owner\'s device becomes linked to your sign-in.</string>
+    <string name="apple_account_intro_device_unknown">Apple will see a new device named after your relay iPhone, with its serial number. If the relay iPhone is not yours, its owner\'s device becomes linked to your sign-in.</string>
+    <string name="apple_account_intro_adp">Advanced Data Protection and Contact Key Verification must be off.</string>
+    <string name="apple_account_intro_key">A sign-in key made from your password is kept in LightDecoder\'s private storage, which is never backed up, until you sign out.</string>
+    <string name="apple_account_intro_limits">Apple may limit iMessage on accounts it does not expect. Do not contact Apple Support about LightDecoder.</string>
+    <string name="apple_account_intro_sign_out">Signing out removes the sign-in from this phone only. Your Apple Account may go on listing this phone until you remove it there.</string>
+    <string name="apple_account_understand">I understand</string>
+    <string name="apple_account_continue">Continue</string>
+    <string name="apple_account_not_now">Not Now</string>
+    <string name="apple_account_id_hint">Email or Phone Number</string>
+    <string name="apple_account_password_hint">Password</string>
+    <string name="apple_account_sign_in">Sign In</string>
+    <!-- %1$s: the Apple Account, mostly hidden (j•••@icloud.com). -->
+    <string name="apple_account_continue_as">Continue as %1$s</string>
+    <string name="apple_account_again_body">Your Apple Account needs you to sign in again</string>
+    <string name="apple_account_forgot">Forgot password?</string>
+    <string name="apple_account_device_code_title">Two-Factor Authentication</string>
+    <string name="apple_account_device_code_body">Enter the verification code shown on your other Apple devices.</string>
+    <string name="apple_account_code">Verification code</string>
+    <string name="apple_account_no_code">Didn\'t get a code?</string>
+    <string name="apple_account_text_me">Text me a code instead</string>
+    <string name="apple_account_send_again">Send Again</string>
+    <string name="apple_account_try_again">Try Again</string>
+    <string name="apple_account_timed_out">Your other Apple devices did not confirm the code in time.</string>
+    <string name="apple_account_not_sent">No code was sent yet.</string>
+    <string name="apple_account_text_title">Text Message</string>
+    <string name="apple_account_text_pick">Where should Apple text the verification code?</string>
+    <string name="apple_account_text_send">Send Code</string>
+    <!-- %1$s: the trusted number, as Apple writes it (mostly hidden). -->
+    <string name="apple_account_text_body">Enter the verification code sent to %1$s.</string>
+    <string name="apple_account_text_body_unnamed">Enter the verification code sent to your trusted phone number.</string>
+    <string name="apple_account_resend">Resend Code</string>
+    <!-- %1$d: seconds until a code may be asked for again. -->
+    <string name="apple_account_resend_in">Resend Code (%1$d s)</string>
+    <string name="apple_account_verify">Continue</string>
+    <string name="apple_account_terms">Apple asks you to accept new iCloud terms. Accept them on an Apple device or at icloud.com, then try again.</string>
+    <string name="apple_account_ok">OK</string>
+    <string name="apple_account_done">Signed in. iMessage restarts for a moment to turn on iCloud features.</string>
+    <string name="apple_account_working">Signing in…</string>
+    <string name="apple_account_missing">Enter your Apple Account and password.</string>
+    <!-- %1$d: minutes until the next try. -->
+    <string name="apple_account_too_many">Too many attempts. Try again in %1$d min.</string>
+    <!-- %1$d: seconds until another code may be asked for. -->
+    <string name="apple_account_code_wait">Wait %1$d s before asking for another code.</string>
+    <string name="apple_account_code_wait_long">Too many codes were asked for. Try again later.</string>
+    <string name="apple_account_wrong_password">Your Apple Account or password was incorrect.</string>
+    <string name="apple_account_enter_password">Enter your password to sign in again.</string>
+    <string name="apple_account_expired">The sign-in took too long. Enter your password again.</string>
+    <string name="apple_account_incomplete">Apple did not finish the sign-in. Try again.</string>
+    <string name="apple_account_no_numbers">Your Apple Account has no trusted phone number to text a code to.</string>
+    <string name="apple_account_code_format">Enter the 6-digit code.</string>
+    <!-- %1$s: Apple's or the library's words. -->
+    <string name="apple_account_failed">Couldn\'t sign in: %1$s</string>
+    <string name="apple_account_busy">Finish your FaceTime call first.</string>
+    <string name="apple_account_not_registered">Register this phone\'s number with iMessage first.</string>
+    <string name="apple_account_already">You are already signed in.</string>
+    <string name="apple_account_not_started">The sign-in was closed. Start it again.</string>
+    <!-- %1$s: the Apple Account, mostly hidden (j•••@icloud.com). -->
+    <string name="apple_account_signed_in_as">Signed in as %1$s</string>
+    <string name="apple_account_signed_in">Signed in</string>
+    <string name="apple_account_icloud_on">iCloud features: On</string>
+    <string name="apple_account_icloud_off">iCloud features: Not available</string>
+    <string name="apple_account_sign_out">Sign Out</string>
+    <string name="apple_account_sign_out_title">Sign out of your Apple Account on this phone?</string>
+    <string name="apple_account_sign_out_body">iMessage keeps working with your phone number. It restarts for a moment.</string>
+    <string name="apple_account_signed_out">Signed out on this phone. Your Apple Account may still list this phone as \'Apple Device\': on your iPhone, open Settings > [your name], tap it and choose Remove from Account.</string>
+    <string name="apple_account_notice_interrupted">A sign-in to your Apple Account was interrupted. What it left on this phone was removed.</string>
+    <string name="apple_account_notice_signed_out">Signed out of your Apple Account</string>
+    <string name="apple_account_notice_sign_in_again">Sign in to your Apple Account again</string>
+    <string name="apple_account_restart_pending">iMessage restarts once your FaceTime call is over.</string>
+    <string name="apple_account_restart_later">iMessage restarts for a moment the next time you open LightDecoder.</string>
 </resources>

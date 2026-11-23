@@ -183,6 +183,65 @@
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
+            <!-- The optional Apple Account (AppleAccountActivity): only once this phone's number is registered. -->
+            <com.google.android.material.card.MaterialCardView
+                android:id="@+id/appleAccountCard"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="16dp">
+
+                    <TextView
+                        android:id="@+id/appleAccountTitle"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/apple_account_row"
+                        android:textAppearance="?attr/textAppearanceTitleSmall" />
+
+                    <!-- Said once, after something happened to the account. -->
+                    <TextView
+                        android:id="@+id/appleAccountNotice"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:accessibilityLiveRegion="polite"
+                        android:textAppearance="?attr/textAppearanceBodyMedium"
+                        android:textStyle="bold"
+                        android:visibility="gone" />
+
+                    <TextView
+                        android:id="@+id/appleAccountBody"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:text="@string/apple_account_row_help"
+                        android:textAppearance="?attr/textAppearanceBodyMedium" />
+
+                    <TextView
+                        android:id="@+id/appleAccountIcloud"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:textAppearance="?attr/textAppearanceBodyMedium"
+                        android:visibility="gone" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/appleAccountAction"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:filterTouchesWhenObscured="true"
+                        android:text="@string/apple_account_sign_in_row" />
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
             <!-- Settings of the library's own (this process's DirectPrefs). -->
             <com.google.android.material.card.MaterialCardView
                 android:id="@+id/settingsCard"

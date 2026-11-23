@@ -635,6 +635,9 @@ class FaceTimeCallActivity : AppCompatActivity() {
 
     private fun finishCall() {
         if (isFinishing) return
+        // Still in sight (Android allows iMessage's service to be started): a restart of iMessage for
+        // the optional Apple Account that the call kept back is made now. Nothing without one.
+        if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) com.lightdecoder.imessage.direct.AppleAccount.callScreenEnded()
         finishAndRemoveTask()
     }
 

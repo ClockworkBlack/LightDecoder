@@ -45,8 +45,18 @@ object DirectIpc {
      * Answers requests: [handle] runs off the main thread and returns the reply's JSON. Whatever a
      * request makes [handle] throw, an error too (memory or a stack run out), is its answer, never
      * the end of the process: the other process is told it failed.
+     *
+     * Each request is counted in [requests] from when it is taken until its answer has gone (a restart
+     * of the process waits for them); while that is closed, a request is not taken and is answered at
+     * once that it did not go ([Client.UNREACHABLE]). [afterReply] runs once a request's answer has
+     * gone (and it is no longer counted), never for one not taken; what it throws is logged only.
      */
-    class Server(private val handle: suspend (what: Int, request: JSONObject) -> JSONObject) {
+    class Server(
+        private val afterReply: (what: Int, request: JSONObject) -> Unit = { _, _ -> },
+        private val handle: suspend (what: Int, request: JSONObject) -> JSONObject,
+    ) {
+        /** The requests being answered ([RequestGate]). */
+        internal val requests = RequestGate()
         private val thread = HandlerThread("imessage-ipc-server").apply { start() }
         private val failures = CoroutineExceptionHandler { _, e -> Log.e(TAG, "a request's work failed (${e::class.java.simpleName})") }
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + failures)
@@ -66,34 +76,55 @@ object DirectIpc {
                     } catch (e: org.json.JSONException) {
                         JSONObject()
                     }
+                    // Counted from here (a restart waits for it); not taken at all while one is under way.
+                    val taken = requests.enter()
                     scope.launch {
-                        val reply = try {
-                            handle(what, request)
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (e: Exception) {
-                            Log.w(TAG, "request $what failed (${e::class.java.simpleName})")
-                            DirectWire.failure(e)
-                        } catch (e: Throwable) {
-                            Log.e(TAG, "request $what failed (${e::class.java.simpleName})")
-                            DirectWire.failure(e)
-                        }
                         try {
-                            replyTo.send(
-                                Message.obtain(null, DirectWire.REPLY).apply {
-                                    data = Bundle().apply {
-                                        putLong(DirectWire.KEY_ID, id)
-                                        putString(DirectWire.KEY_JSON, reply.toString())
-                                    }
-                                },
-                            )
-                        } catch (e: RemoteException) {
-                            // The asking process went away; it will ask again.
+                            val reply = if (!taken) {
+                                DirectWire.error(Client.UNREACHABLE)
+                            } else {
+                                try {
+                                    handle(what, request)
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "request $what failed (${e::class.java.simpleName})")
+                                    DirectWire.failure(e)
+                                } catch (e: Throwable) {
+                                    Log.e(TAG, "request $what failed (${e::class.java.simpleName})")
+                                    DirectWire.failure(e)
+                                }
+                            }
+                            send(replyTo, id, reply)
+                        } finally {
+                            if (taken) requests.leave()
+                        }
+                        if (taken) {
+                            try {
+                                afterReply(what, request)
+                            } catch (e: Throwable) {
+                                Log.w(TAG, "after request $what: ${e::class.java.simpleName}")
+                            }
                         }
                     }
                 }
             },
         )
+
+        private fun send(replyTo: Messenger, id: Long, reply: JSONObject) {
+            try {
+                replyTo.send(
+                    Message.obtain(null, DirectWire.REPLY).apply {
+                        data = Bundle().apply {
+                            putLong(DirectWire.KEY_ID, id)
+                            putString(DirectWire.KEY_JSON, reply.toString())
+                        }
+                    },
+                )
+            } catch (e: RemoteException) {
+                // The asking process went away; it will ask again.
+            }
+        }
 
         fun close() {
             thread.quitSafely()

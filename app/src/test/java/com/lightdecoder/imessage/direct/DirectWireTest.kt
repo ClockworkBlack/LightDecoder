@@ -542,4 +542,76 @@ class DirectWireTest {
         assertEquals("pollChange", json.getString("kind"))
         assertTrue(DirectWire.decode(json) is DirectArchive.Update.PollChange)
     }
+
+    // --- the optional Apple Account (SPEC2 §3) ---------------------------------------------------------
+
+    @Test
+    fun theCodeTableIsSpec2sAndEveryCodeIsItsOwn() {
+        val spec = linkedMapOf(
+            "SEND" to 1, "UNSEND" to 2, "REACH" to 3, "EDIT" to 4, "REACT" to 5, "TYPING" to 6, "READ" to 7, "DOWNLOAD" to 8,
+            "EXTENSION" to 9, "UPDATE" to 10, "BACKGROUND" to 11, "UNSCHEDULE" to 12, "RENAME" to 13, "MEMBERS" to 14,
+            "GROUP_PHOTO" to 15, "MARK_UNREAD" to 16, "REPORT_JUNK" to 17, "PEERS" to 18, "FT_CAPABLE" to 19, "CALLER" to 20,
+            "ACCOUNT" to 21,
+        )
+        assertEquals(spec, DirectWire.REQUEST_CODES)
+        assertEquals(DirectWire.REQUEST_CODES.size, DirectWire.REQUEST_CODES.values.toSet().size)
+        assertFalse(DirectWire.REPLY in DirectWire.REQUEST_CODES.values)
+        assertEquals(21, DirectWire.ACCOUNT)
+        assertEquals(100, DirectWire.REPLY)
+    }
+
+    @Test
+    fun theAccountsStateCrossesAsBooleansOnly() {
+        val state = AccountState(signedIn = true, attention = false, icloud = true)
+        val reply = JSONObject(state.toJson().toString())
+        assertEquals(setOf("signedIn", "attention", "icloud", "clique", "focus", "history"), reply.keys().asSequence().toSet())
+        for (key in reply.keys()) assertTrue(key, reply.get(key) is Boolean)
+        assertEquals(state, AccountState.fromJson(reply))
+        assertEquals(0, DirectWire.account().length())
+        // Only a real true is true; not signed in, nothing else is.
+        assertEquals(AccountState.SIGNED_OUT, AccountState.fromJson(JSONObject("""{"signedIn":"true","icloud":1}""")))
+        assertEquals(AccountState.SIGNED_OUT, AccountState.fromJson(JSONObject("""{"signedIn":false,"icloud":true,"attention":true}""")))
+        assertEquals(AccountState.SIGNED_OUT, AccountState.fromJson(DirectWire.error("LightDecoder's iMessage part could not be reached.")))
+    }
+
+    @Test
+    fun theAccountRequestSaysVisibleOnlyWhenAsked() {
+        assertEquals("{}", DirectWire.account().toString())
+        assertEquals("""{"visible":true}""", DirectWire.account(visible = true).toString())
+        assertTrue(DirectWire.AccountRequest.fromJson(JSONObject(DirectWire.account(visible = true).toString())).visible)
+        // Read strictly: only a real true.
+        for (bad in listOf("{}", """{"visible":false}""", """{"visible":"true"}""", """{"visible":1}""", """{"visible":[true]}""")) {
+            assertFalse(bad, DirectWire.AccountRequest.fromJson(JSONObject(bad)).visible)
+        }
+    }
+
+    @Test
+    fun theAccountUpdateSurvivesTheTrip() {
+        val u = DirectArchive.Update.Account(AccountState(signedIn = true, attention = true))
+        assertEquals(u, trip(u))
+        assertEquals("account", DirectWire.encodeUpdate(u).getString("kind"))
+        assertEquals(DirectArchive.Update.Account(AccountState.SIGNED_OUT), trip(DirectArchive.Update.Account(AccountState.SIGNED_OUT)))
+        assertEquals(DirectArchive.Update.Account(AccountState.SIGNED_OUT), DirectWire.decode(JSONObject("""{"kind":"account","signedIn":"yes"}""")))
+        // Told right before the process ends for its restart: said, and read strictly.
+        val restarting = DirectArchive.Update.Account(AccountState.SIGNED_OUT, restarting = true)
+        assertEquals(restarting, trip(restarting))
+        assertFalse(DirectWire.encodeUpdate(u).has("restarting"))
+        for (bad in listOf("\"true\"", "1", "false", "null")) {
+            assertEquals(bad, DirectArchive.Update.Account(AccountState.SIGNED_OUT), DirectWire.decode(JSONObject("""{"kind":"account","restarting":$bad}""")))
+        }
+    }
+
+    @Test
+    fun theAccountAnswerSaysARestartIsPendingOnlyWhenItIs() {
+        val state = AccountState(signedIn = true, icloud = true)
+        val pending = JSONObject(DirectWire.accountReply(state, restartPending = true).toString())
+        assertTrue(DirectWire.restartPendingOf(pending))
+        assertEquals(state, AccountState.fromJson(pending))
+        for (key in pending.keys()) assertTrue(key, pending.get(key) is Boolean)
+        val none = JSONObject(DirectWire.accountReply(AccountState.SIGNED_OUT, restartPending = false).toString())
+        assertFalse(DirectWire.restartPendingOf(none))
+        assertEquals(AccountState.SIGNED_OUT.toJson().toString(), none.toString())
+        for (bad in listOf("""{"restartPending":"true"}""", """{"restartPending":1}""", "{}")) assertFalse(bad, DirectWire.restartPendingOf(JSONObject(bad)))
+        assertFalse(DirectWire.restartPendingOf(DirectWire.error("LightDecoder's iMessage part could not be reached.")))
+    }
 }

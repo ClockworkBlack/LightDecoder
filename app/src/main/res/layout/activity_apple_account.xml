@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The optional Apple Account's sign-in (ui/imessage/AppleAccountActivity), in the ":imessage" process,
+    under FLAG_SECURE. One page shows at a time. No field keeps its text in the saved state
+    (saveEnabled="false"), and every button that goes on has filterTouchesWhenObscured.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <com.google.android.material.appbar.MaterialToolbar
+        android:id="@+id/toolbar"
+        android:layout_width="match_parent"
+        android:layout_height="?attr/actionBarSize"
+        app:title="@string/apple_account_title" />
+
+    <com.google.android.material.progressindicator.LinearProgressIndicator
+        android:id="@+id/progress"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:contentDescription="@string/apple_account_working"
+        android:indeterminate="true"
+        android:visibility="invisible" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingHorizontal="20dp"
+            android:paddingBottom="24dp">
+
+            <include
+                android:id="@+id/intro"
+                layout="@layout/page_apple_account_intro" />
+
+            <include
+                android:id="@+id/credentials"
+                layout="@layout/page_apple_account_credentials" />
+
+            <include
+                android:id="@+id/device"
+                layout="@layout/page_apple_account_device" />
+
+            <include
+                android:id="@+id/text"
+                layout="@layout/page_apple_account_text" />
+
+            <include
+                android:id="@+id/message"
+                layout="@layout/page_apple_account_message" />
+        </LinearLayout>
+    </ScrollView>
+</LinearLayout>

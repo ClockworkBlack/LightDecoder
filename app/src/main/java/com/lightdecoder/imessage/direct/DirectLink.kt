@@ -46,6 +46,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -114,6 +116,51 @@ class DirectLink private constructor(
 
     /** Each chat's own "Send Read Receipts" ([ReadReceiptChoices]). */
     private val receiptChoices = ReadReceiptChoices(app)
+
+    private val _account = MutableStateFlow(AccountState.SIGNED_OUT)
+    private val accountAsked = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * Where the optional Apple Account stands in the ":imessage" process (Booleans only), for what
+     * only works with it. Asked of that process the first time it is read (with iMessage set up), and
+     * told by it whenever it changes ([DirectArchive.Update.Account]).
+     */
+    val account: StateFlow<AccountState>
+        get() {
+            if (active && accountAsked.compareAndSet(false, true)) scope.launch { askAccount() }
+            return _account
+        }
+
+    /** A check that the ":imessage" process came back after it restarted for the Apple Account. */
+    private var restartCheck: kotlinx.coroutines.Job? = null
+
+    /**
+     * The ":imessage" process has told of an Apple Account (signed in, out, needing a sign-in, or a
+     * restart for one pending), or said one is there or a restart is pending: only then do this
+     * process's screens say they are in sight ([screenShown]). For a user who never signs in, it stays
+     * false and nothing of the account is ever sent. Kept ([ACCOUNT_PREFS]), so a main process made
+     * again while a restart is pending still says so; false again once an answer says there is neither
+     * an account nor a restart pending.
+     */
+    private val accountPrefs by lazy { app.getSharedPreferences(ACCOUNT_PREFS, Context.MODE_PRIVATE) }
+
+    @Volatile
+    private var accountSeen: Boolean? = null
+
+    private fun accountSeen(): Boolean = accountSeen ?: accountPrefs.getBoolean(KEY_ACCOUNT_SEEN, false).also { accountSeen = it }
+
+    private fun seeAccount(seen: Boolean) {
+        if (accountSeen() == seen) return
+        accountSeen = seen
+        accountPrefs.edit().putBoolean(KEY_ACCOUNT_SEEN, seen).apply()
+    }
+
+    /** How many times the ":imessage" process told of the account: an answer asked for before the last of them never says "nothing there". */
+    private val accountTold = java.util.concurrent.atomic.AtomicInteger()
+
+    /** Tests: how long after an "account" update its service is started ([RESTART_CHECK_MS]), and how. */
+    internal var restartCheckMs = RESTART_CHECK_MS
+    internal var startService: () -> Boolean = { DirectService.start(app) }
 
     init {
         if (active) scope.launch { failInterruptedSends() }
@@ -1384,6 +1431,72 @@ class DirectLink private constructor(
     private fun isMember(conversationId: String, address: String): Boolean =
         address.isNotBlank() && repo.participants(conversationId).any { !it.isMe && isAddressOf(it, address) }
 
+    // --- the optional Apple Account ---------------------------------------------------------------
+
+    /** Asks the ":imessage" process where the Apple Account stands (never with "visible"); an error leaves it as it was known. */
+    private suspend fun askAccount() {
+        val told = accountTold.get()
+        val reply = requests.call(DirectWire.ACCOUNT, DirectWire.account(), ACCOUNT_TIMEOUT_MS)
+        took(reply, told)
+    }
+
+    /** An ACCOUNT answer, asked for when [told] tellings had come: where the account stands, and whether the screens go on saying they are in sight. */
+    private fun took(reply: JSONObject, told: Int) {
+        if (DirectWire.errorOf(reply) != null) return
+        val state = AccountState.fromJson(reply)
+        _account.value = state
+        when {
+            state.signedIn || DirectWire.restartPendingOf(reply) -> seeAccount(true)
+            // Neither, and nothing told since it was asked (which the answer may not have known of).
+            accountTold.get() == told -> seeAccount(false)
+        }
+    }
+
+    /**
+     * One of this process's screens (the chats, a chat) came into sight: with an Apple Account told
+     * of, the ":imessage" process is asked where it stands with "visible", the one request that lets
+     * it make a restart it still has pending (Android allows its service to be started now). Nothing
+     * at all without iMessage, or for a user who never signed in.
+     */
+    fun screenShown() {
+        if (!active || !accountSeen()) return
+        scope.launch {
+            val told = accountTold.get()
+            val reply = requests.call(DirectWire.ACCOUNT, DirectWire.account(visible = true), ACCOUNT_TIMEOUT_MS)
+            took(reply, told)
+        }
+    }
+
+    /**
+     * The ":imessage" process says where the Apple Account now stands. When that changed, or it says
+     * it is about to end for its restart ([restarting]), [RESTART_CHECK_MS] later its service is
+     * started once, whatever happened (a service that is back already only takes it as the start it
+     * had: a bind alone would bring the process back without starting the service, §4.4), and where
+     * the account stands asked again (never with "visible": the check never restarts anything). Told
+     * the same again, nothing more is done: one check per change, and one per restart, at most.
+     * (The names, photos and Focus states it brings, once there are any, go with a sign-out here.)
+     */
+    private fun accountChanged(state: AccountState, restarting: Boolean) {
+        val before = _account.value
+        _account.value = state
+        accountAsked.set(true)
+        accountTold.incrementAndGet()
+        seeAccount(true)
+        if (before == state && !restarting) return
+        if (before != state) IMessageLog.add(app, "Apple Account: signed in ${state.signedIn}, needs sign-in ${state.attention}, iCloud ${state.icloud}")
+        restartCheck?.cancel()
+        restartCheck = scope.launch {
+            delay(restartCheckMs)
+            val started = try {
+                startService()
+            } catch (e: RuntimeException) {
+                false
+            }
+            if (!started) IMessageLog.add(app, "Apple Account: iMessage's service was not started after the account changed")
+            askAccount()
+        }
+    }
+
     /** Stores one change from the ":imessage" process. Returns once it is in the archive. */
     fun apply(update: DirectArchive.Update) {
         synchronized(this) { store(update) }
@@ -1413,6 +1526,7 @@ class DirectLink private constructor(
             is DirectArchive.Update.Note -> IMessageLog.add(app, FaceTimeLog.PREFIX + loggableNote(update.line))
             is DirectArchive.Update.Dropped ->
                 IMessageLog.add(app, "an event from Apple was not taken (${loggableText(update.what, 40)}): ${loggableText(update.why, 160)}")
+            is DirectArchive.Update.Account -> accountChanged(update.state, update.restarting)
             is DirectArchive.Update.ReadElsewhere -> readElsewhere(update)
             is DirectArchive.Update.MarkUnread -> markedUnreadElsewhere(update)
             DirectArchive.Update.PeerCacheInvalidate -> devicesChanged()
@@ -3234,6 +3348,15 @@ class DirectLink private constructor(
             DirectService.start(context)
         }
 
+        /**
+         * One of the main process's screens came into sight (the chats, a chat): see [screenShown].
+         * Nothing without iMessage set up.
+         */
+        fun screenShown(context: Context) {
+            if (!DirectEngine.isSetUp(context)) return
+            get(context).screenShown()
+        }
+
         /** The archive's id for the user (as Blue Bubbles stores it). */
         const val ME = "me"
 
@@ -3427,6 +3550,16 @@ class DirectLink private constructor(
 
         /** Typing and read receipts wait for no answer from Apple: only for the session coming up. */
         private const val NOTICE_TIMEOUT_MS = 30_000L
+
+        /** The Apple Account's state is answered at once (the process may have to start first). */
+        private const val ACCOUNT_TIMEOUT_MS = 20_000L
+
+        /** How long after a change of the Apple Account the ":imessage" process should be back from its restart. */
+        const val RESTART_CHECK_MS = 15_000L
+
+        /** This process's own note that an Apple Account was told of ([accountSeen]): Booleans only. */
+        private const val ACCOUNT_PREFS = "imessage_account_link"
+        private const val KEY_ACCOUNT_SEEN = "seen"
 
         /** "Stopped typing" goes this long after the last keystroke, as on an iPhone. */
         const val TYPING_IDLE_MS = 5_000L
