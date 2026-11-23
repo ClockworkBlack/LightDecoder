@@ -163,6 +163,10 @@ class FaceTimeCalls internal constructor(
     @Volatile
     private var rotation = 0
 
+    /** The camera's orientation for the library, for the screen's rotation and how that side's camera is mounted. */
+    private fun orientationFor(front: Boolean): Int =
+        CallOrientation.forCamera(rotation, front, runCatching { camera.sensorOrientation(front) }.getOrNull())
+
     init {
         this.scope.launch { for (input in inputs) step(input) }
         this.scope.launch { for (event in events) take(event) }
@@ -288,7 +292,7 @@ class FaceTimeCalls internal constructor(
         if (on && !cameraAllowed()) return
         _media.update { it.copy(cameraOn = on, cameraFailed = if (on) false else it.cameraFailed) }
         if (on) {
-            command { it.orientation(CallOrientation.forCamera(rotation, _media.value.cameraFront)) }
+            command { it.orientation(orientationFor(_media.value.cameraFront)) }
             // With the call screen away the camera waits for it ([screenHidden]).
             command { if (!cameraPaused) it.camera(true) }
             // More of the foreground notice's kind now: the camera's.
@@ -309,7 +313,7 @@ class FaceTimeCalls internal constructor(
         if (_media.value.cameraOn) {
             stopCamera { startCamera() }
         }
-        command { it.orientation(CallOrientation.forCamera(rotation, front)) }
+        command { it.orientation(orientationFor(front)) }
     }
 
     /** Sends the call's sound to [route], the user's pick. */
@@ -321,7 +325,7 @@ class FaceTimeCalls internal constructor(
     /** The screen was turned ([android.view.Display.getRotation]): the library is told how the camera's picture lies now. */
     fun displayRotation(value: Int) {
         rotation = value.coerceIn(0, 3)
-        command { it.orientation(CallOrientation.forCamera(rotation, _media.value.cameraFront)) }
+        command { it.orientation(orientationFor(_media.value.cameraFront)) }
     }
 
     /** The call screen's big view has a Surface: the library is asked to draw the other side's picture into it. */
@@ -589,7 +593,7 @@ class FaceTimeCalls internal constructor(
         val cameraOn = video && call.withCamera && cameraAllowed() && (camera.has(true) || camera.has(false))
         val front = if (camera.has(true)) true else !camera.has(false)
         _media.update { it.copy(cameraOn = cameraOn, cameraFront = front) }
-        native.orientation(CallOrientation.forCamera(rotation, front))
+        native.orientation(orientationFor(front))
         native.camera(cameraOn && !cameraPaused)
         native.microphone(!_media.value.muted)
         try {
@@ -705,7 +709,7 @@ class FaceTimeCalls internal constructor(
             if (ok) {
                 if (front != _media.value.cameraFront) {
                     _media.update { it.copy(cameraFront = front) }
-                    command { it.orientation(CallOrientation.forCamera(rotation, front)) }
+                    command { it.orientation(orientationFor(front)) }
                 }
             } else {
                 // No camera that gives what the encoder takes: sound only, and said so.
