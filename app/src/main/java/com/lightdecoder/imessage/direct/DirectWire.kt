@@ -146,6 +146,28 @@ object DirectWire {
      */
     const val RECYCLE = 26
 
+    /**
+     * "Notify Anyway" (B6, Apple Account only): tells a one-to-one chat whose person has notifications
+     * silenced to notify them of the user's message [notifyAnyway] (its GUID), answered with [ok].
+     */
+    const val NOTIFY_ANYWAY = 27
+
+    /**
+     * Fetches a name and photo someone shared ([profileFetch]: the offer's descriptor, and where its
+     * photo goes, a file the main process chose), answered with [ProfileReply] (the name, and whether a
+     * photo was written). Asked by the main process only for an offer it took (an existing chat).
+     */
+    const val PROFILE_FETCH = 28
+
+    /** Shares the user's own name and photo with one one-to-one chat ([profileShare]), answered with [guid]. */
+    const val PROFILE_SHARE = 29
+
+    /**
+     * The handles whose Focus status is wanted ([focusSubscribe]: one-to-one chats opened lately,
+     * [MAX_FOCUS_HANDLES] at most; a full replacement), answered with [ok].
+     */
+    const val FOCUS_SUBSCRIBE = 30
+
     const val REPLY = 100
 
     /**
@@ -159,7 +181,82 @@ object DirectWire {
         "MARK_UNREAD" to MARK_UNREAD, "REPORT_JUNK" to REPORT_JUNK, "PEERS" to PEERS, "FT_CAPABLE" to FT_CAPABLE,
         "CALLER" to CALLER, "ACCOUNT" to ACCOUNT, "FT_STATE" to FT_STATE, "BLOCKLIST" to BLOCKLIST,
         "PROGRESS" to PROGRESS, "CANCEL" to CANCEL, "RECYCLE" to RECYCLE,
+        "NOTIFY_ANYWAY" to NOTIFY_ANYWAY, "PROFILE_FETCH" to PROFILE_FETCH, "PROFILE_SHARE" to PROFILE_SHARE,
+        "FOCUS_SUBSCRIBE" to FOCUS_SUBSCRIBE,
     )
+
+    // --- the Apple Account's features (B6) -----------------------------------------------------
+
+    /** The [NOTIFY_ANYWAY] request: the chat [target] and the user's message [guid] it is for. */
+    fun notifyAnyway(target: Target, guid: String): JSONObject = JSONObject().put("target", target.toJson()).put("guid", guid)
+
+    /** A [NOTIFY_ANYWAY] request, read strictly: a GUID as Apple makes them, in a chat with one person. */
+    data class NotifyAnywayRequest(val target: Target, val guid: String) {
+        companion object {
+            fun fromJson(o: JSONObject): NotifyAnywayRequest {
+                val guid = (o.opt("guid") as? String)?.takeIf(RecycleRules::isGuid) ?: throw org.json.JSONException("no guid")
+                val target = Target.fromJson(o.getJSONObject("target"))
+                if (target.groupGuid != null || target.participants.size != 1) throw org.json.JSONException("not a chat with one person")
+                return NotifyAnywayRequest(target, guid)
+            }
+        }
+    }
+
+    /** The [PROFILE_FETCH] request: the offer's [descriptor] and the file [imagePath] its photo goes to. */
+    fun profileFetch(descriptor: String, imagePath: String): JSONObject = JSONObject().put("descriptor", descriptor).put("imagePath", imagePath)
+
+    /** A [PROFILE_FETCH] request, read strictly: a descriptor [ProfileDescriptor.decode] reads, a path of [MAX_PATH_CHARS] at most. */
+    data class ProfileFetchRequest(val descriptor: ProfileDescriptor, val imagePath: String) {
+        companion object {
+            fun fromJson(o: JSONObject): ProfileFetchRequest {
+                val d = ProfileDescriptor.decode(o.opt("descriptor") as? String) ?: throw org.json.JSONException("no descriptor")
+                val path = (o.opt("imagePath") as? String)?.takeIf { it.isNotEmpty() && it.length <= MAX_PATH_CHARS } ?: throw org.json.JSONException("no path")
+                return ProfileFetchRequest(d, path)
+            }
+        }
+    }
+
+    /** The [PROFILE_FETCH] answer: the shared name (as it came: the main process cleans it) and whether a photo was written. */
+    data class ProfileReply(val name: String, val first: String, val last: String, val image: Boolean) {
+        fun toJson(): JSONObject = ok().put("name", name).put("first", first).put("last", last).put("image", image)
+
+        companion object {
+            /** Read as untrusted: each name [SharedNames.MAX_RAW] characters at most; an error answer is null. */
+            fun fromJson(o: JSONObject): ProfileReply? {
+                if (errorOf(o) != null) return null
+                fun text(k: String) = (o.opt(k) as? String)?.take(SharedNames.MAX_RAW).orEmpty()
+                return ProfileReply(text("name"), text("first"), text("last"), o.opt("image") == true)
+            }
+        }
+    }
+
+    /** The [PROFILE_SHARE] request: the chat with one person [target]. */
+    fun profileShare(target: Target): JSONObject = JSONObject().put("target", target.toJson())
+
+    /** The [FOCUS_SUBSCRIBE] request: [handles], a full replacement. */
+    fun focusSubscribe(handles: List<String>): JSONObject = JSONObject().put("handles", JSONArray(handles.take(MAX_FOCUS_HANDLES)))
+
+    /** The handles of a [FOCUS_SUBSCRIBE] request, read strictly: addresses only, each once, [MAX_FOCUS_HANDLES] at most (more: a failure). */
+    fun focusHandlesOf(o: JSONObject): List<String> {
+        val a = o.optJSONArray("handles") ?: throw org.json.JSONException("no handles")
+        if (a.length() > MAX_FOCUS_HANDLES) throw org.json.JSONException("too many handles")
+        return (0 until a.length()).mapNotNull { CallIds.handle(a.opt(it) as? String) }.distinctBy(CallIds::key)
+    }
+
+    /** The most handles whose Focus status is asked for at once. */
+    const val MAX_FOCUS_HANDLES = 50
+
+    /** The most chats and messages one "cloudBatch" update carries (it is cut smaller to fit [MAX_UPDATE_CHARS] too). */
+    const val MAX_CLOUD_CHATS = 100
+    const val MAX_CLOUD_MESSAGES = 400
+
+    /** The longest iCloud attachment record id a [DOWNLOAD] may name. */
+    const val MAX_CLOUD_RECORD_CHARS = 128
+
+    private val CLOUD_RECORD = Regex("^[A-Za-z0-9_.:-]{1,$MAX_CLOUD_RECORD_CHARS}$")
+
+    /** Whether [id] may be an iCloud attachment's record id (letters, digits and `_.:-` only). */
+    fun isCloudRecord(id: String?): Boolean = id != null && CLOUD_RECORD.matches(id)
 
     /**
      * The [RECYCLE] request: [op] ([RecycleRules.OP_BIN], [RecycleRules.OP_RECOVER] or
@@ -842,8 +939,9 @@ object DirectWire {
      * [maxBytes]; with [automaticMs], one fetched without anyone asking (a sticker, a group's photo), only
      * from Apple's own file servers ([DirectMedia.isAppleFileServer]) and in that long at most.
      */
-    fun download(descriptor: String, path: String, maxBytes: Long? = null, automaticMs: Long? = null, transfer: String? = null): JSONObject =
+    fun download(descriptor: String, path: String, maxBytes: Long? = null, automaticMs: Long? = null, transfer: String? = null, cloudRecord: String? = null): JSONObject =
         JSONObject().put("descriptor", descriptor).put("path", path)
+            .apply { if (cloudRecord != null) put("cloudRecord", cloudRecord) }
             .apply { maxBytes?.let { put("maxBytes", it) } }
             .apply { automaticMs?.let { put("automaticMs", it) } }
             .apply { if (transfer != null && automaticMs == null) put("transfer", transfer) }
@@ -852,16 +950,30 @@ object DirectWire {
      * A [DOWNLOAD]'s request, as [download] makes it: [maxBytes] within [DirectMedia.MAX_DOWNLOAD_BYTES], [automaticMs] within [MAX_AUTOMATIC_MS] (null: one the user asked for);
      * [transfer], the key [CANCEL] stops it by (a media id), only for one the user asked for.
      */
-    data class DownloadRequest(val descriptor: String, val path: String, val maxBytes: Long, val automaticMs: Long?, val transfer: String? = null) {
+    data class DownloadRequest(
+        val descriptor: String,
+        val path: String,
+        val maxBytes: Long,
+        val automaticMs: Long?,
+        val transfer: String? = null,
+        /** An imported iCloud attachment's record id ([isCloudRecord]), instead of [descriptor]: only one the user asked for. */
+        val cloudRecord: String? = null,
+    ) {
         companion object {
             fun fromJson(o: JSONObject): DownloadRequest {
                 val automatic = if (o.has("automaticMs") && !o.isNull("automaticMs")) o.optLong("automaticMs").coerceIn(1L, MAX_AUTOMATIC_MS) else null
+                val cloud = if (o.has("cloudRecord") && !o.isNull("cloudRecord")) {
+                    (o.opt("cloudRecord") as? String)?.takeIf { automatic == null && isCloudRecord(it) } ?: throw org.json.JSONException("not a record")
+                } else {
+                    null
+                }
                 return DownloadRequest(
-                    o.getString("descriptor"),
+                    if (cloud != null) o.optString("descriptor") else o.getString("descriptor"),
                     o.getString("path"),
                     o.optLong("maxBytes", DirectMedia.MAX_DOWNLOAD_BYTES).takeIf { it > 0 }?.coerceAtMost(DirectMedia.MAX_DOWNLOAD_BYTES) ?: DirectMedia.MAX_DOWNLOAD_BYTES,
                     automatic,
                     (o.opt("transfer") as? String)?.takeIf { automatic == null && isTransferKey(it) && !it.startsWith("tmp:") },
+                    cloud,
                 )
             }
         }
@@ -994,6 +1106,12 @@ object DirectWire {
         is DirectArchive.Update.Note -> JSONObject().put("kind", "note").put("line", u.line.take(MAX_NOTE_CHARS))
         is DirectArchive.Update.Dropped -> JSONObject().put("kind", "dropped").put("what", u.what).put("why", u.why)
         is DirectArchive.Update.Account -> u.state.toJson().put("kind", "account").apply { if (u.restarting) put("restarting", true) }
+        is DirectArchive.Update.ProfileOffer -> JSONObject().put("kind", "profileOffer").put("conversationId", u.conversationId)
+            .put("sender", u.sender).put("descriptor", u.descriptor)
+        is DirectArchive.Update.Focus -> JSONObject().put("kind", "focus").put("handle", u.handle).put("silenced", u.silenced).put("atMs", u.atMs)
+        is DirectArchive.Update.CloudBatch -> JSONObject().put("kind", "cloudBatch")
+            .put("chats", JSONArray().apply { u.chats.forEach { put(it.toJson()) } })
+            .put("messages", JSONArray().apply { u.messages.forEach { put(it.toJson(includeInlineData = false)) } })
         DirectArchive.Update.Ignore -> JSONObject().put("kind", "ignore")
     }
 
@@ -1163,7 +1281,40 @@ object DirectWire {
         "note" -> o.optStringOrNull("line")?.takeIf { it.isNotBlank() }?.let { DirectArchive.Update.Note(it.take(MAX_NOTE_CHARS)) } ?: DirectArchive.Update.Ignore
         "dropped" -> DirectArchive.Update.Dropped(o.optString("what"), o.optString("why"))
         "account" -> DirectArchive.Update.Account(AccountState.fromJson(o), restarting = o.opt("restarting") == true)
+        "profileOffer" -> profileOfferOf(o)
+        "focus" -> {
+            val handle = CallIds.handle(o.opt("handle") as? String)
+            val silenced = o.opt("silenced") as? Boolean
+            val at = when (val v = o.opt("atMs")) { is Int -> v.toLong(); is Long -> v; else -> 0L }
+            if (handle == null || silenced == null || at <= 0) DirectArchive.Update.Ignore else DirectArchive.Update.Focus(handle, silenced, at)
+        }
+        "cloudBatch" -> cloudBatchOf(o)
         else -> DirectArchive.Update.Ignore
+    }
+
+    /** A "profileOffer" update, read as untrusted: an iMessage chat with one person, an address, a descriptor [ProfileDescriptor] reads. */
+    private fun profileOfferOf(o: JSONObject): DirectArchive.Update {
+        val id = (o.opt("conversationId") as? String)?.takeIf { DirectArchive.isImessage(it) && !DirectArchive.isGroup(it) && it.length <= MAX_CONVERSATION_ID_CHARS }
+        val sender = CallIds.handle(o.opt("sender") as? String)
+        val descriptor = (o.opt("descriptor") as? String)?.takeIf { it.length <= MAX_DESCRIPTOR_CHARS && ProfileDescriptor.decode(it) != null }
+        return if (id == null || sender == null || descriptor == null) DirectArchive.Update.Ignore else DirectArchive.Update.ProfileOffer(id, sender, descriptor)
+    }
+
+    /**
+     * A "cloudBatch" update, read as untrusted: iMessage chats and messages only, [MAX_CLOUD_CHATS] and
+     * [MAX_CLOUD_MESSAGES] at most, each message marked as imported ([IMessageExtra.imported]); the
+     * main process checks each again as it stores it ([DirectLink]).
+     */
+    private fun cloudBatchOf(o: JSONObject): DirectArchive.Update {
+        val chats = o.objects("chats").take(MAX_CLOUD_CHATS).mapNotNull { c ->
+            runCatching { ConversationDto.fromJson(c) }.getOrNull()?.takeIf { DirectArchive.isImessage(it.id) && it.id.length <= MAX_CONVERSATION_ID_CHARS }
+        }
+        val messages = o.objects("messages").take(MAX_CLOUD_MESSAGES).mapNotNull { m ->
+            runCatching { MessageDto.fromJson(m) }.getOrNull()?.takeIf {
+                DirectArchive.isImessage(it.id) && DirectArchive.isImessage(it.conversationId) && IMessageExtra.parse(it.extra).imported
+            }
+        }
+        return if (chats.isEmpty() && messages.isEmpty()) DirectArchive.Update.Ignore else DirectArchive.Update.CloudBatch(chats, messages)
     }
 
     /**
@@ -1252,7 +1403,10 @@ data class FaceTimeState(
  * Where the optional Apple Account stands, as the main process may know it ([DirectWire.ACCOUNT], and
  * the "account" update): Booleans only. [signedIn]: an account is on this phone; [attention]: it needs
  * the user to sign in again; [icloud]: the session has iCloud's services (`hasIcloudServices`);
- * [clique], [focus], [history]: the iCloud Keychain joined, Focus status, Messages in iCloud (later).
+ * [clique]: this phone is in the iCloud Keychain; [focus]: Focus status is received (on, and Apple
+ * allowed it); [history]: Messages in iCloud is on (imported history); [profiles]: names and photos
+ * people share are taken; [profile]: the user set up their own name and photo to share.
+ * The last two are added to SPEC2 §3's table: the main process needs them for its banners.
  */
 data class AccountState(
     val signedIn: Boolean = false,
@@ -1261,10 +1415,16 @@ data class AccountState(
     val clique: Boolean = false,
     val focus: Boolean = false,
     val history: Boolean = false,
+    val profiles: Boolean = false,
+    val profile: Boolean = false,
 ) {
+    /** Whether the Apple Account's features may be used at all (B6): signed in, not needing a sign-in, with iCloud's services. */
+    val features: Boolean get() = signedIn && !attention && icloud
+
     fun toJson(): JSONObject = JSONObject()
         .put("signedIn", signedIn).put("attention", attention).put("icloud", icloud)
         .put("clique", clique).put("focus", focus).put("history", history)
+        .put("profiles", profiles).put("profile", profile)
 
     companion object {
         val SIGNED_OUT = AccountState()
@@ -1280,6 +1440,8 @@ data class AccountState(
                 clique = signedIn && flag("clique"),
                 focus = signedIn && flag("focus"),
                 history = signedIn && flag("history"),
+                profiles = signedIn && flag("profiles"),
+                profile = signedIn && flag("profile"),
             )
         }
     }

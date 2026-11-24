@@ -39,6 +39,8 @@ import org.json.JSONObject
  * @param stickerParts the media parts that are stickers (`p<idx>`, [MAX_MEDIA_MARKS] at most): never in a photo stack
  * @param tapbackParts which photo of several each person's tapback is on (iOS 15's per-photo tapbacks): participant
  *   id -> Apple part index (> 0), [MAX_TAPBACK_PARTS] at most; anyone not listed reacted to the message as a whole
+ * @param imported imported from Messages in iCloud (B6): never notified, read-only history
+ * @param quietly  "Delivered Quietly" (B6): delivered while its person had notifications silenced
  * @param pending a batch's local copy (photos sent together): the files after its first (which is the
  *   row's own), in order, [MAX_PENDING] at most, each in the outbox ([DirectPaths]-checked when read)
  *
@@ -65,6 +67,8 @@ data class IMessageExtra(
     val stickerParts: List<String> = emptyList(),
     val pending: List<PendingFile> = emptyList(),
     val tapbackParts: Map<String, Int> = emptyMap(),
+    val imported: Boolean = false,
+    val quietly: Boolean = false,
 ) {
     /** One of a batch's files waiting to go ([pending]): where its copy is, its type and name. */
     data class PendingFile(val path: String, val mime: String, val name: String) {
@@ -289,6 +293,8 @@ data class IMessageExtra(
             pollCards = (stored.pollCards + pollCards).distinct().take(MAX_POLL_CARDS),
             stickers = (stored.stickers + stickers).distinctBy { it.id }.take(MAX_STICKERS),
             tapbackParts = stored.tapbackParts,
+            quietly = stored.quietly || quietly,
+            imported = stored.imported && imported,
             app = newerPoll?.copy(root = app?.root ?: newerPoll.root) ?: app,
             link = link?.let { l -> if (l.image.isEmpty() && stored.link?.url == l.url) l.copy(image = stored.link.image) else l },
         )
@@ -331,6 +337,8 @@ data class IMessageExtra(
         if (stickerParts.isNotEmpty()) o.put("stickerParts", JSONArray(stickerParts))
         if (tapbackParts.isNotEmpty()) o.put("tapbackParts", JSONObject().apply { tapbackParts.forEach { (k, v) -> put(k, v) } })
         if (pending.isNotEmpty()) o.put("pending", JSONArray().apply { pending.forEach { put(it.toJson()) } })
+        if (imported) o.put("imported", true)
+        if (quietly) o.put("quietly", true)
         return if (o.length() == 0) "" else o.toString()
     }
 
@@ -501,6 +509,8 @@ data class IMessageExtra(
                     pending = o.optJSONArray("pending")?.let { a ->
                         (0 until minOf(a.length(), MAX_PENDING)).mapNotNull { a.optJSONObject(it)?.let(PendingFile::fromJson) }
                     }.orEmpty(),
+                    imported = o.opt("imported") == true,
+                    quietly = o.opt("quietly") == true,
                 )
             } catch (e: JSONException) {
                 IMessageExtra()

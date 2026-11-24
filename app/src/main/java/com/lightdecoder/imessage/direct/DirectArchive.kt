@@ -21,6 +21,7 @@ import uniffi.rust_bridge.PushChatMessage
 import uniffi.rust_bridge.ReactMessageType
 import uniffi.rust_bridge.Reaction
 import uniffi.rust_bridge.SetTranscriptBackgroundMessage
+import uniffi.rust_bridge.ShareProfileMessage
 
 /**
  * How iMessages live in the Messages tab's archive, next to the Google Messages conversations:
@@ -388,6 +389,24 @@ object DirectArchive {
          */
         data class Account(val state: AccountState, val restarting: Boolean = false) : Update()
 
+        /**
+         * Someone shared their name and photo (B6, Apple Account only): [sender] in the chat with one
+         * person [conversationId], and where it is ([descriptor], a [ProfileDescriptor]'s text; no
+         * poster). Nothing is fetched for it here: the main process asks ([DirectWire.PROFILE_FETCH])
+         * once it took it (a chat it has with them).
+         */
+        data class ProfileOffer(val conversationId: String, val sender: String, val descriptor: String) : Update()
+
+        /** Someone's Focus status (B6): [handle] has notifications silenced ([silenced]) or not, as of [atMs]. */
+        data class Focus(val handle: String, val silenced: Boolean, val atMs: Long) : Update()
+
+        /**
+         * Older messages imported from Messages in iCloud (B6, read-only): chats and messages as the
+         * archive keeps them, each message marked [IMessageExtra.imported]. Never notified, never
+         * answered with receipts.
+         */
+        data class CloudBatch(val chats: List<ConversationDto>, val messages: List<MessageDto>) : Update()
+
         object Ignore : Update()
     }
 
@@ -559,8 +578,42 @@ object DirectArchive {
             }
             is PushChatMessage.MoveToRecycleBin, is PushChatMessage.RecoverChat ->
                 RecycleRules.incoming(m, sender, inst.verificationFailed, me, deleteSync, now) ?: Update.Ignore
+            // Someone's name and photo: an offer, only as [profileOfferOf] allows it.
+            is PushChatMessage.ShareProfile -> profileOfferOf(inst, m.v1, me) ?: Update.Ignore
+            // From the user's own devices only, and never to this phone with the account as it is
+            // signed in here ("iCloud services only": the iPhone never sends them to this number).
+            is PushChatMessage.UpdateProfile, is PushChatMessage.UpdateProfileSharing -> Update.Ignore
+            // Never past Android's Do Not Disturb: nothing is done with it.
+            PushChatMessage.NotifyAnyways -> Update.Ignore
             else -> Update.Ignore
         }
+    }
+
+    /**
+     * An offer of [profile] (someone's name and photo) from [inst], only when all hold: Apple verified
+     * its sender, who is not the user, it came in a chat with that one person, and its descriptor is
+     * [DirectWire.MAX_DESCRIPTOR_CHARS] at most. The poster that may come with it is never taken.
+     * Also for a name and photo that came with a message or a tapback ([embeddedProfileOf]).
+     */
+    fun profileOfferOf(inst: MessageInst, profile: ShareProfileMessage, me: Set<String>): Update.ProfileOffer? {
+        if (inst.verificationFailed) return null
+        val sender = inst.sender ?: return null
+        if (sender in me) return null
+        val conversation = inst.conversation ?: return null
+        val others = (conversation.participants + sender).filter { it !in me }.distinct()
+        if (others != listOf(sender)) return null
+        val descriptor = ProfileDescriptor.of(profile)?.encode()?.takeIf { it.length <= DirectWire.MAX_DESCRIPTOR_CHARS } ?: return null
+        return Update.ProfileOffer(conversationId(others, me, null), sender, descriptor)
+    }
+
+    /** The name and photo a message or a tapback came with, as an offer ([profileOfferOf]); null with none. */
+    fun embeddedProfileOf(inst: MessageInst, me: Set<String>): Update.ProfileOffer? {
+        val profile = when (val m = inst.message) {
+            is PushChatMessage.Message -> m.v1.embeddedProfile
+            is PushChatMessage.React -> m.v1.embeddedProfile
+            else -> null
+        } ?: return null
+        return profileOfferOf(inst, profile, me)
     }
 
     /**
@@ -576,6 +629,7 @@ object DirectArchive {
             m is PushChatMessage.PermanentDelete || m is PushChatMessage.MoveToRecycleBin || m is PushChatMessage.RecoverChat ||
             m is PushChatMessage.SetTranscriptBackground ||
             m is PushChatMessage.MarkUnread || m is PushChatMessage.PeerCacheInvalidate ||
+            m is PushChatMessage.ShareProfile || m is PushChatMessage.UpdateProfile || m is PushChatMessage.UpdateProfileSharing ||
             (m is PushChatMessage.React && m.v1.reaction.let { r -> r is ReactMessageType.Extension || (r as? ReactMessageType.React)?.reaction is Reaction.Sticker })
 
     /** The longest GUID taken from Apple's events (Apple's are UUIDs). */
