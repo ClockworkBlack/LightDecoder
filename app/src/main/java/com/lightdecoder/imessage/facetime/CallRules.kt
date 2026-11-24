@@ -393,8 +393,12 @@ class CallRules(
             guid, caller, outgoing = false, video = session.video, startedMs = input.now, durationMs = 0, outcome = Outcome.MISSED,
             group = group, members = listed,
         )
+        // An invitation's missed call is counted in the call's bucket, and held to and charged against
+        // its caller's own notes too: a new guid each time never notes past their own limit.
+        val heldByCaller = invite && group
         fun notRung(why: String, quiet: Boolean): Step =
-            if (limiter.notice(who, guid, input.now)) {
+            if ((!heldByCaller || limiter.noticeAllows(CallIds.key(caller), input.now)) && limiter.notice(who, guid, input.now)) {
+                if (heldByCaller) limiter.charge(CallIds.key(caller), RingLimiter.Verdict.MISSED_ONLY, input.now)
                 Step(state, listOf(Effect.LogCall(missed.copy(quiet = quiet)), Effect.Note(why)))
             } else {
                 Step(state, listOf(Effect.Note("$why; not noted as missed either (it was already, or too many from this caller)")))
@@ -409,7 +413,15 @@ class CallRules(
             // An invitation rings no call its caller could not ring here now: their own limits hold.
             invite && group && !limiter.allows(CallIds.key(caller), input.now) ->
                 Step(state, listOf(Effect.Note("a Group FaceTime invitation past its caller's limit was not rung")))
-            else -> when (if (invite && group) limiter.callRing(guid, input.now) else limiter.ring(who, guid, input.now)) {
+            else -> when (
+                if (invite && group) {
+                    // Counted in the call's bucket (each guid rings once), and charged to its caller too:
+                    // a new guid each time never rings past their own limits.
+                    limiter.callRing(guid, input.now).also { limiter.charge(CallIds.key(caller), it, input.now) }
+                } else {
+                    limiter.ring(who, guid, input.now)
+                }
+            ) {
                 RingLimiter.Verdict.DROP -> Step(state, listOf(Effect.Note("a FaceTime ring was dropped: the same call again, or too many from this caller")))
                 RingLimiter.Verdict.MISSED_ONLY ->
                     Step(state, listOf(Effect.LogCall(missed.copy(quiet = true)), Effect.Note("a FaceTime ring past the caller's limit was not rung")))

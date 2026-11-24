@@ -197,6 +197,45 @@ class DirectBlockingTest {
     }
 
     @Test
+    fun aBlockedPersonsChatBackgroundIsDroppedWithItsPictureAndMakesNoChat() {
+        val link = link()
+        blocks.block(bob)
+        val row = map(inst("BG1", bob, normal(listOf(text("Bob changed the chat background."))))) as DirectArchive.Update.Upsert
+        val picture = ChatBackgrounds.incomingFile(context).apply { writeBytes(byteArrayOf(1, 2, 3)) }
+        val update = wire(
+            DirectArchive.Update.Background(
+                row.conversation.id, null, null, System.currentTimeMillis(), picture.path,
+                row.copy(message = row.message.copy(direction = "system")),
+            ),
+        )
+        val reply = answer(link, update)
+        assertTrue("answered blocked: no delivery receipt for it", DirectWire.isBlocked(reply))
+        assertNull("no row, and no chat made by it", repo.conversation(row.conversation.id))
+        assertNull(repo.message("imsg:BG1"))
+        assertFalse("the picture the :imessage process saved goes", picture.exists())
+        assertEquals(0L, ChatBackgrounds(context).of(row.conversation.id).version)
+    }
+
+    @Test
+    fun aBlockedPersonsOwnSystemRowIsDroppedButTheirGroupsStateIsNot() {
+        val link = link()
+        blocks.block(bob)
+        // An iMessage app's "updated" row: written by its sender (the app's name), not a group's state.
+        val row = map(inst("AU1", bob, normal(listOf(text("Bob updated Pwned App"))))) as DirectArchive.Update.Upsert
+        val meta = wire(row.copy(message = row.message.copy(direction = "system")))
+        assertEquals(DirectLink.Applied.BLOCKED, link.apply(meta))
+        assertNull(repo.message("imsg:AU1"))
+        assertNull(repo.conversation(row.conversation.id))
+        // A group's rename by them is still a group's state: it applies (the group stays whole).
+        val members = listOf(me, alice, bob)
+        link.apply(map(inst("G0", alice, normal(listOf(text("hello all"))), members, "GRP-S")))
+        val renamed = map(inst("G1", bob, PushChatMessage.RenameMessage(ChatRenameMessage("Renamed")), members, "GRP-S", ts = 1_700_000_001_000L))
+        assertTrue((renamed as DirectArchive.Update.Upsert).groupEvent)
+        assertEquals(DirectLink.Applied.STORED, link.apply(renamed))
+        assertEquals("Renamed", repo.conversation("imsg:group:GRP-S")!!.name)
+    }
+
+    @Test
     fun aBlockedSendersMentionDoesNotNotifyEvenWhereAMentionLiftsHiddenAlerts() {
         repo.upsertConversation(
             com.lightdecoder.relay.ConversationDto(

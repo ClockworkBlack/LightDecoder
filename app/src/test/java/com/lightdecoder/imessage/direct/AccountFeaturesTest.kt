@@ -185,6 +185,33 @@ class AccountFeaturesTest {
     }
 
     @Test
+    fun anAuthenticationErrorFromAFeatureMakesTheAccountNeedAttentionOnceAndNothingLoops() = runBlocking {
+        signedIn()
+        val f = features()
+        bridge.subscribeFails = DirectEngine.ImessageError("HTTP 401 Unauthorized")
+        f.focusRequest(listOf(bob), emptyList())
+        val deadline = System.currentTimeMillis() + 5_000
+        while (rig.files.readFlag().state != FlagState.ATTENTION && System.currentTimeMillis() < deadline) Thread.sleep(10)
+        assertEquals(FlagState.ATTENTION, rig.files.readFlag().state)
+        assertEquals(AccountNotice.SIGN_IN_AGAIN, rig.files.readFlag().notice)
+        assertTrue("the account is kept for a one-tap sign-in", rig.files.accountSaved())
+        assertTrue(rig.account.state.value.attention)
+        assertFalse("its features are off now", rig.account.state.value.features)
+        // Nothing is tried again by itself, and nothing more asks Apple.
+        bridge.calls.clear()
+        f.focusRequest(listOf("tel:+15550000003"), emptyList())
+        assertTrue(bridge.calls.toString(), bridge.calls.isEmpty())
+        assertTrue("no sign-in was tried", rig.bridge.auths.isEmpty())
+        // Said once: a second failure changes nothing.
+        Thread.sleep(200)
+        val told = rig.hooks.told.size
+        rig.account.authFailed()
+        Thread.sleep(200)
+        assertEquals(told, rig.hooks.told.size)
+        assertEquals(FlagState.ATTENTION, rig.files.readFlag().state)
+    }
+
+    @Test
     fun appleRefusingFocusMarksItNotAvailable() = runBlocking {
         signedIn()
         val f = features()

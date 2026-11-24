@@ -106,7 +106,10 @@ class DirectService : Service() {
                 // Written only into the app's own media folders, never over the library's state or outside the app.
                 DirectPaths.require(this, r.path, getString(R.string.imessage_direct_attachment_not_saved))
                 // An imported iCloud attachment: by its record id, into the path LightDecoder chose (B6.5).
-                r.cloudRecord?.let { record -> return@Server DirectWire.downloaded(engine.downloadCloud(record, r.path, r.maxBytes)) }
+                // Stoppable, capped while it comes, and heard from while it does, as any download the user asked for.
+                r.cloudRecord?.let { record ->
+                    return@Server DirectWire.downloaded(engine.downloadCloud(record, r.path, r.maxBytes, r.transfer, if (r.transfer != null) progress else null))
+                }
                 // Progress only for one the user asked for (never an automatic one), and only when it can be stopped.
                 DirectWire.downloaded(
                     engine.download(r.descriptor, r.path, r.maxBytes, r.automaticMs, r.transfer, if (r.automaticMs == null && r.transfer != null) progress else null),

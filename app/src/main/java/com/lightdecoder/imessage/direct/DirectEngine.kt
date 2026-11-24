@@ -1197,18 +1197,35 @@ class DirectEngine private constructor(private val app: Context) {
     /**
      * An imported iCloud attachment (B6.5) into [path] (LightDecoder's, checked by the caller), by its
      * record id: only one the user asked for, [maxBytes] at most, through the library's
-     * `downloadCloudAttachments` (read-only). Its size.
+     * `downloadCloudAttachments` (read-only). As the user's other downloads: stoppable as [transfer],
+     * stopped once more than [maxBytes] is on disk ([CloudDownloads.capped]), and its size so far
+     * passed on now and then ([onProgress]: the library tells nothing of how far it is). Its size.
      */
-    suspend fun downloadCloud(record: String, path: String, maxBytes: Long): Long {
+    suspend fun downloadCloud(
+        record: String,
+        path: String,
+        maxBytes: Long,
+        transfer: String? = null,
+        onProgress: ((JSONObject) -> Unit)? = null,
+    ): Long {
         if (!features.on() || !DirectWire.isCloudRecord(record)) throw ImessageError(app.getString(R.string.imessage_direct_attachment_not_saved))
+        val cap = maxBytes.coerceIn(1L, DirectMedia.MAX_DOWNLOAD_BYTES)
+        return transfers.run(transfer) { downloadCloudInto(record, path, cap, onProgress) }
+    }
+
+    private suspend fun downloadCloudInto(record: String, path: String, cap: Long, onProgress: ((JSONObject) -> Unit)?): Long {
         val file = File(path)
         file.parentFile?.mkdirs()
         val partial = File.createTempFile(file.name + ".", MediaCache.PART_SUFFIX, file.parentFile)
         try {
             partial.delete()
-            call { NativeFeatureBridge { session }.downloadCloudAttachments(mapOf(record to partial.path)) }
+            // Its whole size is not known here: the size so far only, which keeps the main process waiting for it.
+            val beat = onProgress?.let { emit -> { done: Long -> emit(DirectWire.progress(done, 0)) } }
+            val within = CloudDownloads.capped(partial, cap, beat) {
+                call { NativeFeatureBridge { session }.downloadCloudAttachments(mapOf(record to partial.path)) }
+            }
+            if (!within) throw tooBigToDownload(cap)
             val size = partial.length()
-            if (size > maxBytes.coerceIn(1L, DirectMedia.MAX_DOWNLOAD_BYTES)) throw tooBigToDownload(maxBytes)
             if (size <= 0 || !partial.renameTo(file)) throw ImessageError(app.getString(R.string.imessage_direct_attachment_not_saved))
             return file.length()
         } finally {

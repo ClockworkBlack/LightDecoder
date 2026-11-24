@@ -72,6 +72,8 @@ class Profiles(
     private val file: File,
     private val enabled: () -> Boolean,
     private val sharing: () -> Boolean,
+    /** A call to Apple failed ([AccountFeatures]: an authentication error makes the account need attention). */
+    private val failed: (Throwable) -> Unit = {},
 ) {
 
     /** What a [publish] came to. */
@@ -122,6 +124,7 @@ class Profiles(
             throw e
         } catch (e: Exception) {
             Log.w(TAG, "a shared name and photo was not fetched (${e::class.java.simpleName})")
+            failed(e)
             null
         } ?: return null
         val image = fetched.image?.takeIf { it.isNotEmpty() && it.size <= MAX_IMAGE_BYTES }
@@ -169,6 +172,7 @@ class Profiles(
             throw e
         } catch (e: Exception) {
             Log.w(TAG, "the user's name and photo was not published (${e::class.java.simpleName})")
+            failed(e)
             Publish.Failed(com.lightdecoder.imessage.Redact.secrets(DirectEngine.readable(e)))
         }
     }

@@ -47,6 +47,8 @@ class CloudImport(
     private val now: () -> Long = System::currentTimeMillis,
     context: CoroutineContext? = null,
     private val wait: suspend (Long) -> Unit = { delay(it) },
+    /** A call to Apple failed ([AccountFeatures]: an authentication error makes the account need attention). */
+    private val failed: (Throwable) -> Unit = {},
 ) {
 
     /** How a run stands: running, how many chats and messages it imported, and why it ended if it failed. */
@@ -76,6 +78,7 @@ class CloudImport(
                 Log.w(TAG, "the import from iCloud stopped (${e::class.java.simpleName})")
                 val text = com.lightdecoder.imessage.Redact.secrets(DirectEngine.readable(e))
                 if (isAdp(text)) adp()
+                failed(e)
                 _progress.value = _progress.value.copy(running = false, failed = text.take(200))
             }
         }

@@ -967,6 +967,51 @@ class CallRulesTest {
     }
 
     @Test
+    fun invitationRingsOfNewGroupCallsCountAgainstTheirCallersOwnLimit() {
+        val rules = CallRules(RingLimiter())
+        fun go(input: Input): List<Effect> = rules.reduce(state, input).also { state = it.state; done += it.effects }.effects
+        fun at(e: CallEvent, sessions: List<CallSessionInfo>) = go(Input.Event(e, sessions, setOf(ME), t, 10 * 60_000L, on))
+        var rung = 0
+        for (i in 1..7) {
+            val g = "9C7E1F2A-0000-4000-8000-0000000B%04d".format(i)
+            // Alice's own ring, before the library lists the call: deferred, nothing counted yet ...
+            at(CallEvent.Join(g, ALICE, ring = true), emptyList())
+            // ... then the invitation rings it, as hers.
+            t += 2_000
+            if (at(CallEvent.Invite(g), listOf(groupSession(g))).has<Effect.LookupCaller>()) rung++
+            state?.let { go(Input.DeclineByUser(it.guid, t)) }
+            assertNull(state)
+            t += 60_000
+        }
+        assertEquals("her six rings an hour hold, whichever event rang them", RingLimiter.MAX_RINGS_PER_HOUR, rung)
+    }
+
+    @Test
+    fun missedCallsOfNewGroupCallsInvitedDuringAnotherCallCountAgainstTheirCallersOwnLimit() {
+        val rules = CallRules(RingLimiter(maxNoticesPerHour = 3))
+        fun go(input: Input): List<Effect> = rules.reduce(state, input).also { state = it.state; done += it.effects }.effects
+        fun at(e: CallEvent, sessions: List<CallSessionInfo>) = go(Input.Event(e, sessions, setOf(ME), t, 10 * 60_000L, on))
+        // The user is in a call with Bob.
+        at(CallEvent.Join(OTHER, BOB, ring = true), listOf(session(OTHER, BOB)))
+        go(Input.Caller(OTHER, CallerInfo("Bob", known = true), t, on))
+        assertEquals(Phase.RINGING_IN, state?.phase)
+        for (i in 1..8) {
+            val g = "9C7E1F2A-0000-4000-8000-0000000C%04d".format(i)
+            // Alice's own ring, before the library lists the call, then its invitation: not rung (a call is on).
+            at(CallEvent.Join(g, ALICE, ring = true), listOf(session(OTHER, BOB)))
+            t += 2_000
+            at(CallEvent.Invite(g), listOf(session(OTHER, BOB), groupSession(g)))
+            assertEquals(OTHER, state?.guid)
+            t += 60_000
+        }
+        assertEquals(
+            "her three missed calls an hour hold, whichever guid each came in",
+            3,
+            logged().count { it.peer == ALICE && it.outcome == Outcome.MISSED },
+        )
+    }
+
+    @Test
     fun aGroupInvitationsAllowanceIsTheCallsNotTheCallers() {
         val limiter = RingLimiter(minGapMs = 10, maxRingsPerHour = 1, windowMs = 1_000)
         assertEquals(RingLimiter.Verdict.RING, limiter.ring("alice", "g1", 0))

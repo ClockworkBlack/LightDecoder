@@ -250,6 +250,36 @@ class DirectRecycleTest {
     }
 
     @Test
+    fun twoPurgesOfAChatDeletedHereAnHourAgoStillKeepItItsDay() {
+        DirectPrefs.setDeleteOnAllDevices(context, true)
+        link.apply(incoming("G1", "hi", 1_700_000_000_000L))
+        repo.moveToDeleted(chat, System.currentTimeMillis() - 3_600_000)
+        link.apply(wire(DirectArchive.Update.Purge(chat, null, emptyList())))
+        link.apply(wire(DirectArchive.Update.Purge(chat, null, emptyList())))
+        assertEquals(Folder.DELETED, folderOf(chat))
+        assertNotNull(repo.message("imsg:G1"))
+    }
+
+    @Test
+    fun aRecycleDatedLongAgoThenAPurgeAtOnceStillKeepsTheChatADay() {
+        DirectPrefs.setDeleteOnAllDevices(context, true)
+        link.apply(incoming("G1", "hi", 1_700_000_000_000L))
+        assertEquals(Folder.INBOX, folderOf(chat))
+        // Recycled "a month ago" (at 1 ms), then purged right away: the day is from when it moved here.
+        link.apply(wire(DirectArchive.Update.Recycle(chat, null, emptyList(), 1)))
+        link.apply(wire(DirectArchive.Update.Purge(chat, null, emptyList())))
+        assertEquals(Folder.DELETED, folderOf(chat))
+        assertNotNull("its messages stay", repo.message("imsg:G1"))
+        // A second purge at once is held the same.
+        link.apply(wire(DirectArchive.Update.Purge(chat, null, emptyList())))
+        assertEquals(Folder.DELETED, folderOf(chat))
+        assertNotNull(repo.message("imsg:G1"))
+        // A day later, retention takes it.
+        assertEquals(1, manager.purgeExpired(System.currentTimeMillis() + day + 60_000))
+        assertNull(repo.conversation(chat))
+    }
+
+    @Test
     fun openingAConversationWithSomeoneInRecentlyDeletedLeavesTheirChatThere() = runBlocking {
         val reached = JSONObject().put(
             "conversation",

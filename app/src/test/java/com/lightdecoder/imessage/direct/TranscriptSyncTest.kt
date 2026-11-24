@@ -532,6 +532,15 @@ class TranscriptSyncTest {
         }
         assertEquals(listOf("imsg:R2", "imsg:R3", "imsg:R4", "imsg:R5", "imsg:R6"), JunkReports.pick(rows).map { it.id })
         assertEquals(alice, JunkReports.message(rows[1], target)!!.sender)
+        // Imported from Messages in iCloud: never reported, nor an iCloud record id as an attachment.
+        val imported = rows[1].copy(id = "imsg:R9", extra = IMessageExtra(imported = true).toJson())
+        assertEquals(listOf("imsg:R2", "imsg:R3", "imsg:R4", "imsg:R5", "imsg:R6"), JunkReports.pick(rows.take(6) + imported).map { it.id })
+        val part = com.lightdecoder.archive.MediaRow(
+            messageId = "imsg:R2", partId = "1", mediaId = "R2/p1", key = (CloudMapping.CLOUD_KEY + "rec1").toByteArray(), thumbMediaId = "",
+            thumbKey = ByteArray(0), mime = "image/jpeg", fileName = "a.jpg", size = 1, width = 0, height = 0, inlineData = ByteArray(0),
+            needsFullSize = false, localPath = "", thumbPath = "", fullSizeRequested = false, stickerChecked = false,
+        )
+        assertTrue(JunkReports.message(rows[1].copy(media = listOf(part)), target)!!.attachments.isEmpty())
     }
 
     // --- a message Apple could not deliver, and pictures that go with a chat -------------------------------

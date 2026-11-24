@@ -399,6 +399,16 @@ class FaceTimeCallScreenGroupTest {
             app.sendBroadcast(Intent(Intent.ACTION_SCREEN_OFF))
             waitUntil("the camera paused") { !engine.camera.running && native.calls.toList().last { it.startsWith("enableCamera") } == "enableCamera:77:false:-1" }
             assertTrue("the user still has it on", calls.media.value.cameraOn)
+            // The screen comes back on, still locked, and the window is started again over the lock
+            // screen: its camera stays paused until the unlock.
+            val keyguard = shadowOf(app.getSystemService(android.app.KeyguardManager::class.java))
+            keyguard.setKeyguardLocked(true)
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.CREATED)
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
+            settle()
+            assertFalse("not sent over the lock screen", engine.camera.running)
+            assertEquals("enableCamera:77:false:-1", native.calls.toList().last { it.startsWith("enableCamera") })
+            keyguard.setKeyguardLocked(false)
             // Unlocked: back.
             app.sendBroadcast(Intent(Intent.ACTION_USER_PRESENT))
             waitUntil("the camera again") { engine.camera.running && native.calls.toList().last { it.startsWith("enableCamera") } == "enableCamera:77:true:-1" }

@@ -2149,15 +2149,17 @@ class DirectLink private constructor(
 
     /**
      * Whether [update] is content from someone the user blocked (never the user's own): a message, a
-     * tapback, typing, a sticker, a poll's vote or change, an edit, an unsend. Dropped then, with
-     * the files the ":imessage" process wrote aside for it, and said in the log without naming
-     * anyone. A group's state (renamed, its members changed and its version, its photo) is still
-     * taken, silently: dropping it would leave the group's members and version behind, and the
-     * user's later messages to the group would go to a stale list.
+     * tapback, typing, a sticker, a poll's vote or change, an edit, an unsend, a chat background,
+     * a row of the chat's own they wrote (an iMessage app's "updated"). Dropped then, with the files
+     * the ":imessage" process wrote aside for it, and said in the log without naming anyone. A
+     * group's state (renamed, its members changed and its version, its photo) is still taken,
+     * silently: dropping it would leave the group's members and version behind, and the user's later
+     * messages to the group would go to a stale list.
      */
     private fun dropBlocked(update: DirectArchive.Update): Boolean {
         val sender = when (update) {
-            is DirectArchive.Update.Upsert -> update.message.takeIf { !it.fromMe && it.direction != "system" && !update.groupOnly }?.senderId
+            is DirectArchive.Update.Upsert -> update.message.takeIf { !it.fromMe && !isGroupState(update) }?.senderId
+            is DirectArchive.Update.Background -> update.row?.message?.takeIf { !it.fromMe }?.senderId
             is DirectArchive.Update.Reaction -> update.participantId.takeIf { !update.fromMe }
             is DirectArchive.Update.Typing -> update.participantId
             is DirectArchive.Update.Sticker -> update.participantId.takeIf { !update.fromMe }
@@ -2172,6 +2174,7 @@ class DirectLink private constructor(
         if (sender.isNullOrBlank() || !blocked(sender)) return false
         when (update) {
             is DirectArchive.Update.Upsert -> dropInlineFiles(update.message)
+            is DirectArchive.Update.Background -> update.path?.let(::File)?.takeIf { ChatBackgrounds.isOurs(app, it) }?.delete()
             is DirectArchive.Update.PollChange -> dropInlineFiles(update.row.message)
             is DirectArchive.Update.Reaction -> update.sticker?.let(::dropPicture)
             is DirectArchive.Update.Sticker -> DirectArchive.guidOf(update.messageId)?.let { dropPicture(IMessageExtra.stickerKey(it, update.stickerGuid)) }
@@ -2180,6 +2183,10 @@ class DirectLink private constructor(
         if (update !is DirectArchive.Update.Typing && update !is DirectArchive.Update.Focus) IMessageLog.add(app, "a message from a blocked sender was dropped")
         return true
     }
+
+    /** Whether [u] is a group's own state (taken even from someone blocked, [dropBlocked]): never just any row of direction "system". */
+    private fun isGroupState(u: DirectArchive.Update.Upsert): Boolean =
+        u.message.direction == "system" && (u.groupEvent || u.groupOnly || u.renamed || u.membersChanged || u.groupVersion != null)
 
     /** Sends the ":imessage" process its copy of the block list ([DirectWire.BLOCKLIST]) when iMessage is set up here. */
     private fun pushBlockList() {
@@ -3752,7 +3759,11 @@ class DirectLink private constructor(
         if (update.conversationId == null) return removeAll(update.messageIds, "deleted on another of the user's devices")
         val id = recycleChat(update.conversationId, update.groupGuid) ?: return IMessageLog.add(app, "a chat deleted on another of the user's devices is not stored here")
         // Held again here to what the other process may name (a day in Recently Deleted at least before retention takes it).
-        if (!repo.moveToDeleted(id, RecycleRules.clampDeletedAt(update.atMs, System.currentTimeMillis()))) return
+        val now = System.currentTimeMillis()
+        val at = RecycleRules.clampDeletedAt(update.atMs, now)
+        if (!repo.moveToDeleted(id, at)) return
+        // The day before a purge may take it is from now, whatever date the recycle named (R1.3).
+        noteHold(id, at, now + RecycleRules.MIN_DELETED_MS, now)
         MessageNotifier.cancel(app, id, ChatService.IMESSAGE)
         IMessageLog.add(app, "${IMessageLog.chatRef(id)}: moved to Recently Deleted on another of the user's devices")
     }
@@ -3779,14 +3790,58 @@ class DirectLink private constructor(
             refused("a deletion for good", id, "of a chat not in Recently Deleted")
             return
         }
-        when (val decision = RecycleRules.purgeNow(row.deletedAt, now)) {
+        val noted = holdOf(id, row.deletedAt)
+        when (val decision = RecycleRules.purgeNow(row.deletedAt, now, noted)) {
             is RecycleRules.PurgeNow.Defer -> {
                 repo.setDeletedAt(id, decision.deletedAt)
+                // A purge again before the day is over is held as this one (its time now names weeks ago).
+                noteHold(id, decision.deletedAt, RecycleRules.holdUntil(row.deletedAt, now, noted), now)
                 IMessageLog.add(app, "${IMessageLog.chatRef(id)}: deleted for good on another of the user's devices; kept here until its first day in Recently Deleted is over")
             }
             RecycleRules.PurgeNow.Delete -> {
+                forgetHold(id)
                 if (purgeForGood(id) > 0) IMessageLog.add(app, "${IMessageLog.chatRef(id)}: deleted for good on another of the user's devices")
             }
+        }
+    }
+
+    /**
+     * The end of a chat's first day in Recently Deleted as this phone counts it ([RecycleRules.purgeNow]),
+     * where its `deleted_at` does not say it: one moved there by another device's recycle (dated as
+     * that device says), or deferred by a purge. Kept with the `deleted_at` it was noted for, and
+     * taken only while the chat still has that one (moved there again, it is another stay). By a hash
+     * of the chat's id (no address is kept), and only until that day is over.
+     */
+    private val holdPrefs get() = app.getSharedPreferences(RECYCLE_HOLD_PREFS, Context.MODE_PRIVATE)
+
+    private fun holdKey(id: String): String =
+        java.security.MessageDigest.getInstance("SHA-256").digest(id.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+
+    private fun noteHold(id: String, deletedAt: Long, until: Long, now: Long) {
+        try {
+            val prefs = holdPrefs
+            val edit = prefs.edit()
+            for ((k, v) in prefs.all) if ((v as? String)?.substringAfter(':')?.toLongOrNull()?.let { it > now } != true) edit.remove(k)
+            if (until > now) edit.putString(holdKey(id), "$deletedAt:$until")
+            edit.apply()
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "a chat's day in Recently Deleted was not noted (${e::class.java.simpleName})")
+        }
+    }
+
+    /** The end of [id]'s first day noted for its stay since [deletedAt]; 0 for none. */
+    private fun holdOf(id: String, deletedAt: Long): Long = try {
+        val v = holdPrefs.getString(holdKey(id), null).orEmpty()
+        if (v.substringBefore(':').toLongOrNull() == deletedAt) v.substringAfter(':').toLongOrNull() ?: 0 else 0
+    } catch (e: RuntimeException) {
+        0
+    }
+
+    private fun forgetHold(id: String) {
+        try {
+            holdPrefs.edit().remove(holdKey(id)).apply()
+        } catch (e: RuntimeException) {
+            // Gone within a day either way.
         }
     }
 
@@ -4677,6 +4732,7 @@ class DirectLink private constructor(
 
         /** This process's own note that an Apple Account was told of ([accountSeen]): Booleans only. */
         private const val ACCOUNT_PREFS = "imessage_account_link"
+        private const val RECYCLE_HOLD_PREFS = "imessage_recycle_hold"
 
         /** Whether the ":imessage" process was last sent a block list with anyone on it (an empty one is sent only after that). */
         private const val BLOCKLIST_PREFS = "imessage_blocklist_link"

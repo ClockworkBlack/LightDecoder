@@ -23,6 +23,16 @@ class AppleAccountRulesTest {
     // --- every LoginResult leads somewhere -----------------------------------------------------------
 
     @Test
+    fun onlyAnAuthenticationErrorMakesTheAccountNeedAttention() {
+        for (m in listOf("HTTP 401 Unauthorized", "Auth error: token expired", "authentication failed", "Invalid token", "token refresh failed")) {
+            assertTrue(m, AppleAccountRules.isAuthFailure(m))
+        }
+        for (m in listOf(null, "", "Connection reset", "Request timed out (401 ms)", "StatusKit is unavailable without a keychain", "error 4010", "Advanced Data Protection")) {
+            assertFalse("$m", AppleAccountRules.isAuthFailure(m))
+        }
+    }
+
+    @Test
     fun everyAnswerOfTheLibraryLeadsToAPage() {
         val p = Progress(credentials = true)
         assertEquals(Next.IcloudLogin, AppleAccountRules.next(AccountBridge.Step.LoggedIn, p))

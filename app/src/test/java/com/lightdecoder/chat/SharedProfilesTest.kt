@@ -107,6 +107,31 @@ class SharedProfilesTest {
     }
 
     @Test
+    fun anOfferThatCameToNothingStillLeavesNothingAfterASignOut() {
+        // Fetched, but nothing to offer (no name, no photo): only the limit's record of it is kept.
+        assertEquals(SharedProfileRules.Decision.FETCH, profiles.take(bob, "rec-1", chatExists = true, now = now))
+        assertNull(profiles.offered("imsg:$bob", bob, "rec-1", "", null, now))
+        val kept = File(dir, "profiles.json")
+        assertTrue(kept.isFile)
+        assertFalse("their address and the record are still on disk: not empty", profiles.isEmpty())
+        // The sign-out, as DirectLink makes it.
+        if (!profiles.isEmpty()) profiles.clear()
+        assertFalse(kept.exists())
+        assertTrue(profiles.isEmpty())
+        assertTrue(dir.listFiles().orEmpty().isEmpty())
+    }
+
+    @Test
+    fun aChatDeletedTakesTheirAddressOutOfTheLimitsRecordToo() {
+        profiles.take(bob, "rec-1", chatExists = true, now = now)
+        profiles.offered("imsg:$bob", bob, "rec-1", "Bob", null, now)
+        profiles.dismiss("imsg:$bob")
+        assertTrue(File(dir, "profiles.json").readText().contains("5550000002"))
+        profiles.forget("imsg:$bob", bob)
+        assertFalse(File(dir, "profiles.json").readText().contains("5550000002"))
+    }
+
+    @Test
     fun aPhotoIsFetchedOnlyToANewFileOfTheirFolder() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val fresh = SharedProfiles.get(context).incomingFile()

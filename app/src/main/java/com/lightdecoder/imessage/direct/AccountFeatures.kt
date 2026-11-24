@@ -51,11 +51,17 @@ class AccountFeatures internal constructor(
         return s.features && flag().state == FlagState.SIGNED_IN
     }
 
-    val profiles = Profiles(bridge, files.myProfileFile, enabled = ::on, sharing = { flag().profileShare })
+    /** A feature's call failed: when Apple no longer takes the sign-in, the account needs attention (once; [AppleAccount.authFailed]). */
+    private fun failedWith(e: Throwable) {
+        if (e is CancellationException) return
+        if (AppleAccountRules.isAuthFailure(com.lightdecoder.imessage.Redact.secrets(DirectEngine.readable(e)))) account.authFailed()
+    }
+
+    val profiles = Profiles(bridge, files.myProfileFile, enabled = ::on, sharing = { flag().profileShare }, failed = ::failedWith)
 
     val focus = FocusStatus(bridge, enabled = { on() && flag().let { it.focusIn && !it.focusUnavailable } }, unavailable = {
         scope.launch { setFlag { it.copy(focusUnavailable = true) } }
-    }, now = now)
+    }, now = now, failed = ::failedWith)
 
     val sharer = FocusSharer(bridge, enabled = { on() && flag().focusShare }, sender = sender, file = files.focusInvitedFile)
 
@@ -68,6 +74,7 @@ class AccountFeatures internal constructor(
             scope.launch { setFlag { it.copy(history = AccountFlag.HISTORY_OFF) } }
         },
         now = now,
+        failed = ::failedWith,
     )
 
     val join = KeychainJoin(

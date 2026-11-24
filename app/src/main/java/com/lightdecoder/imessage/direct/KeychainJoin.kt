@@ -99,10 +99,11 @@ class KeychainJoin(
         /** Joined: this phone's code, shown once. */
         data class Code(val code: String) : Page()
         object Done : Page()
-        data class Failed(val why: Why, val text: String? = null) : Page()
+        /** [waitMs]: with [Why.TOO_MANY], how long until the saved sign-in may be tried again. */
+        data class Failed(val why: Why, val text: String? = null, val waitMs: Long = 0) : Page()
     }
 
-    enum class Why { BUSY, NOT_ALLOWED, NOT_READY, SIGN_IN_AGAIN, ADP, NOT_JOINED, FAILED }
+    enum class Why { BUSY, NOT_ALLOWED, NOT_READY, SIGN_IN_AGAIN, ADP, NOT_JOINED, FAILED, TOO_MANY }
 
     /** [Steps.reconfigure] failed before it deleted anything: the registration and the session are as they were. */
     class Untouched(cause: Throwable) : Exception(cause.message, cause)
@@ -144,10 +145,20 @@ class KeychainJoin(
     suspend fun understood(): Page = guarded {
         // Nothing the rebuild needs is missing: else not even a device approval is asked for.
         if (!steps.ready()) return@guarded end(Page.Failed(Why.NOT_READY))
+        // The saved sign-in is a password's stand-in: S7's password limit holds for it too.
+        val wait = files.readFlag().limits.passwordWaitMs(now())
+        if (wait > 0) return@guarded end(Page.Failed(Why.TOO_MANY, waitMs = wait))
         understood = true
         touchedLive = true
         when (val step = steps.authSaved()) {
             AccountBridge.Step.NeedsDevice2Fa, AccountBridge.Step.Needs2FaVerification -> sendToDevices()
+            // Apple refused the saved sign-in: a failed attempt, as a wrong password is.
+            AccountBridge.Step.NeedsLogin -> {
+                val flag = files.readFlag()
+                files.writeFlag(flag.copy(limits = flag.limits.passwordFailed(now())))
+                Log.i(TAG, "the saved sign-in was refused")
+                end(Page.Failed(Why.SIGN_IN_AGAIN))
+            }
             // Signed in with no device approval (nothing to join with), or only a text message: the
             // join is offered with a device's approval only.
             else -> {

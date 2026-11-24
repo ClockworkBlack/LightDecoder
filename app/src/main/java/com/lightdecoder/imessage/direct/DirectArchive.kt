@@ -142,6 +142,12 @@ object DirectArchive {
              * one: [GroupVersions]); null when it says nothing about it.
              */
             val groupVersion: Long? = null,
+            /**
+             * A group's own event ([groupEvent]: renamed, its members or photo changed): its state,
+             * taken even from someone the user blocked. Any other row of the conversation's own
+             * (direction "system", an iMessage app's "updated", say) is from its sender like any message.
+             */
+            val groupEvent: Boolean = false,
         ) : Update()
 
         /**
@@ -979,7 +985,7 @@ object DirectArchive {
         // Down to one other person, it is the group only by its guid: the main process knows if it is one.
         if (!isGroup(id) && conversation.senderGuid.isNullOrBlank()) return Update.Ignore
         val row = eventRow(inst, conversation, members, groupName, me, nameOf, text, now) as Update.Upsert
-        return row.copy(groupOnly = !isGroup(id), renamed = renamed)
+        return row.copy(groupOnly = !isGroup(id), renamed = renamed, groupEvent = true)
     }
 
     /**

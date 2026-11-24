@@ -382,6 +382,7 @@ internal class AppleFeaturePages(
                     KeychainJoin.Why.ADP -> activity.getString(R.string.apple_icloud_failed_adp)
                     KeychainJoin.Why.NOT_JOINED -> activity.getString(R.string.apple_icloud_failed_not_joined)
                     KeychainJoin.Why.FAILED -> activity.getString(R.string.apple_icloud_failed, p.text.orEmpty())
+                    KeychainJoin.Why.TOO_MANY -> activity.getString(R.string.apple_account_too_many, ((p.waitMs + 59_999) / 60_000).toInt().coerceAtLeast(1))
                 }
                 text(0).apply { text = line }
                 button(R.string.apple_account_ok) { activity.finish() }

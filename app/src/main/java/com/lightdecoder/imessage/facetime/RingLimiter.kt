@@ -80,6 +80,29 @@ class RingLimiter(
     }
 
     /**
+     * Whether [caller] could still be noted as missed at [now] by their own hourly limit. Counts
+     * nothing: a group call's invitation that does not ring is held to its caller's notes this way.
+     */
+    @Synchronized
+    fun noticeAllows(caller: String, now: Long): Boolean = prune(caller, now).notices.size < maxNoticesPerHour
+
+    /**
+     * Charges [caller] with a ring a group call's invitation made for them ([callRing]'s [verdict]):
+     * a ring counts as one of theirs, a missed call as one of their notes, so their own gap and hourly
+     * limits hold for every ring that is theirs, whichever event brought it. Everyone's totals are not
+     * counted again ([callRing] did).
+     */
+    @Synchronized
+    fun charge(caller: String, verdict: Verdict, now: Long) {
+        val c = prune(caller, now)
+        when (verdict) {
+            Verdict.RING -> c.rings.addLast(now)
+            Verdict.MISSED_ONLY -> c.notices.addLast(now)
+            Verdict.DROP -> Unit
+        }
+    }
+
+    /**
      * Whether a call from someone the main process does not know may ring at [now]: all such
      * callers share one allowance. Counted when it may.
      */

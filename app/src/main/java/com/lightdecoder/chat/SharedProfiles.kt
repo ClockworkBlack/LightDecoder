@@ -204,7 +204,11 @@ class SharedProfiles internal constructor(val dir: File) {
     fun forget(conversationId: String, address: String?) = synchronized(lock) {
         offers.remove(conversationId)?.let { deletePhoto(it.photo) }
         answered.remove(conversationId)
-        address?.let(::keyOf)?.let { people.remove(it) }?.let { deletePhoto(it.photo) }
+        address?.let(::keyOf)?.let { key ->
+            people.remove(key)?.let { deletePhoto(it.photo) }
+            // Nor when they last offered one (their address, kept for the limit).
+            times.remove(key)
+        }
         save()
     }
 
@@ -218,8 +222,13 @@ class SharedProfiles internal constructor(val dir: File) {
         dir.listFiles()?.forEach { it.delete() }
     }
 
-    /** Whether anything is kept (a sign-out has something to remove). */
-    fun isEmpty(): Boolean = synchronized(lock) { people.isEmpty() && offers.isEmpty() && answered.isEmpty() }
+    /**
+     * Whether nothing is kept (a sign-out has nothing to remove): no one's name, photo or offer, no
+     * answer, nor when someone last offered one or which records were fetched, and no file of it.
+     */
+    fun isEmpty(): Boolean = synchronized(lock) {
+        people.isEmpty() && offers.isEmpty() && answered.isEmpty() && times.isEmpty() && seen.isEmpty() && dir.listFiles().isNullOrEmpty()
+    }
 
     private fun keepPhoto(incoming: File): String? {
         if (!incoming.isFile || incoming.length() <= 0 || incoming.length() > MAX_INCOMING_BYTES) return null

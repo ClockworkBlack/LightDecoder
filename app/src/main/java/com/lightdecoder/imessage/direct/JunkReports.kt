@@ -28,9 +28,10 @@ object JunkReports {
     /**
      * The messages a report carries, from a chat's [rows] (oldest first): the last
      * [DirectWire.MAX_JUNK_MESSAGES] someone else sent that Apple knows by their GUID, oldest first.
+     * Never one imported from Messages in iCloud (B6.5): those are never reported.
      */
     fun pick(rows: List<MessageRow>): List<MessageRow> =
-        rows.filter { !it.isOutgoing && it.direction == "in" && !it.isLocal && DirectArchive.guidOf(it.id) != null }
+        rows.filter { !it.isOutgoing && it.direction == "in" && !it.isLocal && DirectArchive.guidOf(it.id) != null && !IMessageExtra.parse(it.extra).imported }
             .takeLast(DirectWire.MAX_JUNK_MESSAGES)
 
     /**
@@ -45,8 +46,9 @@ object JunkReports {
         val sender = row.senderId.takeIf { it.isNotBlank() }?.let { Handles.normalize(it) } ?: target.peer ?: return null
         // A Live Photo's moving part is never one of its own: only what the chat shows is reported.
         val motion = IMessageExtra.parse(row.extra).motionParts
+        // Only the library's own descriptions: an imported attachment's iCloud record id is none.
         val attachments = row.media.filter { it.partId !in motion }.map { String(it.key, Charsets.UTF_8) }
-            .filter { it.isNotEmpty() && it.length <= DirectWire.MAX_DESCRIPTOR_CHARS }
+            .filter { it.isNotEmpty() && it.length <= DirectWire.MAX_DESCRIPTOR_CHARS && !it.startsWith(CloudMapping.CLOUD_KEY) }
             .take(DirectWire.MAX_JUNK_ATTACHMENTS)
         return DirectWire.JunkMessage(
             guid = guid,

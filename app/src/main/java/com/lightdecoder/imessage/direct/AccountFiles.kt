@@ -247,12 +247,25 @@ class AccountFiles(private val filesDir: File, val statePath: String) {
     fun deleteAccountFiles() {
         flagFile.delete()
         File(flagFile.parentFile, flagFile.name + ".tmp").delete()
+        deleteAccountSecrets()
+        deleteLibraryLogs()
+    }
+
+    /**
+     * What later features keep for the account (S5), the flag left as it is: the iCloud Keychain's
+     * code, iCloud's tokens, the user's own name and photo, those the Focus was shared with. Gone
+     * whenever the account is gone, by a sign-out or otherwise (the account vanished, a new device).
+     */
+    fun deleteAccountSecrets() {
         keychainCodeFile.delete()
         cloudDir.deleteRecursively()
         myProfileFile.delete()
         focusInvitedFile.delete()
-        deleteLibraryLogs()
     }
+
+    /** Whether anything [deleteAccountSecrets] deletes is still on disk. */
+    fun accountSecretsLeft(): Boolean =
+        keychainCodeFile.exists() || cloudDir.exists() || myProfileFile.exists() || focusInvitedFile.exists()
 
     companion object {
         private const val MAX_FLAG_BYTES = 16 * 1024L

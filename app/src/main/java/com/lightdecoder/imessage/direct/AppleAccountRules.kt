@@ -162,6 +162,24 @@ object AppleAccountRules {
         }
     }
 
+    /**
+     * Whether an account-gated call's error (redacted) says Apple no longer takes the account's
+     * sign-in (a token refresh refused, the account signed out at Apple): §4.8's "needs attention".
+     * By its words only, and narrowly: anything else (the network, a timeout) is never one.
+     */
+    fun isAuthFailure(message: String?): Boolean {
+        val m = message.orEmpty()
+        if (m.isEmpty() || m.contains("timed out", ignoreCase = true)) return false
+        return AUTH_FAILURE.containsMatchIn(m)
+    }
+
+    private val AUTH_FAILURE = Regex(
+        "unauthori[sz]ed|\\b401\\b|auth(entication)?[ _-]?(failed|failure|error|invalid|expired)|" +
+            "invalid[ _-]?(auth|token|credentials?)|token[ _-]?(expired|invalid|refresh failed)|" +
+            "not (logged|signed) in|needs? (login|sign[ -]?in)|login required|re-?login",
+        RegexOption.IGNORE_CASE,
+    )
+
     /** At most this much of Apple's own words is shown. */
     const val MAX_APPLE_TEXT = 300
 

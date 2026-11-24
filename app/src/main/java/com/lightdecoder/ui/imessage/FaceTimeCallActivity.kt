@@ -253,8 +253,9 @@ class FaceTimeCallActivity : AppCompatActivity() {
     override fun onStart() {
         super.onStart()
         tellRotation()
-        // Back in sight: a camera that was paused while it was not is sent again.
-        calls.screenShown(this)
+        // Back in sight: a camera that was paused while it was not is sent again. Not the floating
+        // window come back over the lock screen: its camera waits for the unlock (ACTION_USER_PRESENT).
+        if (inPip && (pausedForScreenOff || locked())) pausedForScreenOff = true else calls.screenShown(this)
     }
 
     /**
@@ -322,6 +323,11 @@ class FaceTimeCallActivity : AppCompatActivity() {
             tileViews.values.forEach { it.video?.zoom?.reset() }
         }
         if (floating) watchScreenOff() else stopWatchingScreenOff()
+        // Opened out to the whole screen (the user's own tap): a camera paused for the screen going off is back with it.
+        if (!floating && pausedForScreenOff) {
+            pausedForScreenOff = false
+            if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) calls.screenShown(this)
+        }
         // The small picture of the user's own camera is not in the window: the camera goes on into the call only, and is back with the screen.
         previewSurface?.let { surface -> if (floating) calls.detachPreview(surface) {} else calls.attachPreview(surface) }
         sheet?.dismiss()

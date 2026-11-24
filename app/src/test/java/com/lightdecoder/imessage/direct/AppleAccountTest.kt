@@ -1125,6 +1125,125 @@ class AppleAccountTest {
         assertEquals(AppleAccount.SignOut.NotSignedIn, account.signOut())
     }
 
+    /** What later features keep for the account (S5), written as they would. */
+    private fun accountSecrets() {
+        rig.files.keychainCodeFile.writeText("sealed")
+        rig.files.cloudDir.apply { mkdirs() }.resolve("tokens").writeText("t")
+        rig.files.myProfileFile.writeText("{}")
+        rig.files.focusInvitedFile.writeText("[]")
+    }
+
+    private fun assertNoAccountSecrets() {
+        assertFalse(rig.files.keychainCodeFile.exists())
+        assertFalse(rig.files.cloudDir.exists())
+        assertFalse(rig.files.myProfileFile.exists())
+        assertFalse(rig.files.focusInvitedFile.exists())
+    }
+
+    @Test
+    fun anAccountThatVanishedTakesItsSecretsWithIt() = runBlocking {
+        rig.signedIn()
+        accountSecrets()
+        File(rig.statePath, "account.plist").delete()
+        rig.restart()
+        account.atStartLocked()
+        assertEquals(FlagState.NONE, rig.files.readFlag().state)
+        assertNoAccountSecrets()
+        assertEquals("the escrow code's key goes too", 1, hooks.keysDeleted)
+    }
+
+    @Test
+    fun aNewPasswordFromNeedsAttentionReplacesWhatTheAccountKept() = runBlocking {
+        rig.signedIn(FlagState.ATTENTION)
+        accountSecrets()
+        bridge.onTryAuth = { _, _ -> AccountBridge.Step.NeedsDevice2Fa }
+        account.begin()
+        account.understood()
+        account.signIn("other@example.com", PASSWORD)
+        assertNoAccountSecrets()
+        assertEquals(1, hooks.keysDeleted)
+        account.cancel()
+        account.settled()
+        assertNoAccountSecrets()
+        assertEquals(FlagState.NONE, rig.files.readFlag().state)
+    }
+
+    @Test
+    fun aNewDeviceThatCouldNotWipeTheAccountStillTakesItsSecrets() = runBlocking {
+        rig.signedIn()
+        accountSecrets()
+        val failing = object : AccountBridge by bridge {
+            override fun resetAppleLogin(statePath: String): Unit = throw RustBridgeException.Other("busy")
+        }
+        val a = AppleAccount(rig.files, failing, rig.lock, hooks, now = { rig.clock[0] })
+        a.newDeviceLocked { }
+        assertEquals(FlagState.NONE, rig.files.readFlag().state)
+        assertNoAccountSecrets()
+        assertEquals(1, hooks.keysDeleted)
+    }
+
+    @Test
+    fun aFreshSignInFindsNothingAnEarlierAccountLeft() = runBlocking {
+        accountSecrets()
+        bridge.onTryAuth = { _, _ -> AccountBridge.Step.LoggedIn }
+        bridge.icloudUser = { true }
+        toPassword()
+        assertEquals(Page.Done, account.signIn("user@example.com", PASSWORD))
+        assertNoAccountSecrets()
+        assertFalse(account.state.value.profile)
+    }
+
+    @Test
+    fun whatAnAccountLeftCanStillBeSignedOutOf() = runBlocking {
+        // Signed out as far as the flag goes, account.plist gone, but its files still there.
+        accountSecrets()
+        rig.files.writeFlag(AccountFlag())
+        rig.restart()
+        assertEquals(AppleAccount.SignOut.Done, account.signOut())
+        assertNoAccountSecrets()
+        assertEquals(1, hooks.keysDeleted)
+        assertEquals(AppleAccount.SignOut.NotSignedIn, account.signOut())
+    }
+
+    @Test
+    fun continueAsIsHeldToThePasswordLimitAndARefusalCounts() = runBlocking {
+        rig.signedIn(FlagState.ATTENTION)
+        bridge.onTryAuth = { user, _ -> if (user == null) AccountBridge.Step.NeedsLogin else AccountBridge.Step.LoggedIn }
+        assertTrue(account.begin() is Page.Credentials)
+        repeat(AppleAccountRules.PASSWORD_MAX) {
+            val p = account.continueAsSaved() as Page.Credentials
+            assertEquals(Problem.EnterPassword, p.problem)
+        }
+        assertEquals(AppleAccountRules.PASSWORD_MAX, rig.files.readFlag().limits.passwordFailures.size)
+        val tries = bridge.auths.size
+        val held = account.continueAsSaved() as Page.Credentials
+        assertTrue("${held.problem}", held.problem is Problem.TooManyAttempts)
+        assertEquals("Apple was not asked again", tries, bridge.auths.size)
+        // A typed password is held the same.
+        account.understood()
+        assertTrue((account.signIn("user@example.com", PASSWORD) as Page.Credentials).problem is Problem.TooManyAttempts)
+        assertEquals(tries, bridge.auths.size)
+    }
+
+    @Test
+    fun appleNoLongerTakingTheSignInMakesItNeedAttentionOnce() = runBlocking {
+        rig.signedIn()
+        account.authFailed()
+        account.settled()
+        waitFor("needs attention") { rig.files.readFlag().state == FlagState.ATTENTION }
+        assertEquals(AccountNotice.SIGN_IN_AGAIN, rig.files.readFlag().notice)
+        waitFor("the main process told") { hooks.told.any { it.attention } }
+        account.authFailed()
+        Thread.sleep(100)
+        assertEquals(1, hooks.told.count { it.attention })
+        assertTrue("never a sign-in by itself", bridge.auths.isEmpty())
+        // Signed out: nothing.
+        rig.files.writeFlag(AccountFlag())
+        account.authFailed()
+        Thread.sleep(100)
+        assertEquals(FlagState.NONE, rig.files.readFlag().state)
+    }
+
     // --- what the engine has it do ----------------------------------------------------------------------
 
     @Test

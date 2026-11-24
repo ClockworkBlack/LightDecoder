@@ -89,6 +89,22 @@ class KeychainJoinTest {
     }
 
     @Test
+    fun theSavedSignInIsHeldToThePasswordLimitAndARefusalCounts() = runBlocking {
+        steps.auth = AccountBridge.Step.NeedsLogin
+        repeat(AppleAccountRules.PASSWORD_MAX) {
+            join.begin()
+            assertEquals(KeychainJoin.Page.Failed(KeychainJoin.Why.SIGN_IN_AGAIN), join.understood())
+        }
+        assertEquals(AppleAccountRules.PASSWORD_MAX, files.readFlag().limits.passwordFailures.size)
+        assertEquals(AppleAccountRules.PASSWORD_MAX, steps.calls.count { it == "authSaved" })
+        join.begin()
+        val held = join.understood() as KeychainJoin.Page.Failed
+        assertEquals(KeychainJoin.Why.TOO_MANY, held.why)
+        assertTrue(held.waitMs > 0)
+        assertEquals("Apple was not asked again", AppleAccountRules.PASSWORD_MAX, steps.calls.count { it == "authSaved" })
+    }
+
+    @Test
     fun aCodeThatDoesNotSignInCommitsNothing() = runBlocking {
         steps.verified = AccountBridge.Verified(AccountBridge.Step.NeedsExtraStep("x"), false)
         join.begin()

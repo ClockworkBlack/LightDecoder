@@ -383,7 +383,11 @@ class AppleAccount internal constructor(
         val wait = flag.limits.passwordWaitMs(now())
         if (wait > 0) return page(f, credentialsPage(f, Problem.TooManyAttempts(wait), iforgot = true))
         // The library wipes what was saved before it signs in with a password: from here, nothing is.
-        if (flag.state == FlagState.ATTENTION) writeFlag(flag.copy(state = FlagState.NONE, sinceMs = 0))
+        if (flag.state == FlagState.ATTENTION) {
+            writeFlag(flag.copy(state = FlagState.NONE, sinceMs = 0))
+            // Nothing of the account it replaces is kept for whichever account comes next (S5).
+            wipeAccountSecrets()
+        }
         f.replacedSaved = true
         f.typed = true
         f.retried = false
@@ -399,6 +403,9 @@ class AppleAccount internal constructor(
         refusal()?.let { return Page.Refused(it) }
         val f = currentFlow() ?: return Page.Refused(Refusal.NOT_STARTED)
         if (!f.again || f.replacedSaved || !files.accountSaved()) return page(f, credentialsPage(f, Problem.EnterPassword))
+        // The saved sign-in stands in for the password (S3): S7's limit holds for it as for a typed one.
+        val wait = files.readFlag().limits.passwordWaitMs(now())
+        if (wait > 0) return page(f, credentialsPage(f, Problem.TooManyAttempts(wait), iforgot = true))
         f.typed = false
         f.retried = false
         return authenticate(f, useCredentials = false)
@@ -480,7 +487,11 @@ class AppleAccount internal constructor(
                 countFailure()
                 resetToPassword(f, Problem.WrongPassword, iforgot = true)
             }
-            Next.EnterPassword -> resetToPassword(f, Problem.EnterPassword)
+            Next.EnterPassword -> {
+                // Apple refused the saved sign-in ("Continue as"): a failed attempt, as a wrong password is (S7).
+                if (!f.typed && step is AccountBridge.Step.NeedsLogin) countFailure()
+                resetToPassword(f, Problem.EnterPassword)
+            }
             Next.SendToDevices -> sendToDevices(f)
             Next.EnterDeviceCode -> page(f, Page.DeviceCode(sent = true))
             Next.TextOptions -> textOptions(f)
@@ -661,6 +672,15 @@ class AppleAccount internal constructor(
         if (currentFlow() !== f) {
             cleanup(f)
             return Page.Refused(Refusal.NOT_STARTED)
+        }
+        // A fresh sign-in (maybe another Apple ID) finds nothing an account before it kept (S5). Its
+        // files only: a Keystore key the library may have made for this very sign-in stays.
+        if (!f.again || f.replacedSaved) {
+            try {
+                files.deleteAccountSecrets()
+            } catch (e: Throwable) {
+                Log.w(TAG, "Apple Account: an earlier account's files were not all deleted (${e::class.java.simpleName})")
+            }
         }
         val flag = files.readFlag()
         writeFlag(flag.copy(state = FlagState.COMMITTING, sinceMs = now(), notice = null))
@@ -914,7 +934,10 @@ class AppleAccount internal constructor(
             if (cleanHalf()) f.touched = true
             val flag = files.readFlag()
             // A new sign-in from "needs attention" replaced what was saved, and did not finish: signed out now.
-            if (f.again && f.replacedSaved && flag.state == FlagState.NONE) writeFlag(flag.copy(notice = AccountNotice.SIGNED_OUT))
+            if (f.again && f.replacedSaved && flag.state == FlagState.NONE) {
+                writeFlag(flag.copy(notice = AccountNotice.SIGNED_OUT))
+                wipeAccountSecrets()
+            }
         } catch (e: Throwable) {
             Log.w(TAG, "Apple Account: an unfinished sign-in was not put away (${e::class.java.simpleName})")
         }
@@ -947,6 +970,24 @@ class AppleAccount internal constructor(
         if (cleanHalf()) f.touched = true
         publish()
         return page(f, credentialsPage(f, problem, iforgot))
+    }
+
+    /**
+     * S5: LightDecoder's own secrets of the account (its files but the flag, and its Keystore key)
+     * deleted, wherever the account goes without a sign-out: it vanished at a start, a new device
+     * could not wipe it, a new sign-in from "needs attention" replaced it. Never a failure of what called it.
+     */
+    private fun wipeAccountSecrets() {
+        try {
+            files.deleteAccountSecrets()
+        } catch (e: Throwable) {
+            Log.w(TAG, "Apple Account: its files were not all deleted (${e::class.java.simpleName})")
+        }
+        try {
+            hooks.deleteAccountKeys()
+        } catch (e: Throwable) {
+            Log.w(TAG, "Apple Account: its key was not deleted (${e::class.java.simpleName})")
+        }
     }
 
     private fun countFailure() {
@@ -1003,7 +1044,8 @@ class AppleAccount internal constructor(
         if (hooks.busy) return SignOut.Refused(Refusal.BUSY)
         val result = lock.withLock {
             if (hooks.busy) return@withLock SignOut.Refused(Refusal.BUSY)
-            if (files.readFlag().state == FlagState.NONE && !files.accountSaved()) return@withLock SignOut.NotSignedIn
+            // Anything of an account still on disk (left by a way out that was not a sign-out) can still be signed out of (S5).
+            if (files.readFlag().state == FlagState.NONE && !files.accountSaved() && !files.accountSecretsLeft()) return@withLock SignOut.NotSignedIn
             takeFlow()?.let {
                 dropCredentials()
                 it.closeAll()
@@ -1115,6 +1157,7 @@ class AppleAccount internal constructor(
                         notice = if (flag.notice == AccountNotice.SIGN_IN_AGAIN) AccountNotice.SIGN_IN_AGAIN else AccountNotice.SIGNED_OUT,
                     ),
                 )
+                wipeAccountSecrets()
             }
         }
     }
@@ -1169,6 +1212,7 @@ class AppleAccount internal constructor(
             if (saved || flag.state != FlagState.NONE) deleteLogsQuietly()
             if (flag.state != FlagState.NONE) {
                 writeFlag(flag.copy(state = if (wiped) FlagState.ATTENTION else FlagState.NONE, notice = AccountNotice.SIGN_IN_AGAIN))
+                if (!wiped) wipeAccountSecrets()
                 icloud = false
                 publish()
                 scope.launch { tellQuietly() }
@@ -1241,6 +1285,30 @@ class AppleAccount internal constructor(
             profiles = on && flag.profilesIn,
             profile = on && flag.profileShare && files.myProfileFile.isFile,
         )
+    }
+
+    /**
+     * An account-gated call (Name & Photo, Focus status, Messages in iCloud) failed with an
+     * authentication error ([AppleAccountRules.isAuthFailure]): Apple no longer takes the account's
+     * sign-in, so it needs the user's sign-in again (S7, §4.8), offered with one tap ("Continue as").
+     * Marked once, under the lock (in this account's own scope: never in the way of what failed, nor
+     * waiting on a lock it may hold); nothing is retried here, and nothing loops: the features are off
+     * from then on, so no further call fails for it.
+     */
+    fun authFailed() {
+        scope.launch(io) {
+            val marked = lock.withLock {
+                val flag = files.readFlag()
+                if (flag.state != FlagState.SIGNED_IN || !files.accountSaved()) return@withLock false
+                writeFlag(flag.copy(state = FlagState.ATTENTION, notice = AccountNotice.SIGN_IN_AGAIN))
+                publish()
+                true
+            }
+            if (marked) {
+                Log.i(TAG, "Apple Account: Apple no longer takes the sign-in; needs attention")
+                tellQuietly()
+            }
+        }
     }
 
     /** A feature's setting or state changed (B6): published, and the main process told. Nothing without an account. */

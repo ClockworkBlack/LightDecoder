@@ -193,9 +193,20 @@ object RecycleRules {
     /**
      * A remote purge of a chat in Recently Deleted since [deletedAt]: there less than [MIN_DELETED_MS],
      * it is kept until that day is over (its time set so that retention takes it then); else it goes.
+     * [holdUntil]: the end of its first day as this phone counts it (0: none noted), from when it
+     * moved there here, whatever date another device's recycle named ([deletedAt] may be one from
+     * weeks before, as that device says it) and whatever an earlier purge deferred it to: a recycle
+     * dated long ago and a purge right after it, or two purges, never delete at once a chat that was
+     * in the inbox a moment before.
      */
-    fun purgeNow(deletedAt: Long, now: Long): PurgeNow =
-        if (deletedAt > 0 && now - deletedAt < MIN_DELETED_MS) PurgeNow.Defer(now - RETENTION_MS + MIN_DELETED_MS) else PurgeNow.Delete
+    fun purgeNow(deletedAt: Long, now: Long, holdUntil: Long = 0): PurgeNow {
+        val young = (deletedAt > 0 && now - deletedAt < MIN_DELETED_MS) || now < holdUntil
+        return if (young) PurgeNow.Defer(now - RETENTION_MS + MIN_DELETED_MS) else PurgeNow.Delete
+    }
+
+    /** The end of the first day ([purgeNow]'s `holdUntil`) of a chat in Recently Deleted since [deletedAt], as of [now]. */
+    fun holdUntil(deletedAt: Long, now: Long, noted: Long): Long =
+        maxOf(noted, if (deletedAt > 0 && now - deletedAt < MIN_DELETED_MS) deletedAt + MIN_DELETED_MS else 0)
 
     /**
      * Whether a message arriving in a chat in Recently Deleted (since [deletedAt]) brings the chat back:

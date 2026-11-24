@@ -1067,6 +1067,7 @@ object DirectWire {
             .apply { u.member?.let { put("member", it) } }
             .apply { if (u.membersChanged) put("membersChanged", true) }
             .apply { u.groupVersion?.let { put("groupVersion", it) } }
+            .apply { if (u.groupEvent) put("groupEvent", true) }
         is DirectArchive.Update.Remove -> JSONObject().put("kind", "remove").put("messageId", u.messageId)
             .apply { if (u.scheduledOnly) put("scheduledOnly", true) }
         is DirectArchive.Update.Receipt -> JSONObject().put("kind", "receipt")
@@ -1209,6 +1210,7 @@ object DirectWire {
             member = if (o.has("member")) o.optBoolean("member") else null,
             membersChanged = o.optBoolean("membersChanged"),
             groupVersion = if (o.has("groupVersion") && !o.isNull("groupVersion")) o.optLong("groupVersion") else null,
+            groupEvent = o.optBoolean("groupEvent"),
         )
         "remove" -> DirectArchive.Update.Remove(o.getString("messageId"), o.optBoolean("scheduledOnly"))
         "receipt" -> DirectArchive.Update.Receipt(

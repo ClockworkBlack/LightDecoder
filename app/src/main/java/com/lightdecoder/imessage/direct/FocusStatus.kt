@@ -18,6 +18,8 @@ class FocusStatus(
     private val enabled: () -> Boolean,
     private val unavailable: () -> Unit,
     private val now: () -> Long = System::currentTimeMillis,
+    /** A call to Apple failed ([AccountFeatures]: an authentication error makes the account need attention). */
+    private val failed: (Throwable) -> Unit = {},
 ) {
 
     private val lock = Any()
@@ -55,6 +57,7 @@ class FocusStatus(
             throw e
         } catch (e: Exception) {
             Log.w(TAG, "Focus status was not asked for (${e::class.java.simpleName}); not available")
+            failed(e)
             synchronized(lock) {
                 subscribed = emptySet()
                 active = false

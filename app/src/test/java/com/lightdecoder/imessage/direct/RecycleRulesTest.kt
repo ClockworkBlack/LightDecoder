@@ -148,6 +148,22 @@ class RecycleRulesTest {
     }
 
     @Test
+    fun aPurgeIsHeldADayFromWhenTheChatMovedHereWhateverDateItsRecycleNamed() {
+        val now = 1_800_000_000_000L
+        val day = RecycleRules.MIN_DELETED_MS
+        val backdated = RecycleRules.clampDeletedAt(1L, now)
+        assertEquals(RecycleRules.PurgeNow.Delete, RecycleRules.purgeNow(backdated, now))
+        assertTrue(RecycleRules.purgeNow(backdated, now, holdUntil = now + day) is RecycleRules.PurgeNow.Defer)
+        assertTrue(RecycleRules.purgeNow(backdated, now + day - 1, holdUntil = now + day) is RecycleRules.PurgeNow.Defer)
+        assertEquals(RecycleRules.PurgeNow.Delete, RecycleRules.purgeNow(backdated, now + day, holdUntil = now + day))
+        // A chat deleted here an hour ago: its day ends a day after that, whatever a purge deferred it to.
+        assertEquals(now - 3_600_000 + day, RecycleRules.holdUntil(now - 3_600_000, now, 0))
+        assertEquals(now + day, RecycleRules.holdUntil(backdated, now, now + day))
+        assertEquals(0L, RecycleRules.holdUntil(now - 2 * day, now, 0))
+    }
+
+
+    @Test
     fun aRemotePurgeWaitsForTheChatsFirstDayInRecentlyDeleted() {
         assertEquals(RecycleRules.PurgeNow.Defer(now - RecycleRules.RETENTION_MS + day), RecycleRules.purgeNow(now - 60_000, now))
         assertEquals(RecycleRules.PurgeNow.Delete, RecycleRules.purgeNow(now - day - 1, now))
