@@ -17,7 +17,7 @@ import org.json.JSONObject
  */
 class DirectSinkService : Service() {
 
-    private val server = DirectIpc.Server { what, request ->
+    private val server = DirectIpc.Server { what, request, _ ->
         when (what) {
             DirectWire.UPDATE -> take(request) { update ->
                 synchronized(DirectSinkService::class.java) { DirectLink.get(this).apply(update) }

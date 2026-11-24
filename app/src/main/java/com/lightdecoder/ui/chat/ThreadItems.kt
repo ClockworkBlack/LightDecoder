@@ -202,7 +202,7 @@ object ThreadItems {
 
     /** Only pictures or video stills: no text, subject or reply quote. */
     fun picturesOnly(row: MessageRow): Boolean =
-        row.media.isNotEmpty() && row.media.all(::isVisualPart) && row.text.isEmpty() &&
+        row.shownMedia().let { m -> m.isNotEmpty() && m.all(::isVisualPart) } && row.text.isEmpty() &&
             row.subject.isBlank() && row.replyToId.isEmpty()
 
     /** Pictures sent together arrive within this of each other. */

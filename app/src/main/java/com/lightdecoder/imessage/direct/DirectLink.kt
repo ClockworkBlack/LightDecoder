@@ -48,6 +48,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -82,11 +83,91 @@ class DirectLink private constructor(
     /** Asks the ":imessage" process ([DirectIpc.Client]); tests answer in its place. */
     internal fun interface Requests {
         suspend fun call(what: Int, request: JSONObject, timeoutMs: Long): JSONObject
+
+        /**
+         * As [call], with [onProgress] hearing the request's [DirectWire.PROGRESS] and, with [idleMs],
+         * the wait ending [idleMs] after the last of them ([timeoutMs] at most). A test's answer has no progress.
+         */
+        suspend fun call(what: Int, request: JSONObject, timeoutMs: Long, onProgress: ((JSONObject) -> Unit)?, idleMs: Long?): JSONObject =
+            call(what, request, timeoutMs)
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val client by lazy { DirectIpc.Client(app, DirectService::class.java) }
-    private val requests: Requests = requests ?: Requests { what, request, timeoutMs -> client.call(what, request, timeoutMs) }
+    private val requests: Requests = requests ?: object : Requests {
+        override suspend fun call(what: Int, request: JSONObject, timeoutMs: Long): JSONObject = client.call(what, request, timeoutMs)
+        override suspend fun call(what: Int, request: JSONObject, timeoutMs: Long, onProgress: ((JSONObject) -> Unit)?, idleMs: Long?): JSONObject =
+            client.call(what, request, timeoutMs, onProgress, idleMs)
+    }
+
+    /** A transfer the screen shows: [done] of [total] bytes of part [part] of [parts], going out ([upload]) or coming in, in chat [conversationId]. */
+    data class Transfer(val done: Long, val total: Long, val part: Int, val parts: Int, val upload: Boolean, val conversationId: String = "") {
+        val fraction: Float get() = if (total <= 0) 0f else (done.toDouble() / total).toFloat().coerceIn(0f, 1f)
+    }
+
+    private val _transfers = MutableStateFlow<Map<String, Transfer>>(emptyMap())
+
+    /**
+     * The transfers under way, by key: a download by its media id ([DirectWire.transferKey]), a send by
+     * its local copy ([DirectWire.sendKey]). Only for what the user asked for; each gone once it ends.
+     */
+    val transfers: StateFlow<Map<String, Transfer>> get() = _transfers
+
+    /** The progress [o] the ":imessage" process told of transfer [key], clamped to [size] (the part's own, when known). */
+    private fun heard(key: String, o: JSONObject, size: Long, upload: Boolean) {
+        val p = DirectWire.Progress.fromJson(o)?.clampedTo(size) ?: return
+        _transfers.update { all ->
+            // Only one still under way (a late word after its end is dropped), in the chat it was started in.
+            val now = all[key] ?: return@update all
+            all + (key to Transfer(p.done, p.total, p.part, p.parts.coerceAtMost(now.parts), upload, now.conversationId))
+        }
+    }
+
+    /** Transfer [key] started (nothing done yet), so the screen shows it at once. */
+    private fun started(key: String, total: Long, parts: Int, upload: Boolean, conversationId: String = "") {
+        _transfers.update { it + (key to Transfer(0, total.coerceAtLeast(0), 0, parts.coerceAtLeast(1), upload, conversationId)) }
+    }
+
+    private fun ended(key: String) {
+        _transfers.update { it - key }
+    }
+
+    /**
+     * The blue bar of chat [conversationIds]'s sends (iPhone's, under the bar): how much of all their
+     * files has gone (0..1), and which file of how many the first of them is on; null when none is going.
+     */
+    data class SendBar(val fraction: Float, val file: Int, val files: Int)
+
+    object SendBars {
+        fun sendBar(transfers: Map<String, Transfer>, conversationIds: Set<String>): SendBar? {
+            val sends = transfers.values.filter { it.upload && it.conversationId in conversationIds }
+            if (sends.isEmpty()) return null
+            // Each file of each send counts the same: done files whole, the one going by its bytes.
+            val files = sends.sumOf { it.parts }
+            val done = sends.sumOf { t -> t.part.toDouble() + t.fraction }
+            val first = sends.first()
+            return SendBar((done / files).toFloat().coerceIn(0f, 1f), first.part + 1, first.parts)
+        }
+    }
+
+    /** Downloads the user stopped ([cancelTransfer]), by media id, until their request has answered. */
+    private val stoppedDownloads = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+
+    /**
+     * Stops the transfer [key] ([DirectWire.CANCEL]): a download of an attachment, or a send still
+     * uploading. True when it was stopped; false when there was none or it is already with Apple.
+     */
+    suspend fun cancelTransfer(key: String): Boolean {
+        if (!DirectWire.isTransferKey(key)) return false
+        if (!key.startsWith("tmp:")) stoppedDownloads += key
+        val reply = requests.call(DirectWire.CANCEL, DirectWire.cancel(key), NOTICE_TIMEOUT_MS)
+        val stopped = DirectWire.isCancelled(reply)
+        if (!stopped) stoppedDownloads -= key
+        return stopped
+    }
+
+    /** A download the user stopped: not a failure (the screen does not try it again by itself). */
+    class Stopped : DirectEngine.ImessageError(Transfers.STOPPED)
     private val manager: IMessageManager get() = IMessageManager.get(app)
     private val repo: ArchiveRepository get() = manager.repo
 
@@ -377,12 +458,14 @@ class DirectLink private constructor(
         effect: String? = null,
         runs: List<TextRun> = emptyList(),
         scheduledAt: Long? = null,
+        mime: String? = null,
+        name: String? = null,
     ): String {
         val tmpId = UUID.randomUUID().toString()
         val file = repo.outboxFileFor(tmpId)
         copyCapped(uri, file)
-        val given = displayName(uri)
-        val mime = mimeOf(uri, given)
+        val given = name ?: displayName(uri)
+        val mime = mime ?: mimeOf(uri, given)
         // Named as an iPhone names its own voice messages.
         val name = if (voice) "$VOICE_NAME.${DirectMedia.extensionFor(mime, given)}" else given.ifBlank { DirectMedia.nameFor(mime) }
         val (text, formatted) = TextRuns.trimmed(caption.orEmpty(), runs)
@@ -393,6 +476,69 @@ class DirectLink private constructor(
             deliver(tmpId, conversationId, text, replyToId, Outgoing(file, mime, name, voice), effect, runs = formatted, scheduledAt = scheduledAt)
         }
         return tmpId
+    }
+
+    /**
+     * Sends the files at [uris] (photos and videos picked together, [MAX_BATCH] at most) as one
+     * iMessage, as an iPhone sends them, so that both sides show them as one stack; [caption] goes
+     * with them. One local copy now ("tmp:<tmpId>": its first file in the row, the others in its
+     * extra's [IMessageExtra.pending]), the sent message once Apple confirms it. Every file is copied
+     * here first; when one of them cannot be (unreadable, too large), none is kept and nothing is
+     * sent ([DirectEngine.ImessageError]). A single uri is [sendMedia].
+     */
+    fun sendMediaBatch(
+        conversationId: String,
+        uris: List<Uri>,
+        caption: String?,
+        replyToId: String?,
+        effect: String? = null,
+        runs: List<TextRun> = emptyList(),
+        scheduledAt: Long? = null,
+    ): String {
+        require(uris.isNotEmpty())
+        if (uris.size == 1) return sendMedia(conversationId, uris[0], caption, replyToId, effect = effect, runs = runs, scheduledAt = scheduledAt)
+        if (uris.size > MAX_BATCH) throw DirectEngine.ImessageError(app.getString(R.string.imessage_batch_too_many, MAX_BATCH))
+        val tmpId = UUID.randomUUID().toString()
+        val copies = ArrayList<Outgoing>()
+        try {
+            for ((i, uri) in uris.withIndex()) {
+                val file = repo.outboxFileFor(if (i == 0) tmpId else "$tmpId-$i")
+                copyCapped(uri, file)
+                val given = displayName(uri)
+                val mime = mimeOf(uri, given)
+                copies += Outgoing(file, mime, given.ifBlank { DirectMedia.nameFor(mime) }, voice = false)
+            }
+        } catch (e: Exception) {
+            // All or nothing: a batch never goes in part.
+            copies.forEach { it.file.delete() }
+            throw e
+        }
+        val (text, formatted) = TextRuns.trimmed(caption.orEmpty(), runs)
+        if (scheduledAt == null) typingThrottle.sent(conversationId)
+        val first = copies.first()
+        val extra = IMessageExtra(effect = effect, runs = runsOf(formatted), scheduledAt = scheduledAt ?: 0, pending = copies.drop(1).map { IMessageExtra.PendingFile(it.file.path, it.mime, it.name) }).toJson()
+        repo.insertLocalOutgoing(tmpId, conversationId, text, first.file.path, first.mime, first.name, replyToId, scheduledAt ?: System.currentTimeMillis(), extra)
+        inTurn(conversationId) {
+            deliver(tmpId, conversationId, text, replyToId, first, effect, runs = formatted, scheduledAt = scheduledAt, more = copies.drop(1))
+        }
+        return tmpId
+    }
+
+    /**
+     * Sends [file] (one the app made, such as a location's card: [AppleLocation]) as an iMessage
+     * attachment of type [mime] named [name]. As [sendMedia]: a local copy now, the sent message once
+     * Apple confirms it; [file] is copied to the outbox first and can go once this returns.
+     */
+    fun sendFile(conversationId: String, file: File, mime: String, name: String): String =
+        sendMedia(conversationId, Uri.fromFile(file), null, null, mime = mime, name = name)
+
+    /**
+     * Stops the send of local copy [tmpId] while it still uploads ([DirectWire.CANCEL]), before it is
+     * dropped here: asked at once, answered whenever (one already with Apple still arrives, as sent).
+     */
+    fun stopSending(tmpId: String) {
+        if (!active || _transfers.value[DirectWire.sendKey(tmpId)] == null) return
+        scope.launch { runCatching { cancelTransfer(DirectWire.sendKey(tmpId)) } }
     }
 
     /**
@@ -625,6 +771,8 @@ class DirectLink private constructor(
         if (row.localState != LocalState.FAILED) return true
         val extra = IMessageExtra.parse(row.extra)
         val media = row.media.firstOrNull()?.let { Outgoing(File(it.localPath), it.mime, it.fileName, extra.voice) }
+        // "Try Again" on a batch sends all of it again: its other files, only from the outbox.
+        val more = pendingFiles(extra)
         // From failed to waiting, once: of two retries at once only one goes.
         if (!repo.setLocalStateIf(tmpId, LocalState.FAILED, LocalState.PENDING)) return true
         // Send Later whose time has passed meanwhile: it goes now.
@@ -632,10 +780,19 @@ class DirectLink private constructor(
         inTurn(row.conversationId) {
             deliver(
                 tmpId, row.conversationId, row.text, row.replyToId.ifEmpty { null }, media, extra.effect, extra.app, extra.textRuns(row.text), scheduledAt,
-                extra.textMentions(row.text),
+                extra.textMentions(row.text), more = more,
             )
         }
         return true
+    }
+
+    /** A batch's other files, as its local copy keeps them: only those in the iMessage outbox, that are there. */
+    private fun pendingFiles(extra: IMessageExtra): List<Outgoing> {
+        val outbox = DirectPaths.forImessageOutbox(app)
+        return extra.pending.filter { DirectPaths.isAllowed(it.path, outbox) && File(it.path).isFile }.map { p ->
+            val mime = p.mime.ifBlank { DirectMedia.mimeOfName(p.name) ?: DirectMedia.OCTET_STREAM }
+            Outgoing(File(p.path), mime, p.name.ifBlank { DirectMedia.nameFor(mime) }, voice = false)
+        }
     }
 
     /** Sends waiting their turn, by conversation ([inTurn]). */
@@ -682,7 +839,11 @@ class DirectLink private constructor(
         runs: List<TextRun> = emptyList(),
         scheduledAt: Long? = null,
         mentions: List<Mention> = emptyList(),
+        /** The batch's other files (photos picked together go as one message), after [media]. */
+        more: List<Outgoing> = emptyList(),
     ) {
+        val files = listOfNotNull(media) + more
+        val transfer = DirectWire.sendKey(tmpId).takeIf { files.isNotEmpty() && DirectWire.isTransferKey(it) }
         try {
             repo.setLocalState(tmpId, LocalState.SENDING)
             val target = targetOf(conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
@@ -696,16 +857,32 @@ class DirectLink private constructor(
             val replyPart = replyGuid?.let { DirectWire.replyPart(repo.message(replyToId)?.text.orEmpty()) }
             val request = DirectWire.send(
                 target, if (appCard != null) "" else text, replyGuid, replyPart, effect,
-                attachments = listOfNotNull(media?.let { DirectWire.Attachment(it.file.path, it.mime, it.name) }),
+                attachments = files.map { DirectWire.Attachment(it.file.path, it.mime, it.name) },
                 voice = media?.voice == true,
                 app = appCard,
                 runs = if (appCard != null) emptyList() else runs,
                 scheduledMs = scheduledAt,
                 mentions = if (appCard != null) emptyList() else mentions,
                 link = preview?.request,
+                transfer = transfer,
             )
-            // A file is uploaded first: that takes longer than a text.
-            val reply = requests.call(DirectWire.SEND, request, if (media == null) SEND_TIMEOUT_MS else MEDIA_SEND_TIMEOUT_MS)
+            // A file is uploaded first: that takes longer than a text. Its progress shows (the chat's
+            // blue bar) and is waited for while it moves.
+            val sizes = files.map { it.file.length() }
+            if (transfer != null) started(transfer, sizes.firstOrNull() ?: 0, files.size, upload = true, conversationId = conversationId)
+            val reply = try {
+                if (transfer == null) {
+                    requests.call(DirectWire.SEND, request, SEND_TIMEOUT_MS)
+                } else {
+                    requests.call(
+                        DirectWire.SEND, request, MEDIA_MAX_MS,
+                        onProgress = { o -> heard(transfer, o, DirectWire.Progress.fromJson(o)?.let { sizes.getOrNull(it.part) } ?: 0, upload = true) },
+                        idleMs = MEDIA_SEND_TIMEOUT_MS,
+                    )
+                }
+            } finally {
+                if (transfer != null) ended(transfer)
+            }
             DirectWire.errorOf(reply)?.let {
                 throw if (DirectWire.unconfirmed(reply)) DirectEngine.Unconfirmed(it) else DirectEngine.ImessageError(it)
             }
@@ -717,8 +894,8 @@ class DirectLink private constructor(
                     mime = p.mime, fileName = p.name, size = p.size,
                 )
             }
-            // The file sent is the message's from now on: where a download of it would be kept.
-            val kept = media?.let { m -> mediaParts.firstOrNull()?.let { part -> part to keepSent(m.file, part) } }
+            // The files sent are the message's from now on: where a download of each would be kept (in order).
+            val kept = files.zip(mediaParts).map { (m, part) -> part to keepSent(m.file, part) }
             // The preview's picture is the sent message's, as one that came with it would be.
             val link = preview?.let { p -> p.link.copy(image = p.keepFor(sent.guid)) }
             val stored = MessageDto(
@@ -738,7 +915,7 @@ class DirectLink private constructor(
                 isOld = true,
                 // An app's card is the first of its session.
                 extra = IMessageExtra(
-                    voice = media?.voice == true, effect = effect, app = appCard?.copy(root = messageId),
+                    voice = media?.voice == true && more.isEmpty(), effect = effect, app = appCard?.copy(root = messageId),
                     runs = if (appCard != null) emptyMap() else runsOf(runs),
                     scheduledAt = scheduledAt ?: 0,
                     mentions = if (appCard != null) emptyMap() else mentionsOf(mentions),
@@ -749,15 +926,16 @@ class DirectLink private constructor(
             // [apply] held for it is applied now, under the same lock, so none slips between.
             synchronized(this) {
                 repo.upsertMessage(stored)
-                kept?.let { (part, file) -> if (file != null) record(messageId, part.partId, part.mediaId, file, part.mime) }
+                kept.forEach { (part, file) -> if (file != null) record(messageId, part.partId, part.mediaId, file, part.mime) }
                 replayHeld(messageId)
             }
-            // Apple numbered no attachment: the copy has nothing to belong to.
-            if (media != null && kept == null) media.file.delete()
+            // Apple numbered fewer attachments: the copies left have nothing to belong to.
+            files.drop(kept.size).forEach { it.file.delete() }
             IMessageLog.add(
                 app,
                 "${IMessageLog.chatRef(conversationId)}: sent through the iMessage library (Apple confirmed)" +
                     (if (media != null) " with ${if (media.voice) "a voice message" else media.mime.substringBefore('/')}" else "") +
+                    (if (more.isNotEmpty()) " and ${more.size} more file(s), as one message" else "") +
                     (if (effect != null) ", with an effect" else "") +
                     (if (runs.isNotEmpty()) ", formatted" else "") +
                     (if (mentions.isNotEmpty()) ", with ${mentions.size} mention(s)" else "") +
@@ -984,7 +1162,20 @@ class DirectLink private constructor(
         if (file.length() <= 0) {
             // Nothing to download it by: a file that came inside the message, whose copy is gone.
             val descriptor = String(part.key, Charsets.UTF_8).ifEmpty { return null }
-            val reply = requests.call(DirectWire.DOWNLOAD, DirectWire.download(descriptor, file.path), DOWNLOAD_TIMEOUT_MS)
+            // Shown with its progress while it comes, and stoppable ([cancelTransfer]); waited for while it moves.
+            val key = DirectWire.transferKey(part.mediaId).takeIf(DirectWire::isTransferKey)
+            if (key != null) started(key, part.size, 1, upload = false, conversationId = repo.message(messageId)?.conversationId.orEmpty())
+            val reply = try {
+                requests.call(
+                    DirectWire.DOWNLOAD, DirectWire.download(descriptor, file.path, transfer = key), MEDIA_MAX_MS,
+                    onProgress = key?.let { k -> { o: JSONObject -> heard(k, o, part.size, upload = false) } },
+                    idleMs = DOWNLOAD_TIMEOUT_MS,
+                )
+            } finally {
+                if (key != null) ended(key)
+            }
+            val stopped = key != null && stoppedDownloads.remove(key)
+            if (DirectWire.isStopped(reply) || (stopped && DirectWire.errorOf(reply) != null)) throw Stopped()
             DirectWire.errorOf(reply)?.let { throw DirectEngine.ImessageError(it) }
             if (file.length() <= 0) return null
         }
@@ -1965,6 +2156,10 @@ class DirectLink private constructor(
         val sticker = stickerKey != null && update.enable && update.emoji == DirectArchive.STICKER_TAPBACK && update.sticker == stickerKey
         if (sticker) claimPicture(stickerKey!!)
         repo.applyReaction(update.messageId, who, update.emoji, update.enable, update.fromMe, update.atMs)
+        // Which photo it is on, of several sent together (iOS 15): kept with the message, for its stack's grid.
+        val extra = IMessageExtra.parse(row.extra)
+        val parts = IMessageExtra.withTapbackPart(extra.tapbackParts, who, update.part, update.enable)
+        if (parts != extra.tapbackParts) repo.setExtra(row.id, extra.copy(tapbackParts = parts).toJson())
         if (stickerKey != null && !sticker && (update.enable || update.emoji == DirectArchive.STICKER_TAPBACK)) {
             update.sticker?.let(::dropPicture)
             deletePicture(stickerKey)
@@ -2080,6 +2275,63 @@ class DirectLink private constructor(
                 )
             }
         }
+    }
+
+    /** Location cards being fetched, by media id: a second ask waits for the first. */
+    private val locationFetches = HashMap<String, Deferred<Pair<Double, Double>?>>()
+
+    /**
+     * The coordinates of the location card [partId] of message [messageId] ([AppleLocation]): read
+     * from its file when it is here (one that came inside the message is), else fetched now as one
+     * nobody asked for, [AppleLocation.MAX_BYTES] at most, from Apple's own file servers only, and
+     * counted against what its sender's changes may fetch in an hour. Null when it is no location's
+     * card, cannot be had, or holds no coordinates in range. Never logs them.
+     */
+    suspend fun locationOf(messageId: String, partId: String): Pair<Double, Double>? {
+        val part = repo.mediaPart(messageId, partId) ?: return null
+        if (!AppleLocation.isLocation(part.mime, part.fileName)) return null
+        existing(part.localPath)?.let { return readLocation(it) }
+        if (part.inlineIsMedia) return AppleLocation.coordinatesFrom(part.inlineData)
+        if (part.mediaId.isEmpty() || part.size > AppleLocation.MAX_BYTES) return null
+        val job = synchronized(locationFetches) {
+            locationFetches[part.mediaId]?.takeIf { it.isActive } ?: scope.async { fetchLocation(messageId, part) }.also { locationFetches[part.mediaId] = it }
+        }
+        try {
+            return job.await()
+        } finally {
+            synchronized(locationFetches) { if (locationFetches[part.mediaId] === job && job.isCompleted) locationFetches.remove(part.mediaId) }
+        }
+    }
+
+    private fun readLocation(file: File): Pair<Double, Double>? =
+        if (file.length() in 1..AppleLocation.MAX_BYTES.toLong()) runCatching { AppleLocation.coordinatesFrom(file.readBytes()) }.getOrNull() else null
+
+    private suspend fun fetchLocation(messageId: String, part: MediaRow): Pair<Double, Double>? {
+        val row = repo.message(messageId) ?: return null
+        val descriptor = String(part.key, Charsets.UTF_8).ifEmpty { return null }
+        val by = if (row.isOutgoing || row.direction == "out") ME else row.senderId
+        if (!autoFetches.take(by, System.currentTimeMillis())) {
+            refused("a location", row.conversationId, "past what one person's changes may fetch in an hour")
+            return null
+        }
+        val bytes = try {
+            fetchFile(descriptor, AppleLocation.MAX_BYTES.toLong(), LOCATION_FETCH_MS)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Log.w(TAG, "a location was not fetched (${e::class.java.simpleName})")
+            null
+        } ?: return null
+        val coordinates = AppleLocation.coordinatesFrom(bytes)
+        // Kept as the part's file, so it is read from here from now on (and goes with the message).
+        val file = repo.mediaFileFor(part.mediaId, "vcf")
+        try {
+            MediaCache.writeAtomically(file, bytes)
+            synchronized(this) { record(messageId, part.partId, part.mediaId, file, part.mime) }
+        } catch (e: java.io.IOException) {
+            Log.w(TAG, "a location was not kept", e)
+        }
+        return coordinates
     }
 
     /**
@@ -2234,8 +2486,10 @@ class DirectLink private constructor(
         val parts = partsOf(row, extra)
         val partId = DirectArchive.partId(update.part)
         val media = row.media.map { it.partId }
+        // A Live Photo's moving part goes with its still: it is never shown on its own.
+        val motion = extra.live[partId]
         val textLeft = parts - update.part
-        if (textLeft.isEmpty() && (media - partId).isEmpty()) {
+        if (textLeft.isEmpty() && (media - partId - extra.motionParts).isEmpty()) {
             val text = if (update.fromMe || row.isOutgoing) {
                 app.getString(R.string.imessage_you_unsent)
             } else {
@@ -2246,11 +2500,12 @@ class DirectLink private constructor(
             return
         }
         if (partId in media) repo.removeMediaPart(row.id, partId)
+        if (motion != null && motion in media) repo.removeMediaPart(row.id, motion)
         // What it read before an edit is the whole message's, the part unsent among it: that goes too,
         // with the "Edited" by it (the count of edits stays, Apple's five are five).
         val next = extra.copy(
             parts = textLeft, unsent = extra.unsent + update.part, runs = extra.runs - update.part, mentions = extra.mentions - update.part,
-            history = emptyList(),
+            history = emptyList(), live = extra.live - partId,
         )
         repo.editText(row.id, next.text(), 0, next.toJson(), snippetOf(next.text(), row.extra))
     }
@@ -3185,11 +3440,18 @@ class DirectLink private constructor(
         val row = repo.message(messageId)?.takeIf(::undelivered) ?: return null
         if (!canSend(row.conversationId)) return null
         val extra = IMessageExtra.parse(row.extra)
-        val file = row.media.firstNotNullOfOrNull { m -> existing(m.localPath)?.let { it to m } }
+        // Its files that are still here (a Live Photo's moving part never goes: Live Photos are not sent from here).
+        val files = row.media.filter { it.partId !in extra.motionParts }.mapNotNull { m -> existing(m.localPath)?.let { it to m } }
+        val file = files.firstOrNull()
         val reply = row.replyToId.ifEmpty { null }
         val tmpId = if (file != null) {
             try {
-                sendMedia(row.conversationId, Uri.fromFile(file.first), row.text.ifEmpty { null }, reply, extra.voice, extra.effect, extra.textRuns(row.text))
+                if (files.size > 1) {
+                    // Photos sent together go again together, as one message.
+                    sendMediaBatch(row.conversationId, files.take(MAX_BATCH).map { Uri.fromFile(it.first) }, row.text.ifEmpty { null }, reply, extra.effect, extra.textRuns(row.text))
+                } else {
+                    sendMedia(row.conversationId, Uri.fromFile(file.first), row.text.ifEmpty { null }, reply, extra.voice, extra.effect, extra.textRuns(row.text))
+                }
             } catch (e: DirectEngine.ImessageError) {
                 Log.w(TAG, "failed message not sent again: ${com.lightdecoder.imessage.Redact.text(e.message.orEmpty())}")
                 return null
@@ -3784,6 +4046,15 @@ class DirectLink private constructor(
 
         /** A download from Apple may take this long. */
         private const val DOWNLOAD_TIMEOUT_MS = 5 * 60_000L
+
+        /** The longest a transfer of media is waited for however it moves (its idle timeout ends it sooner when it stalls). */
+        private const val MEDIA_MAX_MS = 60 * 60_000L
+
+        /** The longest a location's card is fetched for. */
+        private const val LOCATION_FETCH_MS = 30_000L
+
+        /** The most files one batch sends as one message (photos picked together). */
+        const val MAX_BATCH = 10
 
         /** A sticker's picture fetched without anyone asking may take this long ([fetchSticker]). */
         const val STICKER_FETCH_MS = 20_000L

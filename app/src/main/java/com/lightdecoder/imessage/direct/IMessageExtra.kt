@@ -34,6 +34,13 @@ import org.json.JSONObject
  *   when it became the text; the latest [MAX_HISTORY] of them, each at most [MAX_HISTORY_TEXT_CHARS]
  * @param call    a FaceTime call's row ([com.lightdecoder.imessage.facetime.CallRows]): what the call
  *   was, for its sign and for calling back
+ * @param live    a Live Photo's moving part, by its still: still part id -> motion part id (both `p<idx>`),
+ *   [MAX_LIVE] at most; the motion part is a media row of its own that is never shown ([shownMedia])
+ * @param stickerParts the media parts that are stickers (`p<idx>`, [MAX_MEDIA_MARKS] at most): never in a photo stack
+ * @param tapbackParts which photo of several each person's tapback is on (iOS 15's per-photo tapbacks): participant
+ *   id -> Apple part index (> 0), [MAX_TAPBACK_PARTS] at most; anyone not listed reacted to the message as a whole
+ * @param pending a batch's local copy (photos sent together): the files after its first (which is the
+ *   row's own), in order, [MAX_PENDING] at most, each in the outbox ([DirectPaths]-checked when read)
  *
  * Pure. Tested in IMessageExtraTest.
  */
@@ -54,7 +61,28 @@ data class IMessageExtra(
     val stickers: List<PlacedSticker> = emptyList(),
     val history: List<Version> = emptyList(),
     val call: CallInfo? = null,
+    val live: Map<String, String> = emptyMap(),
+    val stickerParts: List<String> = emptyList(),
+    val pending: List<PendingFile> = emptyList(),
+    val tapbackParts: Map<String, Int> = emptyMap(),
 ) {
+    /** One of a batch's files waiting to go ([pending]): where its copy is, its type and name. */
+    data class PendingFile(val path: String, val mime: String, val name: String) {
+        fun toJson(): JSONObject = JSONObject().put("path", path).put("mime", mime).put("name", name)
+
+        companion object {
+            fun fromJson(o: JSONObject): PendingFile? {
+                val path = (o.opt("path") as? String)?.takeIf { it.isNotBlank() && it.length <= MAX_PENDING_PATH_CHARS } ?: return null
+                val mime = (o.opt("mime") as? String)?.takeIf { it.length <= 128 }.orEmpty()
+                val name = (o.opt("name") as? String)?.take(255).orEmpty()
+                return PendingFile(path, mime, name)
+            }
+        }
+    }
+
+    /** The motion parts of its Live Photos: stored, never shown. */
+    val motionParts: Set<String> get() = live.values.toSet()
+
     /**
      * A FaceTime call, as its row keeps it: the call's guid, who placed it ([outgoing]: the user),
      * audio or [video], how it ended ([outcome]: an [com.lightdecoder.imessage.facetime.Outcome]'s
@@ -260,6 +288,7 @@ data class IMessageExtra(
             pollVotes = stored.pollVotes.ifEmpty { pollVotes },
             pollCards = (stored.pollCards + pollCards).distinct().take(MAX_POLL_CARDS),
             stickers = (stored.stickers + stickers).distinctBy { it.id }.take(MAX_STICKERS),
+            tapbackParts = stored.tapbackParts,
             app = newerPoll?.copy(root = app?.root ?: newerPoll.root) ?: app,
             link = link?.let { l -> if (l.image.isEmpty() && stored.link?.url == l.url) l.copy(image = stored.link.image) else l },
         )
@@ -298,6 +327,10 @@ data class IMessageExtra(
         if (stickers.isNotEmpty()) o.put("stickers", JSONArray().apply { stickers.forEach { put(it.toJson()) } })
         if (history.isNotEmpty()) o.put("history", JSONArray().apply { history.forEach { put(it.toJson()) } })
         call?.let { o.put("call", it.toJson()) }
+        if (live.isNotEmpty()) o.put("live", JSONObject().apply { live.forEach { (k, v) -> put(k, v) } })
+        if (stickerParts.isNotEmpty()) o.put("stickerParts", JSONArray(stickerParts))
+        if (tapbackParts.isNotEmpty()) o.put("tapbackParts", JSONObject().apply { tapbackParts.forEach { (k, v) -> put(k, v) } })
+        if (pending.isNotEmpty()) o.put("pending", JSONArray().apply { pending.forEach { put(it.toJson()) } })
         return if (o.length() == 0) "" else o.toString()
     }
 
@@ -330,6 +363,30 @@ data class IMessageExtra(
 
         /** The most later cards a poll keeps ([pollCards]) and stickers a message keeps ([stickers]). */
         const val MAX_POLL_CARDS = 20
+
+        /** The most Live Photos one message maps ([live]). */
+        const val MAX_LIVE = 32
+
+        /** The most media parts one message marks ([stickerParts]). */
+        const val MAX_MEDIA_MARKS = 64
+
+        /** The most people whose tapback's photo a message keeps ([tapbackParts]). */
+        const val MAX_TAPBACK_PARTS = 64
+
+        /** [tapbackParts] with [who]'s tapback now on part [part] (0 or [enable] false: on none). */
+        fun withTapbackPart(parts: Map<String, Int>, who: String, part: Int, enable: Boolean): Map<String, Int> =
+            if (!enable || part <= 0) parts - who else if (who in parts || parts.size < MAX_TAPBACK_PARTS) parts + (who to part) else parts
+
+        /** The most files a batch's local copy holds beyond its first ([pending]). */
+        const val MAX_PENDING = 9
+
+        /** The longest path [pending] keeps. */
+        const val MAX_PENDING_PATH_CHARS = 1024
+
+        private val PART_ID = Regex("^p[0-9]{1,4}$")
+
+        /** Whether [id] is an attachment part's id as the archive numbers them (`p<idx>`). */
+        fun isPartId(id: String): Boolean = PART_ID.matches(id)
         const val MAX_STICKERS = 20
 
         /** The key the link preview picture of message [guid] is kept under (in the iMessage media folder, a JPEG). */
@@ -424,6 +481,24 @@ data class IMessageExtra(
                         (maxOf(0, a.length() - MAX_HISTORY) until a.length()).mapNotNull { a.optJSONObject(it)?.let(Version::fromJson) }
                     }.orEmpty(),
                     call = o.optJSONObject("call")?.let(CallInfo::fromJson),
+                    live = o.optJSONObject("live")?.let { l ->
+                        l.keys().asSequence().take(MAX_LIVE).mapNotNull { k ->
+                            val v = l.opt(k) as? String
+                            if (isPartId(k) && v != null && isPartId(v) && v != k) k to v else null
+                        }.toMap()
+                    }.orEmpty(),
+                    stickerParts = o.optJSONArray("stickerParts")?.let { a ->
+                        (0 until minOf(a.length(), MAX_MEDIA_MARKS)).mapNotNull { (a.opt(it) as? String)?.takeIf(::isPartId) }.distinct()
+                    }.orEmpty(),
+                    tapbackParts = o.optJSONObject("tapbackParts")?.let { t ->
+                        t.keys().asSequence().take(MAX_TAPBACK_PARTS).mapNotNull { k ->
+                            val v = t.opt(k)
+                            if (k.isNotBlank() && k.length <= Mentions.MAX_HANDLE_CHARS && v is Int && v in 1..9_999) k to v else null
+                        }.toMap()
+                    }.orEmpty(),
+                    pending = o.optJSONArray("pending")?.let { a ->
+                        (0 until minOf(a.length(), MAX_PENDING)).mapNotNull { a.optJSONObject(it)?.let(PendingFile::fromJson) }
+                    }.orEmpty(),
                 )
             } catch (e: JSONException) {
                 IMessageExtra()

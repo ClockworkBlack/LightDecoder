@@ -39,6 +39,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONObject
 import uniffi.rust_bridge.AttachmentType
 import uniffi.rust_bridge.ChatRenameMessage
 import uniffi.rust_bridge.ConversationData
@@ -847,10 +848,12 @@ class DirectEngine private constructor(private val app: Context) {
         scheduledMs: Long? = null,
         mentions: List<Mention> = emptyList(),
         link: DirectWire.LinkPreviewRequest? = null,
-    ): DirectWire.SendReply {
+        transfer: String? = null,
+        onProgress: ((JSONObject) -> Unit)? = null,
+    ): DirectWire.SendReply = transfers.run(transfer) { handle ->
         val s = requireSession()
         val (conversation, from) = conversationOf(target)
-        val uploaded = attachments.map { upload(s, it) }
+        val uploaded = attachments.mapIndexed { i, a -> upload(s, a, uploadProgress(onProgress, i, attachments.size)) }
         val outgoing = if (app != null) DirectMessages.appParts(app, uploaded, move = false) else DirectMessages.outgoing(text, uploaded, runs, mentions)
         // The preview's picture, as the main process made it (a small JPEG): never more than a preview's.
         val linkMeta = link?.takeIf { app == null }?.let { l ->
@@ -865,8 +868,25 @@ class DirectEngine private constructor(private val app: Context) {
             scheduledMs?.let { ScheduleMode(it.toULong(), true) }, null,
         )
         val inst = uniffi.rust_bridge.newMsg(conversation, from, PushChatMessage.Message(message))
+        // From here on it may be with Apple: no longer stopped ([cancel] answers so).
+        if (!handle.commit()) throw Transfers.Stopped()
         sendAndConfirm(s, inst, Sent.MESSAGE)
-        return DirectWire.SendReply(inst.id, inst.sentTimestamp.toLong().takeIf { it > 0 } ?: System.currentTimeMillis(), outgoing.attachments)
+        DirectWire.SendReply(inst.id, inst.sentTimestamp.toLong().takeIf { it > 0 } ?: System.currentTimeMillis(), outgoing.attachments)
+    }
+
+    /** The transfers the user may stop ([DirectWire.CANCEL]): sends until they go to Apple, downloads the user asked for. */
+    private val transfers = Transfers()
+
+    /** Stops the transfer [key] ([DirectWire.CANCEL]): true when it was stopped; false when there is none, or a send is already with Apple. */
+    fun cancel(key: String): Boolean = transfers.cancel(key)
+
+    /** The progress of attachment [part] of [parts] while it uploads, throttled, for [onProgress] (none without it). */
+    private fun uploadProgress(onProgress: ((JSONObject) -> Unit)?, part: Int, parts: Int): ProgressThrottle? =
+        onProgress?.let { emit -> ProgressThrottle { done, total -> emit(DirectWire.progress(done, total, part, parts)) } }
+
+    /** The library's callback for one transfer, made of [p] (which catches whatever its parts throw). */
+    private fun callbackOf(p: TransferProgress) = object : uniffi.rust_bridge.AttachmentProgressCallback {
+        override fun onProgress(transferred: ULong, total: ULong) = p.onProgress(transferred, total)
     }
 
     /**
@@ -891,7 +911,7 @@ class DirectEngine private constructor(private val app: Context) {
     }
 
     /** Puts the file to send on Apple's servers ([DirectMedia.MAX_SEND_BYTES] at most): the attachment the message carries. */
-    private suspend fun upload(s: SharedPushStateHandle, a: DirectWire.Attachment): MessageAttachment {
+    private suspend fun upload(s: SharedPushStateHandle, a: DirectWire.Attachment, ui: ProgressThrottle? = null): MessageAttachment {
         val file = File(a.path)
         if (!file.isFile || file.length() == 0L) throw ImessageError(app.getString(R.string.imessage_direct_attachment_unreadable))
         if (file.length() > DirectMedia.MAX_SEND_BYTES) {
@@ -899,7 +919,13 @@ class DirectEngine private constructor(private val app: Context) {
         }
         val mime = a.mime.ifBlank { DirectMedia.mimeOfName(a.name) ?: DirectMedia.OCTET_STREAM }
         val name = a.name.ifBlank { DirectMedia.nameFor(mime) }
-        val uploaded = call { uniffi.rust_bridge.uploadMmcsAttachment(s, file.path, mime, DirectMedia.utiFor(mime), name, null) }
+        // A fresh callback for this one transfer, as the library asks; none without anyone to tell.
+        val progress = ui?.let { callbackOf(TransferProgress(maxBytes = null, ui = it)) }
+        val uploaded = try {
+            call { uniffi.rust_bridge.uploadMmcsAttachment(s, file.path, mime, DirectMedia.utiFor(mime), name, progress) }
+        } finally {
+            ui?.finish()
+        }
         // With the type and name the main process stored it under.
         return uploaded.copy(mime = mime, name = name)
     }
@@ -1160,14 +1186,25 @@ class DirectEngine private constructor(private val app: Context) {
      * took the change that names it) comes only from Apple's own file servers
      * ([DirectMedia.isAppleFileServer]) and is given that long at most. Returns its size.
      */
-    suspend fun download(descriptor: String, path: String, maxBytes: Long = DirectMedia.MAX_DOWNLOAD_BYTES, automaticMs: Long? = null): Long {
+    suspend fun download(
+        descriptor: String,
+        path: String,
+        maxBytes: Long = DirectMedia.MAX_DOWNLOAD_BYTES,
+        automaticMs: Long? = null,
+        transfer: String? = null,
+        onProgress: ((JSONObject) -> Unit)? = null,
+    ): Long {
         val cap = maxBytes.coerceIn(1L, DirectMedia.MAX_DOWNLOAD_BYTES)
-        if (automaticMs == null) return downloadInto(descriptor, path, cap, automatic = false)
+        // One the user asked for may be stopped and shows its progress; one nobody asked for, neither.
+        if (automaticMs == null) {
+            val ui = onProgress?.let { emit -> ProgressThrottle { done, total -> emit(DirectWire.progress(done, total)) } }
+            return transfers.run(transfer) { downloadInto(descriptor, path, cap, automatic = false, ui = ui) }
+        }
         return withTimeoutOrNull(automaticMs) { downloadInto(descriptor, path, cap, automatic = true) }
             ?: throw ImessageError(app.getString(R.string.imessage_direct_attachment_not_saved))
     }
 
-    private suspend fun downloadInto(descriptor: String, path: String, maxBytes: Long, automatic: Boolean): Long {
+    private suspend fun downloadInto(descriptor: String, path: String, maxBytes: Long, automatic: Boolean, ui: ProgressThrottle? = null): Long {
         val attachment = call { uniffi.rust_bridge.restoreAttachment(descriptor) }
         val file = File(path)
         file.parentFile?.mkdirs()
@@ -1188,7 +1225,7 @@ class DirectEngine private constructor(private val app: Context) {
                     val s = requireSession()
                     // The library makes the file itself, as it does for OpenBubbles: only its name is taken here.
                     partial.delete()
-                    downloadCapped(s, largest, partial.path, maxBytes)
+                    downloadCapped(s, largest, partial.path, maxBytes, ui)
                 }
             }
             if (partial.length() <= 0 || !partial.renameTo(file)) {
@@ -1209,15 +1246,22 @@ class DirectEngine private constructor(private val app: Context) {
      * as the library counts it or as the file on disk grows, the partial file deleted. Throws
      * [ImessageError] then, as for any download that fails.
      */
-    private suspend fun downloadCapped(s: SharedPushStateHandle, file: MmcsFile, path: String, maxBytes: Long) {
+    private suspend fun downloadCapped(s: SharedPushStateHandle, file: MmcsFile, path: String, maxBytes: Long, ui: ProgressThrottle? = null) {
         if (file.size > maxBytes.toULong()) throw tooBigToDownload(maxBytes)
         val target = File(path)
-        val over = java.util.concurrent.atomic.AtomicBoolean(false)
+        val fetching = java.util.concurrent.atomic.AtomicReference<kotlinx.coroutines.Job?>(null)
+        // The cap and the screen's progress in one callback, which never throws into the library.
+        val progress = TransferProgress(maxBytes, onOver = { fetching.get()?.cancel() }, ui = ui)
+        val over = progress.over
         try {
             coroutineScope {
                 val fetch = async {
-                    val self = coroutineContext[kotlinx.coroutines.Job]
-                    call { uniffi.rust_bridge.downloadMmcsFile(s, file, path, progress(maxBytes, over) { self?.cancel() }) }
+                    fetching.set(coroutineContext[kotlinx.coroutines.Job])
+                    try {
+                        call { uniffi.rust_bridge.downloadMmcsFile(s, file, path, callbackOf(progress)) }
+                    } finally {
+                        ui?.finish()
+                    }
                 }
                 val watch = launch {
                     while (isActive) {
@@ -1244,16 +1288,6 @@ class DirectEngine private constructor(private val app: Context) {
         }
         if (over.get()) throw tooBigToDownload(maxBytes)
     }
-
-    /** The library's progress of a download: past [maxBytes], [over] is set and [stop] is called. */
-    private fun progress(maxBytes: Long, over: java.util.concurrent.atomic.AtomicBoolean, stop: () -> Unit) =
-        object : uniffi.rust_bridge.AttachmentProgressCallback {
-            override fun onProgress(transferred: ULong, total: ULong) {
-                if (transferred > maxBytes.toULong() || total > maxBytes.toULong()) {
-                    if (over.compareAndSet(false, true)) stop()
-                }
-            }
-        }
 
     /**
      * The library's conversation for [target] and the address to send from. A one-to-one chat

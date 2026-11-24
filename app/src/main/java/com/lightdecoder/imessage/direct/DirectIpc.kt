@@ -41,6 +41,9 @@ object DirectIpc {
     /** Whether [msg] came from this app (either of its processes): [Message.sendingUid], which Android sets for a Messenger's messages. */
     internal fun fromThisApp(msg: Message): Boolean = msg.sendingUid == android.os.Process.myUid()
 
+    /** A clock that only goes forward, in ms (for the idle timeouts of [Client.call]). */
+    private fun monotonicMs(): Long = System.nanoTime() / 1_000_000
+
     /**
      * Answers requests: [handle] runs off the main thread and returns the reply's JSON. Whatever a
      * request makes [handle] throw, an error too (memory or a stack run out), is its answer, never
@@ -53,8 +56,15 @@ object DirectIpc {
      */
     class Server(
         private val afterReply: (what: Int, request: JSONObject) -> Unit = { _, _ -> },
-        private val handle: suspend (what: Int, request: JSONObject) -> JSONObject,
+        private val handle: suspend (what: Int, request: JSONObject, progress: (JSONObject) -> Unit) -> JSONObject,
     ) {
+        /**
+         * Sends a request's interim [DirectWire.PROGRESS] messages, one at a time and never on the
+         * thread that reports them (the library's own, which a Binder send must not hold up).
+         */
+        private val progressOut = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "imessage-ipc-progress").apply { isDaemon = true }
+        }
         /** The requests being answered ([RequestGate]). */
         internal val requests = RequestGate()
         private val thread = HandlerThread("imessage-ipc-server").apply { start() }
@@ -71,6 +81,11 @@ object DirectIpc {
                     val replyTo = msg.replyTo ?: return
                     val id = msg.data.getLong(DirectWire.KEY_ID)
                     val what = msg.what
+                    // An interim message is never a request.
+                    if (what == DirectWire.PROGRESS || what == DirectWire.REPLY) {
+                        Log.w(TAG, "message $what is no request: dropped")
+                        return
+                    }
                     val request = try {
                         JSONObject(msg.data.getString(DirectWire.KEY_JSON) ?: "{}")
                     } catch (e: org.json.JSONException) {
@@ -84,7 +99,7 @@ object DirectIpc {
                                 DirectWire.error(Client.UNREACHABLE)
                             } else {
                                 try {
-                                    handle(what, request)
+                                    handle(what, request) { p -> progress(replyTo, id, p) }
                                 } catch (e: CancellationException) {
                                     throw e
                                 } catch (e: Exception) {
@@ -126,8 +141,35 @@ object DirectIpc {
             }
         }
 
+        /**
+         * Hands [p] to the asking process as request [id]'s interim message, on [progressOut]: never
+         * throws, whatever happens (the transfer goes on either way).
+         */
+        private fun progress(replyTo: Messenger, id: Long, p: JSONObject) {
+            try {
+                val json = p.toString()
+                progressOut.execute {
+                    try {
+                        replyTo.send(
+                            Message.obtain(null, DirectWire.PROGRESS).apply {
+                                data = Bundle().apply {
+                                    putLong(DirectWire.KEY_ID, id)
+                                    putString(DirectWire.KEY_JSON, json)
+                                }
+                            },
+                        )
+                    } catch (e: Throwable) {
+                        // The asking process went away, or the message could not go: only progress.
+                    }
+                }
+            } catch (e: Throwable) {
+                // Closed, or out of memory: only progress.
+            }
+        }
+
         fun close() {
             thread.quitSafely()
+            progressOut.shutdown()
         }
     }
 
@@ -139,6 +181,12 @@ object DirectIpc {
         private val app = context.applicationContext
         private val thread = HandlerThread("imessage-ipc-client").apply { start() }
         private val pending = ConcurrentHashMap<Long, CompletableDeferred<JSONObject>>()
+
+        /** Who hears each open request's [DirectWire.PROGRESS], by request id; removed when its reply comes. */
+        private val progressListeners = ConcurrentHashMap<Long, (JSONObject) -> Unit>()
+
+        /** When each open request with an idle timeout last heard of its progress ([monotonicMs]). */
+        private val lastHeard = ConcurrentHashMap<Long, Long>()
         private val nextId = AtomicLong(1)
         private val bindLock = Mutex()
 
@@ -149,17 +197,39 @@ object DirectIpc {
         private val replies = Messenger(
             object : Handler(thread.looper) {
                 override fun handleMessage(msg: Message) {
-                    if (msg.what != DirectWire.REPLY || !fromThisApp(msg)) return
-                    val id = msg.data.getLong(DirectWire.KEY_ID)
-                    val json = try {
-                        JSONObject(msg.data.getString(DirectWire.KEY_JSON) ?: "{}")
-                    } catch (e: org.json.JSONException) {
-                        DirectWire.error("Unreadable answer from the other process.")
+                    if (!fromThisApp(msg)) return
+                    when (msg.what) {
+                        DirectWire.REPLY -> {
+                            val id = msg.data.getLong(DirectWire.KEY_ID)
+                            val json = try {
+                                JSONObject(msg.data.getString(DirectWire.KEY_JSON) ?: "{}")
+                            } catch (e: org.json.JSONException) {
+                                DirectWire.error("Unreadable answer from the other process.")
+                            }
+                            // No progress after its answer: one that comes late (Binder keeps no order between threads) is dropped.
+                            progressListeners.remove(id)
+                            lastHeard.remove(id)
+                            pending.remove(id)?.complete(json)
+                        }
+                        DirectWire.PROGRESS -> progressOf(msg)
                     }
-                    pending.remove(id)?.complete(json)
                 }
             },
         )
+
+        /** A [DirectWire.PROGRESS] message: only for a request still open with a listener; what the listener throws stays here. */
+        private fun progressOf(msg: Message) {
+            try {
+                val id = msg.data.getLong(DirectWire.KEY_ID)
+                val listener = progressListeners[id] ?: return
+                if (!pending.containsKey(id)) return
+                val json = JSONObject(msg.data.getString(DirectWire.KEY_JSON) ?: return)
+                lastHeard.computeIfPresent(id) { _, _ -> monotonicMs() }
+                listener(json)
+            } catch (e: Throwable) {
+                Log.w(TAG, "progress not taken (${e::class.java.simpleName})")
+            }
+        }
 
         private val connection = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -207,12 +277,43 @@ object DirectIpc {
             withTimeoutOrNull(BIND_TIMEOUT_MS) { wait.await() }
         }
 
-        /** The other side's answer, or an [DirectWire.error] when it cannot be reached in [timeoutMs]. */
-        suspend fun call(what: Int, request: JSONObject, timeoutMs: Long): JSONObject {
+        /**
+         * The other side's answer, or an [DirectWire.error] when it cannot be reached in [timeoutMs].
+         * [onProgress] hears the request's [DirectWire.PROGRESS] messages until its answer comes. With
+         * [idleMs] the wait ends [idleMs] after the last of them (or after the request, before the
+         * first), but never later than [timeoutMs] after the request: a long transfer that keeps
+         * moving is waited for, one that stalls is not.
+         */
+        suspend fun call(what: Int, request: JSONObject, timeoutMs: Long, onProgress: ((JSONObject) -> Unit)? = null, idleMs: Long? = null): JSONObject {
             val m = connect() ?: return DirectWire.error(UNREACHABLE)
             val id = nextId.getAndIncrement()
             val answer = CompletableDeferred<JSONObject>()
             pending[id] = answer
+            val started = monotonicMs()
+            if (idleMs != null) lastHeard[id] = started
+            if (onProgress != null) {
+                progressListeners[id] = onProgress
+            } else if (idleMs != null) {
+                progressListeners[id] = { }
+            }
+            try {
+                return await(id, answer, started, timeoutMs, idleMs, m, what, request)
+            } finally {
+                progressListeners.remove(id)
+                lastHeard.remove(id)
+            }
+        }
+
+        private suspend fun await(
+            id: Long,
+            answer: CompletableDeferred<JSONObject>,
+            started: Long,
+            timeoutMs: Long,
+            idleMs: Long?,
+            m: Messenger,
+            what: Int,
+            request: JSONObject,
+        ): JSONObject {
             try {
                 m.send(
                     Message.obtain(null, what).apply {
@@ -234,9 +335,22 @@ object DirectIpc {
                 }
                 return notHandedOver(e)
             }
-            return withTimeoutOrNull(timeoutMs) { answer.await() } ?: run {
-                pending.remove(id)
-                DirectWire.error(NO_ANSWER)
+            if (idleMs == null) {
+                return withTimeoutOrNull(timeoutMs) { answer.await() } ?: run {
+                    pending.remove(id)
+                    DirectWire.error(NO_ANSWER)
+                }
+            }
+            val deadline = started + timeoutMs
+            while (true) {
+                val now = monotonicMs()
+                val idleEnd = (lastHeard[id] ?: started) + idleMs
+                val wait = minOf(deadline, idleEnd) - now
+                if (wait <= 0) {
+                    pending.remove(id)
+                    return DirectWire.error(NO_ANSWER)
+                }
+                withTimeoutOrNull(wait) { answer.await() }?.let { return it }
             }
         }
 

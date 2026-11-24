@@ -32,6 +32,17 @@ class ZoomImageView @JvmOverloads constructor(
     /** Single tap (not part of a double tap). */
     var onTap: (() -> Unit)? = null
 
+    /** Touch and hold (a Live Photo plays): null, and a long press does nothing. */
+    var onHold: (() -> Unit)? = null
+
+    /** The finger that held ([onHold]) went up, or the gesture was taken away. */
+    var onRelease: (() -> Unit)? = null
+
+    /** While true (a Live Photo plays over it) the picture neither zooms nor pans. */
+    var zoomSuspended = false
+
+    private var holding = false
+
     /** Fits the picture into the view (centered). */
     private val base = Matrix()
 
@@ -79,6 +90,13 @@ class ZoomImageView @JvmOverloads constructor(
         override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
             onTap?.invoke()
             return true
+        }
+
+        override fun onLongPress(e: MotionEvent) {
+            val hold = onHold ?: return
+            if (scaleDetector.isInProgress || dragDecided) return
+            holding = true
+            hold()
         }
 
         override fun onDoubleTap(e: MotionEvent): Boolean {
@@ -232,6 +250,12 @@ class ZoomImageView @JvmOverloads constructor(
                 }
             }
         }
+        if (holding && (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL)) {
+            holding = false
+            onRelease?.invoke()
+            return true
+        }
+        if (zoomSuspended || holding) return true
         scaleDetector.onTouchEvent(event)
         gestures.onTouchEvent(event)
         return true

@@ -43,7 +43,9 @@ object JunkReports {
     fun message(row: MessageRow, target: DirectWire.Target): DirectWire.JunkMessage? {
         val guid = DirectArchive.guidOf(row.id)?.takeIf { it.isNotBlank() && it.length <= DirectWire.MAX_GUID_CHARS } ?: return null
         val sender = row.senderId.takeIf { it.isNotBlank() }?.let { Handles.normalize(it) } ?: target.peer ?: return null
-        val attachments = row.media.map { String(it.key, Charsets.UTF_8) }
+        // A Live Photo's moving part is never one of its own: only what the chat shows is reported.
+        val motion = IMessageExtra.parse(row.extra).motionParts
+        val attachments = row.media.filter { it.partId !in motion }.map { String(it.key, Charsets.UTF_8) }
             .filter { it.isNotEmpty() && it.length <= DirectWire.MAX_DESCRIPTOR_CHARS }
             .take(DirectWire.MAX_JUNK_ATTACHMENTS)
         return DirectWire.JunkMessage(

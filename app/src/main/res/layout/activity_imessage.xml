@@ -313,6 +313,21 @@
                         android:text="@string/imessage_link_previews_help"
                         android:textAppearance="?attr/textAppearanceBodySmall" />
 
+                    <!-- Addresses for the locations people send (DirectPrefs.locationAddresses): off, as nothing is sent anywhere then. -->
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switchLocationAddresses"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:minHeight="48dp"
+                        android:text="@string/location_show_addresses" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/location_show_addresses_help"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+
                     <!-- A mention notifies even with a chat's alerts hidden (DirectPrefs.notifyWhenMentioned, read in the main process). -->
                     <com.google.android.material.materialswitch.MaterialSwitch
                         android:id="@+id/switchNotifyMentions"

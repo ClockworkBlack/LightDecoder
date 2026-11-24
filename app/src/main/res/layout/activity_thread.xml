@@ -72,6 +72,14 @@
         android:importantForAccessibility="no"
         android:visibility="gone" />
 
+    <!-- iMessage: the chat's sends with files going out, as iPhone's blue bar under the navigation bar. -->
+    <com.google.android.material.progressindicator.LinearProgressIndicator
+        android:id="@+id/sendProgress"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:max="1000"
+        android:visibility="gone" />
+
     <include
         android:id="@+id/banner"
         layout="@layout/view_connection_banner" />

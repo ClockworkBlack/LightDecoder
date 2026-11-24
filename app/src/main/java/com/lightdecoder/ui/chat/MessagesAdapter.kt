@@ -142,7 +142,28 @@ class MessagesAdapter(
 
         /** A FaceTime call's row tapped ([anchor]: the row's words): call back, with video or audio. */
         fun onCallRowTap(row: MessageRow, anchor: View) = Unit
+
+        /** Photos sent together tapped: all of them ([StackGridSheet]). */
+        fun onStackTap(row: MessageRow, parts: List<MediaRow>) = onMediaTap(row, parts.first())
+
+        /** A download's ring tapped: it stops ([com.lightdecoder.imessage.direct.DirectLink.cancelTransfer]). */
+        fun onTransferCancel(key: String) = Unit
+
+        /** A location's card tapped: [coordinates] when its card was read (null: not yet, or none in it). */
+        fun onLocationTap(row: MessageRow, part: MediaRow, coordinates: Pair<Double, Double>?) = Unit
     }
+
+    /**
+     * A location card's coordinates, when known ([com.lightdecoder.imessage.direct.DirectLink.locationOf]); null
+     * until its card was read (the screen reads it, then rebinds the row). Never opened as an address.
+     */
+    var locationOf: (MessageRow, MediaRow) -> Pair<Double, Double>? = { _, _ -> null }
+
+    /** The address of some coordinates, only with "Show addresses for locations" on and once looked up; else null. */
+    var addressOf: (Pair<Double, Double>) -> String? = { null }
+
+    /** The transfers under way, by key ([com.lightdecoder.imessage.direct.DirectLink.transfers]): downloads show a ring. */
+    private var transferState: Map<String, com.lightdecoder.imessage.direct.DirectLink.Transfer> = emptyMap()
 
     /** Messages whose invisible ink was tapped away, by id: their text shows. */
     private val revealed = HashSet<String>()
@@ -1149,7 +1170,10 @@ class MessagesAdapter(
         // or reaction change) would leave a download running for a detached view.
         cancelMedia(container)
         container.removeAllViews()
-        if (row.media.isEmpty()) {
+        // A Live Photo's moving part is never drawn: its still is, marked LIVE.
+        val extra = if (DirectArchive.isImessage(row.id) || row.isLocal) IMessageExtra.parse(row.extra) else NO_EXTRA
+        val parts = row.shownMedia(extra)
+        if (parts.isEmpty()) {
             container.visibility = View.GONE
             return
         }
@@ -1158,35 +1182,170 @@ class MessagesAdapter(
         val metrics = container.resources.displayMetrics
         // As large as a bubble can show it: its width on screen, and tall pictures up to the cap.
         val maxSide = maxOf((MEDIA_MAX_SIDE_DP * metrics.density).toInt(), (metrics.widthPixels * 0.8f).toInt())
-        for (part in row.media) {
-            val pb = ItemMediaPartBinding.inflate(inflater, container, false)
-            val visual = isVisual(part)
-            val audio = !visual && part.mime.startsWith("audio/")
-            pb.mediaFrame.visibility = if (visual) View.VISIBLE else View.GONE
-            pb.mediaFile.visibility = if (visual || audio) View.GONE else View.VISIBLE
-            pb.mediaAudio.visibility = if (audio) View.VISIBLE else View.GONE
-            if (audio) {
-                bindAudio(pb, row, part, contentColor)
-            } else if (visual) {
-                media.bind(pb.mediaImage, row.id, part, maxSide, pb.mediaStatus)
-                pb.mediaPlay.visibility = if (part.mime.startsWith("video/")) View.VISIBLE else View.GONE
-                pb.mediaImage.contentDescription = container.context.getString(
-                    if (part.mime.startsWith("video/")) R.string.chat_media_video else R.string.chat_media_picture
-                )
-                pb.mediaFrame.setOnClickListener { if (opensApp) callbacks.onAppCardTap(row) else callbacks.onMediaTap(row, part) }
-                pb.mediaFrame.setOnLongClickListener {
-                    callbacks.onMessageLongPress(row)
-                    true
+        // Photos sent together in one iMessage show as one collage or stack, as on an iPhone (not an app's card).
+        val segments = if (DirectArchive.isImessage(row.id) && !opensApp) MediaStacks.segments(parts, extra) else parts.map { MediaStacks.Segment.Single(it) }
+        for (segment in segments) {
+            when (segment) {
+                is MediaStacks.Segment.Stack -> container.addView(stackView(inflater, container, row, segment, maxSide))
+                is MediaStacks.Segment.Single -> {
+                    val part = segment.part
+                    if (com.lightdecoder.imessage.direct.AppleLocation.isLocation(part.mime, part.fileName) && DirectArchive.isImessage(row.id)) {
+                        container.addView(locationCard(inflater, container, row, part))
+                    } else {
+                        container.addView(partView(inflater, container, row, part, extra, contentColor, opensApp, maxSide))
+                    }
                 }
-            } else {
-                pb.mediaFileName.text = part.fileName.ifBlank { part.mime.ifBlank { container.context.getString(R.string.chat_media_file) } }
-                pb.mediaFile.setOnClickListener { callbacks.onMediaTap(row, part) }
             }
-            val canAskFullSize = part.needsFullSize && !part.fullSizeRequested && !row.isLocal
-            // Only a thumbnail on the phone so far: the original is asked for without a tap.
-            pb.mediaFullSize.visibility = View.GONE
-            if (canAskFullSize && visual) callbacks.onLoadFullSize(row, part)
-            container.addView(pb.root)
+        }
+    }
+
+    /** One media part: a picture or video still (with its download's ring, and LIVE for a Live Photo), a voice message, or a file. */
+    private fun partView(
+        inflater: LayoutInflater,
+        container: ViewGroup,
+        row: MessageRow,
+        part: MediaRow,
+        extra: IMessageExtra,
+        contentColor: Int,
+        opensApp: Boolean,
+        maxSide: Int,
+    ): View {
+        val pb = ItemMediaPartBinding.inflate(inflater, container, false)
+        val visual = isVisual(part)
+        val audio = !visual && part.mime.startsWith("audio/")
+        pb.mediaFrame.visibility = if (visual) View.VISIBLE else View.GONE
+        pb.mediaFile.visibility = if (visual || audio) View.GONE else View.VISIBLE
+        pb.mediaAudio.visibility = if (audio) View.VISIBLE else View.GONE
+        if (audio) {
+            bindAudio(pb, row, part, contentColor)
+        } else if (visual) {
+            media.bind(pb.mediaImage, row.id, part, maxSide, pb.mediaStatus)
+            pb.mediaPlay.visibility = if (part.mime.startsWith("video/")) View.VISIBLE else View.GONE
+            val live = part.partId in extra.live
+            pb.mediaLive.visibility = if (live) View.VISIBLE else View.GONE
+            pb.mediaImage.contentDescription = container.context.getString(
+                if (part.mime.startsWith("video/")) R.string.chat_media_video else R.string.chat_media_picture
+            ).let { if (live) "$it, ${container.context.getString(R.string.live_photo_badge)}" else it }
+            pb.mediaFrame.setOnClickListener { if (opensApp) callbacks.onAppCardTap(row) else callbacks.onMediaTap(row, part) }
+            pb.mediaFrame.setOnLongClickListener {
+                callbacks.onMessageLongPress(row)
+                true
+            }
+            // A download the user waits for: its ring, which stops it on a tap.
+            if (part.mediaId.isNotEmpty() && com.lightdecoder.imessage.direct.DirectWire.isTransferKey(part.mediaId)) {
+                pb.transferRing.tag = part.mediaId
+                pb.transferRing.setOnClickListener { callbacks.onTransferCancel(part.mediaId) }
+                applyTransfer(pb.transferRing)
+            }
+        } else {
+            pb.mediaFileName.text = part.fileName.ifBlank { part.mime.ifBlank { container.context.getString(R.string.chat_media_file) } }
+            pb.mediaFile.setOnClickListener { callbacks.onMediaTap(row, part) }
+        }
+        val canAskFullSize = part.needsFullSize && !part.fullSizeRequested && !row.isLocal
+        // Only a thumbnail on the phone so far: the original is asked for without a tap.
+        pb.mediaFullSize.visibility = View.GONE
+        if (canAskFullSize && visual) callbacks.onLoadFullSize(row, part)
+        return pb.root
+    }
+
+    /** Photos sent together: a collage (2-3) or a stack (4+); a tap shows them all, a long press is the message's sheet. */
+    private fun stackView(inflater: LayoutInflater, container: ViewGroup, row: MessageRow, segment: MediaStacks.Segment.Stack, maxSide: Int): View {
+        val root = inflater.inflate(R.layout.item_media_stack, container, false)
+        val view = root.findViewById<MediaStackView>(R.id.stackView)
+        val count = root.findViewById<TextView>(R.id.stackCount)
+        val parts = segment.parts
+        val side = MediaStacks.thumbSide(maxSide)
+        view.show(parts.size, segment.style, side)
+        val cards = view.cards
+        for ((i, card) in cards.withIndex()) {
+            // A collage's cards are its photos in order; a stack's top card (the last) is its first photo.
+            val part = if (segment.style == MediaStacks.Style.COLLAGE) parts[i] else parts[cards.size - 1 - i]
+            media.bind(card, row.id, part, side)
+        }
+        count.visibility = if (segment.style == MediaStacks.Style.STACK) View.VISIBLE else View.GONE
+        count.text = parts.size.toString()
+        val context = container.context
+        root.contentDescription = context.getString(R.string.media_stack_description, parts.size)
+        androidx.core.view.ViewCompat.replaceAccessibilityAction(
+            root, androidx.core.view.accessibility.AccessibilityNodeInfoCompat.AccessibilityActionCompat.ACTION_CLICK,
+            context.getString(R.string.media_stack_show_all), null,
+        )
+        root.setOnClickListener { callbacks.onStackTap(row, parts) }
+        root.setOnLongClickListener {
+            callbacks.onMessageLongPress(row)
+            true
+        }
+        return root
+    }
+
+    /**
+     * A location someone sent: a pin, "Current Location" and its coordinates once its small card was
+     * read ("Location" until then), and "Open in Maps". No map is drawn and nothing in the card is opened.
+     */
+    private fun locationCard(inflater: LayoutInflater, container: ViewGroup, row: MessageRow, part: MediaRow): View {
+        val root = inflater.inflate(R.layout.item_location_card, container, false)
+        val title = root.findViewById<TextView>(R.id.locationTitle)
+        val numbers = root.findViewById<TextView>(R.id.locationCoordinates)
+        val address = root.findViewById<TextView>(R.id.locationAddress)
+        val context = container.context
+        val at = locationOf(row, part)
+        if (at != null) {
+            title.setText(R.string.location_current)
+            numbers.text = context.getString(
+                R.string.location_coordinates,
+                com.lightdecoder.imessage.direct.AppleLocation.shown(at.first), com.lightdecoder.imessage.direct.AppleLocation.shown(at.second),
+            )
+            numbers.visibility = View.VISIBLE
+            val shownAddress = addressOf(at)
+            address.text = shownAddress.orEmpty()
+            address.visibility = if (shownAddress.isNullOrEmpty()) View.GONE else View.VISIBLE
+            root.contentDescription = context.getString(R.string.location_card_description, numbers.text)
+        } else {
+            title.setText(R.string.location_untitled)
+            numbers.visibility = View.GONE
+            address.visibility = View.GONE
+            root.contentDescription = context.getString(R.string.location_untitled)
+        }
+        root.setOnClickListener { callbacks.onLocationTap(row, part, locationOf(row, part)) }
+        root.setOnLongClickListener {
+            callbacks.onMessageLongPress(row)
+            true
+        }
+        return root
+    }
+
+    /** Shows [transferState] on one download's ring (found by its tag, the part's media id). */
+    private fun applyTransfer(ring: TransferRing) {
+        val key = ring.tag as? String ?: return
+        val t = transferState[key]?.takeIf { !it.upload }
+        if (t == null) {
+            ring.visibility = View.GONE
+            return
+        }
+        ring.visibility = View.VISIBLE
+        ring.fraction = if (t.total > 0) t.fraction else -1f
+        ring.stateDescriptionCompat(ring.context.getString(R.string.transfer_downloading, TransferRing.percentOf(t.fraction)))
+    }
+
+    private fun View.stateDescriptionCompat(text: String) {
+        androidx.core.view.ViewCompat.setStateDescription(this, text)
+    }
+
+    /** Draws message [messageId] again (its location card was read). */
+    fun rebindMessage(messageId: String) {
+        val at = currentList.indexOfFirst { it is ThreadItem.Message && it.row.id == messageId }
+        if (at >= 0) notifyItemChanged(at)
+    }
+
+    /** The transfers changed: every download ring on screen shows it, without rebinding. */
+    fun updateTransferViews(list: RecyclerView, transfers: Map<String, com.lightdecoder.imessage.direct.DirectLink.Transfer>) {
+        transferState = transfers
+        for (i in 0 until list.childCount) {
+            val holder = list.getChildViewHolder(list.getChildAt(i)) as? MessageHolder ?: continue
+            val container = holder.binding.mediaContainer
+            for (j in 0 until container.childCount) {
+                container.getChildAt(j).findViewById<TransferRing>(R.id.transferRing)?.takeIf { it.tag != null }?.let(::applyTransfer)
+            }
         }
     }
 
@@ -1262,7 +1421,10 @@ class MessagesAdapter(
 
     private fun cancelMedia(container: ViewGroup) {
         for (i in 0 until container.childCount) {
-            container.getChildAt(i).findViewById<ImageView>(R.id.mediaImage)?.let(media::cancel)
+            val child = container.getChildAt(i)
+            child.findViewById<ImageView>(R.id.mediaImage)?.let(media::cancel)
+            // A stack's or collage's cards too.
+            child.findViewById<MediaStackView>(R.id.stackView)?.cards?.forEach(media::cancel)
         }
     }
 

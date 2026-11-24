@@ -596,7 +596,7 @@ class DirectWireTest {
             "SEND" to 1, "UNSEND" to 2, "REACH" to 3, "EDIT" to 4, "REACT" to 5, "TYPING" to 6, "READ" to 7, "DOWNLOAD" to 8,
             "EXTENSION" to 9, "UPDATE" to 10, "BACKGROUND" to 11, "UNSCHEDULE" to 12, "RENAME" to 13, "MEMBERS" to 14,
             "GROUP_PHOTO" to 15, "MARK_UNREAD" to 16, "REPORT_JUNK" to 17, "PEERS" to 18, "FT_CAPABLE" to 19, "CALLER" to 20,
-            "ACCOUNT" to 21, "FT_STATE" to 22, "BLOCKLIST" to 23,
+            "ACCOUNT" to 21, "FT_STATE" to 22, "BLOCKLIST" to 23, "PROGRESS" to 24, "CANCEL" to 25,
         )
         assertEquals(spec, DirectWire.REQUEST_CODES)
         assertEquals(DirectWire.REQUEST_CODES.size, DirectWire.REQUEST_CODES.values.toSet().size)
@@ -723,5 +723,82 @@ class DirectWireTest {
 
     private companion object {
         const val CALL = "BBBBBBBB-0000-4000-8000-000000000002"
+    }
+    // --- B4: progress and cancel ---------------------------------------------------------------------
+
+    @Test
+    fun progressGoesAndComesBack() {
+        val p = DirectWire.Progress.fromJson(JSONObject(DirectWire.progress(500, 1000, 1, 3).toString()))!!
+        assertEquals(DirectWire.Progress(500, 1000, 1, 3), p)
+        assertEquals(0.5f, p.fraction, 0.0001f)
+        assertEquals(24, DirectWire.PROGRESS)
+        assertEquals(25, DirectWire.CANCEL)
+    }
+
+    @Test
+    fun badProgressNumbersAreClampedOrRefused() {
+        fun read(json: String) = DirectWire.Progress.fromJson(JSONObject(json))
+        // More done than the whole, negative, parts out of range: clamped.
+        assertEquals(DirectWire.Progress(10, 10, 0, 1), read("{\"done\":99,\"total\":10}"))
+        assertEquals(DirectWire.Progress(0, 0, 0, 1), read("{\"done\":-5,\"total\":-1,\"part\":-2,\"parts\":-3}"))
+        assertEquals(DirectWire.Progress(1, 2, 31, 32), read("{\"done\":1,\"total\":2,\"part\":500,\"parts\":99999}"))
+        assertEquals(DirectWire.MAX_PROGRESS_BYTES, read("{\"done\":1,\"total\":99999999999999}")!!.total)
+        // Not whole numbers: nothing.
+        assertNull(read("{\"done\":\"NaN\",\"total\":10}"))
+        assertNull(read("{\"done\":1.5,\"total\":10}"))
+        assertNull(read("{\"total\":10}"))
+        assertNull(read("{\"done\":1,\"total\":1e3}"))
+        // Never more than twice the part's own size.
+        assertEquals(DirectWire.Progress(200, 200, 0, 1), DirectWire.Progress(900, 1000, 0, 1).clampedTo(100))
+        assertEquals(DirectWire.Progress(9, 10, 0, 1), DirectWire.Progress(9, 10, 0, 1).clampedTo(0))
+    }
+
+    @Test
+    fun aCancelNamesOnlyATransfersKey() {
+        assertEquals("G-1/p2", DirectWire.cancelKeyOf(JSONObject(DirectWire.cancel(DirectWire.transferKey("G-1/p2")).toString())))
+        val tmp = DirectWire.sendKey("0f8fad5b-d9cb-469f-a165-70867728950e")
+        assertEquals(tmp, DirectWire.cancelKeyOf(DirectWire.cancel(tmp)))
+        for (bad in listOf("", "../etc/passwd", "G/p", "G/p1/../x", "tmp:", "tmp:a/b", "x".repeat(100) + "/p1", "G1/q1")) {
+            assertNull(bad, DirectWire.cancelKeyOf(DirectWire.cancel(bad)))
+        }
+        assertNull(DirectWire.cancelKeyOf(JSONObject().put("key", 5)))
+        assertTrue(DirectWire.isCancelled(DirectWire.cancelled(true)))
+        assertFalse(DirectWire.isCancelled(DirectWire.cancelled(false)))
+        assertFalse(DirectWire.isCancelled(JSONObject().put("cancelled", "true")))
+        assertFalse(DirectWire.isCancelled(DirectWire.error("x").put("cancelled", true)))
+    }
+
+    @Test
+    fun onlyADownloadTheUserAskedForCanBeStoppedAndASendByItsLocalCopy() {
+        val asked = DirectWire.DownloadRequest.fromJson(JSONObject(DirectWire.download("D", "/p", transfer = "G1/p0").toString()))
+        assertEquals("G1/p0", asked.transfer)
+        // An automatic one: never.
+        val automatic = DirectWire.DownloadRequest.fromJson(DirectWire.download("D", "/p", 100, 1000, transfer = "G1/p0").put("transfer", "G1/p0"))
+        assertNull(automatic.transfer)
+        assertNull(DirectWire.DownloadRequest.fromJson(DirectWire.download("D", "/p").put("transfer", "tmp:abc")).transfer)
+        val target = DirectWire.Target(listOf("tel:+15551234567"), null, null, "tel:+15550000001")
+        val send = DirectWire.SendRequest.fromJson(JSONObject(DirectWire.send(target, "", null, transfer = "tmp:abc").toString()))
+        assertEquals("tmp:abc", send.transfer)
+        assertNull(DirectWire.SendRequest.fromJson(DirectWire.send(target, "", null, transfer = "G1/p0")).transfer)
+        assertNull(DirectWire.SendRequest.fromJson(DirectWire.send(target, "", null)).transfer)
+    }
+
+    @Test
+    fun aStoppedTransferAnswersAsStopped() {
+        val reply = JSONObject(DirectWire.failure(Transfers.Stopped()).toString())
+        assertTrue(DirectWire.isStopped(reply))
+        assertEquals(Transfers.STOPPED, DirectWire.errorOf(reply))
+        assertFalse(DirectWire.isStopped(DirectWire.failure(DirectEngine.ImessageError("no"))))
+        assertFalse(DirectWire.isStopped(DirectWire.ok().put("stopped", true)))
+    }
+
+    @Test
+    fun aTapbacksPhotoCrossesWithIt() {
+        val r = DirectArchive.Update.Reaction("imsg:G", "+15551234567", "❤️", true, false, 1, "imsg:x", part = 3)
+        assertEquals(3, (DirectWire.decode(JSONObject(DirectWire.encode(r).toString())) as DirectArchive.Update.Reaction).part)
+        val whole = DirectWire.decode(JSONObject(DirectWire.encode(r.copy(part = 0)).toString())) as DirectArchive.Update.Reaction
+        assertEquals(0, whole.part)
+        val far = DirectWire.encode(r).put("part", 1_000_000)
+        assertEquals(DirectArchive.MAX_PART_INDEX, (DirectWire.decode(far) as DirectArchive.Update.Reaction).part)
     }
 }

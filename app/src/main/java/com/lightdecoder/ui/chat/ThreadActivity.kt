@@ -425,6 +425,13 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         updateThreadsInChat()
         updatePhoneStyle()
         lifecycleScope.launch { voicePlayer.state.collect { adapter.updateVoiceViews(binding.messages, it) } }
+        // iMessage through the library: downloads' rings and the chat's blue send bar, while the screen is started.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                if (!directMode()) return@repeatOnLifecycle
+                com.lightdecoder.imessage.direct.DirectLink.get(applicationContext).transfers.collect(::showTransfers)
+            }
+        }
         if (VoicePrefs.readNewAloud(this) && !reader.isAvailable) noteReaderUnavailable()
         savedInstanceState?.getString(STATE_REPLY_TO)?.let(::restoreReply)
         if (savedInstanceState == null) takeShared(intent)
@@ -487,6 +494,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             it.canVote = { row -> com.lightdecoder.imessage.direct.DirectLink.get(this).canVote(row, reachable = row.conversationId in directReachable) }
             it.pictureFile = { key -> com.lightdecoder.imessage.direct.DirectLink.pictureFile(applicationContext, key) }
             it.notDelivered = ::notDeliveredHere
+            it.locationOf = ::locationOf
+            it.addressOf = ::addressOf
         }
         binding.messages.adapter = adapter
         updatePhoneStyle()
@@ -724,6 +733,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             it.canVote = { row -> com.lightdecoder.imessage.direct.DirectLink.get(this).canVote(row, reachable = row.conversationId in directReachable) }
             it.pictureFile = { key -> com.lightdecoder.imessage.direct.DirectLink.pictureFile(applicationContext, key) }
             it.notDelivered = ::notDeliveredHere
+            it.locationOf = ::locationOf
+            it.addressOf = ::addressOf
         }
         layoutManager = LinearLayoutManager(this).apply { stackFromEnd = true }
         binding.messages.layoutManager = layoutManager
@@ -2579,6 +2590,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
         if (phoneStyle) choices += R.string.imessage_attach_stickers to { showStickers() }
         pollChat()?.let { pollChat -> choices += R.string.imessage_attach_poll to { askPoll(pollChat) } }
+        // "Send My Current Location", in iMessage chats the library reaches only.
+        pollChat()?.let { locationChat -> choices += R.string.location_attach to { askLocation(locationChat) } }
         confirmDialog?.dismiss()
         confirmDialog = MaterialAlertDialogBuilder(this)
             .setItems(choices.map { getString(it.first) }.toTypedArray()) { _, which -> choices[which].second() }
@@ -2865,10 +2878,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         runs: List<TextRun> = emptyList(),
         scheduledAt: Long? = null,
     ) {
-        files.forEachIndexed { i, file ->
+        // Picked together, they go together: one iMessage (an iPhone shows them as one stack), as many
+        // as one may hold at a time; the text, reply and effect with the first.
+        files.chunked(com.lightdecoder.imessage.direct.DirectLink.MAX_BATCH).forEachIndexed { i, batch ->
             val first = i == 0
-            im.sendMedia(
-                chat, file, text.ifEmpty { null }.takeIf { first }, replyTo.takeIf { first }, effect.takeIf { first },
+            im.sendMediaBatch(
+                chat, batch, text.ifEmpty { null }.takeIf { first }, replyTo.takeIf { first }, effect.takeIf { first },
                 if (first) runs else emptyList(), scheduledAt,
             )
         }
@@ -3829,6 +3844,153 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             }
         }
         dialog.show()
+    }
+
+    // --- media in the transcript (SPEC2 B4) -------------------------------------------------------
+
+    /** The transfers under way: downloads' rings (no rebinding), and this chat's sends as the blue bar. */
+    private fun showTransfers(all: Map<String, com.lightdecoder.imessage.direct.DirectLink.Transfer>) {
+        adapter.updateTransferViews(binding.messages, all)
+        val chats = setOfNotNull(conversationId, companionId)
+        val bar = com.lightdecoder.imessage.direct.DirectLink.SendBars.sendBar(all, chats)
+        val view = binding.sendProgress
+        if (bar == null) {
+            view.visibility = View.GONE
+            return
+        }
+        view.visibility = View.VISIBLE
+        view.setProgressCompat((bar.fraction * 1000).toInt(), true)
+        view.contentDescription = getString(R.string.transfer_sending, bar.file, bar.files)
+    }
+
+    override fun onTransferCancel(key: String) {
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(applicationContext)
+        lifecycleScope.launch {
+            val stopped = withContext(Dispatchers.IO) { runCatching { direct.cancelTransfer(key) }.getOrDefault(false) }
+            if (stopped) toast(getString(R.string.transfer_stopped))
+        }
+    }
+
+    /** Photos sent together: all of them in a grid ("N Photos"); a tap on one opens it full screen. */
+    override fun onStackTap(row: MessageRow, parts: List<MediaRow>) {
+        StackGridSheet.show(this, media, row, parts) { part -> onMediaTap(row, part) }
+    }
+
+    /** Location cards read so far, by message and part: their coordinates, or null for none. */
+    private val locations = HashMap<String, Pair<Double, Double>?>()
+
+    /** Addresses looked up so far ("Show addresses for locations" only), by coordinates. */
+    private val addresses = HashMap<Pair<Double, Double>, String?>()
+
+    /**
+     * A location card's coordinates when its card was read; null until then, and the card is read
+     * now (fetched as an automatic download: Apple's servers only, 16 KB at most), its row drawn again.
+     */
+    private fun locationOf(row: MessageRow, part: MediaRow): Pair<Double, Double>? {
+        val key = row.id + "|" + part.partId
+        if (key in locations) return locations[key]
+        locations[key] = null
+        if (!com.lightdecoder.imessage.direct.DirectArchive.isImessage(row.id)) return null
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(applicationContext)
+        lifecycleScope.launch {
+            val at = withContext(Dispatchers.IO) { runCatching { direct.locationOf(row.id, part.partId) }.getOrNull() }
+            if (at != null) {
+                locations[key] = at
+                adapter.rebindMessage(row.id)
+            }
+        }
+        return null
+    }
+
+    /** The address of [at] with "Show addresses for locations" on (Android's Geocoder, looked up once); else null. */
+    private fun addressOf(at: Pair<Double, Double>): String? {
+        if (!com.lightdecoder.imessage.direct.DirectPrefs.locationAddresses(this)) return null
+        if (at in addresses) return addresses[at]
+        addresses[at] = null
+        lifecycleScope.launch {
+            val found = withContext(Dispatchers.IO) { LocationAddresses.lookUp(applicationContext, at.first, at.second) }
+            if (found != null) {
+                addresses[at] = found
+                adapter.notifyDataSetChanged()
+            }
+        }
+        return null
+    }
+
+    /** A location card: its own `geo:` address (never the card's URL) to a map app the user picks. */
+    override fun onLocationTap(row: MessageRow, part: MediaRow, coordinates: Pair<Double, Double>?) {
+        val at = coordinates ?: return toast(getString(R.string.location_unavailable))
+        val view = Intent(Intent.ACTION_VIEW, Uri.parse(com.lightdecoder.imessage.direct.AppleLocation.geoUri(at.first, at.second)))
+        if (view.resolveActivity(packageManager) == null) return toast(getString(R.string.location_no_app))
+        try {
+            startActivity(Intent.createChooser(view, getString(R.string.location_open_in_maps)))
+        } catch (e: android.content.ActivityNotFoundException) {
+            toast(getString(R.string.location_no_app))
+        }
+    }
+
+    /** "+" > Location: asked for the permission only now, then the location found, shown, and sent once confirmed. */
+    private var locationChat: String? = null
+
+    private val locationPermission = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { granted ->
+        val chat = locationChat ?: return@registerForActivityResult
+        locationChat = null
+        if (granted.values.any { it }) findLocationFor(chat) else toast(getString(R.string.location_permission_denied))
+    }
+
+    @VisibleForTesting
+    internal fun askLocation(chat: String) {
+        if (CurrentLocation.permitted(this)) return findLocationFor(chat)
+        locationChat = chat
+        locationPermission.launch(CurrentLocation.PERMISSIONS)
+    }
+
+    private fun findLocationFor(chat: String) {
+        toast(getString(R.string.location_finding))
+        lifecycleScope.launch {
+            val at = CurrentLocation.get(applicationContext) ?: return@launch toast(getString(R.string.location_unavailable))
+            confirmLocation(chat, at)
+        }
+    }
+
+    /** "Send My Current Location?" with the coordinates it would send: nothing goes without [Send]. */
+    @VisibleForTesting
+    internal fun confirmLocation(chat: String, at: Pair<Double, Double>) {
+        val shown = getString(
+            R.string.location_coordinates,
+            com.lightdecoder.imessage.direct.AppleLocation.shown(at.first), com.lightdecoder.imessage.direct.AppleLocation.shown(at.second),
+        )
+        confirmDialog?.dismiss()
+        confirmDialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.location_send_title)
+            .setMessage(shown)
+            .setPositiveButton(R.string.location_send) { _, _ -> sendLocation(chat, at) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+        (confirmDialog as? androidx.appcompat.app.AlertDialog)?.getButton(android.content.DialogInterface.BUTTON_POSITIVE)?.filterTouchesWhenObscured = true
+    }
+
+    private fun sendLocation(chat: String, at: Pair<Double, Double>) {
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(applicationContext)
+        scrollToBottomNext = true
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    // Written where shared files wait, under a name of its own; the outbox keeps its copy.
+                    val id = java.util.UUID.randomUUID().toString()
+                    val dir = File(cacheDir, "shared-in/$id").apply { mkdirs() }
+                    val name = com.lightdecoder.imessage.direct.AppleLocation.fileName(id)
+                    val file = File(dir, name)
+                    try {
+                        file.writeText(com.lightdecoder.imessage.direct.AppleLocation.toVcf(at.first, at.second))
+                        direct.sendFile(chat, file, com.lightdecoder.imessage.direct.AppleLocation.MIME, name)
+                    } finally {
+                        file.delete()
+                        dir.delete()
+                    }
+                }
+            }.onFailure { toast(com.lightdecoder.imessage.direct.DirectEngine.readable(it)) }
+        }
     }
 
     override fun onMediaTap(row: MessageRow, part: MediaRow) {

@@ -197,6 +197,8 @@ object DirectArchive {
             val groupGuid: String? = null,
             val sticker: String? = null,
             val stickerFile: String = "",
+            /** The part of the message it is on (a photo of several sent together), 0 for the message as a whole. */
+            val part: Int = 0,
         ) : Update()
 
         /**
@@ -457,7 +459,10 @@ object DirectArchive {
                     val sticker = (r.reaction as? Reaction.Sticker)?.takeIf { r.enable && stickerAttachment(m) != null }
                         ?.let { IMessageExtra.tapbackStickerKey(m.v1.toUuid, if (fromMe) TAPBACK_ME else Handles.display(sender)) }
                     val file = if (sticker != null) stickerFile(m, describe) else ""
-                    Update.Reaction(messageId(m.v1.toUuid), Handles.display(sender), emojiOf(r.reaction), r.enable, fromMe, at, chat, guid, sticker, file)
+                    Update.Reaction(
+                        messageId(m.v1.toUuid), Handles.display(sender), emojiOf(r.reaction), r.enable, fromMe, at, chat, guid, sticker, file,
+                        part = partOf(m.v1.toPart),
+                    )
                 }
                 is ReactMessageType.Extension -> appUpdate(inst, m.v1.toUuid, r, me, nameOf, texts, describe, now)
             }
@@ -612,6 +617,8 @@ object DirectArchive {
             runs = if (n.app == null) TextRuns.fromParts(n.parts).filterKeys { it in partTexts } else emptyMap(),
             scheduledAt = n.scheduledAt,
             mentions = if (n.app == null) Mentions.fromParts(n.parts, me).filterKeys { it in partTexts } else emptyMap(),
+            live = liveOf(attachments),
+            stickerParts = attachments.filter { it.sticker }.map { it.partId }.take(IMessageExtra.MAX_MEDIA_MARKS),
         )
         val msg = MessageDto(
             id = messageId(inst.id),
@@ -737,7 +744,16 @@ object DirectArchive {
      * `p<idx>`, media id `<GUID>/p<idx>`), its real type, file name and size, and the library's
      * attachment ([source]) it came as.
      */
-    class Attachment(val idx: Int, val mime: String, val name: String, val size: Long, val sticker: Boolean, val source: MessageAttachment) {
+    class Attachment(
+        val idx: Int,
+        val mime: String,
+        val name: String,
+        val size: Long,
+        val sticker: Boolean,
+        val source: MessageAttachment,
+        /** A Live Photo's moving part: the Apple part index of the still it belongs to; null for any other attachment. */
+        val liveOf: Int? = null,
+    ) {
         val partId: String get() = DirectArchive.partId(idx)
 
         /** The file's bytes when they came inside the message (a small file), else null: it is downloaded. */
@@ -746,22 +762,30 @@ object DirectArchive {
 
     /**
      * A message's attachments, in order. The moving part of a Live Photo (an `iris` attachment
-     * right after a picture, whether or not the still is marked `iris` too) is left out: the still
-     * shows, as on an Android phone. A sticker is a picture.
+     * right after a picture, whether or not the still is marked `iris` too) is kept as an attachment
+     * of its own marked [Attachment.liveOf] its still: stored, never shown, fetched only when the user
+     * holds the still in the gallery. A sticker is a picture.
      */
     fun attachments(parts: List<IndexedMessagePart>): List<Attachment> {
         val out = ArrayList<Attachment>()
         val indexes = partIndexes(parts)
         // The picture just kept, whose moving part may come next (once: a moving part has no other).
-        var still = false
+        var still: Int? = null
         for ((i, p) in parts.withIndex()) {
             val att = (p.part as? MessagePart.Attachment)?.v1
             if (att == null) {
-                still = false
+                still = null
                 continue
             }
-            if (att.iris && still) {
-                still = false
+            val stillIdx = still
+            if (att.iris && stillIdx != null) {
+                still = null
+                val mime = DirectMedia.mimeFor(att.mime, att.utiType, att.name)
+                val size = when (val t = att.aType) {
+                    is AttachmentType.Inline -> t.v1.size.toLong()
+                    is AttachmentType.Mmcs -> t.v1.maxOfOrNull { it.size }?.toLong() ?: 0L
+                }
+                out += Attachment(indexes[i], mime, att.name, size, false, att, liveOf = stillIdx)
                 continue
             }
             val sticker = p.ext is PartExtension.Sticker
@@ -772,7 +796,7 @@ object DirectArchive {
                 is AttachmentType.Mmcs -> t.v1.maxOfOrNull { it.size }?.toLong() ?: 0L
             }
             out += Attachment(indexes[i], mime, att.name, size, sticker, att)
-            still = mime.startsWith("image/")
+            still = indexes[i].takeIf { mime.startsWith("image/") }
         }
         return out
     }
@@ -806,6 +830,16 @@ object DirectArchive {
             )
         }
     }
+
+    /** A tapback's part (Apple's index), bounded: 0 when there is none or it is out of range. */
+    internal fun partOf(toPart: ULong?): Int = toPart?.takeIf { it <= MAX_PART_INDEX.toULong() }?.toInt() ?: 0
+
+    /** The highest part index a tapback may name. */
+    const val MAX_PART_INDEX = 9_999
+
+    /** Each Live Photo's still and moving part ([IMessageExtra.live]), by part id: at most [IMessageExtra.MAX_LIVE]. */
+    internal fun liveOf(attachments: List<Attachment>): Map<String, String> =
+        attachments.mapNotNull { a -> a.liveOf?.let { partId(it) to a.partId } }.take(IMessageExtra.MAX_LIVE).toMap()
 
     /** A sticker whose type Apple did not say: Apple's stickers are HEIC pictures. */
     private const val STICKER_MIME = "image/heic"

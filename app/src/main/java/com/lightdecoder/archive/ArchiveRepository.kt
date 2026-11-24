@@ -358,6 +358,21 @@ class ArchiveRepository private constructor(
     }
 
     /**
+     * Only a message's extra changes (what a service keeps with it, such as which photo a tapback is
+     * on): its text, snippet and everything else stay. False if there is no such message.
+     */
+    fun setExtra(messageId: String, extra: String): Boolean = write { b ->
+        val conversationId = query(b.db, "SELECT conversation_id FROM messages WHERE message_id = ?", arrayOf(messageId)) { it.getString(0).orEmpty() }
+            .firstOrNull() ?: return@write false
+        b.db.update("messages", ContentValues().apply {
+            put("extra_json", extra)
+            put("updated_at", b.now)
+        }, "message_id = ?", arrayOf(messageId))
+        b.changed(Kind.MESSAGES, conversationId)
+        true
+    }
+
+    /**
      * The sender edited a message: its new [text], edited at [editedAtMs],
      * and (when not null) its new [extra]. Its reactions, media and status
      * stay as they are. The search index follows, and so does the

@@ -679,4 +679,30 @@
     <string name="blocked_contacts_full">The block list is full.</string>
     <string name="blocked_contacts_already">Already blocked.</string>
     <string name="blocked_contacts_unblock_description">Unblock %1$s</string>
+    <!-- B4: media in the transcript -->
+    <string name="imessage_batch_too_many">You can send up to %1$d photos and videos at once.</string>
+    <string name="transfer_stop_download">Stop Download</string>
+    <string name="transfer_downloading">Downloading, %1$d%%</string>
+    <string name="transfer_stopped">Download stopped</string>
+    <string name="transfer_sending">Sending %1$d of %2$d</string>
+    <string name="media_stack_title">%1$d Photos</string>
+    <string name="media_stack_description">%1$d photos</string>
+    <string name="media_stack_show_all">Show All</string>
+    <string name="live_photo_badge">LIVE</string>
+    <string name="live_photo_hint">Touch and hold to play the Live Photo.</string>
+    <string name="live_photo_unavailable">The Live Photo could not be played.</string>
+    <string name="location_current">Current Location</string>
+    <string name="location_untitled">Location</string>
+    <string name="location_open_in_maps">Open in Maps</string>
+    <string name="location_coordinates">%1$s, %2$s</string>
+    <string name="location_no_app">No app on this phone can show a location.</string>
+    <string name="location_attach">Location</string>
+    <string name="location_send_title">Send My Current Location?</string>
+    <string name="location_send">Send</string>
+    <string name="location_finding">Finding your location…</string>
+    <string name="location_unavailable">Your location is not available right now.</string>
+    <string name="location_permission_denied">Allow location access to send your location.</string>
+    <string name="location_show_addresses">Show addresses for locations</string>
+    <string name="location_show_addresses_help">Looks up the address of a location someone sent with Android\'s address service, which sends its coordinates to that service. Off: only the coordinates show.</string>
+    <string name="location_card_description">Location, %1$s</string>
 </resources>

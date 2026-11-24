@@ -36,7 +36,7 @@ class DirectService : Service() {
     /** FaceTime's lines for the main process's iMessage log, the oldest dropped when it cannot keep up. */
     private val notes = kotlinx.coroutines.channels.Channel<String>(64, kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST)
 
-    private val server = DirectIpc.Server(afterReply = ::afterReply) { what, request ->
+    private val server = DirectIpc.Server(afterReply = ::afterReply) { what, request, progress ->
         when (what) {
             DirectWire.SEND -> {
                 val r = DirectWire.SendRequest.fromJson(request)
@@ -45,7 +45,12 @@ class DirectService : Service() {
                 // A link preview's picture only from where the main process keeps them (the iMessage media
                 // folder); one from anywhere else goes without its picture.
                 val link = r.link?.let { l -> if (l.imagePath != null && !DirectPaths.isAllowed(l.imagePath, DirectPaths.forImessageMedia(this))) l.copy(imagePath = null) else l }
-                engine.send(r.target, r.text, r.replyGuid, r.replyPart, r.effect, r.attachments, r.voice, r.app, r.runs, r.scheduledMs, r.mentions, link).toJson()
+                // Its upload's progress (attachments only) goes back on this request, and it can be stopped until it is handed to Apple.
+                val shows = r.transfer != null && r.attachments.isNotEmpty()
+                engine.send(
+                    r.target, r.text, r.replyGuid, r.replyPart, r.effect, r.attachments, r.voice, r.app, r.runs, r.scheduledMs, r.mentions, link,
+                    transfer = r.transfer, onProgress = if (shows) progress else null,
+                ).toJson()
             }
             DirectWire.EXTENSION -> {
                 val r = DirectWire.ExtensionRequest.fromJson(request)
@@ -100,7 +105,15 @@ class DirectService : Service() {
                 val r = DirectWire.DownloadRequest.fromJson(request)
                 // Written only into the app's own media folders, never over the library's state or outside the app.
                 DirectPaths.require(this, r.path, getString(R.string.imessage_direct_attachment_not_saved))
-                DirectWire.downloaded(engine.download(r.descriptor, r.path, r.maxBytes, r.automaticMs))
+                // Progress only for one the user asked for (never an automatic one), and only when it can be stopped.
+                DirectWire.downloaded(
+                    engine.download(r.descriptor, r.path, r.maxBytes, r.automaticMs, r.transfer, if (r.automaticMs == null && r.transfer != null) progress else null),
+                )
+            }
+            DirectWire.CANCEL -> {
+                // Only a transfer's key, as the main process makes them; nothing is looked up by anything else.
+                val key = DirectWire.cancelKeyOf(request) ?: throw DirectEngine.ImessageError("No transfer")
+                DirectWire.cancelled(engine.cancel(key))
             }
             DirectWire.BACKGROUND -> {
                 val r = DirectWire.BackgroundRequest.fromJson(request)

@@ -91,6 +91,16 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
     <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <!--
+        "Send My Current Location" in an iMessage chat (SPEC2 B4.4): asked only when the user picks
+        "+" > Location, used only while the screen is open. Never in the background (no
+        ACCESS_BACKGROUND_LOCATION), never kept, never logged.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-feature
+        android:name="android.hardware.location"
+        android:required="false" />
     <uses-feature
         android:name="android.hardware.camera"
         android:required="false" />
@@ -114,6 +124,11 @@
         </intent>
         <intent>
             <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+        <!-- So a location card can say when no map app is there to open its coordinates (SPEC2 B4.4). -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="geo" />
         </intent>
         <!-- So "Open Discord app" on the Discord tab can hand a conversation to the official app. -->
         <package android:name="com.discord" />

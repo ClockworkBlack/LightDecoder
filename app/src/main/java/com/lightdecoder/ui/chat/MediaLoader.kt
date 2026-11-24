@@ -80,6 +80,9 @@ class MediaLoader(
     private val jobs = WeakHashMap<ImageView, Job>()
     private val permits = Semaphore(PARALLEL)
 
+    /** Parts whose download the user stopped (its ring tapped): not fetched again in the bubble; a tap opens it. */
+    private val stopped = HashSet<String>()
+
     /** Parts that turned out not to be pictures; not tried again. */
     private val notPictures = HashSet<String>()
 
@@ -122,7 +125,7 @@ class MediaLoader(
         }
         val cachedStandIn = cache.get(standInKey(key))
         if (cachedStandIn != null) show(view, cachedStandIn, standIn = true) else showLoading(view)
-        if (key in notPictures) {
+        if (key in notPictures || key in stopped) {
             settle(view)
             return
         }
@@ -170,6 +173,8 @@ class MediaLoader(
                 when (failure) {
                     Failure.NOT_A_PICTURE -> notPictures.add(key)
                     Failure.UNAVAILABLE -> hadFailures = true
+                    // Stopped by the user: not tried again until the row is drawn anew (a tap opens it).
+                    Failure.STOPPED -> stopped.add(key)
                     Failure.NEEDS_CONNECTION -> {
                         needsConnection.add(key)
                         hadFailures = true
@@ -218,7 +223,7 @@ class MediaLoader(
     }
 
     /** Why the picture itself could not be had. */
-    private enum class Failure { NOT_A_PICTURE, UNAVAILABLE, NEEDS_CONNECTION }
+    private enum class Failure { NOT_A_PICTURE, UNAVAILABLE, NEEDS_CONNECTION, STOPPED }
 
     private sealed class Loaded {
         /** The picture itself (for a video: its still). */
@@ -240,6 +245,9 @@ class MediaLoader(
         class Got(val file: File) : Fetched()
         object None : Fetched()
         object NeedsConnection : Fetched()
+
+        /** The user stopped its download: no failure (nothing is tried again by itself), the stand-in stays. */
+        object Stopped : Fetched()
     }
 
     private fun isVideo(part: MediaRow) = part.mime.startsWith("video/")
@@ -277,11 +285,16 @@ class MediaLoader(
         onStandIn: suspend (Bitmap) -> Unit,
     ): Loaded {
         var needsConnection = false
+        var stopped = false
         suspend fun fetch(thumbnail: Boolean): ByteArray? = when (val fetched = download(messageId, part, thumbnail)) {
             is Fetched.Got -> readCapped(fetched.file)
             Fetched.None -> null
             Fetched.NeedsConnection -> {
                 needsConnection = true
+                null
+            }
+            Fetched.Stopped -> {
+                stopped = true
                 null
             }
         }
@@ -331,7 +344,7 @@ class MediaLoader(
             ?: (if (part.inlineIsMedia) part.inlineData else null)
             ?: fetch(thumbnail = false)
         val failure = if (bytes == null) {
-            if (needsConnection) Failure.NEEDS_CONNECTION else Failure.UNAVAILABLE
+            if (stopped) Failure.STOPPED else if (needsConnection) Failure.NEEDS_CONNECTION else Failure.UNAVAILABLE
         } else {
             currentCoroutineContext().ensureActive()
             try {
@@ -342,8 +355,8 @@ class MediaLoader(
                 Failure.UNAVAILABLE
             }
         }
-        // No picture for now: the thumbnail, downloaded only now, if nothing shows yet.
-        if (standIn == null && !haveStandIn) standIn = decode(fetch(thumbnail = true), maxSide)
+        // No picture for now: the thumbnail, downloaded only now, if nothing shows yet (not once the user stopped it).
+        if (standIn == null && !haveStandIn && !stopped) standIn = decode(fetch(thumbnail = true), maxSide)
         return if (standIn != null) Loaded.StandIn(standIn, failure) else Loaded.Failed(failure)
     }
 
@@ -358,7 +371,11 @@ class MediaLoader(
         return relayAttempt { backendFor(messageId).mediaFile(messageId, part.partId, thumbnail) }.fold(
             onSuccess = { file -> if (file != null) Fetched.Got(file) else Fetched.None },
             onFailure = { e ->
-                if (RelayErrors.codeOf(e) == RelayException.NOT_CONNECTED) Fetched.NeedsConnection else Fetched.None
+                when {
+                    e is com.lightdecoder.imessage.direct.DirectLink.Stopped -> Fetched.Stopped
+                    RelayErrors.codeOf(e) == RelayException.NOT_CONNECTED -> Fetched.NeedsConnection
+                    else -> Fetched.None
+                }
             },
         )
     }

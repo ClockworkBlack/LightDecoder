@@ -244,7 +244,7 @@ class DirectArchiveTest {
     }
 
     @Test
-    fun aLivePhotosMovingPartIsLeftOutTheStillShows() {
+    fun aLivePhotosMovingPartIsStoredAndMappedToItsStill() {
         val u = withParts(
             "L1",
             listOf(
@@ -253,11 +253,20 @@ class DirectArchiveTest {
                 file(2, "IMG_6.MOV", "video/quicktime", "com.apple.quicktime-movie"),
             ),
         )
-        assertEquals(listOf("p0", "p2"), u.message.parts.map { it.partId })
+        // Both stored (the motion as a media row of its own, so downloads and deletes treat it as any file) ...
+        assertEquals(listOf("p0", "p1", "p2"), u.message.parts.map { it.partId })
+        assertEquals("L1/p1", u.message.parts[1].mediaId)
+        assertEquals("desc:IMG_5.MOV", String(u.message.parts[1].key, Charsets.UTF_8))
+        // ... and the motion is the still's.
+        assertEquals(mapOf("p0" to "p1"), IMessageExtra.parse(u.message.extra).live)
+        // Across the processes and back.
+        val wired = DirectWire.decode(org.json.JSONObject(DirectWire.encode(u).toString())) as DirectArchive.Update.Upsert
+        assertEquals(mapOf("p0" to "p1"), IMessageExtra.parse(wired.message.extra).live)
         // A video marked so that does not follow a picture is a video.
         val alone = withParts("L2", listOf(file(0, "IMG_8.MOV", "video/quicktime", "com.apple.quicktime-movie", iris = true)))
         assertEquals(listOf("p0"), alone.message.parts.map { it.partId })
-        // The still marked too: its moving part is still left out, and only that one.
+        assertTrue(IMessageExtra.parse(alone.message.extra).live.isEmpty())
+        // The still marked too: its moving part is mapped, and a second iris after it is not.
         val both = withParts(
             "L3",
             listOf(
@@ -266,7 +275,8 @@ class DirectArchiveTest {
                 file(2, "IMG_10.MOV", "video/quicktime", "com.apple.quicktime-movie", iris = true),
             ),
         )
-        assertEquals(listOf("p0", "p2"), both.message.parts.map { it.partId })
+        assertEquals(listOf("p0", "p1", "p2"), both.message.parts.map { it.partId })
+        assertEquals(mapOf("p0" to "p1"), IMessageExtra.parse(both.message.extra).live)
         // Text between them: the video does not follow the picture.
         val apart = withParts(
             "L4",
@@ -277,6 +287,31 @@ class DirectArchiveTest {
             ),
         )
         assertEquals(listOf("p0", "p2"), apart.message.parts.filter { it.isMedia }.map { it.partId })
+        assertTrue(IMessageExtra.parse(apart.message.extra).live.isEmpty())
+        // Two Live Photos in one message: each its own.
+        val two = withParts(
+            "L5",
+            listOf(
+                file(0, "A.HEIC", "image/heic", "public.heic"),
+                file(1, "A.MOV", "video/quicktime", "com.apple.quicktime-movie", iris = true),
+                file(2, "B.HEIC", "image/heic", "public.heic"),
+                file(3, "B.MOV", "video/quicktime", "com.apple.quicktime-movie", iris = true),
+            ),
+        )
+        assertEquals(mapOf("p0" to "p1", "p2" to "p3"), IMessageExtra.parse(two.message.extra).live)
+    }
+
+    @Test
+    fun stickersAreMarkedSoThatTheyAreNeverInAPhotoStack() {
+        val sticker = uniffi.rust_bridge.PartExtension.Sticker(0.5, 0.0, 0UL, 1.0, null, 0UL, 0.5, 0.5, 1UL, "h", 0UL, 0L, "s1")
+        val u = withParts(
+            "SM",
+            listOf(file(0, "a.png", "image/png", "public.png"), file(1, "sticker.png", "image/png", "public.png", ext = sticker), file(2, "b.png", "image/png", "public.png")),
+        )
+        val extra = IMessageExtra.parse(u.message.extra)
+        assertEquals(listOf("p1"), extra.stickerParts)
+        assertTrue(extra.sticker)
+        assertTrue(IMessageExtra.parse(withParts("SN", listOf(file(0, "a.png", "image/png", "public.png"))).message.extra).stickerParts.isEmpty())
     }
 
     @Test
@@ -459,6 +494,16 @@ class DirectArchiveTest {
     }
 
     @Test
+    fun aTapbacksPhotoIsKept() {
+        fun on(part: ULong?) = map(inst("R2", bob, PushChatMessage.React(ReactMessage("M1", part, ReactMessageType.React(Reaction.Heart, true), "", null)))) as DirectArchive.Update.Reaction
+        assertEquals(2, on(2UL).part)
+        assertEquals(0, on(null).part)
+        assertEquals(0, on(0UL).part)
+        // Out of any message's range: on the whole message.
+        assertEquals(0, on(ULong.MAX_VALUE).part)
+    }
+
+    @Test
     fun tapbacksBecomeOnePersonsReaction() {
         fun react(r: Reaction, enable: Boolean = true, sender: String = bob) =
             map(inst("R1", sender, PushChatMessage.React(ReactMessage("M1", 0UL, ReactMessageType.React(r, enable), "", null))))
@@ -473,6 +518,8 @@ class DirectArchiveTest {
         assertEquals("🦊", (react(Reaction.Emoji("🦊")) as DirectArchive.Update.Reaction).emoji)
         assertEquals("🖼️", (react(Reaction.Sticker(null, emptyList())) as DirectArchive.Update.Reaction).emoji)
         assertFalse((react(Reaction.Heart, enable = false) as DirectArchive.Update.Reaction).enable)
+        // On the message as a whole: part 0.
+        assertEquals(0, heart.part)
         // The user's own, from another device.
         val mine = react(Reaction.Laugh, sender = me) as DirectArchive.Update.Reaction
         assertTrue(mine.fromMe)

@@ -470,6 +470,25 @@ class IMessageManager private constructor(
     ): String =
         sendThroughLibrary(conversationId, uri, caption, replyToId, voice = false, effect = effect, runs = runs, scheduledAt = scheduledAt)
 
+    /**
+     * Several files picked together, sent as one iMessage (an iPhone shows them as one stack), as
+     * [sendMedia] otherwise; only through the iMessage library.
+     */
+    fun sendMediaBatch(
+        conversationId: String,
+        uris: List<Uri>,
+        caption: String?,
+        replyToId: String?,
+        effect: String?,
+        runs: List<com.lightdecoder.imessage.direct.TextRun> = emptyList(),
+        scheduledAt: Long? = null,
+    ): String {
+        if (uris.size == 1) return sendMedia(conversationId, uris[0], caption, replyToId, effect, runs, scheduledAt)
+        if (direct.canSend(conversationId)) return direct.sendMediaBatch(conversationId, uris, caption, replyToId, effect, runs, scheduledAt)
+        if (direct.active) throw RelayException(IMessageErrors.NO_REPLY_BUTTON, "this chat cannot be reached through the iMessage library")
+        throw RelayException(IMessageErrors.HAND_OFF, "attachments are sent in OpenBubbles")
+    }
+
     /** A recorded voice message, which an iPhone shows as one: as [sendMedia]. */
     fun sendVoice(conversationId: String, uri: Uri, replyToId: String?): String =
         sendThroughLibrary(conversationId, uri, null, replyToId, voice = true, effect = null)
@@ -504,8 +523,12 @@ class IMessageManager private constructor(
 
     /** Drops a message that did not go, with the copy of its file kept for sending it (and its link preview's picture). */
     override fun discardFailed(tmpId: String) {
+        // One still uploading is stopped first (it may already be with Apple: then it still arrives, as sent).
+        if (direct.active) direct.stopSending(tmpId)
         repo.applyDeletion(MessageRow.tmpMessageId(tmpId))
         repo.outboxFileFor(tmpId).delete()
+        // A batch's other files ([com.lightdecoder.imessage.direct.DirectLink.sendMediaBatch]).
+        for (i in 1..com.lightdecoder.imessage.direct.DirectLink.MAX_BATCH) repo.outboxFileFor("$tmpId-$i").delete()
         com.lightdecoder.imessage.direct.DirectLink.pictureFile(
             appContext, com.lightdecoder.imessage.direct.IMessageExtra.linkImageKey(MessageRow.tmpMessageId(tmpId)),
         ).delete()

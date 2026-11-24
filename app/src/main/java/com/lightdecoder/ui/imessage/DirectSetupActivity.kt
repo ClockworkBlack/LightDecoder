@@ -110,6 +110,8 @@ class DirectSetupActivity : AppCompatActivity() {
         // Read in the main process (it fetches the page, and posts the notifications): files, as above.
         binding.switchLinkPreviews.isChecked = DirectPrefs.linkPreviews(this)
         binding.switchLinkPreviews.setOnCheckedChangeListener { _, on -> DirectPrefs.setLinkPreviews(this, on) }
+        binding.switchLocationAddresses.isChecked = DirectPrefs.locationAddresses(this)
+        binding.switchLocationAddresses.setOnCheckedChangeListener { _, on -> DirectPrefs.setLocationAddresses(this, on) }
         binding.switchNotifyMentions.isChecked = DirectPrefs.notifyWhenMentioned(this)
         binding.switchNotifyMentions.setOnCheckedChangeListener { _, on -> DirectPrefs.setNotifyWhenMentioned(this, on) }
         // FaceTime: on by default; the call engine (this process) and the chat screens (main process) read it.

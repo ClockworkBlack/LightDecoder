@@ -121,4 +121,61 @@ class IMessageExtraTest {
             assertFalse(other, IMessageExtra.isWebAddress(other))
         }
     }
+    // --- B4: Live Photos, stickers, batches, per-photo tapbacks --------------------------------------
+
+    @Test
+    fun theMediaMarksGoAndComeBack() {
+        val e = IMessageExtra(
+            live = mapOf("p0" to "p1"),
+            stickerParts = listOf("p3"),
+            pending = listOf(IMessageExtra.PendingFile("/x/outbox/t-1", "image/png", "a.png")),
+            tapbackParts = mapOf("+15551234567" to 2, "me" to 1),
+        )
+        val back = IMessageExtra.parse(e.toJson())
+        assertEquals(e.live, back.live)
+        assertEquals(e.stickerParts, back.stickerParts)
+        assertEquals(e.pending, back.pending)
+        assertEquals(e.tapbackParts, back.tapbackParts)
+        assertEquals(setOf("p1"), back.motionParts)
+        assertEquals("", IMessageExtra().toJson())
+    }
+
+    @Test
+    fun theMediaMarksAreReadWithLimits() {
+        val live = org.json.JSONObject().apply {
+            put("p0", "p1"); put("p2", "../x"); put("x", "p3"); put("p4", "p4"); put("p5", 6)
+            for (i in 100 until 200) put("p$i", "p${i + 1000}")
+        }
+        val json = org.json.JSONObject()
+            .put("live", live)
+            .put("stickerParts", org.json.JSONArray(listOf("p1", "p1", "q", 5) + (0 until 100).map { "p$it" }))
+            .put("pending", org.json.JSONArray((0 until 20).map { org.json.JSONObject().put("path", "/p/$it").put("mime", "image/png").put("name", "n") } + listOf("x")))
+            .put("tapbackParts", org.json.JSONObject().put("a", 2).put("b", 0).put("c", "3").put("d", 99_999))
+        val e = IMessageExtra.parse(json.toString())
+        assertTrue(e.live.size <= IMessageExtra.MAX_LIVE)
+        assertTrue(e.live.all { (k, v) -> IMessageExtra.isPartId(k) && IMessageExtra.isPartId(v) && k != v })
+        assertFalse("p2" in e.live)
+        assertTrue(e.stickerParts.size <= IMessageExtra.MAX_MEDIA_MARKS)
+        assertEquals(e.stickerParts.distinct(), e.stickerParts)
+        assertFalse("q" in e.stickerParts)
+        assertEquals(IMessageExtra.MAX_PENDING, e.pending.size)
+        assertEquals(mapOf("a" to 2), e.tapbackParts)
+    }
+
+    @Test
+    fun aPersonsTapbackMovesFromPhotoToPhotoAndOff() {
+        var parts = IMessageExtra.withTapbackPart(emptyMap(), "a", 2, enable = true)
+        assertEquals(mapOf("a" to 2), parts)
+        parts = IMessageExtra.withTapbackPart(parts, "a", 3, enable = true)
+        assertEquals(mapOf("a" to 3), parts)
+        // On the whole message, or taken back: on no photo.
+        assertEquals(emptyMap<String, Int>(), IMessageExtra.withTapbackPart(parts, "a", 0, enable = true))
+        assertEquals(emptyMap<String, Int>(), IMessageExtra.withTapbackPart(parts, "a", 3, enable = false))
+        // Full: nobody new, the ones there still move.
+        val full = (0 until IMessageExtra.MAX_TAPBACK_PARTS).associate { "p$it" to 1 }
+        assertEquals(full, IMessageExtra.withTapbackPart(full, "new", 2, enable = true))
+        assertEquals(2, IMessageExtra.withTapbackPart(full, "p0", 2, enable = true)["p0"])
+        // Apple's copy again: what was gathered stays.
+        assertEquals(mapOf("a" to 3), IMessageExtra().keepingGathered(IMessageExtra(tapbackParts = mapOf("a" to 3))).tapbackParts)
+    }
 }

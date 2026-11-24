@@ -151,6 +151,18 @@ object DirectPrefs {
     /** Turns link previews on or off (see [linkPreviews]). */
     fun setLinkPreviews(context: Context, on: Boolean) = setMarker(linkPreviewsOffMarker(context), !on)
 
+    private fun locationAddressesMarker(context: Context) = File(context.filesDir, "imessage/location-addresses-on")
+
+    /**
+     * "Show addresses for locations": whether a location card someone sent also shows its address,
+     * looked up with Android's Geocoder (which sends the coordinates to its service). Off by default:
+     * only the coordinates show, and nothing is looked up anywhere.
+     */
+    fun locationAddresses(context: Context): Boolean = locationAddressesMarker(context).isFile
+
+    /** Turns "Show addresses for locations" on or off (see [locationAddresses]). */
+    fun setLocationAddresses(context: Context, on: Boolean) = setMarker(locationAddressesMarker(context), on)
+
     private fun faceTimeOffMarker(context: Context) = File(context.filesDir, "imessage/facetime-off")
 
     /**

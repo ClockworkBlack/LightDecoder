@@ -113,7 +113,7 @@ class PictureGalleryActivity : AppCompatActivity() {
             } else {
                 val single = withContext(Dispatchers.IO) {
                     runCatching { backend.repo.message(messageId) }.getOrNull()
-                        ?.let { row -> row.media.firstOrNull { it.partId == partId }?.let { Picture(row, it) } }
+                        ?.let { row -> row.shownMedia().firstOrNull { it.partId == partId }?.let { Picture(row, it) } }
                 }
                 start = 0
                 listOfNotNull(single)
@@ -173,6 +173,8 @@ class PictureGalleryActivity : AppCompatActivity() {
     }
 
     private fun showPosition(position: Int) {
+        // Another page: a Live Photo playing on the last one stops.
+        if (livePlayer.playing) livePlayer.stop()
         val picture = pictures.getOrNull(position) ?: return
         // Through the action bar: set on the toolbar alone, the activity's own title could replace it.
         supportActionBar?.title = senderOf(picture)
@@ -249,6 +251,7 @@ class PictureGalleryActivity : AppCompatActivity() {
 
     private inner class Holder(val page: ItemGalleryPageBinding) : RecyclerView.ViewHolder(page.root) {
         var job: Job? = null
+        var liveJob: Job? = null
     }
 
     private inner class Pages : RecyclerView.Adapter<Holder>() {
@@ -269,6 +272,7 @@ class PictureGalleryActivity : AppCompatActivity() {
             page.loading.visibility = View.VISIBLE
             val picture = pictures[position]
             val side = maxSide()
+            bindLive(holder, picture)
             holder.job = lifecycleScope.launch {
                 // What is on this phone already first: a quick, small stand-in.
                 val standIn = withContext(Dispatchers.IO) { decodeStandIn(picture.part) }
@@ -289,7 +293,76 @@ class PictureGalleryActivity : AppCompatActivity() {
 
         override fun onViewRecycled(holder: Holder) {
             holder.job?.cancel()
+            holder.liveJob?.cancel()
+            if (livePlayer.playing) livePlayer.stop()
             holder.page.picture.setImageDrawable(null)
+        }
+    }
+
+    // --- Live Photos ------------------------------------------------------------------------
+
+    private val livePlayer by lazy { LivePhotoPlayer(this) }
+
+    override fun onPause() {
+        super.onPause()
+        if (livePlayer.playing) livePlayer.stop()
+    }
+
+    /**
+     * A Live Photo's page: "LIVE" on it, and touch and hold plays its moving part, fetched only
+     * then (the usual download, with its caps and its progress on the badge), never before.
+     */
+    private fun bindLive(holder: Holder, picture: Picture) {
+        val page = holder.page
+        val motion = picture.message.motionOf(picture.part.partId)
+        page.live.text = getString(R.string.live_photo_badge)
+        page.live.visibility = if (motion != null) View.VISIBLE else View.GONE
+        page.picture.zoomSuspended = false
+        if (motion == null) {
+            page.picture.onHold = null
+            page.picture.onRelease = null
+            return
+        }
+        page.picture.contentDescription = getString(R.string.gallery_picture) + ", " + getString(R.string.live_photo_hint)
+        var held = false
+        page.picture.onRelease = {
+            held = false
+            if (livePlayer.playing) livePlayer.stop()
+        }
+        page.picture.onHold = hold@{
+            held = true
+            if (holder.liveJob?.isActive == true) return@hold
+            holder.liveJob = lifecycleScope.launch {
+                val watch = launch { showLiveProgress(page, motion) }
+                val file = try {
+                    localFile(motion) ?: relayAttempt { backend.mediaFile(picture.message.id, motion.partId) }.getOrNull()
+                } finally {
+                    watch.cancel()
+                    page.live.text = getString(R.string.live_photo_badge)
+                }
+                if (file == null) {
+                    toast(getString(R.string.live_photo_unavailable))
+                    return@launch
+                }
+                // Let go meanwhile: nothing plays (the next hold plays at once).
+                if (!held) return@launch
+                page.picture.resetZoom()
+                page.picture.zoomSuspended = true
+                livePlayer.play(page.root as android.widget.FrameLayout, page.picture, file) { page.picture.zoomSuspended = false }
+            }
+        }
+    }
+
+    /** The moving part's download, as a percentage on the LIVE badge, while it comes. */
+    private suspend fun showLiveProgress(page: ItemGalleryPageBinding, motion: MediaRow) {
+        if (backend.service != ChatService.IMESSAGE) return
+        com.lightdecoder.imessage.direct.DirectLink.get(applicationContext).transfers.collect { all ->
+            val t = all[motion.mediaId]
+            page.live.text = if (t != null && t.total > 0) {
+                getString(R.string.live_photo_badge) + " " + TransferRing.percentOf(t.fraction) + "%"
+            } else {
+                getString(R.string.live_photo_badge)
+            }
         }
     }
 
@@ -372,6 +445,6 @@ class PictureGalleryActivity : AppCompatActivity() {
         internal fun picturesOf(backend: ChatBackend, conversationId: String): List<Picture> =
             backend.repo.messages(conversationId, limit = MESSAGES_LOOKED_AT)
                 .filter { it.direction != "deleted" }
-                .flatMap { row -> row.media.filter(::isPicture).map { Picture(row, it) } }
+                .flatMap { row -> row.shownMedia().filter(::isPicture).map { Picture(row, it) } }
     }
 }

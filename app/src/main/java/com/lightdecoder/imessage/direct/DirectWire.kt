@@ -124,6 +124,21 @@ object DirectWire {
      */
     const val BLOCKLIST = 23
 
+    /**
+     * :imessage -> main, an interim message and never a request: how far the transfer a [SEND],
+     * [EXTENSION] or [DOWNLOAD] asked for has come ([progress]), sent on that request's replyTo with
+     * its id. Only for transfers the user started (never an automatic download). Its numbers are only
+     * shown, after [Progress.fromJson] clamped them.
+     */
+    const val PROGRESS = 24
+
+    /**
+     * Stops a transfer ([cancel]): a download by its media id (`<GUID>/p<idx>`) or a send by its local
+     * copy (`tmp:<tmpId>`), answered with [cancelled]: `true` when it was stopped, `false` when there
+     * was none or it can no longer be (a send already handed to Apple).
+     */
+    const val CANCEL = 25
+
     const val REPLY = 100
 
     /**
@@ -136,7 +151,78 @@ object DirectWire {
         "UNSCHEDULE" to UNSCHEDULE, "RENAME" to RENAME, "MEMBERS" to MEMBERS, "GROUP_PHOTO" to GROUP_PHOTO,
         "MARK_UNREAD" to MARK_UNREAD, "REPORT_JUNK" to REPORT_JUNK, "PEERS" to PEERS, "FT_CAPABLE" to FT_CAPABLE,
         "CALLER" to CALLER, "ACCOUNT" to ACCOUNT, "FT_STATE" to FT_STATE, "BLOCKLIST" to BLOCKLIST,
+        "PROGRESS" to PROGRESS, "CANCEL" to CANCEL,
     )
+
+    /** A [PROGRESS] message: [done] of [total] bytes of part [part] (from 0) of [parts]. */
+    fun progress(done: Long, total: Long, part: Int = 0, parts: Int = 1): JSONObject =
+        JSONObject().put("done", done).put("total", total).put("part", part).put("parts", parts)
+
+    /**
+     * What a [PROGRESS] message says, read as untrusted: whole numbers only (anything else, NaN or
+     * a string, makes it null), clamped so that 0 <= [done] <= [total] <= [MAX_PROGRESS_BYTES] and
+     * 0 <= [part] < [parts] <= [MAX_PROGRESS_PARTS]. The main process clamps [total] again to the part's
+     * own size ([clampedTo]).
+     */
+    data class Progress(val done: Long, val total: Long, val part: Int, val parts: Int) {
+        /** The fraction done, 0..1 (0 while the total is not known). */
+        val fraction: Float get() = if (total <= 0) 0f else (done.toDouble() / total).toFloat().coerceIn(0f, 1f)
+
+        /** This, with its total no more than twice [size] (when [size] is known): a sender's word on a size is only shown. */
+        fun clampedTo(size: Long): Progress {
+            if (size <= 0) return this
+            val cap = if (size > MAX_PROGRESS_BYTES / 2) MAX_PROGRESS_BYTES else size * 2
+            val t = total.coerceAtMost(cap)
+            return copy(total = t, done = done.coerceAtMost(t))
+        }
+
+        companion object {
+            fun fromJson(o: JSONObject): Progress? {
+                val done = wholeOf(o.opt("done")) ?: return null
+                val total = wholeOf(o.opt("total")) ?: return null
+                val parts = (wholeOf(o.opt("parts")) ?: 1L).coerceIn(1L, MAX_PROGRESS_PARTS.toLong()).toInt()
+                val part = (wholeOf(o.opt("part")) ?: 0L).coerceIn(0L, (parts - 1).toLong()).toInt()
+                val t = total.coerceIn(0L, MAX_PROGRESS_BYTES)
+                return Progress(done.coerceIn(0L, t), t, part, parts)
+            }
+
+            private fun wholeOf(v: Any?): Long? = when (v) {
+                is Int -> v.toLong()
+                is Long -> v
+                else -> null
+            }
+        }
+    }
+
+    /** The most bytes a [PROGRESS] may say (a part is never larger than a send or a download may be). */
+    const val MAX_PROGRESS_BYTES = 4L * 1024 * 1024 * 1024
+
+    /** The most parts a [PROGRESS] may count (a batch is [DirectLink.MAX_BATCH] at most). */
+    const val MAX_PROGRESS_PARTS = 32
+
+    /** The [CANCEL] request: stop the transfer [key] ([transferKey] / [sendKey]). */
+    fun cancel(key: String): JSONObject = JSONObject().put("key", key)
+
+    /** The key a download of attachment [mediaId] is known by. */
+    fun transferKey(mediaId: String): String = mediaId
+
+    /** The key a send of local copy [tmpId] is known by. */
+    fun sendKey(tmpId: String): String = "tmp:$tmpId"
+
+    private val DOWNLOAD_KEY = Regex("^[A-Za-z0-9-]{1,$MAX_GUID_CHARS}/p[0-9]{1,4}$")
+    private val SEND_KEY = Regex("^tmp:[A-Za-z0-9-]{1,$MAX_GUID_CHARS}$")
+
+    /** Whether [key] is a transfer's key as [transferKey] or [sendKey] make them (nothing else is ever looked up by it). */
+    fun isTransferKey(key: String?): Boolean = key != null && (DOWNLOAD_KEY.matches(key) || SEND_KEY.matches(key))
+
+    /** What a [CANCEL] request names, read strictly: null when it is no transfer's key. */
+    fun cancelKeyOf(o: JSONObject): String? = (o.opt("key") as? String)?.takeIf(::isTransferKey)
+
+    /** The [CANCEL] answer. */
+    fun cancelled(stopped: Boolean): JSONObject = JSONObject().put("cancelled", stopped)
+
+    /** Whether a [CANCEL] answer says it was stopped: only a real `true`. */
+    fun isCancelled(o: JSONObject): Boolean = errorOf(o) == null && o.opt("cancelled") == true
 
     /** The [BLOCKLIST] request: [salt] and the [hashes] (lower-case hex), as [com.lightdecoder.chat.BlockList.mirror] makes them. */
     fun blockList(salt: String, hashes: List<String>): JSONObject = JSONObject().put("salt", salt).put("hashes", JSONArray(hashes))
@@ -322,6 +408,8 @@ object DirectWire {
         val mentions: List<Mention> = emptyList(),
         /** The preview of the link in its text, if one was made ([LinkPreviews]). */
         val link: LinkPreviewRequest? = null,
+        /** The key [CANCEL] stops it by ([sendKey]) while it uploads; null: it cannot be stopped. */
+        val transfer: String? = null,
     ) {
         companion object {
             fun fromJson(o: JSONObject) = SendRequest(
@@ -330,13 +418,14 @@ object DirectWire {
                 o.optStringOrNull("replyGuid")?.ifEmpty { null },
                 o.optStringOrNull("replyPart")?.ifEmpty { null },
                 o.optStringOrNull("effect")?.ifEmpty { null },
-                o.objects("attachments").map(Attachment::fromJson),
+                o.objects("attachments").take(MAX_PROGRESS_PARTS).map(Attachment::fromJson),
                 o.optBoolean("voice"),
                 o.optJSONObject("app")?.let(IMessageExtra.App::fromJson),
                 TextRuns.fromJsonArray(o.optJSONArray("runs")),
                 o.optLong("scheduledMs").takeIf { it > 0 },
                 Mentions.fromJsonArray(o.optJSONArray("mentions")),
                 o.optJSONObject("link")?.let(LinkPreviewRequest::fromJson),
+                (o.opt("transfer") as? String)?.takeIf { isTransferKey(it) && it.startsWith("tmp:") },
             )
         }
     }
@@ -628,8 +717,10 @@ object DirectWire {
         scheduledMs: Long? = null,
         mentions: List<Mention> = emptyList(),
         link: LinkPreviewRequest? = null,
+        transfer: String? = null,
     ): JSONObject =
         JSONObject().put("target", target.toJson()).put("text", text)
+            .apply { if (transfer != null) put("transfer", transfer) }
             .put("replyGuid", replyGuid ?: JSONObject.NULL).put("replyPart", replyPart ?: JSONObject.NULL)
             .put("effect", effect ?: JSONObject.NULL)
             .put("attachments", JSONArray().apply { attachments.forEach { put(it.toJson()) } })
@@ -715,20 +806,28 @@ object DirectWire {
      * [maxBytes]; with [automaticMs], one fetched without anyone asking (a sticker, a group's photo), only
      * from Apple's own file servers ([DirectMedia.isAppleFileServer]) and in that long at most.
      */
-    fun download(descriptor: String, path: String, maxBytes: Long? = null, automaticMs: Long? = null): JSONObject =
+    fun download(descriptor: String, path: String, maxBytes: Long? = null, automaticMs: Long? = null, transfer: String? = null): JSONObject =
         JSONObject().put("descriptor", descriptor).put("path", path)
             .apply { maxBytes?.let { put("maxBytes", it) } }
             .apply { automaticMs?.let { put("automaticMs", it) } }
+            .apply { if (transfer != null && automaticMs == null) put("transfer", transfer) }
 
-    /** A [DOWNLOAD]'s request, as [download] makes it: [maxBytes] within [DirectMedia.MAX_DOWNLOAD_BYTES], [automaticMs] within [MAX_AUTOMATIC_MS] (null: one the user asked for). */
-    data class DownloadRequest(val descriptor: String, val path: String, val maxBytes: Long, val automaticMs: Long?) {
+    /**
+     * A [DOWNLOAD]'s request, as [download] makes it: [maxBytes] within [DirectMedia.MAX_DOWNLOAD_BYTES], [automaticMs] within [MAX_AUTOMATIC_MS] (null: one the user asked for);
+     * [transfer], the key [CANCEL] stops it by (a media id), only for one the user asked for.
+     */
+    data class DownloadRequest(val descriptor: String, val path: String, val maxBytes: Long, val automaticMs: Long?, val transfer: String? = null) {
         companion object {
-            fun fromJson(o: JSONObject) = DownloadRequest(
-                o.getString("descriptor"),
-                o.getString("path"),
-                o.optLong("maxBytes", DirectMedia.MAX_DOWNLOAD_BYTES).takeIf { it > 0 }?.coerceAtMost(DirectMedia.MAX_DOWNLOAD_BYTES) ?: DirectMedia.MAX_DOWNLOAD_BYTES,
-                if (o.has("automaticMs") && !o.isNull("automaticMs")) o.optLong("automaticMs").coerceIn(1L, MAX_AUTOMATIC_MS) else null,
-            )
+            fun fromJson(o: JSONObject): DownloadRequest {
+                val automatic = if (o.has("automaticMs") && !o.isNull("automaticMs")) o.optLong("automaticMs").coerceIn(1L, MAX_AUTOMATIC_MS) else null
+                return DownloadRequest(
+                    o.getString("descriptor"),
+                    o.getString("path"),
+                    o.optLong("maxBytes", DirectMedia.MAX_DOWNLOAD_BYTES).takeIf { it > 0 }?.coerceAtMost(DirectMedia.MAX_DOWNLOAD_BYTES) ?: DirectMedia.MAX_DOWNLOAD_BYTES,
+                    automatic,
+                    (o.opt("transfer") as? String)?.takeIf { automatic == null && isTransferKey(it) && !it.startsWith("tmp:") },
+                )
+            }
         }
     }
 
@@ -757,7 +856,15 @@ object DirectWire {
      * time ([DirectEngine.Unconfirmed]), since what was asked may have gone through all the same.
      */
     fun failure(e: Throwable): JSONObject =
-        error(DirectEngine.readable(e)).apply { if (e is DirectEngine.Unconfirmed) put(KEY_UNCONFIRMED, true) }
+        error(DirectEngine.readable(e)).apply {
+            if (e is DirectEngine.Unconfirmed) put(KEY_UNCONFIRMED, true)
+            if (e is Transfers.Stopped) put(KEY_STOPPED, true)
+        }
+
+    /** Whether a failure says the user stopped it ([CANCEL]): only a real `true`. */
+    fun isStopped(o: JSONObject): Boolean = errorOf(o) != null && o.opt(KEY_STOPPED) == true
+
+    private const val KEY_STOPPED = "stopped"
 
     fun errorOf(o: JSONObject): String? = o.optStringOrNull("error")
 
@@ -806,6 +913,7 @@ object DirectWire {
             .apply { u.groupGuid?.let { put("groupGuid", it) } }
             .apply { u.sticker?.let { put("sticker", it) } }
             .apply { if (u.stickerFile.isNotEmpty()) put("stickerFile", u.stickerFile) }
+            .apply { if (u.part > 0) put("part", u.part) }
         is DirectArchive.Update.Sticker -> JSONObject().put("kind", "sticker").put("messageId", u.messageId).put("stickerGuid", u.stickerGuid)
             .put("participantId", u.participantId).put("fromMe", u.fromMe).put("atMs", u.atMs).put("conversationId", u.conversationId)
             .apply { u.groupGuid?.let { put("groupGuid", it) } }
@@ -935,6 +1043,7 @@ object DirectWire {
             o.optBoolean("fromMe"), o.optLong("atMs"), o.optString("conversationId"), o.optString("groupGuid").takeIf { it.isNotEmpty() },
             o.optStringOrNull("sticker")?.takeIf { it.isNotEmpty() },
             fileOf(o, "stickerFile"),
+            part = o.optInt("part").coerceIn(0, DirectArchive.MAX_PART_INDEX),
         )
         "sticker" -> DirectArchive.Update.Sticker(
             o.getString("messageId"), o.getString("stickerGuid"), o.optString("participantId"), o.optBoolean("fromMe"), o.optLong("atMs"),

@@ -199,6 +199,14 @@ class DirectWordingTest {
             R.string.blocked_contacts_already, R.string.blocked_contacts_unblock_description, R.string.facetime_telecom,
             R.string.facetime_telecom_help, R.string.facetime_telecom_account, R.string.facetime_phone_call_incoming,
             R.string.facetime_ended_for_phone_call,
+            // B4: media in the transcript.
+            R.string.imessage_batch_too_many, R.string.transfer_stop_download, R.string.transfer_downloading, R.string.transfer_stopped,
+            R.string.transfer_sending, R.string.media_stack_title, R.string.media_stack_description, R.string.media_stack_show_all,
+            R.string.live_photo_badge, R.string.live_photo_hint, R.string.live_photo_unavailable, R.string.location_current,
+            R.string.location_untitled, R.string.location_open_in_maps, R.string.location_coordinates, R.string.location_no_app,
+            R.string.location_attach, R.string.location_send_title, R.string.location_send, R.string.location_finding,
+            R.string.location_unavailable, R.string.location_permission_denied, R.string.location_show_addresses,
+            R.string.location_show_addresses_help, R.string.location_card_description,
         )
         for (res in direct) {
             val text = context.getString(res)

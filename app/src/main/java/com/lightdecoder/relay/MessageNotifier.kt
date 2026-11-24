@@ -252,7 +252,9 @@ object MessageNotifier {
 
     private fun bodyOf(context: Context, message: MessageDto): CharSequence {
         if (message.text.isNotBlank()) return message.text
-        val media = message.mediaParts.firstOrNull() ?: return ""
+        // A Live Photo's moving part is never counted: its still is the photo.
+        val motion = if (message.extra.isEmpty()) emptySet() else com.lightdecoder.imessage.direct.IMessageExtra.parse(message.extra).motionParts
+        val media = message.mediaParts.firstOrNull { it.partId !in motion } ?: return ""
         return context.getString(if (media.mime.startsWith("image/")) R.string.relay_notify_photo else R.string.relay_notify_attachment)
     }
 
