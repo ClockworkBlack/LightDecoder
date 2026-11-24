@@ -19,6 +19,14 @@
         android:title="@string/action_clear"
         app:showAsAction="never" />
     <item
+        android:id="@+id/action_backup_chats"
+        android:title="@string/backup_menu"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_restore_chats"
+        android:title="@string/restore_menu"
+        app:showAsAction="never" />
+    <item
         android:id="@+id/action_report"
         android:title="@string/action_report"
         app:showAsAction="never" />

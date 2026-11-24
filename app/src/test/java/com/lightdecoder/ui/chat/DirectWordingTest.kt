@@ -78,6 +78,7 @@ class DirectWordingTest {
             R.string.imessage_background_choose, R.string.imessage_background_remove, R.string.imessage_background_sending,
             R.string.imessage_background_set, R.string.imessage_background_removed, R.string.imessage_background_failed,
             R.string.imessage_background_unreadable, R.string.imessage_background_too_big,
+            R.string.imessage_backup_hint, R.string.backup_not_included, R.string.restore_done, R.string.backup_intro,
             R.string.imessage_background_section_colors, R.string.imessage_background_section_dynamic,
             R.string.imessage_background_section_themes, R.string.imessage_background_section_photos,
             R.string.imessage_background_photo, R.string.imessage_background_none, R.string.imessage_background_preview_set,

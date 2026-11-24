@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Back up chats / Restore chats (backup/ChatBackup, ui/backup/BackupActivity). -->
+<resources>
+    <string name="backup_menu">Back up chats</string>
+    <string name="restore_menu">Restore chats</string>
+
+    <string name="backup_intro">Saves all your chats (Messages, iMessage, WhatsApp and the others), with the pictures and attachments stored on this phone, to one file you choose, encrypted with a passphrase. Keep the file somewhere off this phone, such as a computer or cloud storage.</string>
+    <string name="backup_not_included">Your iMessage registration is not in the backup; register again after restoring. Sign-ins and pairings (Google Messages, WhatsApp, Gmail, Discord) and passwords are not in it either.</string>
+    <string name="backup_passphrase_note">Without the passphrase nobody can open the backup, not even you: there is no way to recover it.</string>
+    <string name="restore_intro">Restores chats from a file made with Back up chats. This replaces all chats on this phone with the backup.</string>
+
+    <string name="backup_passphrase">Passphrase</string>
+    <string name="backup_passphrase_again">Passphrase again</string>
+    <string name="backup_passphrase_short">At least 8 characters.</string>
+    <string name="backup_passphrase_mismatch">The two passphrases are not the same.</string>
+    <string name="backup_passphrase_missing">Type the passphrase first.</string>
+    <string name="backup_strength_weak">Strength: weak. A longer passphrase is much harder to guess.</string>
+    <string name="backup_strength_fair">Strength: fair.</string>
+    <string name="backup_strength_strong">Strength: strong.</string>
+
+    <string name="backup_start">Choose where to save</string>
+    <string name="restore_start">Choose backup file</string>
+
+    <string name="backup_progress">Backing up chats…</string>
+    <string name="restore_progress_check">Checking the backup…</string>
+    <string name="restore_progress_apply">Restoring chats…</string>
+
+    <string name="backup_done">Backup saved: %1$d conversations, %2$d messages, %3$d files.</string>
+    <string name="backup_done_skipped">%1$d files larger than 100 MB were left out.</string>
+    <string name="backup_cancelled">Backup cancelled. The unfinished file was deleted.</string>
+    <string name="backup_error_io">The backup could not be written. Check that there is enough space where you saved it, and try again. The unfinished file was deleted.</string>
+    <string name="backup_error_local">A chat archive on this phone failed its check, so no backup was made.</string>
+
+    <string name="restore_confirm_title">Replace all chats?</string>
+    <string name="restore_confirm_body">This replaces all chats on this phone with the backup.</string>
+    <string name="restore_confirm_button">Replace</string>
+    <string name="restore_done">Chats restored: %1$d conversations, %2$d messages. LightDecoder restarts now. Your iMessage registration is not in the backup; register again after restoring.</string>
+    <string name="restore_restart">Restart</string>
+    <string name="restore_cancelled">Restore cancelled. Nothing on this phone was changed.</string>
+    <string name="restore_error_not_backup">This file is not a LightDecoder backup. Nothing on this phone was changed.</string>
+    <string name="restore_error_format">This backup was made by a newer version of LightDecoder. Update the app, then restore it. Nothing on this phone was changed.</string>
+    <string name="restore_error_passphrase">Wrong passphrase, or the file was changed. Nothing on this phone was changed.</string>
+    <string name="restore_error_damaged">The backup file is damaged or incomplete. Nothing on this phone was changed.</string>
+    <string name="restore_error_newer">These chats come from a newer version of LightDecoder, and restoring them here would need a downgrade. Update the app, then restore. Nothing on this phone was changed.</string>
+    <string name="restore_error_invalid">The file holds something a LightDecoder backup never does, so it was not restored. Nothing on this phone was changed.</string>
+    <string name="restore_error_space">There is not enough free space on this phone to restore this backup. Free some space, then try again. Nothing on this phone was changed.</string>
+    <string name="backup_error_busy">Another backup or restore is running. Try again once it has finished.</string>
+    <string name="restore_error_busy">The chats were busy, so nothing was changed. Try again.</string>
+    <string name="restore_error_io">The backup could not be read or restored (the file could not be opened, or there is not enough space). Nothing on this phone was changed.</string>
+
+    <!-- On the iMessage screen (ui/imessage/DirectSetupActivity). -->
+    <string name="imessage_backup_hint">To keep your iMessage chats, back them up with Back up chats in the Messages menu. Your iMessage registration is not in the backup; register again after restoring.</string>
+</resources>
