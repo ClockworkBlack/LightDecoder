@@ -200,6 +200,19 @@ object DirectPrefs {
         }
     }
 
+    private fun telecomOffMarker(context: Context) = File(context.filesDir, "imessage/facetime-telecom-off")
+
+    /**
+     * "Use with Bluetooth and car": FaceTime calls are handed to Android's Telecom (a self-managed
+     * call), so a headset's or a car's buttons answer and end them and the car shows them. On by
+     * default; off, nothing is handed to Telecom (the kill switch: calls are as before it). A file,
+     * like [faceTimeOn]: the setup screen and the call engine are both in the ":imessage" process.
+     */
+    fun telecomOn(context: Context): Boolean = !telecomOffMarker(context).isFile
+
+    /** Turns "Use with Bluetooth and car" on or off (see [telecomOn]). */
+    fun setTelecomOn(context: Context, on: Boolean) = setMarker(telecomOffMarker(context), !on)
+
     /** Puts [f] there ([present]) or takes it away, as a setting's marker. */
     private fun setMarker(f: File, present: Boolean) {
         runCatching {

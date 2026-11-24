@@ -45,6 +45,8 @@ data class Media(
     val screen: Picture = Picture(),
     /** A group call's tiles whose pictures are being drawn, by participant id: each one's picture as its decoder makes it. */
     val tiles: Map<Long, Picture> = emptyMap(),
+    /** A phone call rings on this phone meanwhile ([CellularWatch]): "Phone call incoming". */
+    val phoneRinging: Boolean = false,
 ) {
     /** The picture's width and height as shown: turned a quarter, they change places. */
     val remoteShown: Pair<Int, Int>
@@ -71,6 +73,9 @@ sealed class CallMessage {
 
     /** The camera could not be started: the call goes on with sound only. */
     object CameraUnavailable : CallMessage()
+
+    /** The call was ended because a phone call was answered ([CellularWatch]). */
+    object EndedForPhoneCall : CallMessage()
 }
 
 /** The main process, as the call engine needs it: who a caller is, and where a call's row goes. */
@@ -108,6 +113,12 @@ interface CallAudio {
 
     /** Sends the call's sound to [route]. False when it could not. */
     fun route(route: Route): Boolean
+
+    /**
+     * The route in use as the platform itself decides it (Telecom, while it has the call: a pick on the
+     * car, the headset or the system's switcher); null when the app chooses the route itself.
+     */
+    fun current(): Route? = null
 
     /** Gives the phone's audio back as it was. */
     fun leave()

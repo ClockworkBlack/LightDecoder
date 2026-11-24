@@ -78,6 +78,13 @@ class FaceTimeCalls internal constructor(
     eventBacklog: Int = MAX_EVENT_BACKLOG,
     /** Told the call there is after every change (null: none), for the main process's "return to call" bar; it says only what changed. */
     private val tell: (Call?) -> Unit = {},
+    /**
+     * Android's Telecom, when calls are handed to it (Bluetooth headsets, cars): told of every ring,
+     * placed call, change and end ([TelecomCalls]). Null: never (calls are as without it).
+     */
+    val telecom: TelecomCalls? = null,
+    /** The phone's audio mode, watched for a cellular call while a call holds the line ([CellularWatch]); null: not watched. */
+    cellularSource: CellularWatch.Source? = null,
 ) {
     private val failures = CoroutineExceptionHandler { _, e -> FaceTimeLog.note("call work failed (${e::class.java.simpleName})") }
     private val scope = scope ?: CoroutineScope(SupervisorJob() + Dispatchers.Default + failures)
@@ -186,6 +193,30 @@ class FaceTimeCalls internal constructor(
     private fun orientationFor(front: Boolean): Int =
         CallOrientation.forCamera(rotation, front, runCatching { camera.sensorOrientation(front) }.getOrNull())
 
+    /** A cellular call during this one, when Telecom does not have it ([CellularWatch]). */
+    private val cellular: CellularWatch? = cellularSource?.let { source ->
+        CellularWatch(
+            source,
+            banner = { on -> _media.update { it.copy(phoneRinging = on) } },
+            mute = { setMuted(true) },
+            end = { endForPhoneCall() },
+            telecomHas = { telecom?.ownsAudio(_state.value?.guid) == true },
+        )
+    }
+
+    /**
+     * A phone call was answered during the call there is: it ends ("Ended for a phone call"). Asked
+     * on the commands' thread, after the microphone was muted there ([CellularWatch]'s mute comes first).
+     */
+    private fun endForPhoneCall() {
+        val call = _state.value ?: return
+        scope.launch(commands) {
+            FaceTimeLog.note("${FaceTimeLog.ref(call.guid)}: ended for a phone call")
+            _messages.tryEmit(CallMessage.EndedForPhoneCall)
+            inputs.trySend(CallRules.Input.HangUp(call.guid, now()))
+        }
+    }
+
     init {
         this.scope.launch { for (input in inputs) step(input) }
         this.scope.launch { for (event in events) take(event) }
@@ -273,6 +304,8 @@ class FaceTimeCalls internal constructor(
             _messages.tryEmit(CallMessage.NotStarted(Refusal.NOT_CALLABLE))
             return
         }
+        // From a group chat, or to several people: its name is the chat's, whoever is called in the end.
+        val fromGroup = people.size > 1 || conversationId?.let(com.lightdecoder.imessage.direct.DirectArchive::isGroup) == true
         scope.launch {
             // The process may have started with this very screen: its session comes up in a moment.
             if (!bridge.connected) withTimeoutOrNull(connectWaitMs) { while (!bridge.connected) delay(100) }
@@ -293,7 +326,7 @@ class FaceTimeCalls internal constructor(
             }
             inputs.trySend(
                 CallRules.Input.Place(
-                    CallIds.newGuid(), to.first(), name, video, from, conversationId?.take(MAX_ID_CHARS), photo, now(), phoneBusy(), settings(), to,
+                    CallIds.newGuid(), to.first(), name, video, from, conversationId?.take(MAX_ID_CHARS), photo, now(), phoneBusy(), settings(), to, fromGroup,
                 ),
             )
         }
@@ -576,6 +609,20 @@ class FaceTimeCalls internal constructor(
                 FaceTimeLog.note("${effect::class.simpleName} could not be done (${e::class.java.simpleName})")
             }
         }
+        // Telecom hears of it after the call engine did it: a ring or a placed call handed over, how a call ended, a call joined.
+        val t = telecom ?: return
+        for (effect in step.effects) {
+            try {
+                t.onEffect(effect)
+            } catch (e: Throwable) {
+                FaceTimeLog.note("Telecom could not be told of ${effect::class.simpleName} (${e::class.java.simpleName})")
+            }
+        }
+        try {
+            t.onState(before, step.state)
+        } catch (e: Throwable) {
+            FaceTimeLog.note("Telecom could not be told of the call's change (${e::class.java.simpleName})")
+        }
     }
 
     /** What follows a call coming to hold the line, or letting go of it. */
@@ -600,6 +647,7 @@ class FaceTimeCalls internal constructor(
             _lingering.value = null
             foreground.start()
             runCatching { remember(after.guid) }
+            runCatching { cellular?.start() }
         }
         if (after != null && after.group && after.joined) lookUpLabels(after)
         if (!held && wasHeld) {
@@ -607,6 +655,7 @@ class FaceTimeCalls internal constructor(
             val linger = synchronized(foregroundLock) { (joinsRunning > 0).also { stopOwed = it } }
             if (linger) _lingering.value = before else foreground.stop()
             runCatching { remember(null) }
+            runCatching { cellular?.stop() }
         }
         if (after != null && before != null && after.guid == before.guid && after.phase == Phase.ACTIVE && before.phase != Phase.ACTIVE) {
             FaceTimeLog.note("${FaceTimeLog.ref(after.guid)}: in the call (${if (after.outgoing) "placed" else "answered"}, ${if (after.video) "video" else "audio"})")
@@ -773,7 +822,7 @@ class FaceTimeCalls internal constructor(
         native.camera(cameraOn && !cameraPaused)
         native.microphone(!_media.value.muted)
         try {
-            audio.enter { applyRoute() }
+            audio.enter { routesChanged() }
         } catch (e: Throwable) {
             FaceTimeLog.note("the phone's audio could not be taken for the call (${e::class.java.simpleName})")
         }
@@ -932,6 +981,22 @@ class FaceTimeCalls internal constructor(
             FaceTimeLog.note("the phone's audio could not be given back (${e::class.java.simpleName})")
         }
         _media.update { it.copy(cameraOn = false, remoteVideo = false, screenVideo = false, tiles = emptyMap()) }
+    }
+
+    /**
+     * The phone's routes changed. While Telecom has the call, the route it says is in use is the one shown, and
+     * nothing is asked back of it: a pick on the car, the headset or the system's switcher stands (SPEC2 B3.3).
+     * Otherwise the app's own rule picks the route, as before.
+     */
+    private fun routesChanged() {
+        val current = runCatching { audio.current() }.getOrNull() ?: return applyRoute()
+        try {
+            val routes = audio.routes()
+            pickedRoute = current
+            _media.update { it.copy(routes = routes, route = current) }
+        } catch (e: Throwable) {
+            FaceTimeLog.note("the call's audio routes could not be shown (${e::class.java.simpleName})")
+        }
     }
 
     private fun applyRoute(video: Boolean = _state.value?.video == true && _media.value.cameraOn) {

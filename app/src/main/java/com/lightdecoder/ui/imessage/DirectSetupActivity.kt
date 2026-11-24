@@ -39,7 +39,8 @@ import kotlinx.coroutines.withContext
  * Runs in the ":imessage" process, with the library's own settings (read receipts), and "iMessage
  * games" (a file the main process reads: [DirectPrefs.gamesOn]) with whether OpenPigeon is here.
  * And FaceTime's: "FaceTime" ([DirectPrefs.faceTimeOn]) and "Silence unknown FaceTime callers"
- * ([DirectPrefs.silenceUnknownFaceTime]), with what Android still has to allow for a call to ring.
+ * ([DirectPrefs.silenceUnknownFaceTime]), with what Android still has to allow for a call to ring, and
+ * "Use with Bluetooth and car" ([DirectPrefs.telecomOn]); and "Blocked Contacts" (the main process's screen).
  * Once registered, the optional Apple Account ([AppleAccount]): "Apple Account (optional)" to sign in
  * ([AppleAccountActivity]), or who is signed in, whether iCloud's features are on, and Sign Out.
  */
@@ -117,11 +118,22 @@ class DirectSetupActivity : AppCompatActivity() {
             DirectPrefs.setFaceTimeOn(this, on)
             // Turned on: from now on the library is told this phone's addresses (a call needs them).
             engine.faceTimeSettingChanged()
+            // FaceTime off takes LightDecoder's calling account away from Telecom too.
+            com.lightdecoder.imessage.facetime.TelecomAccount.sync(this)
             showFaceTime()
         }
         // Off by default: an unknown caller rings like anyone else.
         binding.switchSilenceUnknown.isChecked = DirectPrefs.silenceUnknownFaceTime(this)
         binding.switchSilenceUnknown.setOnCheckedChangeListener { _, on -> DirectPrefs.setSilenceUnknownFaceTime(this, on) }
+        // "Use with Bluetooth and car": on by default; off unregisters LightDecoder's calling account (the kill switch).
+        binding.switchTelecom.isChecked = DirectPrefs.telecomOn(this)
+        binding.switchTelecom.setOnCheckedChangeListener { _, on ->
+            DirectPrefs.setTelecomOn(this, on)
+            com.lightdecoder.imessage.facetime.TelecomAccount.sync(this)
+        }
+        binding.blockedContacts.setOnClickListener {
+            runCatching { startActivity(com.lightdecoder.ui.chat.BlockedContactsActivity.intent(this)) }
+        }
         binding.faceTimeFix.setOnClickListener { fixFaceTime() }
         binding.getGames.setOnClickListener { MadridHost.openStore(this, MadridApps.OPENPIGEON) }
         // The service's status notice: turned off in its channel's settings, iMessage keeps running.
@@ -295,6 +307,8 @@ class DirectSetupActivity : AppCompatActivity() {
         val on = DirectPrefs.faceTimeOn(this)
         binding.switchSilenceUnknown.isEnabled = on
         binding.silenceUnknownHelp.alpha = if (on) 1f else 0.5f
+        binding.switchTelecom.isEnabled = on && com.lightdecoder.imessage.facetime.TelecomAccount.supported(this)
+        binding.telecomHelp.alpha = if (binding.switchTelecom.isEnabled) 1f else 0.5f
         val block = faceTimeBlock()
         binding.faceTimeStatus.visibility = if (block == FaceTimeBlock.NONE) View.GONE else View.VISIBLE
         binding.faceTimeFix.visibility = binding.faceTimeStatus.visibility

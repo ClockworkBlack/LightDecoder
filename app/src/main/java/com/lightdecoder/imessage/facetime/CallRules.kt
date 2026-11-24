@@ -35,7 +35,10 @@ import kotlin.math.abs
  *   call; being taken out of it ([CallEvent.Removed]) stops its ring. Dismissed, a group ring from
  *   someone the user does not know is ignored, not declined ([Call.ignoreOnly]).
  *
- * [blocked] says whom the user blocked: their rings are dropped before anything else is done.
+ * [blocked] says whom the user blocked (the ":imessage" process's copy of the block list,
+ * [BlockedCallers]): their rings are dropped before anything else is done, with no ring, no row and
+ * no missed-call notice, whether the main process answers or not; the main process's own word
+ * ([CallerInfo.blocked]) drops them as well.
  */
 class CallRules(
     private val limiter: RingLimiter = RingLimiter(),
@@ -98,7 +101,8 @@ class CallRules(
 
         /**
          * The user places a call to [peer], and with a group call to everyone of [peers] ([peer]
-         * first). [phoneBusy]: the phone is in another call.
+         * first). [phoneBusy]: the phone is in another call. [fromGroup]: placed from a group chat, or
+         * to several people (even if only one of them is called in the end).
          */
         data class Place(
             val guid: String,
@@ -112,6 +116,7 @@ class CallRules(
             val phoneBusy: Boolean,
             val settings: FaceTimeSettings,
             val peers: List<String> = listOf(peer),
+            val fromGroup: Boolean = false,
         ) : Input()
 
         /** The library placed call [guid] (it rings on the other side now), or could not. */
@@ -424,6 +429,8 @@ class CallRules(
     private fun caller(state: Call?, input: Input.Caller): Step {
         if (state == null || state.guid != input.guid || state.phase != Phase.SCREENING) return Step(state)
         val info = input.info
+        // The main process says the user blocked them (its copy here had not said so yet): no ring, no row, no notice.
+        if (info?.blocked == true) return Step(null, listOf(Effect.Note("a FaceTime ring from a blocked caller was dropped")))
         // The phone is in another call (a cellular one): two calls would fight over its sound.
         if (input.phoneBusy) {
             return Step(
@@ -477,7 +484,7 @@ class CallRules(
             guid = input.guid, peer = peer, name = CallIds.name(input.name), video = input.video, outgoing = true,
             phase = Phase.RINGING_OUT, from = input.from?.let(CallIds::handle), conversationId = input.conversationId,
             photo = input.photo, startedMs = input.now, withCamera = input.video,
-            peers = people, group = people.size > 1, joiners = joinedOf(input.guid),
+            peers = people, group = people.size > 1, fromGroup = input.fromGroup || people.size > 1, joiners = joinedOf(input.guid),
         )
         return Step(
             call,

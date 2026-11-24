@@ -845,6 +845,17 @@ class CallRulesTest {
     }
 
     @Test
+    fun aCallFromAGroupChatThatReachesOneMemberIsStillMarkedAsFromTheGroup() {
+        val one = send(Input.Place(OUT, ALICE, "Hikers", true, ME, "imsg:group:G", null, t, false, on, peers = listOf(ALICE), fromGroup = true)).only<Effect.CreateCall>().call
+        assertFalse(one.group)
+        assertTrue(one.fromGroup)
+        state = null
+        assertTrue(send(Input.Place(OTHER, ALICE, "", false, ME, null, null, t, false, on, peers = listOf(ALICE, BOB))).only<Effect.CreateCall>().call.fromGroup)
+        state = null
+        assertFalse(send(Input.Place(THIRD, ALICE, "Alice Martin", false, ME, "imsg:tel:+15551234567", null, t, false, on)).only<Effect.CreateCall>().call.fromGroup)
+    }
+
+    @Test
     fun aPlacedGroupCallEndsDeclinedOnlyOnceEveryoneSaidNo() {
         send(Input.Place(OUT, ALICE, "", false, ME, null, null, t, false, on, peers = listOf(ALICE, BOB)))
         send(Input.Placed(OUT, ok = true, now = t))
@@ -1105,6 +1116,58 @@ class CallRulesTest {
         assertNull(out.state)
         assertTrue(out.effects.toString(), out.effects.all { it is Effect.Note })
         assertTrue(rules.reduce(null, Input.Event(CallEvent.Join(OTHER, ALICE, ring = true), listOf(session(OTHER)), setOf(ME), t, 10 * 60_000L, on)).effects.any { it is Effect.LookupCaller })
+    }
+
+    // --- blocking (SPEC2 B3) ---------------------------------------------------------------------
+
+    @Test
+    fun aBlockedCallerGetsNoRingNoNoticeAndNoRowEvenWhenTheirRingWouldOtherwiseBeMissed() {
+        val rules = CallRules(blocked = { it == MALLORY })
+        fun ring(guid: String, session: CallSessionInfo, sinceStart: Long = 10 * 60_000L, state: Call? = null) =
+            rules.reduce(state, Input.Event(CallEvent.Join(guid, MALLORY, ring = true), listOf(session), setOf(ME), t, sinceStart, on))
+        // A ring that would ring, one for a call nobody is in any more, an old one after a restart, one during another call:
+        // none rings, none is noted as missed, nothing is asked of the main process.
+        val busy = Call(OTHER, ALICE, "Alice", video = false, outgoing = true, phase = Phase.ACTIVE, startedMs = t)
+        for (step in listOf(
+            ring(IN, session(IN, MALLORY)),
+            ring(guid(1), session(guid(1), MALLORY, active = false)),
+            ring(guid(2), session(guid(2), MALLORY, startMs = t - 10 * 60_000L), sinceStart = 1_000L),
+            ring(guid(3), session(guid(3), MALLORY), state = busy),
+        )) {
+            assertTrue(step.effects.toString(), step.effects.none { it is Effect.LogCall || it is Effect.ShowIncoming || it is Effect.LookupCaller })
+        }
+    }
+
+    @Test
+    fun theMainProcessesWordThatTheCallerIsBlockedDropsTheRingBeforeItRings() {
+        // This process's copy said nothing (not sent yet): the main process's answer drops it, with no row and no notice.
+        event(CallEvent.Join(IN, MALLORY, ring = true), listOf(session(IN, MALLORY)))
+        assertEquals(Phase.SCREENING, state?.phase)
+        val out = send(Input.Caller(IN, CallerInfo("", known = false, blocked = true), t, on))
+        assertNull(state)
+        assertTrue(out.toString(), out.all { it is Effect.Note })
+        assertTrue(logged().isEmpty())
+    }
+
+    @Test
+    fun withNoAnswerFromTheMainProcessTheCopyOfTheBlockListStillDropsTheRing() {
+        // Fail-closed through the copy: the main process is down (info null), the ring is dropped all the same.
+        val copy = BlockedCallers(null)
+        val salt = ByteArray(com.lightdecoder.chat.BlockList.SALT_BYTES) { it.toByte() }
+        copy.replace(
+            com.lightdecoder.imessage.direct.DirectWire.BlockListRequest(
+                com.lightdecoder.chat.BlockList.hex(salt), listOf(com.lightdecoder.chat.BlockList.hmac(salt, "+15559990000")),
+            ),
+        )
+        val rules = CallRules(blocked = copy::isBlocked)
+        val rung = rules.reduce(null, Input.Event(CallEvent.Join(IN, MALLORY, ring = true), listOf(session(IN, MALLORY)), setOf(ME), t, 10 * 60_000L, on))
+        assertNull(rung.state)
+        assertTrue(rung.effects.none { it is Effect.LookupCaller || it is Effect.LogCall })
+        // Someone else still rings once the main process does not answer.
+        val other = rules.reduce(null, Input.Event(CallEvent.Join(OTHER, ALICE, ring = true), listOf(session(OTHER)), setOf(ME), t, 10 * 60_000L, on))
+        assertTrue(other.effects.any { it is Effect.LookupCaller })
+        val shown = rules.reduce(other.state, Input.Caller(OTHER, null, t, on))
+        assertTrue(shown.effects.any { it is Effect.ShowIncoming })
     }
 
     private fun guid(n: Int): String = "0A1B2C3D-0000-4000-8000-%012d".format(n)

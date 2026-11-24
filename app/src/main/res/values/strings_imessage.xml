@@ -656,4 +656,27 @@
     <string name="apple_account_notice_sign_in_again">Sign in to your Apple Account again</string>
     <string name="apple_account_restart_pending">iMessage restarts once your FaceTime call is over.</string>
     <string name="apple_account_restart_later">iMessage restarts for a moment the next time you open LightDecoder.</string>
+
+    <!-- Blocking (SPEC2 B3): LightDecoder's own block list, in iPhone wording. -->
+    <string name="block_caller">Block this Caller</string>
+    <string name="unblock_caller">Unblock this Caller</string>
+    <string name="block_caller_title">Block %1$s?</string>
+    <string name="block_caller_body">You will not receive phone calls, messages, or FaceTime from people on the block list.</string>
+    <string name="block_caller_body_sms">You will not receive phone calls, messages, or FaceTime from people on the block list. Also block this number in Google Messages to stop receiving its texts.</string>
+    <string name="block_contact">Block Contact</string>
+    <string name="unblock">Unblock</string>
+    <string name="blocked_done">Blocked</string>
+    <string name="unblocked_done">Unblocked</string>
+    <string name="blocked_row">Blocked</string>
+    <string name="blocked_contacts">Blocked Contacts</string>
+    <string name="blocked_contacts_help">Blocked here only: on this phone, their iMessages and FaceTime calls are dropped, and their texts are hidden and silent.</string>
+    <string name="blocked_contacts_empty">No Blocked Contacts</string>
+    <string name="blocked_contacts_add">Add New…</string>
+    <string name="blocked_contacts_add_hint">Phone number or email</string>
+    <string name="blocked_contacts_sms_note">Also block a number in Google Messages to stop receiving its texts.</string>
+    <string name="blocked_contacts_invalid">That is not a phone number or an email address.</string>
+    <string name="blocked_contacts_own">You can\'t block your own number or email address.</string>
+    <string name="blocked_contacts_full">The block list is full.</string>
+    <string name="blocked_contacts_already">Already blocked.</string>
+    <string name="blocked_contacts_unblock_description">Unblock %1$s</string>
 </resources>

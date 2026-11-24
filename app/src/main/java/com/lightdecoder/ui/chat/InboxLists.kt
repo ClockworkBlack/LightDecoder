@@ -25,7 +25,22 @@ internal object InboxLists {
             .map { ConversationItem(it, ConversationTitles.of(context, iMessage.repo, it), iMessage.service) }
         val listed = if (extra.isEmpty()) own else foldIn(own, extra, BlueBubblesLinks.pairs(context.applicationContext))
         // The pictures they are shown by: a group's photo, a person's picture.
-        return runCatching { AvatarPhotos.withPhotos(context.applicationContext, listed) }.getOrDefault(listed)
+        val pictured = runCatching { AvatarPhotos.withPhotos(context.applicationContext, listed) }.getOrDefault(listed)
+        return runCatching { withBlocked(context, pictured, listOfNotNull(from, iMessage)) }.getOrDefault(pictured)
+    }
+
+    /** [items] with the conversations with one person whom the user blocked marked so ([ConversationItem.blocked]). Runs on IO. */
+    internal fun withBlocked(context: Context, items: List<ConversationItem>, backends: List<ChatBackend>): List<ConversationItem> {
+        val blocks = com.lightdecoder.chat.BlockList.get(context.applicationContext)
+        if (blocks.entries.value.isEmpty()) return items
+        val repos = backends.associate { it.service to it.repo }
+        return items.map { item ->
+            if (item.row.isGroup) return@map item
+            val repo = repos[item.service] ?: return@map item
+            val person = runCatching { repo.participants(item.row.id).filter { !it.isMe }.singleOrNull() }.getOrNull() ?: return@map item
+            val blocked = blocks.anyBlocked(listOf(person.number, person.formattedNumber, person.id).filter { it.isNotBlank() })
+            if (blocked) item.copy(blocked = true) else item
+        }
     }
 
     /** [from]'s inbox as its tab lists it: for Messages with Blue Bubbles on, the iMessage chats folded in. Runs on IO. */

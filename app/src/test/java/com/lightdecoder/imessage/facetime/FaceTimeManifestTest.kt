@@ -4,6 +4,7 @@ import com.lightdecoder.imessage.direct.DirectProcess
 import java.io.File
 import javax.xml.parsers.DocumentBuilderFactory
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -48,10 +49,52 @@ class FaceTimeManifestTest {
         assertEquals(0, list.getElementsByTagName("intent-filter").length)
     }
 
+    /**
+     * Nothing of FaceTime is exported, but for the ConnectionService Android requires to be (SPEC2 B3,
+     * an intentional change to this test's rule): only Telecom can bind that one.
+     */
     @Test
-    fun nothingOfFaceTimeIsExported() {
+    fun nothingOfFaceTimeIsExportedButTheConnectionServiceTelecomAloneCanBind() {
         val faceTime = components().filter { it.getAttributeNS(android, "name").let { n -> n.contains("FaceTime") || n.contains("facetime") || n.endsWith("CallsActivity") } }
-        assertTrue(faceTime.size >= 4)
-        for (c in faceTime) assertEquals(c.getAttributeNS(android, "name"), "false", c.getAttributeNS(android, "exported"))
+        assertTrue(faceTime.size >= 5)
+        for (c in faceTime) {
+            val name = c.getAttributeNS(android, "name")
+            if (name == CONNECTION_SERVICE) continue
+            assertEquals(name, "false", c.getAttributeNS(android, "exported"))
+        }
+    }
+
+    @Test
+    fun theConnectionServiceIsExportedOnlyUnderTelecomsPermissionInTheIMessageProcess() {
+        val service = named(CONNECTION_SERVICE)
+        assertEquals("service", service.tagName)
+        assertEquals("true", service.getAttributeNS(android, "exported"))
+        assertEquals("android.permission.BIND_TELECOM_CONNECTION_SERVICE", service.getAttributeNS(android, "permission"))
+        assertEquals(DirectProcess.SUFFIX, service.getAttributeNS(android, "process"))
+        val actions = service.getElementsByTagName("action")
+        assertEquals(1, actions.length)
+        assertEquals("android.telecom.ConnectionService", (actions.item(0) as Element).getAttributeNS(android, "name"))
+        // Every other exported component of the app is not FaceTime's.
+        val exported = components().filter { it.getAttributeNS(android, "exported") == "true" }.map { it.getAttributeNS(android, "name") }
+        assertTrue(exported.none { it != CONNECTION_SERVICE && (it.contains("facetime") || it.contains("FaceTime")) })
+    }
+
+    @Test
+    fun blockedContactsIsTheMainProcessesAndNotExported() {
+        val screen = named(".ui.chat.BlockedContactsActivity")
+        assertEquals("false", screen.getAttributeNS(android, "exported"))
+        assertTrue("the main process", screen.getAttributeNS(android, "process").isEmpty())
+        assertEquals(0, screen.getElementsByTagName("intent-filter").length)
+    }
+
+    @Test
+    fun noBluetoothPermissionIsAsked() {
+        val manifest = File("src/main/AndroidManifest.xml").readText()
+        assertFalse(manifest.contains("android.permission.BLUETOOTH_CONNECT"))
+        assertTrue(manifest.contains("android.permission.MANAGE_OWN_CALLS"))
+    }
+
+    private companion object {
+        const val CONNECTION_SERVICE = ".imessage.facetime.FaceTimeConnectionService"
     }
 }

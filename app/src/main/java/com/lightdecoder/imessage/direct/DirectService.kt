@@ -136,6 +136,12 @@ class DirectService : Service() {
             DirectWire.ACCOUNT -> DirectWire.accountReply(engine.account.state.value, engine.account.restartPending)
             // Where FaceTime stands, for the main process's "return to call" bar: only the call there is, if any (nothing is made to answer it).
             DirectWire.FT_STATE -> com.lightdecoder.imessage.facetime.FaceTimeNotices.state(this, com.lightdecoder.imessage.facetime.FaceTimeCalls.peek()?.state?.value).toJson()
+            // The user's block list, as salted hashes only: FaceTime drops a blocked caller's ring here, with no question to the main process.
+            DirectWire.BLOCKLIST -> {
+                val r = DirectWire.BlockListRequest.fromJson(request) ?: return@Server DirectWire.error("Not a block list")
+                com.lightdecoder.imessage.facetime.BlockedCallers.get(this).replace(r)
+                DirectWire.ok()
+            }
             else -> DirectWire.error("Unknown request $what")
         }
     }

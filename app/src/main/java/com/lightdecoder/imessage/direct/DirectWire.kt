@@ -15,7 +15,7 @@ import org.json.JSONObject
  *
  * Main -> :imessage: [SEND] (with its mentions and link preview), [UNSEND], [REACH], [EDIT], [REACT], [TYPING], [READ], [DOWNLOAD],
  * [EXTENSION], [BACKGROUND], [UNSCHEDULE], [RENAME], [MEMBERS], [GROUP_PHOTO], [MARK_UNREAD], [REPORT_JUNK], [PEERS], [FT_CAPABLE],
- * [ACCOUNT], [FT_STATE] (requests, answered with the same request id; a failure is answered with [error]). Never raw media bytes:
+ * [ACCOUNT], [FT_STATE], [BLOCKLIST] (requests, answered with the same request id; a failure is answered with [error]). Never raw media bytes:
  * files are passed by path, in the app's own storage; never credentials.
  * :imessage -> main: [UPDATE] (an archive change from Apple, a FaceTime call's row, the Apple Account's state, where FaceTime
  * stands), answered once it is stored; only then does the library forget the event. And [CALLER] (who is calling), answered at once.
@@ -117,6 +117,13 @@ object DirectWire {
      */
     const val FT_STATE = 22
 
+    /**
+     * The user's block list, as FaceTime in the ":imessage" process needs it ([blockList]: a salt and
+     * HMAC-SHA256(salt, address) of each blocked address, [MAX_BLOCKED] at most, never an address),
+     * answered with [ok]. A full replacement each time: sent when the link comes up and on every change.
+     */
+    const val BLOCKLIST = 23
+
     const val REPLY = 100
 
     /**
@@ -128,8 +135,41 @@ object DirectWire {
         "READ" to READ, "DOWNLOAD" to DOWNLOAD, "EXTENSION" to EXTENSION, "UPDATE" to UPDATE, "BACKGROUND" to BACKGROUND,
         "UNSCHEDULE" to UNSCHEDULE, "RENAME" to RENAME, "MEMBERS" to MEMBERS, "GROUP_PHOTO" to GROUP_PHOTO,
         "MARK_UNREAD" to MARK_UNREAD, "REPORT_JUNK" to REPORT_JUNK, "PEERS" to PEERS, "FT_CAPABLE" to FT_CAPABLE,
-        "CALLER" to CALLER, "ACCOUNT" to ACCOUNT, "FT_STATE" to FT_STATE,
+        "CALLER" to CALLER, "ACCOUNT" to ACCOUNT, "FT_STATE" to FT_STATE, "BLOCKLIST" to BLOCKLIST,
     )
+
+    /** The [BLOCKLIST] request: [salt] and the [hashes] (lower-case hex), as [com.lightdecoder.chat.BlockList.mirror] makes them. */
+    fun blockList(salt: String, hashes: List<String>): JSONObject = JSONObject().put("salt", salt).put("hashes", JSONArray(hashes))
+
+    /**
+     * What a [BLOCKLIST] request says, read strictly: a salt of [com.lightdecoder.chat.BlockList.SALT_BYTES]
+     * bytes in hex, and [MAX_BLOCKED] hashes at most, each a SHA-256 in hex (anything else left out).
+     * Null when the salt is not one (the request is then a failure, and nothing is replaced).
+     */
+    data class BlockListRequest(val salt: String, val hashes: List<String>) {
+        companion object {
+            private val SALT = Regex("^[0-9a-f]{32}$")
+            private val HASH = Regex("^[0-9a-f]{64}$")
+
+            fun fromJson(o: JSONObject): BlockListRequest? {
+                val salt = o.optStringOrNull("salt")?.takeIf { SALT.matches(it) } ?: return null
+                val a = o.optJSONArray("hashes") ?: return BlockListRequest(salt, emptyList())
+                val hashes = (0 until minOf(a.length(), MAX_BLOCKED)).mapNotNull { i -> (a.opt(i) as? String)?.takeIf { HASH.matches(it) } }.distinct()
+                return BlockListRequest(salt, hashes)
+            }
+        }
+    }
+
+    /** The most blocked addresses a [BLOCKLIST] request carries. */
+    const val MAX_BLOCKED = com.lightdecoder.chat.BlockList.MAX_ENTRIES
+
+    /** The [UPDATE] answer for a change taken and dropped on purpose: its sender is blocked (no delivery receipt follows). */
+    fun blocked(): JSONObject = ok().put(KEY_BLOCKED, true)
+
+    /** Whether an answer says it was dropped as blocked: only a real `true`, never on an error. */
+    fun isBlocked(o: JSONObject): Boolean = errorOf(o) == null && o.opt(KEY_BLOCKED) == true
+
+    private const val KEY_BLOCKED = "blocked"
 
     /** The [FT_STATE] request: there is nothing to say. */
     fun faceTimeState(): JSONObject = JSONObject()
@@ -485,6 +525,7 @@ object DirectWire {
 
     /** A [CALLER]'s answer. */
     fun callerReply(info: CallerInfo): JSONObject = ok().put("name", info.name).put("known", info.known)
+        .apply { if (info.blocked) put(KEY_BLOCKED, true) }
         .apply { info.conversationId?.let { put("conversationId", it) } }
         .apply { info.photo?.let { put("photo", it) } }
 
@@ -492,6 +533,7 @@ object DirectWire {
     fun callerInfo(o: JSONObject): CallerInfo = CallerInfo(
         name = CallIds.name(o.optStringOrNull("name")),
         known = o.optBoolean("known"),
+        blocked = o.opt(KEY_BLOCKED) == true,
         conversationId = o.optStringOrNull("conversationId")?.takeIf { it.isNotBlank() && it.length <= MAX_CONVERSATION_ID_CHARS },
         photo = o.optStringOrNull("photo")?.takeIf { it.isNotBlank() && it.length <= MAX_PATH_CHARS },
     )

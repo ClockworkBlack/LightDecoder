@@ -550,6 +550,8 @@ class FaceTimeCallActivity : AppCompatActivity() {
         when (message) {
             is CallMessage.NotStarted -> refuse(message.why)
             CallMessage.CameraUnavailable -> say(getString(R.string.facetime_camera_unavailable))
+            // The screen goes with the call: said where it is seen all the same.
+            CallMessage.EndedForPhoneCall -> Toast.makeText(applicationContext, R.string.facetime_ended_for_phone_call, Toast.LENGTH_LONG).show()
         }
     }
 
@@ -686,6 +688,7 @@ class FaceTimeCallActivity : AppCompatActivity() {
         }
         if (call.phase != Phase.ACTIVE) ticker?.cancel()
         renderControls(media)
+        binding.phoneBanner.visibility = if (media.phoneRinging && call.live && !call.incomingRing && !inPip) View.VISIBLE else View.GONE
         // The screen stays on while it rings and while there are pictures; an audio call's goes dark at the ear.
         val keepOn = ringingIn || call.phase == Phase.RINGING_OUT || call.phase == Phase.CONNECTING || (call.phase == Phase.ACTIVE && (pictures || media.cameraOn))
         if (keepOn) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)

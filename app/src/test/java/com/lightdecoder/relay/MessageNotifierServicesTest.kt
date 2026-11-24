@@ -277,6 +277,42 @@ class MessageNotifierServicesTest {
         assertEquals(4, replies.map { it.data }.toSet().size)
     }
 
+    // --- blocking (SPEC2 B3) ----------------------------------------------------------------------
+
+    @Test
+    fun aBlockedSenderOnGoogleMessagesOrSmsIsNotNotified() {
+        com.lightdecoder.imessage.IMessageAddress.setRegionForTesting("US")
+        val blocks = com.lightdecoder.chat.BlockList(java.io.File(context.filesDir, "blocked-notifier-test.json").apply { delete() })
+        com.lightdecoder.chat.BlockList.installForTesting(blocks)
+        try {
+            // Google Messages names a participant id: matched by that participant's number.
+            env.repo.upsertConversation(
+                ConversationDto(
+                    id = "c1", name = "Sam",
+                    participants = listOf(ParticipantDto(id = "2", name = "Sam", number = "+15551234567", formattedNumber = "(555) 123-4567")),
+                ),
+            )
+            // A text with no sender named, in a conversation with one person.
+            env.repo.upsertConversation(
+                ConversationDto(id = "c2", name = "Pat", participants = listOf(ParticipantDto(id = "7", name = "Pat", number = "+447700900123"))),
+            )
+            blocks.block("555-123-4567")
+            blocks.block("+44 7700 900123")
+            MessageNotifier.onIncoming(context, env.repo, incoming("m1", "c1", "hidden"))
+            MessageNotifier.onIncoming(context, env.repo, incoming("m2", "c2", "hidden too").copy(senderId = ""))
+            // Not even a mention lifts it.
+            MessageNotifier.onIncoming(context, env.repo, incoming("m3", "c1", "hidden"), mentioned = true)
+            assertTrue(active().isEmpty())
+            // Unblocked: heard again.
+            blocks.unblock("+15551234567")
+            MessageNotifier.onIncoming(context, env.repo, incoming("m4", "c1", "heard"))
+            assertEquals(listOf("heard"), texts(active().single().notification))
+        } finally {
+            com.lightdecoder.chat.BlockList.installForTesting(null)
+            com.lightdecoder.imessage.IMessageAddress.resetForTesting()
+        }
+    }
+
     // --- the buttons ------------------------------------------------------------------------------
 
     @Test

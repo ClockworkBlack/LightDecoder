@@ -16,6 +16,7 @@ import java.io.File
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -189,11 +190,31 @@ class DirectWordingTest {
             R.string.facetime_calls_new, R.string.facetime_calls_empty, R.string.facetime_calls_today, R.string.facetime_calls_yesterday,
             R.string.facetime_calls_open_chat, R.string.facetime_calls_delete, R.string.facetime_calls_deleted,
             R.string.facetime_calls_row_description, R.string.facetime_calls_new_hint, R.string.facetime_calls_start,
+            // Blocking, Telecom and the cellular watcher (SPEC2 B3).
+            R.string.block_caller, R.string.unblock_caller, R.string.block_caller_title, R.string.block_caller_body,
+            R.string.block_caller_body_sms, R.string.block_contact, R.string.unblock, R.string.blocked_done, R.string.unblocked_done,
+            R.string.blocked_row, R.string.blocked_contacts, R.string.blocked_contacts_help, R.string.blocked_contacts_empty,
+            R.string.blocked_contacts_add, R.string.blocked_contacts_add_hint, R.string.blocked_contacts_sms_note,
+            R.string.blocked_contacts_invalid, R.string.blocked_contacts_own, R.string.blocked_contacts_full,
+            R.string.blocked_contacts_already, R.string.blocked_contacts_unblock_description, R.string.facetime_telecom,
+            R.string.facetime_telecom_help, R.string.facetime_telecom_account, R.string.facetime_phone_call_incoming,
+            R.string.facetime_ended_for_phone_call,
         )
         for (res in direct) {
             val text = context.getString(res)
             assertFalse(text, text.contains("OpenBubbles"))
         }
+        // iPhone's words for blocking.
+        assertEquals("Block this Caller", context.getString(R.string.block_caller))
+        assertEquals("Unblock this Caller", context.getString(R.string.unblock_caller))
+        assertEquals("Blocked Contacts", context.getString(R.string.blocked_contacts))
+        assertEquals(
+            "You will not receive phone calls, messages, or FaceTime from people on the block list.",
+            context.getString(R.string.block_caller_body),
+        )
+        assertTrue(context.getString(R.string.block_caller_body_sms).contains("Also block this number in Google Messages to stop receiving its texts."))
+        // Nothing promises that a blocked sender sees no "Delivered" (the user's other devices still acknowledge).
+        assertFalse(context.getString(R.string.block_caller_body).contains("Delivered"))
         assertEquals("Leave this Conversation", context.getString(R.string.chat_details_leave))
         assertEquals("Change Name and Photo", context.getString(R.string.chat_details_change_name_photo))
         assertEquals("Hide Alerts", context.getString(R.string.chat_details_hide_alerts))

@@ -121,6 +121,7 @@ class ChatDetailsActivity : AppCompatActivity() {
         binding.changeNamePhoto.setOnClickListener { showNameAndPhoto() }
         binding.addMember.setOnClickListener { startActivity(NewConversationActivity.addMembers(this, conversationId)) }
         binding.leave.setOnClickListener { confirmLeave() }
+        binding.block.setOnClickListener { details?.members?.singleOrNull()?.let(::toggleBlock) }
         binding.faceTimeAudio.setOnClickListener { startFaceTime(video = false) }
         binding.faceTimeVideo.setOnClickListener { startFaceTime(video = true) }
         binding.hideAlerts.setOnCheckedChangeListener { _, on -> if (!rendering) setHideAlerts(on) }
@@ -278,6 +279,10 @@ class ChatDetailsActivity : AppCompatActivity() {
         binding.leftNote.visibility = if (d.left) View.VISIBLE else View.GONE
         binding.leave.visibility = if (d.rules.canLeave) View.VISIBLE else View.GONE
         binding.leave.isEnabled = busy == 0
+        // A chat with one person: "Block this Caller", or "Unblock this Caller" when they are.
+        val person = d.members.singleOrNull()?.takeIf { !row.isGroup && blockable(it) }
+        binding.block.visibility = if (person != null) View.VISIBLE else View.GONE
+        if (person != null) binding.block.setText(if (isBlocked(person)) R.string.unblock_caller else R.string.block_caller)
         rendering = false
     }
 
@@ -298,6 +303,8 @@ class ChatDetailsActivity : AppCompatActivity() {
             item.remove.visibility = if (d.rules.canRemove) View.VISIBLE else View.GONE
             item.remove.contentDescription = getString(R.string.chat_details_remove_member, member.name)
             item.remove.setOnClickListener { confirmRemove(member) }
+            // A tap on a member: block or unblock them (and remove them, where the group allows it).
+            item.root.setOnClickListener { memberMenu(item.root, member, d.rules.canRemove) }
             if (d.rules.canRemove) {
                 item.root.setOnLongClickListener {
                     confirmRemove(member)
@@ -364,6 +371,67 @@ class ChatDetailsActivity : AppCompatActivity() {
     @VisibleForTesting
     internal fun setPhoto(uri: Uri) = change { direct.setGroupPhoto(conversationId, uri) }
 
+    // --- the block list ------------------------------------------------------------------------
+
+    private val blocks: com.lightdecoder.chat.BlockList get() = com.lightdecoder.chat.BlockList.get(this)
+
+    private fun isBlocked(member: Member): Boolean = blocks.isBlocked(member.address)
+
+    /** Someone the block list can hold: a phone number or an email address. */
+    private fun blockable(member: Member): Boolean = com.lightdecoder.chat.BlockList.normalize(member.address) != null
+
+    private fun memberMenu(anchor: View, member: Member, canRemove: Boolean) {
+        android.widget.PopupMenu(this, anchor).apply {
+            if (blockable(member)) menu.add(0, MENU_BLOCK, 0, if (isBlocked(member)) R.string.unblock_caller else R.string.block_caller)
+            if (canRemove) menu.add(0, MENU_REMOVE, 1, R.string.chat_details_remove)
+            if (menu.size() == 0) return
+            setOnMenuItemClickListener { item ->
+                when (item.itemId) {
+                    MENU_BLOCK -> toggleBlock(member)
+                    MENU_REMOVE -> confirmRemove(member)
+                }
+                true
+            }
+            show()
+        }
+    }
+
+    /**
+     * Blocks [member] (asked first, in an iPhone's words), or unblocks them. Local only: nothing is
+     * said to Apple or to them, and nothing promises that they see no "Delivered" (the user's iPhone
+     * or Mac still acknowledges their messages).
+     */
+    @VisibleForTesting
+    internal fun toggleBlock(member: Member) {
+        if (isBlocked(member)) {
+            blocks.unblock(member.address)
+            toast(getString(R.string.unblocked_done))
+            details?.let(::render)
+            return
+        }
+        val sms = manager.service == ChatService.MESSAGES
+        dialog?.dismiss()
+        dialog = MaterialAlertDialogBuilder(this)
+            .setTitle(getString(R.string.block_caller_title, member.name))
+            .setMessage(if (sms) R.string.block_caller_body_sms else R.string.block_caller_body)
+            .setPositiveButton(R.string.block_contact) { _, _ -> block(member) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+            .also { shown -> shown.getButton(android.content.DialogInterface.BUTTON_POSITIVE)?.filterTouchesWhenObscured = true }
+    }
+
+    @VisibleForTesting
+    internal fun block(member: Member) {
+        val text = when (blocks.block(member.address)) {
+            com.lightdecoder.chat.BlockList.Added.ADDED, com.lightdecoder.chat.BlockList.Added.ALREADY -> R.string.blocked_done
+            com.lightdecoder.chat.BlockList.Added.OWN -> R.string.blocked_contacts_own
+            com.lightdecoder.chat.BlockList.Added.FULL -> R.string.blocked_contacts_full
+            com.lightdecoder.chat.BlockList.Added.INVALID -> R.string.blocked_contacts_invalid
+        }
+        toast(getString(text))
+        details?.let(::render)
+    }
+
     private fun confirmRemove(member: Member) {
         dialog?.dismiss()
         dialog = MaterialAlertDialogBuilder(this)
@@ -415,6 +483,9 @@ class ChatDetailsActivity : AppCompatActivity() {
     }
 
     companion object {
+        private const val MENU_BLOCK = 1
+        private const val MENU_REMOVE = 2
+
         /** A Messages conversation's iMessage chat (the person's, shown inside it). */
         const val EXTRA_COMPANION = "com.lightdecoder.ui.chat.extra.COMPANION"
 

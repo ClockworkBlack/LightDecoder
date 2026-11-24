@@ -52,7 +52,7 @@ import kotlinx.coroutines.withContext
  *
  * Only LightDecoder's own rows are listed (who called, as Apple vouches for them, or whom the user
  * called): never a list of calls made from what other people's phones say. None of a chat in Deleted
- * or Spam ([ArchiveRepository.calls]), nor of anyone [hidden] says to leave out.
+ * or Spam ([ArchiveRepository.calls]), nor of anyone the user blocked ([hidden]).
  */
 class CallsActivity : AppCompatActivity() {
 
@@ -130,12 +130,8 @@ class CallsActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Whom the list leaves out, by address: nobody yet. (Where the user's own block list goes, so
-     * that a blocked person's calls are never listed.)
-     */
-    @Suppress("UNUSED_PARAMETER")
-    private fun hidden(address: String): Boolean = false
+    /** Whom the list leaves out, by address: everyone on the user's block list ([com.lightdecoder.chat.BlockList]). */
+    private fun hidden(address: String): Boolean = com.lightdecoder.chat.BlockList.get(applicationContext).isBlocked(address)
 
     private fun dayTexts() = object : CallList.DayTexts {
         override fun today() = getString(R.string.facetime_calls_today)
@@ -225,7 +221,8 @@ class CallsActivity : AppCompatActivity() {
         fun missedSinceOpened(context: Context): Int {
             val since = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getLong(KEY_OPENED, 0L)
             val repo = ScreenBackends.get(context, ChatService.IMESSAGE).repo
-            return CallList.missed(repo.calls(MAX_CALLS).map { it.first }, since)
+            val blocks = com.lightdecoder.chat.BlockList.get(context)
+            return CallList.missed(repo.calls(MAX_CALLS).map { it.first }.filter { it.isOutgoing || !blocks.isBlocked(it.senderId) }, since)
         }
 
         /** The chats' menu entry: "FaceTime", or with how many calls were missed, in red. */

@@ -377,6 +377,32 @@
                         android:text="@string/facetime_silence_unknown_help"
                         android:textAppearance="?attr/textAppearanceBodySmall" />
 
+                    <!-- FaceTime through Android's Telecom (DirectPrefs.telecomOn, read by the call engine here): the kill switch. -->
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switchTelecom"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:minHeight="48dp"
+                        android:text="@string/facetime_telecom" />
+
+                    <TextView
+                        android:id="@+id/telecomHelp"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/facetime_telecom_help"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                    <!-- The user's own block list (ui.chat.BlockedContactsActivity, main process). -->
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/blockedContacts"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:minHeight="48dp"
+                        android:text="@string/blocked_contacts" />
+
                     <com.google.android.material.materialswitch.MaterialSwitch
                         android:id="@+id/switchGames"
                         android:layout_width="match_parent"

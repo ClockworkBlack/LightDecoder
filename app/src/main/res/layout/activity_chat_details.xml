@@ -250,6 +250,17 @@
                 android:textColor="?attr/colorOnSurfaceVariant"
                 android:visibility="gone" />
 
+            <!-- "Block this Caller" / "Unblock this Caller" for a chat with one person (LightDecoder's own block list). -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/block"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:text="@string/block_caller"
+                android:textColor="?attr/colorError"
+                android:visibility="gone" />
+
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/leave"
                 style="@style/Widget.Material3.Button.TextButton"

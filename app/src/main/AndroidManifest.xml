@@ -340,6 +340,10 @@
         <activity
             android:name=".ui.chat.CallsActivity"
             android:exported="false" />
+        <!-- Blocked Contacts (the user's own block list), from the iMessage screen: the app's own screen only. -->
+        <activity
+            android:name=".ui.chat.BlockedContactsActivity"
+            android:exported="false" />
         <!--
             FaceTime calls (imessage/facetime), in the ":imessage" process: the library's call is
             a pointer into that process's session, and it records and plays the call's sound there.
@@ -351,7 +355,12 @@
             incoming call's Decline (Ignore), and the window's Mute, Camera Off and End (it never
             answers or places a call). None is exported: only the app's own screens, notifications
             and window reach them (nor is anything else of the iMessage process, the Apple Account's
-            sign-in screen included).
+            sign-in screen included), but for the one Android requires to be: the ConnectionService
+            below, which hands calls to Android's Telecom (Bluetooth headsets, cars) and which only
+            Telecom can bind (BIND_TELECOM_CONNECTION_SERVICE is the system's alone). It makes
+            Telecom's call only for a call the call engine handed over and is waiting for, and what
+            Telecom asks maps to the user's own Answer (camera off), Decline and Hang up; it never
+            answers or places a call by itself.
         -->
         <activity
             android:name=".ui.imessage.FaceTimeCallActivity"
@@ -374,6 +383,15 @@
             android:name=".imessage.facetime.FaceTimeActionReceiver"
             android:exported="false"
             android:process=":imessage" />
+        <service
+            android:name=".imessage.facetime.FaceTimeConnectionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE"
+            android:process=":imessage">
+            <intent-filter>
+                <action android:name="android.telecom.ConnectionService" />
+            </intent-filter>
+        </service>
         <activity
             android:name=".ui.messenger.MessengerActivity"
             android:exported="false" />

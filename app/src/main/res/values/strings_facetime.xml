@@ -161,4 +161,11 @@
     <!-- New FaceTime: everyone picked is called together. -->
     <string name="facetime_calls_new_hint">Everyone you add can see who else is in the call.</string>
     <string name="facetime_calls_start">FaceTime</string>
+
+    <!-- Telecom (SPEC2 B3): Bluetooth headsets and cars through Android's own call handling. -->
+    <string name="facetime_telecom">Use with Bluetooth and car</string>
+    <string name="facetime_telecom_help">A headset\'s or a car\'s buttons answer and end FaceTime calls, and the car shows them. A call answered that way starts with the camera off.</string>
+    <string name="facetime_telecom_account">LightDecoder</string>
+    <string name="facetime_phone_call_incoming">Phone call incoming</string>
+    <string name="facetime_ended_for_phone_call">Ended for a phone call</string>
 </resources>

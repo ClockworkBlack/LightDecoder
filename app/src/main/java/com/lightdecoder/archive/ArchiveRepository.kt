@@ -80,6 +80,16 @@ class ArchiveRepository private constructor(
         ) { it.toConversation() }
     }
 
+    /**
+     * The addresses the chats are carried on ([ConversationRow.defaultOutgoingId]): in iMessage's
+     * archive only ever the user's own (the block list refuses them). At most [limit].
+     */
+    fun outgoingIds(limit: Int = 32): List<String> =
+        query(
+            "SELECT DISTINCT default_outgoing_id FROM conversations WHERE default_outgoing_id != '' LIMIT ${limit.coerceAtLeast(0)}",
+            emptyArray(),
+        ) { it.getString(0) }.filter { it.isNotBlank() }
+
     fun conversation(id: String): ConversationRow? =
         query("SELECT * FROM conversations WHERE conversation_id = ?", arrayOf(id)) { it.toConversation() }.firstOrNull()
 

@@ -179,6 +179,51 @@ class DirectWireTest {
         )
     }
 
+    // --- blocking (SPEC2 B3) -------------------------------------------------------------------------
+
+    @Test
+    fun noDeliveryReceiptFollowsAMessageTheMainProcessDroppedAsBlocked() {
+        val good = DirectWire.encode(DirectArchive.Update.Remove("imsg:G1"))
+        // A fake main process ("sink") that drops it as from someone the user blocked.
+        val sink = DirectEngine.Sink { update ->
+            Delivery.of(JSONObject(DirectSinkService.take(DirectWire.encode(update)) { DirectLink.Applied.BLOCKED }.toString()))
+        }
+        val settled = kotlinx.coroutines.runBlocking { UpdateDelivery.settle({ sink.deliver(DirectWire.decode(good)) }, { }, { 0 }) }
+        assertEquals(Delivery.BLOCKED, settled)
+        assertFalse("no delivery receipt", DirectEngine.acknowledgesAfter(settled))
+        // Settled, not tried again: the ones after it are not held up.
+        assertTrue(kotlinx.coroutines.runBlocking { UpdateDelivery.untilSettled({ Delivery.BLOCKED }, { }, { 0 }) })
+        // Stored, or nothing handed over, or given up on: the receipt goes as before.
+        assertTrue(DirectEngine.acknowledgesAfter(Delivery.STORED))
+        assertTrue(DirectEngine.acknowledgesAfter(null))
+        val stored = DirectEngine.Sink { update -> Delivery.of(DirectSinkService.take(DirectWire.encode(update)) { DirectLink.Applied.STORED }) }
+        assertTrue(DirectEngine.acknowledgesAfter(kotlinx.coroutines.runBlocking { UpdateDelivery.settle({ stored.deliver(DirectWire.decode(good)) }, { }, { 0 }) }))
+        // The engine's own step (DirectEngine.handle): through the fake sink, the receipt is not sent after
+        // "blocked", and is after "stored" and when nothing was handed over.
+        val acks = ArrayList<String>()
+        kotlinx.coroutines.runBlocking {
+            assertEquals(Delivery.BLOCKED, DirectEngine.storeThenAcknowledge(DirectWire.decode(good), { DirectEngine.deliver(sink, it) }) { acks += "blocked" })
+            assertEquals(Delivery.STORED, DirectEngine.storeThenAcknowledge(DirectWire.decode(good), { DirectEngine.deliver(stored, it) }) { acks += "stored" })
+            assertNull(DirectEngine.storeThenAcknowledge(DirectArchive.Update.Ignore, { throw AssertionError("nothing to hand over") }) { acks += "ignored" })
+        }
+        assertEquals(listOf("stored", "ignored"), acks)
+        // Only a real true says blocked; never an error.
+        assertTrue(DirectWire.isBlocked(DirectWire.blocked()))
+        assertFalse(DirectWire.isBlocked(DirectWire.ok().put("blocked", "true")))
+        assertFalse(DirectWire.isBlocked(DirectWire.error("x").put("blocked", true)))
+        assertEquals(Delivery.FAILED, Delivery.of(DirectWire.error("x").put("blocked", true)))
+    }
+
+    @Test
+    fun theCallerAnswerSaysBlockedOnlyForARealTrue() {
+        val info = com.lightdecoder.imessage.facetime.CallerInfo("Mallory", known = true, blocked = true)
+        assertTrue(DirectWire.callerInfo(JSONObject(DirectWire.callerReply(info).toString())).blocked)
+        assertFalse(DirectWire.callerInfo(JSONObject(DirectWire.callerReply(info.copy(blocked = false)).toString())).blocked)
+        assertFalse(DirectWire.callerReply(info.copy(blocked = false)).has("blocked"))
+        assertFalse(DirectWire.callerInfo(DirectWire.ok().put("blocked", "yes")).blocked)
+        assertEquals(23, DirectWire.BLOCKLIST)
+    }
+
     @Test
     fun theMainProcessRejectsAnUpdateItCanNeverStoreAndAsksAgainForOneItCouldNotStoreForNow() {
         val good = DirectWire.encode(DirectArchive.Update.Remove("imsg:G1"))
@@ -551,7 +596,7 @@ class DirectWireTest {
             "SEND" to 1, "UNSEND" to 2, "REACH" to 3, "EDIT" to 4, "REACT" to 5, "TYPING" to 6, "READ" to 7, "DOWNLOAD" to 8,
             "EXTENSION" to 9, "UPDATE" to 10, "BACKGROUND" to 11, "UNSCHEDULE" to 12, "RENAME" to 13, "MEMBERS" to 14,
             "GROUP_PHOTO" to 15, "MARK_UNREAD" to 16, "REPORT_JUNK" to 17, "PEERS" to 18, "FT_CAPABLE" to 19, "CALLER" to 20,
-            "ACCOUNT" to 21, "FT_STATE" to 22,
+            "ACCOUNT" to 21, "FT_STATE" to 22, "BLOCKLIST" to 23,
         )
         assertEquals(spec, DirectWire.REQUEST_CODES)
         assertEquals(DirectWire.REQUEST_CODES.size, DirectWire.REQUEST_CODES.values.toSet().size)

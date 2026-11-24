@@ -21,6 +21,8 @@ data class ConversationItem(
     val service: com.lightdecoder.chat.ChatService = com.lightdecoder.chat.ChatService.MESSAGES,
     /** The picture it is shown by (an iMessage group's photo, a person's contact picture: [AvatarPhotos]); "" for its initials. */
     val photo: String = "",
+    /** A conversation with one person, whom the user blocked ([com.lightdecoder.chat.BlockList]): its row says "Blocked". */
+    val blocked: Boolean = false,
 )
 
 /** What a conversation is called in a list: its name, else the people in it. */
@@ -64,7 +66,7 @@ class ConversationsAdapter(
         Avatars.bind(b.avatar, item.title, row.id, row.avatarColor, item.photo.takeIf { it.isNotEmpty() }?.let { java.io.File(it) })
         b.name.text = item.title
         b.name.setTypeface(null, if (row.unread) Typeface.BOLD else Typeface.NORMAL)
-        val snippet = snippetText(holder, row)
+        val snippet = if (item.blocked) context.getString(R.string.blocked_row) else snippetText(holder, row)
         b.snippet.text = snippet
         b.snippet.setTypeface(null, if (row.unread) Typeface.BOLD else Typeface.NORMAL)
         val time = TimeFormat.listTime(context, row.lastMessageTs)

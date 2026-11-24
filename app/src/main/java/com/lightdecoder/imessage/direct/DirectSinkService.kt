@@ -45,10 +45,11 @@ class DirectSinkService : Service() {
          * The answer to the [DirectWire.UPDATE] [request], stored with [store]: [DirectWire.ok], a
          * plain error when storing failed for now (the storage full or busy: it is handed over
          * again), or [DirectWire.rejected] when it cannot be read or storing it failed otherwise,
-         * as it would every time. Nothing an update does takes the main process down: an error too
+         * as it would every time; [DirectWire.blocked] when it was taken and dropped as from someone the
+         * user blocked. Nothing an update does takes the main process down: an error too
          * (memory run out on it, a stack run out on what it holds) is that update rejected.
          */
-        fun take(request: JSONObject, store: (DirectArchive.Update) -> Unit): JSONObject {
+        fun take(request: JSONObject, store: (DirectArchive.Update) -> Any?): JSONObject {
             val update = try {
                 DirectWire.decode(request)
             } catch (e: Throwable) {
@@ -56,8 +57,8 @@ class DirectSinkService : Service() {
                 return DirectWire.rejected(e)
             }
             return try {
-                store(update)
-                DirectWire.ok()
+                // Dropped as from someone the user blocked: said so, and no delivery receipt follows.
+                if (store(update) == DirectLink.Applied.BLOCKED) DirectWire.blocked() else DirectWire.ok()
             } catch (e: Throwable) {
                 Log.w(TAG, "update ${update::class.simpleName} not stored (${e::class.java.simpleName})")
                 if (isForNow(e)) DirectWire.failure(e) else DirectWire.rejected(e)

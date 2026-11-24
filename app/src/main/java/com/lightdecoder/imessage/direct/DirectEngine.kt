@@ -131,6 +131,13 @@ class DirectEngine private constructor(private val app: Context) {
     private val handles = MutableStateFlow<List<String>>(emptyList())
     private val myHandles: List<String> get() = handles.value
 
+    /** Whether [address] is one of the user's own addresses as the library registered them (never blocked). Never throws. */
+    fun isOwnHandle(address: String): Boolean = try {
+        myHandles.any { com.lightdecoder.imessage.IMessageAddress.sameKey(it, address) }
+    } catch (e: Exception) {
+        false
+    }
+
     /** The one-to-one chats' guids (see [ChatGuids]). */
     private val chatGuids = ChatGuids(File(app.filesDir, "imessage/chat-guids.json"))
 
@@ -306,12 +313,14 @@ class DirectEngine private constructor(private val app: Context) {
         } finally {
             attempts.ended()
         }
-        if (update != DirectArchive.Update.Ignore) store(update)
-        attempts.risky()
-        try {
-            sendDeliveryAck(inst, me)
-        } finally {
-            attempts.ended()
+        // Dropped by the main process as from someone the user blocked: they are not told it arrived.
+        storeThenAcknowledge(update, { store(it) }) {
+            attempts.risky()
+            try {
+                sendDeliveryAck(inst, me)
+            } finally {
+                attempts.ended()
+            }
         }
     }
 
@@ -391,16 +400,10 @@ class DirectEngine private constructor(private val app: Context) {
      * Hands [update] to the main process until it is stored, or given up on ([UpdateDelivery]: one
      * the main process can never store does not hold up every later one).
      */
-    private suspend fun store(update: DirectArchive.Update) {
-        val stored = UpdateDelivery.untilSettled({
-            try {
-                sink?.deliver(update) ?: Delivery.UNREACHABLE
-            } catch (e: Exception) {
-                Log.w(TAG, "main process did not take an update", e)
-                Delivery.FAILED
-            }
-        })
-        if (!stored) Log.w(TAG, "an update the main process could not store was skipped: ${update::class.simpleName}")
+    private suspend fun store(update: DirectArchive.Update): Delivery? {
+        val settled = deliver(sink, update)
+        if (settled == null) Log.w(TAG, "an update the main process could not store was skipped: ${update::class.simpleName}")
+        return settled
     }
 
     /**
@@ -1341,6 +1344,38 @@ class DirectEngine private constructor(private val app: Context) {
     companion object {
         private const val TAG = "Imessage"
         const val CONFIRM_TIMEOUT_MS = 45_000L
+
+        /**
+         * Whether a message is followed by its delivery receipt once the main process took it as
+         * [delivery] (null: nothing was handed over, or it was given up on): always, but for one the
+         * main process dropped as from someone the user blocked ([Delivery.BLOCKED]).
+         */
+        internal fun acknowledgesAfter(delivery: Delivery?): Boolean = delivery?.acknowledges ?: true
+
+        /**
+         * [update] into the main process ([store]; nothing for [DirectArchive.Update.Ignore]), then the
+         * delivery receipt ([acknowledge]), unless the main process dropped it as from someone the user
+         * blocked ([acknowledgesAfter]). What [store] said, for the caller.
+         */
+        internal suspend fun storeThenAcknowledge(
+            update: DirectArchive.Update,
+            store: suspend (DirectArchive.Update) -> Delivery?,
+            acknowledge: suspend () -> Unit,
+        ): Delivery? {
+            val delivery = if (update != DirectArchive.Update.Ignore) store(update) else null
+            if (acknowledgesAfter(delivery)) acknowledge()
+            return delivery
+        }
+
+        /** Hands [update] to the main process through [sink] until it is settled ([UpdateDelivery.settle]). */
+        internal suspend fun deliver(sink: Sink?, update: DirectArchive.Update): Delivery? = UpdateDelivery.settle({
+            try {
+                sink?.deliver(update) ?: Delivery.UNREACHABLE
+            } catch (e: Exception) {
+                Log.w(TAG, "main process did not take an update", e)
+                Delivery.FAILED
+            }
+        })
 
         /** The name OpenBubbles gives an iMessage app's picture. */
         const val APP_IMAGE_NAME = "jpeg-image.jpeg"

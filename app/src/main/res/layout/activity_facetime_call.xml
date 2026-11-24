@@ -96,6 +96,22 @@
             android:visibility="gone"
             app:tint="@color/call_on_screen" />
 
+        <!-- A phone call rings on this phone meanwhile (imessage.facetime.CellularWatch): said at the top. -->
+        <TextView
+            android:id="@+id/phoneBanner"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|center_horizontal"
+            android:layout_marginTop="16dp"
+            android:accessibilityLiveRegion="polite"
+            android:paddingHorizontal="12dp"
+            android:paddingVertical="6dp"
+            android:text="@string/facetime_phone_call_incoming"
+            android:textColor="@color/call_on_screen"
+            android:textSize="15sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
+
         <!-- Who, and how the call stands. In the middle without a picture; at the top over one. -->
         <LinearLayout
             android:id="@+id/info"

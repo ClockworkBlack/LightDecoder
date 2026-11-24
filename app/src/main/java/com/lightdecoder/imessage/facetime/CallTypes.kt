@@ -103,6 +103,11 @@ data class Call(
     val peers: List<String> = listOf(peer),
     /** A group call: placed to several people, or rung for a call of more than the caller and the user. */
     val group: Boolean = false,
+    /**
+     * A placed call that came from a group chat or was placed to several people, even when only one of
+     * them is called in the end: its [name] is then the chat's, which any member may have written.
+     */
+    val fromGroup: Boolean = false,
     /** An incoming group call: how many other people its member list names besides the caller (a count only, [MAX_PEOPLE] at most). */
     val others: Int = 0,
     /**
@@ -180,8 +185,11 @@ data class CallLogEntry(
     val members: List<String> = emptyList(),
 )
 
-/** What the main process knows of a caller: their contact name, whether they are known (a name, or a chat with them), and the chat. */
-data class CallerInfo(val name: String, val known: Boolean, val conversationId: String? = null, val photo: String? = null)
+/**
+ * What the main process knows of a caller: their contact name, whether they are known (a name, or a
+ * chat with them), and the chat; and whether the user blocked them ([blocked]: no ring, no row, no notice).
+ */
+data class CallerInfo(val name: String, val known: Boolean, val conversationId: String? = null, val photo: String? = null, val blocked: Boolean = false)
 
 /** The two FaceTime settings of the iMessage screen. */
 data class FaceTimeSettings(val on: Boolean = true, val silenceUnknown: Boolean = false)

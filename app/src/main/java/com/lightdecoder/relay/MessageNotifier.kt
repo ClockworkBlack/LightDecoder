@@ -116,6 +116,8 @@ object MessageNotifier {
         if (!enabled(context, service)) return
         if (message.isOld || message.fromMe || message.direction != "in") return
         if (message.conversationId == visibleConversationId(service)) return
+        // Someone the user blocked is never heard of, on any service, mentions included (checked before them).
+        if (fromBlocked(context, repo, message)) return
         val conversation = repo.conversation(message.conversationId)
         if ((conversation?.muted == true || mutedAsMerged(context, service, message.conversationId)) && !mentioned) return
         if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) return
@@ -125,6 +127,27 @@ object MessageNotifier {
         val line = Line(sender, bodyOf(context, message), message.timestampMs.takeIf { it > 0 } ?: System.currentTimeMillis(), false)
         val key = Key(service, message.conversationId)
         post(context, key, conversation, add(key, line), alert = true, photo = photoFor(context, repo, message.conversationId, conversation))
+    }
+
+    /**
+     * Whether [message]'s sender is on the user's block list ([com.lightdecoder.chat.BlockList]): by
+     * the address it names, or (Google Messages and WhatsApp name a participant id) by that
+     * participant's number in the conversation. Never throws.
+     */
+    internal fun fromBlocked(context: Context, repo: ArchiveRepository, message: MessageDto): Boolean = try {
+        val list = com.lightdecoder.chat.BlockList.get(context)
+        if (list.entries.value.isEmpty()) {
+            false
+        } else {
+            val sender = message.senderId
+            val others = repo.participants(message.conversationId).filter { !it.isMe }
+            // No sender named: a conversation with one person is theirs.
+            val theirs = if (sender.isBlank()) others.takeIf { it.size == 1 }.orEmpty() else others.filter { it.id == sender || it.number == sender }
+            val numbers = theirs.flatMap { listOf(it.number, it.formattedNumber) }
+            list.anyBlocked((listOf(sender) + numbers).filter { it.isNotBlank() })
+        }
+    } catch (e: Exception) {
+        false
     }
 
     /**

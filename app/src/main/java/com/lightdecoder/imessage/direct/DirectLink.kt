@@ -162,9 +162,22 @@ class DirectLink private constructor(
     internal var restartCheckMs = RESTART_CHECK_MS
     internal var startService: () -> Boolean = { DirectService.start(app) }
 
+    /** The ":imessage" process's copy of the block list is to be sent (it changed, or the last send did not go). */
+    private val blockListOwed = java.util.concurrent.atomic.AtomicBoolean(true)
+
+    /** Sends are made one at a time, the latest list each time. */
+    private val blockListSends = Channel<Unit>(Channel.CONFLATED)
+
+    /** The block list changed: its copy goes to the ":imessage" process (held here: the list holds it only weakly). */
+    private val blockListChanged: () -> Unit = { pushBlockList() }
+
     init {
         if (active) scope.launch { failInterruptedSends() }
         scope.launch { for (notice in typingOut) tell(notice) }
+        // The block list's copy for FaceTime in the ":imessage" process: now (the link is up), and on every change.
+        scope.launch { for (u in blockListSends) sendBlockList() }
+        pushBlockList()
+        runCatching { blockList.addListener(blockListChanged) }
         // New group photos left by work that never ended (the app stopped in the middle of it).
         scope.launch { runCatching { GroupPhotos.sweep(app) } }
     }
@@ -1309,6 +1322,8 @@ class DirectLink private constructor(
     /** Apple does not answer typing: nothing waits for it, and a failure is only logged. */
     private suspend fun sendTyping(conversationId: String, typing: Boolean) {
         try {
+            // Nothing goes to someone the user blocked.
+            if (blockedChat(conversationId)) return
             val target = targetOf(conversationId) ?: return
             val reply = requests.call(DirectWire.TYPING, DirectWire.typing(target, typing), NOTICE_TIMEOUT_MS)
             DirectWire.errorOf(reply)?.let { Log.i(TAG, "typing not sent: $it") }
@@ -1327,6 +1342,8 @@ class DirectLink private constructor(
         runCatching { repo.markConversationRead(conversationId) }
         MessageNotifier.cancel(app, conversationId, ChatService.IMESSAGE)
         if (!active) return
+        // No read receipt goes to someone the user blocked.
+        if (blockedChat(conversationId)) return
         val (guid, target) = try {
             val guid = repo.latestIncomingMessageId(conversationId, DirectArchive.PREFIX)?.let(DirectArchive::guidOf) ?: return
             guid to (targetOf(conversationId) ?: return)
@@ -1497,9 +1514,99 @@ class DirectLink private constructor(
         }
     }
 
+    /** How [apply] took a change. */
+    enum class Applied {
+        /** Stored (or handled as it is to be: refused, held for its message, ...). */
+        STORED,
+
+        /** Dropped: its sender is on the user's block list. The ":imessage" process sends no delivery receipt for it. */
+        BLOCKED,
+    }
+
     /** Stores one change from the ":imessage" process. Returns once it is in the archive. */
-    fun apply(update: DirectArchive.Update) {
-        synchronized(this) { store(update) }
+    fun apply(update: DirectArchive.Update): Applied {
+        // The ":imessage" process is up and talking to this one: its copy of the block list is sent, if it is owed.
+        if (blockListOwed.get()) pushBlockList()
+        return synchronized(this) {
+            if (dropBlocked(update)) {
+                Applied.BLOCKED
+            } else {
+                store(update)
+                Applied.STORED
+            }
+        }
+    }
+
+    // --- the user's block list --------------------------------------------------------------------
+
+    private val blockList: com.lightdecoder.chat.BlockList get() = com.lightdecoder.chat.BlockList.get(app)
+
+    /** Whether [address] (any form) is on the user's block list. Never throws. */
+    private fun blocked(address: String): Boolean = runCatching { blockList.isBlocked(address) }.getOrDefault(false)
+
+    /** Whether [conversationId] is a chat with one person, who is blocked: nothing is sent to them unasked (typing, read receipts). */
+    internal fun blockedChat(conversationId: String): Boolean = try {
+        val row = repo.conversation(conversationId)
+        row != null && !row.isGroup && repo.participants(conversationId).filter { !it.isMe }.singleOrNull()?.let { blocked(it.number.ifBlank { it.id }) } == true
+    } catch (e: RuntimeException) {
+        false
+    }
+
+    /**
+     * Whether [update] is content from someone the user blocked (never the user's own): a message, a
+     * tapback, typing, a sticker, a poll's vote or change, an edit, an unsend. Dropped then, with
+     * the files the ":imessage" process wrote aside for it, and said in the log without naming
+     * anyone. A group's state (renamed, its members changed and its version, its photo) is still
+     * taken, silently: dropping it would leave the group's members and version behind, and the
+     * user's later messages to the group would go to a stale list.
+     */
+    private fun dropBlocked(update: DirectArchive.Update): Boolean {
+        val sender = when (update) {
+            is DirectArchive.Update.Upsert -> update.message.takeIf { !it.fromMe && it.direction != "system" && !update.groupOnly }?.senderId
+            is DirectArchive.Update.Reaction -> update.participantId.takeIf { !update.fromMe }
+            is DirectArchive.Update.Typing -> update.participantId
+            is DirectArchive.Update.Sticker -> update.participantId.takeIf { !update.fromMe }
+            is DirectArchive.Update.PollVote -> update.voter.takeIf { !update.fromMe }
+            is DirectArchive.Update.PollChange -> update.row.message.takeIf { !it.fromMe }?.senderId
+            is DirectArchive.Update.Edit -> update.sender.takeIf { !update.fromMe }
+            is DirectArchive.Update.Unsent -> update.sender.takeIf { !update.fromMe }
+            else -> null
+        }
+        if (sender.isNullOrBlank() || !blocked(sender)) return false
+        when (update) {
+            is DirectArchive.Update.Upsert -> dropInlineFiles(update.message)
+            is DirectArchive.Update.PollChange -> dropInlineFiles(update.row.message)
+            is DirectArchive.Update.Reaction -> update.sticker?.let(::dropPicture)
+            is DirectArchive.Update.Sticker -> DirectArchive.guidOf(update.messageId)?.let { dropPicture(IMessageExtra.stickerKey(it, update.stickerGuid)) }
+            else -> Unit
+        }
+        if (update !is DirectArchive.Update.Typing) IMessageLog.add(app, "a message from a blocked sender was dropped")
+        return true
+    }
+
+    /** Sends the ":imessage" process its copy of the block list ([DirectWire.BLOCKLIST]) when iMessage is set up here. */
+    private fun pushBlockList() {
+        blockListOwed.set(true)
+        if (active) blockListSends.trySend(Unit)
+    }
+
+    private suspend fun sendBlockList() {
+        if (!blockListOwed.getAndSet(false)) return
+        val ok = try {
+            val mirror = blockList.mirror()
+            val marks = app.getSharedPreferences(BLOCKLIST_PREFS, Context.MODE_PRIVATE)
+            // Nobody blocked, and nobody ever was as far as the other process was told: nothing to send.
+            if (mirror.hashes.isEmpty() && !marks.getBoolean(KEY_MIRRORED, false)) return
+            val sent = DirectWire.errorOf(requests.call(DirectWire.BLOCKLIST, DirectWire.blockList(mirror.salt, mirror.hashes), NOTICE_TIMEOUT_MS)) == null
+            if (sent) marks.edit().putBoolean(KEY_MIRRORED, mirror.hashes.isNotEmpty()).apply()
+            sent
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            false
+        }
+        // Not taken: sent again the next time the other process hands something over, or the list changes.
+        if (!ok) blockListOwed.set(true)
     }
 
     private fun store(update: DirectArchive.Update) {
@@ -3346,9 +3453,9 @@ class DirectLink private constructor(
                     repo.messagesWithExtra(chat, "\"call\"", CallRows.PREFIX, 20).any { IMessageExtra.parse(it.extra).call?.outgoing == true }
                 )
             val photo = runCatching { com.lightdecoder.relay.ContactPhotos.get(app).forAddress(address)?.path }.getOrNull()
-            CallerInfo(name = name, known = named || wroteTo, conversationId = chat, photo = photo)
+            CallerInfo(name = name, known = named || wroteTo, conversationId = chat, photo = photo, blocked = blocked(handle))
         } catch (e: RuntimeException) {
-            CallerInfo(name = "", known = false)
+            CallerInfo(name = "", known = false, blocked = blocked(handle))
         }
     }
 
@@ -3363,6 +3470,11 @@ class DirectLink private constructor(
         val outcome = Outcome.of(update.outcome) ?: return
         val peer = CallIds.handle(update.peer) ?: return
         if (!CallIds.isGuid(update.guid)) return
+        // A call from someone the user blocked: no row, no notice (the ":imessage" process drops their rings; this is the last check).
+        if (!update.outgoing && blocked(peer)) {
+            IMessageLog.add(app, "a FaceTime call from a blocked caller was dropped")
+            return
+        }
         val id = CallRows.messageId(update.guid)
         val existing = repo.message(id)
         if (existing != null && !CallRows.replaces(IMessageExtra.parse(existing.extra).call?.let { Outcome.of(it.outcome) }, outcome)) return
@@ -3713,6 +3825,10 @@ class DirectLink private constructor(
 
         /** This process's own note that an Apple Account was told of ([accountSeen]): Booleans only. */
         private const val ACCOUNT_PREFS = "imessage_account_link"
+
+        /** Whether the ":imessage" process was last sent a block list with anyone on it (an empty one is sent only after that). */
+        private const val BLOCKLIST_PREFS = "imessage_blocklist_link"
+        private const val KEY_MIRRORED = "mirrored"
 
         /** Whether the ":imessage" process ever told where FaceTime stands ([faceTimeShown] asks only then). */
         private const val FACETIME_PREFS = "imessage_facetime_link"
