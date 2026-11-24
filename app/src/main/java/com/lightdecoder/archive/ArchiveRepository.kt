@@ -1069,6 +1069,11 @@ class ArchiveRepository private constructor(
                 "AND NOT EXISTS (SELECT 1 FROM outbox_queue q WHERE q.media_local_path = m.local_path AND q.conversation_id != ?)",
             arrayOf(conversationId, conversationId),
         ) { c -> (c.getString(0) ?: "").takeIf { outboxFileOrNull(it) != null }?.let { b.outboxFiles.add(it) } }
+        // The other files of batches still waiting or failed here (named only in their local copy's extra).
+        query(
+            b.db, "SELECT extra_json FROM messages WHERE conversation_id = ? AND message_id LIKE ?",
+            arrayOf(conversationId, MessageRow.TMP_PREFIX + "%"),
+        ) { c -> b.outboxFiles.addAll(pendingOutboxFiles(c.getString(0) ?: "")) }
         b.db.execSQL(
             "DELETE FROM messages_fts WHERE docid IN (SELECT rowid FROM messages WHERE conversation_id = ?)",
             args,
@@ -1196,6 +1201,12 @@ class ArchiveRepository private constructor(
             b.maybeOrphaned.add(it.thumbPath)
             // The copy kept for a send with no queue entry (iMessage's): nothing else has it.
             if (outboxFileOrNull(it.localPath) != null && !outboxUses(b.db, it.localPath)) b.outboxFiles.add(it.localPath)
+        }
+        // A batch's local copy: its other files too, which only its extra names.
+        if (messageId.startsWith(MessageRow.TMP_PREFIX)) {
+            query(b.db, "SELECT extra_json FROM messages WHERE rowid = ?", arrayOf(found.first.toString())) { c ->
+                b.outboxFiles.addAll(pendingOutboxFiles(c.getString(0) ?: ""))
+            }
         }
         b.db.execSQL("DELETE FROM messages_fts WHERE docid = ?", arrayOf<Any>(found.first))
         b.db.delete("messages", "message_id = ?", arrayOf(messageId)) // cascades to media
@@ -1370,6 +1381,16 @@ class ArchiveRepository private constructor(
                 fileInside(path, MediaCache.outboxDir(filesDir, other)) != null
             require(!foreign) { "a file in $other's directory cannot belong to $service's archive" }
         }
+    }
+
+    /**
+     * The other files of a batch whose local copy has [extraJson] (iMessage's
+     * [com.lightdecoder.imessage.direct.IMessageExtra.pending]): only ones inside the outbox.
+     */
+    private fun pendingOutboxFiles(extraJson: String): List<String> {
+        if (!extraJson.contains("\"pending\"")) return emptyList()
+        return com.lightdecoder.imessage.direct.IMessageExtra.parse(extraJson).pending.map { it.path }
+            .filter { outboxFileOrNull(it) != null }
     }
 
     /** Whether a queued send's attachment copy is [path]. */

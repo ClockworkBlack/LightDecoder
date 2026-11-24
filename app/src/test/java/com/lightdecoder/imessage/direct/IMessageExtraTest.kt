@@ -159,7 +159,7 @@ class IMessageExtraTest {
         assertEquals(e.stickerParts.distinct(), e.stickerParts)
         assertFalse("q" in e.stickerParts)
         assertEquals(IMessageExtra.MAX_PENDING, e.pending.size)
-        assertEquals(mapOf("a" to 2), e.tapbackParts)
+        assertEquals(mapOf("a" to 2, "b" to 0), e.tapbackParts)
     }
 
     @Test
@@ -168,8 +168,9 @@ class IMessageExtraTest {
         assertEquals(mapOf("a" to 2), parts)
         parts = IMessageExtra.withTapbackPart(parts, "a", 3, enable = true)
         assertEquals(mapOf("a" to 3), parts)
-        // On the whole message, or taken back: on no photo.
-        assertEquals(emptyMap<String, Int>(), IMessageExtra.withTapbackPart(parts, "a", 0, enable = true))
+        // The first photo is part 0; none named, or taken back: on no photo.
+        assertEquals(mapOf("a" to 0), IMessageExtra.withTapbackPart(parts, "a", 0, enable = true))
+        assertEquals(emptyMap<String, Int>(), IMessageExtra.withTapbackPart(parts, "a", null, enable = true))
         assertEquals(emptyMap<String, Int>(), IMessageExtra.withTapbackPart(parts, "a", 3, enable = false))
         // Full: nobody new, the ones there still move.
         val full = (0 until IMessageExtra.MAX_TAPBACK_PARTS).associate { "p$it" to 1 }

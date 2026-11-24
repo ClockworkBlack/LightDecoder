@@ -34,13 +34,13 @@ object DirectPaths {
         excluded = emptyList(),
     )
 
-    /** Whether [path] is a file under one of [rules]' roots and none of its excluded folders. */
     /** Only the iMessage outbox: where a batch's files wait to be sent ([IMessageExtra.pending]). */
     fun forImessageOutbox(context: Context): Rules = Rules(
         roots = listOf(com.lightdecoder.archive.MediaCache.outboxDir(context, com.lightdecoder.chat.ChatService.IMESSAGE)),
         excluded = emptyList(),
     )
 
+    /** Whether [path] is a file under one of [rules]' roots and none of its excluded folders. */
     fun isAllowed(path: String, rules: Rules): Boolean {
         if (path.isEmpty() || '\u0000' in path) return false
         val file = canonical(File(path)) ?: return false

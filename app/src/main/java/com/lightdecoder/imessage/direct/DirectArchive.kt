@@ -197,8 +197,8 @@ object DirectArchive {
             val groupGuid: String? = null,
             val sticker: String? = null,
             val stickerFile: String = "",
-            /** The part of the message it is on (a photo of several sent together), 0 for the message as a whole. */
-            val part: Int = 0,
+            /** The part of the message Apple says it is on (a photo of several sent together, the first one 0); null when none is named. */
+            val part: Int? = null,
         ) : Update()
 
         /**
@@ -461,7 +461,7 @@ object DirectArchive {
                     val file = if (sticker != null) stickerFile(m, describe) else ""
                     Update.Reaction(
                         messageId(m.v1.toUuid), Handles.display(sender), emojiOf(r.reaction), r.enable, fromMe, at, chat, guid, sticker, file,
-                        part = partOf(m.v1.toPart),
+                        part = tapbackPartOf(m.v1.toPart),
                     )
                 }
                 is ReactMessageType.Extension -> appUpdate(inst, m.v1.toUuid, r, me, nameOf, texts, describe, now)
@@ -833,6 +833,9 @@ object DirectArchive {
 
     /** A tapback's part (Apple's index), bounded: 0 when there is none or it is out of range. */
     internal fun partOf(toPart: ULong?): Int = toPart?.takeIf { it <= MAX_PART_INDEX.toULong() }?.toInt() ?: 0
+
+    /** A tapback's part as Apple names it (the first part is 0), bounded: null when none is named or it is out of range. */
+    internal fun tapbackPartOf(toPart: ULong?): Int? = toPart?.takeIf { it <= MAX_PART_INDEX.toULong() }?.toInt()
 
     /** The highest part index a tapback may name. */
     const val MAX_PART_INDEX = 9_999

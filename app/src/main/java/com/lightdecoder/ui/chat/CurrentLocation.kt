@@ -57,21 +57,21 @@ object CurrentLocation {
             emptySet()
         }
         val provider = providerFor(Build.VERSION.SDK_INT, enabled, all) ?: return null
-        val fix = if (Build.VERSION.SDK_INT >= 30) withTimeoutOrNull(TIMEOUT_MS) { current(context, manager, provider) } else null
+        val fix = withTimeoutOrNull(TIMEOUT_MS) { current(context, manager, provider) }
         val location = fix ?: lastKnown(manager, enabled)
         return location?.let { it.latitude to it.longitude }?.takeIf { (la, lo) -> la.isFinite() && lo.isFinite() && la in -90.0..90.0 && lo in -180.0..180.0 }
     }
 
+    /** One fix on every Android version (a single update request before Android 11), dropped when the wait ends. */
     @SuppressLint("MissingPermission")
-    @androidx.annotation.RequiresApi(30)
     private suspend fun current(context: Context, manager: LocationManager, provider: String): Location? =
         suspendCancellableCoroutine { cont ->
             val signal = CancellationSignal()
             cont.invokeOnCancellation { runCatching { signal.cancel() } }
             try {
-                manager.getCurrentLocation(provider, signal, ContextCompat.getMainExecutor(context)) { location ->
-                    if (cont.isActive) cont.resume(location)
-                }
+                androidx.core.location.LocationManagerCompat.getCurrentLocation(
+                    manager, provider, signal, ContextCompat.getMainExecutor(context),
+                ) { location -> if (cont.isActive) cont.resume(location) }
             } catch (e: RuntimeException) {
                 if (cont.isActive) cont.resume(null)
             }

@@ -521,10 +521,26 @@ class IMessageManager private constructor(
         deliver(tmpId, row.conversationId, row.text)
     }
 
+    /**
+     * Deletes a local copy still waiting or sending (iMessage library only): stopped first, before it
+     * reaches Apple ([com.lightdecoder.imessage.direct.DirectLink.stopBeforeSent]), then gone with its
+     * files. False, and nothing deleted, when it can no longer be stopped: it arrives as sent.
+     */
+    suspend fun deleteSending(tmpId: String): Boolean {
+        if (!direct.active || !direct.stopBeforeSent(tmpId)) return false
+        drop(tmpId)
+        return true
+    }
+
     /** Drops a message that did not go, with the copy of its file kept for sending it (and its link preview's picture). */
     override fun discardFailed(tmpId: String) {
         // One still uploading is stopped first (it may already be with Apple: then it still arrives, as sent).
         if (direct.active) direct.stopSending(tmpId)
+        drop(tmpId)
+    }
+
+    /** Local copy [tmpId] gone, with its files. */
+    private fun drop(tmpId: String) {
         repo.applyDeletion(MessageRow.tmpMessageId(tmpId))
         repo.outboxFileFor(tmpId).delete()
         // A batch's other files ([com.lightdecoder.imessage.direct.DirectLink.sendMediaBatch]).

@@ -913,7 +913,7 @@ object DirectWire {
             .apply { u.groupGuid?.let { put("groupGuid", it) } }
             .apply { u.sticker?.let { put("sticker", it) } }
             .apply { if (u.stickerFile.isNotEmpty()) put("stickerFile", u.stickerFile) }
-            .apply { if (u.part > 0) put("part", u.part) }
+            .apply { u.part?.let { put("part", it) } }
         is DirectArchive.Update.Sticker -> JSONObject().put("kind", "sticker").put("messageId", u.messageId).put("stickerGuid", u.stickerGuid)
             .put("participantId", u.participantId).put("fromMe", u.fromMe).put("atMs", u.atMs).put("conversationId", u.conversationId)
             .apply { u.groupGuid?.let { put("groupGuid", it) } }
@@ -1043,7 +1043,7 @@ object DirectWire {
             o.optBoolean("fromMe"), o.optLong("atMs"), o.optString("conversationId"), o.optString("groupGuid").takeIf { it.isNotEmpty() },
             o.optStringOrNull("sticker")?.takeIf { it.isNotEmpty() },
             fileOf(o, "stickerFile"),
-            part = o.optInt("part").coerceIn(0, DirectArchive.MAX_PART_INDEX),
+            part = (o.opt("part") as? Int)?.coerceIn(0, DirectArchive.MAX_PART_INDEX),
         )
         "sticker" -> DirectArchive.Update.Sticker(
             o.getString("messageId"), o.getString("stickerGuid"), o.optString("participantId"), o.optBoolean("fromMe"), o.optLong("atMs"),

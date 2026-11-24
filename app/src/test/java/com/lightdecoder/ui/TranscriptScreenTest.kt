@@ -574,6 +574,40 @@ class TranscriptScreenTest {
         }
     }
 
+    /** A failed batch's local copy: [files] picked together, the first in the row, the others in its extra (as DirectLink.sendMediaBatch keeps them). */
+    private fun failedBatch(tmpId: String, caption: String, files: Int, missing: Int? = null) {
+        val png = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10)
+        val paths = (0 until files).map { i -> imRepo.outboxFileFor(if (i == 0) tmpId else "$tmpId-$i").apply { parentFile?.mkdirs(); writeBytes(png + i.toByte()) } }
+        val extra = IMessageExtra(pending = paths.drop(1).mapIndexed { i, f -> IMessageExtra.PendingFile(f.path, "image/png", "p${i + 1}.png") })
+        imRepo.insertLocalOutgoing(tmpId, ALICE, caption, paths[0].path, "image/png", "p0.png", null, System.currentTimeMillis() - 30_000, extra.toJson())
+        imRepo.setLocalState(tmpId, LocalState.FAILED, "Apple refused the message")
+        missing?.let { paths[it].delete() }
+    }
+
+    @Test
+    fun aFailedBatchGoesAsATextMessageWholeOrNotAtAll() {
+        val messages = fakeMessages()
+        mergedAlice()
+        failedBatch("t-b", "Trip", files = 3)
+        failedBatch("t-c", "Half here", files = 3, missing = 2)
+        launch(MESSAGES_ALICE, ChatService.MESSAGES).use { scenario ->
+            scenario.waitFor("the batches") { rowOf(it, "Trip") != null && rowOf(it, "Half here") != null }
+            // One of its files gone: nothing goes, and it stays.
+            scenario.onActivity { activity -> activity.sendAsText(shownRow(activity, "Half here")) }
+            two.waitUntil("refused") { org.robolectric.shadows.ShadowToast.getTextOfLatestToast() == two.app.getString(R.string.imessage_not_delivered_files_missing) }
+            assertTrue(messages.calls.none { it.startsWith("sendMedia") })
+            assertNotNull(imRepo.message(MessageRow.tmpMessageId("t-c")))
+            assertTrue(imRepo.outboxFileFor("t-c-1").isFile)
+            // All here: every file goes, then the iMessage copy (and its files).
+            scenario.onActivity { activity -> activity.sendAsText(shownRow(activity, "Trip")) }
+            two.waitUntil("all three sent") { messages.calls.count { it == "sendMedia:$MESSAGES_ALICE" } == 3 }
+            two.waitUntil("the iMessage copy gone") { imRepo.message(MessageRow.tmpMessageId("t-b")) == null }
+            assertFalse(imRepo.outboxFileFor("t-b-1").exists())
+            assertFalse(imRepo.outboxFileFor("t-b-2").exists())
+            assertTrue("never as an iMessage", asked(DirectWire.SEND).isEmpty())
+        }
+    }
+
     // --- Report Junk ------------------------------------------------------------------------------
 
     @Test

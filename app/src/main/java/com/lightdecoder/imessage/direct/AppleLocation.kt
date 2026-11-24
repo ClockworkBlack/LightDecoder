@@ -52,16 +52,18 @@ object AppleLocation {
     /** An `ll` parameter's value, `<lat>,<lon>`, the comma as `\,`, `,` or `%2C`. */
     private val LL = Regex("^($NUMBER)(?:\\\\,|,|%2[Cc])($NUMBER)$")
 
+    /** A URL property's name: `URL`, its parameters after `;`, and an optional short vCard group (`item1.URL;type=pref`, as an iPhone writes it). */
+    private val URL_NAME = Regex("^(?:[A-Za-z0-9-]{1,16}\\.)?URL(?:;[^:]*)?$", RegexOption.IGNORE_CASE)
+
     /**
-     * The coordinates of the card [text]: from its first URL line only (`URL` or `URL;...:`), its
+     * The coordinates of the card [text]: from its first URL line only (`URL`, `URL;...:` or `item1.URL...:`), its
      * `ll=` parameter, each in range ([-90, 90], [-180, 180]). Null when the card is larger than
      * [MAX_BYTES], has no such line, or its numbers are anything but plain decimals in range.
      */
     fun coordinatesFrom(text: String): Pair<Double, Double>? {
         if (text.length > MAX_BYTES) return null
         val line = text.lineSequence().map { it.trimEnd('\r') }.firstOrNull { l ->
-            val head = l.substringBefore(':')
-            head.equals("URL", ignoreCase = true) || head.startsWith("URL;", ignoreCase = true)
+            URL_NAME.matches(l.substringBefore(':'))
         } ?: return null
         val url = line.substringAfter(':', "")
         // The query's own parameters only (never one inside another's value), the first `ll` of them.

@@ -80,7 +80,7 @@ class MediaLoader(
     private val jobs = WeakHashMap<ImageView, Job>()
     private val permits = Semaphore(PARALLEL)
 
-    /** Parts whose download the user stopped (its ring tapped): not fetched again in the bubble; a tap opens it. */
+    /** Parts whose download the user stopped (its ring tapped): not fetched again in the bubble until tapped ([allowAgain]). */
     private val stopped = HashSet<String>()
 
     /** Parts that turned out not to be pictures; not tried again. */
@@ -173,7 +173,7 @@ class MediaLoader(
                 when (failure) {
                     Failure.NOT_A_PICTURE -> notPictures.add(key)
                     Failure.UNAVAILABLE -> hadFailures = true
-                    // Stopped by the user: not tried again until the row is drawn anew (a tap opens it).
+                    // Stopped by the user: not tried again in the bubble until the user asks for it again ([allowAgain]).
                     Failure.STOPPED -> stopped.add(key)
                     Failure.NEEDS_CONNECTION -> {
                         needsConnection.add(key)
@@ -200,6 +200,14 @@ class MediaLoader(
         jobs.remove(view)?.cancel()
         view.tag = null
     }
+
+    /** The user asked for [part] again (tapped it): a download they had stopped may load in the bubble again. */
+    fun allowAgain(messageId: String, part: MediaRow) {
+        stopped.remove(keyFor(messageId, part))
+    }
+
+    /** Whether the user stopped [part]'s download in the bubble (and has not asked for it again). */
+    fun isStopped(messageId: String, part: MediaRow): Boolean = keyFor(messageId, part) in stopped
 
     /**
      * Forget earlier download failures, including "needs a connection" (call

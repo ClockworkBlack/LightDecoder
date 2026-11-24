@@ -1753,7 +1753,7 @@ class BlueBubblesScreenTest {
                 val choice = latestDialog()
                 assertEquals(
                     "no Games choice",
-                    listOf("Photos and videos", "Stickers", "Poll"),
+                    listOf("Photos and videos", "Stickers", "Poll", "Location"),
                     (0 until choice.listView.adapter.count).map { choice.listView.adapter.getItem(it).toString() },
                 )
                 choice.listView.performItemClick(null, 0, 0)
@@ -1781,9 +1781,9 @@ class BlueBubblesScreenTest {
                 org.robolectric.shadows.ShadowLooper.idleMainLooper()
                 val choice = latestDialog()
                 val list = choice.listView
-                // (Stickers too: in an iPhone-style chat the "+" is the way to them; and a poll, in a chat the library reaches.)
+                // (Stickers too: in an iPhone-style chat the "+" is the way to them; and a poll and a location, in a chat the library reaches.)
                 assertEquals(
-                    listOf("Photos and videos", "Games", "Stickers", "Poll"),
+                    listOf("Photos and videos", "Games", "Stickers", "Poll", "Location"),
                     (0 until list.adapter.count).map { list.adapter.getItem(it).toString() },
                 )
                 assertEquals(null, shadowOf(activity).nextStartedActivityForResult)

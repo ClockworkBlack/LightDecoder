@@ -373,9 +373,9 @@ data class IMessageExtra(
         /** The most people whose tapback's photo a message keeps ([tapbackParts]). */
         const val MAX_TAPBACK_PARTS = 64
 
-        /** [tapbackParts] with [who]'s tapback now on part [part] (0 or [enable] false: on none). */
-        fun withTapbackPart(parts: Map<String, Int>, who: String, part: Int, enable: Boolean): Map<String, Int> =
-            if (!enable || part <= 0) parts - who else if (who in parts || parts.size < MAX_TAPBACK_PARTS) parts + (who to part) else parts
+        /** [tapbackParts] with [who]'s tapback now on part [part] (Apple's index, the first part 0; null or [enable] false: on none). */
+        fun withTapbackPart(parts: Map<String, Int>, who: String, part: Int?, enable: Boolean): Map<String, Int> =
+            if (!enable || part == null || part !in 0..9_999) parts - who else if (who in parts || parts.size < MAX_TAPBACK_PARTS) parts + (who to part) else parts
 
         /** The most files a batch's local copy holds beyond its first ([pending]). */
         const val MAX_PENDING = 9
@@ -387,6 +387,8 @@ data class IMessageExtra(
 
         /** Whether [id] is an attachment part's id as the archive numbers them (`p<idx>`). */
         fun isPartId(id: String): Boolean = PART_ID.matches(id)
+
+        /** The most stickers a message keeps ([stickers]). */
         const val MAX_STICKERS = 20
 
         /** The key the link preview picture of message [guid] is kept under (in the iMessage media folder, a JPEG). */
@@ -493,7 +495,7 @@ data class IMessageExtra(
                     tapbackParts = o.optJSONObject("tapbackParts")?.let { t ->
                         t.keys().asSequence().take(MAX_TAPBACK_PARTS).mapNotNull { k ->
                             val v = t.opt(k)
-                            if (k.isNotBlank() && k.length <= Mentions.MAX_HANDLE_CHARS && v is Int && v in 1..9_999) k to v else null
+                            if (k.isNotBlank() && k.length <= Mentions.MAX_HANDLE_CHARS && v is Int && v in 0..9_999) k to v else null
                         }.toMap()
                     }.orEmpty(),
                     pending = o.optJSONArray("pending")?.let { a ->

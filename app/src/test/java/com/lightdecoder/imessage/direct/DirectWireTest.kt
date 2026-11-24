@@ -796,8 +796,11 @@ class DirectWireTest {
     fun aTapbacksPhotoCrossesWithIt() {
         val r = DirectArchive.Update.Reaction("imsg:G", "+15551234567", "❤️", true, false, 1, "imsg:x", part = 3)
         assertEquals(3, (DirectWire.decode(JSONObject(DirectWire.encode(r).toString())) as DirectArchive.Update.Reaction).part)
-        val whole = DirectWire.decode(JSONObject(DirectWire.encode(r.copy(part = 0)).toString())) as DirectArchive.Update.Reaction
-        assertEquals(0, whole.part)
+        val first = DirectWire.decode(JSONObject(DirectWire.encode(r.copy(part = 0)).toString())) as DirectArchive.Update.Reaction
+        assertEquals(0, first.part)
+        val none = DirectWire.decode(JSONObject(DirectWire.encode(r.copy(part = null)).toString())) as DirectArchive.Update.Reaction
+        assertNull(none.part)
+        assertNull((DirectWire.decode(DirectWire.encode(r).put("part", "3")) as DirectArchive.Update.Reaction).part)
         val far = DirectWire.encode(r).put("part", 1_000_000)
         assertEquals(DirectArchive.MAX_PART_INDEX, (DirectWire.decode(far) as DirectArchive.Update.Reaction).part)
     }

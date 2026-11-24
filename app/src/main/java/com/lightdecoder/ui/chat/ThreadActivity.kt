@@ -2864,9 +2864,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     /**
-     * Pictures and files to an iMessage chat through the iMessage library: each an iMessage of its
-     * own, in the order picked, the text with the first (above it, as Apple numbers the parts), the
-     * reply and the [effect] too. Runs on IO; stops at the first that cannot go.
+     * Pictures and files to an iMessage chat through the iMessage library: picked together, they go
+     * as one iMessage ([com.lightdecoder.imessage.direct.DirectLink.MAX_BATCH] files at most each, in
+     * the order picked), the text with the first (above it, as Apple numbers the parts), the reply and
+     * the [effect] too. Runs on IO; stops at the first that cannot go.
      */
     private fun sendFiles(
         im: com.lightdecoder.imessage.IMessageManager,
@@ -2964,16 +2965,27 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private fun handOffFailedFile(link: com.lightdecoder.imessage.IMessageManager, row: MessageRow, part: MediaRow) {
         val tmpId = row.tmpId
         lifecycleScope.launch {
-            val copy = withContext(Dispatchers.IO) {
+            val copies = withContext(Dispatchers.IO) {
                 purgeHandOffCopies()
-                File(part.localPath).takeIf { part.localPath.isNotEmpty() && it.isFile }?.let { shareableCopy(Uri.fromFile(it), part.mime) }
+                // A batch (photos sent together) goes whole: each of its files, or none and it stays here.
+                val all = filesOf(row).takeIf { it.size > 1 }
+                if (all == null) {
+                    File(part.localPath).takeIf { part.localPath.isNotEmpty() && it.isFile }?.let { shareableCopy(Uri.fromFile(it), part.mime) }?.let(::listOf)
+                } else {
+                    val mimes = (row.shownMedia().map { it.mime } + com.lightdecoder.imessage.direct.IMessageExtra.parse(row.extra).pending.map { it.mime })
+                    val made = all.mapIndexedNotNull { i, (_, f) -> f?.let { shareableCopy(Uri.fromFile(it), mimes.getOrNull(i)) } }
+                    if (made.size == all.size) made else {
+                        made.forEach { handOffFileOf(it.first)?.delete() }
+                        null
+                    }
+                }
             }
-            if (copy == null) {
+            if (copies.isNullOrEmpty()) {
                 toast(getString(R.string.chat_media_unavailable))
                 return@launch
             }
-            if (!link.handOff(this@ThreadActivity, row.conversationId, row.text, listOf(copy))) {
-                runInBackground { handOffFileOf(copy.first)?.delete() }
+            if (!link.handOff(this@ThreadActivity, row.conversationId, row.text, copies)) {
+                runInBackground { copies.forEach { handOffFileOf(it.first)?.delete() } }
                 toast(errorText(link, com.lightdecoder.imessage.IMessageErrors.NOT_INSTALLED))
                 return@launch
             }
@@ -3559,7 +3571,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             onReply(row)
         }
         // A picture or sticker in the message: kept among the user's own stickers.
-        val picture = row.media.firstOrNull { PictureGalleryActivity.isPicture(it) }
+        val picture = row.shownMedia().firstOrNull { PictureGalleryActivity.isPicture(it) }
         b.actionSaveSticker.visibility = if (picture != null) View.VISIBLE else View.GONE
         b.actionSaveSticker.setOnClickListener {
             sheet.dismiss()
@@ -3614,12 +3626,14 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             if (backendFor(row) is com.lightdecoder.imessage.IMessageManager) onFailedTap(row) else if (isShown(row)) retryOrAsk(row)
         }
         val discardable = row.isLocal && row.localState == LocalState.FAILED
-        b.actionDiscard.visibility = if (discardable) View.VISIBLE else View.GONE
+        // An iMessage still waiting or uploading can be deleted too: stopped first, so it never reaches Apple.
+        val stoppable = canDeleteWhileSending(row, link)
+        b.actionDiscard.visibility = if (discardable || stoppable) View.VISIBLE else View.GONE
         b.actionDiscard.setOnClickListener {
             sheet.dismiss()
             if (!isShown(row)) return@setOnClickListener
             val tmpId = row.tmpId
-            runInBackground { link.discardFailed(tmpId) }
+            if (!discardable && stoppable) deleteWhileSending(tmpId) else runInBackground { link.discardFailed(tmpId) }
         }
         b.actionDelete.visibility = if (real) View.VISIBLE else View.GONE
         b.actionDelete.setOnClickListener {
@@ -3630,6 +3644,21 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         sheet.setOnDismissListener { if (actionSheet === sheet) actionSheet = null }
         actionSheet = sheet
         sheet.show()
+    }
+
+    /** Whether [row] is a local copy still waiting or sending through the iMessage library (one that can be stopped and deleted). */
+    private fun canDeleteWhileSending(row: MessageRow, link: ChatBackend): Boolean =
+        row.isLocal && (row.localState == LocalState.PENDING || (row.localState == LocalState.SENDING && row.media.isNotEmpty())) &&
+            link is com.lightdecoder.imessage.IMessageManager && com.lightdecoder.imessage.direct.DirectLink.get(this).active
+
+    /** Deletes a local copy still being sent: stopped first ([com.lightdecoder.imessage.IMessageManager.deleteSending]); one too far along arrives as sent. */
+    @VisibleForTesting
+    internal fun deleteWhileSending(tmpId: String) {
+        val im = com.lightdecoder.imessage.IMessageManager.get(applicationContext)
+        lifecycleScope.launch {
+            val deleted = withContext(Dispatchers.IO) { runCatching { im.deleteSending(tmpId) }.getOrDefault(false) }
+            if (!deleted) toast(getString(R.string.transfer_send_not_stopped))
+        }
     }
 
     /** The quick reactions: the five usual ones, with [mine] in the last place when it is another emoji. */
@@ -3873,11 +3902,23 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     /** Photos sent together: all of them in a grid ("N Photos"); a tap on one opens it full screen. */
     override fun onStackTap(row: MessageRow, parts: List<MediaRow>) {
+        // Still being sent: its files are only in the outbox until Apple has them.
+        if (row.isLocal) return
         StackGridSheet.show(this, media, row, parts) { part -> onMediaTap(row, part) }
     }
 
-    /** Location cards read so far, by message and part: their coordinates, or null for none. */
-    private val locations = HashMap<String, Pair<Double, Double>?>()
+    /** Location cards read so far, by message and part: their coordinates. */
+    private val locations = HashMap<String, Pair<Double, Double>>()
+
+    /** Location cards being read now, by the same key. */
+    private val readingLocations = HashSet<String>()
+
+    /**
+     * When a location card's last read failed and how many times in a row, by the same key: it is
+     * read again [LOCATION_RETRY_MS] later, twice as long after each failure up to [LOCATION_RETRY_MAX_MS],
+     * so a card that cannot be read does not use up its sender's hourly fetches.
+     */
+    private val locationFailedAt = HashMap<String, Pair<Long, Int>>()
 
     /** Addresses looked up so far ("Show addresses for locations" only), by coordinates. */
     private val addresses = HashMap<Pair<Double, Double>, String?>()
@@ -3888,15 +3929,28 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      */
     private fun locationOf(row: MessageRow, part: MediaRow): Pair<Double, Double>? {
         val key = row.id + "|" + part.partId
-        if (key in locations) return locations[key]
-        locations[key] = null
-        if (!com.lightdecoder.imessage.direct.DirectArchive.isImessage(row.id)) return null
+        locations[key]?.let { return it }
+        if (key in readingLocations) return null
+        val failed = locationFailedAt[key]
+        if (failed != null && android.os.SystemClock.elapsedRealtime() - failed.first < locationRetryMs(failed.second)) return null
+        val imessage = com.lightdecoder.imessage.direct.DirectArchive.isImessage(row.id) ||
+            (row.isLocal && com.lightdecoder.imessage.direct.DirectArchive.isImessage(row.conversationId))
+        if (!imessage) return null
+        readingLocations += key
         val direct = com.lightdecoder.imessage.direct.DirectLink.get(applicationContext)
         lifecycleScope.launch {
-            val at = withContext(Dispatchers.IO) { runCatching { direct.locationOf(row.id, part.partId) }.getOrNull() }
+            val at = try {
+                withContext(Dispatchers.IO) { runCatching { direct.locationOf(row.id, part.partId) }.getOrNull() }
+            } finally {
+                readingLocations -= key
+            }
             if (at != null) {
                 locations[key] = at
+                locationFailedAt -= key
                 adapter.rebindMessage(row.id)
+            } else {
+                // Not read (not connected yet, a passing error, or the hourly budget): the next bind or tap after a while tries again.
+                locationFailedAt[key] = android.os.SystemClock.elapsedRealtime() to ((failed?.second ?: 0) + 1)
             }
         }
         return null
@@ -3919,7 +3973,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     /** A location card: its own `geo:` address (never the card's URL) to a map app the user picks. */
     override fun onLocationTap(row: MessageRow, part: MediaRow, coordinates: Pair<Double, Double>?) {
-        val at = coordinates ?: return toast(getString(R.string.location_unavailable))
+        val at = coordinates ?: return toast(getString(R.string.location_unreadable))
         val view = Intent(Intent.ACTION_VIEW, Uri.parse(com.lightdecoder.imessage.direct.AppleLocation.geoUri(at.first, at.second)))
         if (view.resolveActivity(packageManager) == null) return toast(getString(R.string.location_no_app))
         try {
@@ -3935,6 +3989,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private val locationPermission = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { granted ->
         val chat = locationChat ?: return@registerForActivityResult
         locationChat = null
+        onLocationPermission(chat, granted)
+    }
+
+    /** The answer to the location permission: any grant (coarse is enough) goes on to find the location; a refusal sends nothing. */
+    @VisibleForTesting
+    internal fun onLocationPermission(chat: String, granted: Map<String, Boolean>) {
         if (granted.values.any { it }) findLocationFor(chat) else toast(getString(R.string.location_permission_denied))
     }
 
@@ -3994,6 +4054,16 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     override fun onMediaTap(row: MessageRow, part: MediaRow) {
+        // A download the user stopped loads again once they ask for the part again.
+        if (media.isStopped(row.id, part)) {
+            media.allowAgain(row.id, part)
+            adapter.rebindMessage(row.id)
+        }
+        // A batch's file still waiting in the outbox: stored nowhere yet, so it opens from its own copy here.
+        if (part.partId.startsWith(WAITING_PART)) {
+            openWaitingFile(part)
+            return
+        }
         // An iMessage picture waiting for OpenBubbles' saved copy.
         if ((part.mime == com.lightdecoder.imessage.IMessageCapture.IMAGE || part.mime == com.lightdecoder.imessage.IMessageCapture.VIDEO) &&
             part.localPath.isEmpty()
@@ -4044,6 +4114,31 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             } else {
                 openWithOtherApp(file, mime)
             }
+        }
+    }
+
+    /**
+     * Opens a batch's waiting file ([MediaStacks.waitingParts]) from its outbox copy, which only a
+     * path [com.lightdecoder.imessage.direct.DirectPaths] allows there can be.
+     */
+    private fun openWaitingFile(part: MediaRow) {
+        val file = File(part.localPath)
+        val allowed = com.lightdecoder.imessage.direct.DirectPaths.isAllowed(
+            part.localPath, com.lightdecoder.imessage.direct.DirectPaths.forImessageOutbox(this),
+        )
+        if (!allowed || !file.isFile) {
+            toast(getString(R.string.chat_media_unavailable))
+            return
+        }
+        val mime = part.mime
+        try {
+            when {
+                mime.startsWith("video/") -> startActivity(VideoPlayerActivity.intent(this, file, title?.toString()))
+                mime.isEmpty() || mime.startsWith("image/") -> startActivity(ViewerActivity.intentForFile(this, file, mime, title))
+                else -> openWithOtherApp(file, mime)
+            }
+        } catch (e: IllegalArgumentException) {
+            toast(getString(R.string.chat_media_unavailable))
         }
     }
 
@@ -4214,16 +4309,32 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val im = backendFor(row)
         val cache = File(cacheDir, AS_TEXT_DIR)
         lifecycleScope.launch {
+            // Every file of a message of several (photos sent together): all of them go, or none and it stays.
+            val all = withContext(Dispatchers.IO) { filesOf(row) }
+            val files = if (all.size > 1) all.mapNotNull { (name, f) -> f?.let { it to name } }.takeIf { it.size == all.size } else
+                all.firstNotNullOfOrNull { (name, f) -> f?.let { it to name } }?.let(::listOf).orEmpty()
+            if (all.size > 1 && files == null) {
+                toast(getString(R.string.imessage_not_delivered_files_missing))
+                return@launch
+            }
+            // How many of its files went before one did not (a batch that went in part stays, and says so).
+            var sent = 0
             val result = withContext(Dispatchers.IO) {
                 relayAttempt {
                     purgeOld(cache)
-                    val file = row.media.firstNotNullOfOrNull { m -> m.localPath.takeIf { it.isNotEmpty() }?.let(::File)?.takeIf { it.isFile && it.length() > 0 }?.let { it to m } }
-                    if (file != null) {
-                        // A copy of its own, by the file's name (its type goes by it), for the Messages link to take in when it is ready.
-                        val name = file.second.fileName.filter { it.isLetterOrDigit() || it in "._-" }.ifBlank { file.first.name }
-                        val copy = File(File(cache, java.util.UUID.randomUUID().toString()).apply { mkdirs() }, name)
-                        file.first.copyTo(copy, overwrite = true)
-                        texts.sendMedia(chat, Uri.fromFile(copy), row.text.ifBlank { null }, null)
+                    if (!files.isNullOrEmpty()) {
+                        // Every copy first, so a copy that cannot be made sends nothing.
+                        val copies = files.map { file ->
+                            // A copy of its own, by the file's name (its type goes by it), for the Messages link to take in when it is ready.
+                            val name = file.second.filter { it.isLetterOrDigit() || it in "._-" }.ifBlank { file.first.name }
+                            File(File(cache, java.util.UUID.randomUUID().toString()).apply { mkdirs() }, name)
+                                .also { file.first.copyTo(it, overwrite = true) }
+                        }
+                        copies.forEachIndexed { i, copy ->
+                            // The words go with the first file.
+                            texts.sendMedia(chat, Uri.fromFile(copy), row.text.ifBlank { null }.takeIf { i == 0 }, null)
+                            sent++
+                        }
                     } else {
                         texts.sendText(chat, row.text, null)
                     }
@@ -4240,7 +4351,32 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                     )
                     scrollToBottomNext = true
                 }
-                .onFailure { toast(getString(R.string.imessage_not_delivered_as_text_failed, errorText(texts, it))) }
+                .onFailure {
+                    val total = files?.size ?: 0
+                    toast(
+                        if (sent in 1 until total) getString(R.string.imessage_not_delivered_as_text_partly, sent, total, errorText(texts, it))
+                        else getString(R.string.imessage_not_delivered_as_text_failed, errorText(texts, it)),
+                    )
+                }
+        }
+    }
+
+    /**
+     * Each file [row] shows, with the file here (null for one that is not): its parts (a Live Photo's
+     * still only), and for a batch's local copy its other files waiting in the outbox
+     * ([com.lightdecoder.imessage.direct.IMessageExtra.pending], only paths [com.lightdecoder.imessage.direct.DirectPaths] allows there).
+     * Not on the main thread.
+     */
+    @VisibleForTesting
+    internal fun filesOf(row: MessageRow): List<Pair<String, File?>> {
+        val extra = com.lightdecoder.imessage.direct.IMessageExtra.parse(row.extra)
+        fun here(path: String) = path.takeIf { it.isNotEmpty() }?.let(::File)?.takeIf { it.isFile && it.length() > 0 }
+        val shown = row.shownMedia(extra).map { it.fileName to here(it.localPath) }
+        if (!row.isLocal || extra.pending.isEmpty()) return shown
+        val outbox = com.lightdecoder.imessage.direct.DirectPaths.forImessageOutbox(applicationContext)
+        // One not allowed is still one of the message's: missing, so that the message stays whole.
+        return shown + extra.pending.take(com.lightdecoder.imessage.direct.IMessageExtra.MAX_PENDING).map { p ->
+            p.name to p.path.takeIf { com.lightdecoder.imessage.direct.DirectPaths.isAllowed(it, outbox) }?.let(::here)
         }
     }
 
@@ -5218,6 +5354,15 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     companion object {
+        /** How long a location card whose read failed waits before it is read again. */
+        private const val LOCATION_RETRY_MS = 30_000L
+        private const val LOCATION_RETRY_MAX_MS = 60 * 60_000L
+
+        /** How long a location card that failed [failures] times in a row waits before it is read again. */
+        internal fun locationRetryMs(failures: Int): Long =
+            if (failures <= 1) LOCATION_RETRY_MS
+            else (LOCATION_RETRY_MS shl (failures - 1).coerceAtMost(7)).coerceAtMost(LOCATION_RETRY_MAX_MS)
+
         private const val HAND_OFF_KEEP_MS = 24 * 60 * 60 * 1000L
 
         /** Under the cache: the copies of files "Send as Text Message" hands to the Messages link. */

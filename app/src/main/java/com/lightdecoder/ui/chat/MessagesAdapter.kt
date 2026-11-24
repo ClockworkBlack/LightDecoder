@@ -397,7 +397,7 @@ class MessagesAdapter(
         val poll = app?.takeIf(Polls::isPoll)?.let { pollOf(it.url) }
         // A picture or sticker on its own has no bubble: it sits on the conversation itself
         // (as on an iPhone), with its time under it in the conversation's own colours.
-        val bare = isBare(item) && app == null
+        val bare = isBare(item, holder.binding.root.context) && app == null
         val metaColor = if (outgoing && !bare) onOwn else if (phone) holder.phoneMeta else holder.incomingMeta
         bindBubbleShape(holder, bare, outgoing, item.place?.last == true)
         bindPhoneRow(holder, item, outgoing)
@@ -908,10 +908,11 @@ class MessagesAdapter(
      * A message that is only pictures (or stickers, or video stills): no
      * text, subject or reply quote. It is drawn without a bubble.
      */
-    private fun isBare(item: ThreadItem.Message): Boolean {
+    private fun isBare(item: ThreadItem.Message, context: android.content.Context): Boolean {
         val row = item.row
         // iPhone-style chats draw a reply's quote outside its bubble: a picture that replies has none either.
-        return row.media.isNotEmpty() && row.media.all(::isVisual) && row.text.isEmpty() &&
+        val shown = drawnParts(row, context)
+        return shown.isNotEmpty() && shown.all(::isVisual) && row.text.isEmpty() &&
             row.subject.isBlank() && (phoneStyle || (item.quote == null && row.replyToId.isEmpty()))
     }
 
@@ -1163,6 +1164,18 @@ class MessagesAdapter(
     /** A voice message's length once known (it has been played), else 0. */
     var voiceDuration: (String) -> Int = { 0 }
 
+    private fun drawnExtra(row: MessageRow): IMessageExtra =
+        if (DirectArchive.isImessage(row.id) || row.isLocal) IMessageExtra.parse(row.extra) else NO_EXTRA
+
+    /**
+     * The files [row] draws: its parts as shown ([shownMedia]) and, for a batch's local copy, its
+     * files still waiting in the outbox ([MediaStacks.waitingParts], only paths the outbox allows).
+     */
+    private fun drawnParts(row: MessageRow, context: android.content.Context, extra: IMessageExtra = drawnExtra(row)): List<MediaRow> =
+        row.shownMedia(extra) + MediaStacks.waitingParts(row, extra) { path ->
+            com.lightdecoder.imessage.direct.DirectPaths.isAllowed(path, com.lightdecoder.imessage.direct.DirectPaths.forImessageOutbox(context))
+        }
+
     /** [opensApp]: the pictures are an iMessage app's card, and a tap on one opens it ([Callbacks.onAppCardTap]). */
     private fun bindMedia(holder: MessageHolder, row: MessageRow, contentColor: Int, opensApp: Boolean = false) {
         val container = holder.binding.mediaContainer
@@ -1171,8 +1184,8 @@ class MessagesAdapter(
         cancelMedia(container)
         container.removeAllViews()
         // A Live Photo's moving part is never drawn: its still is, marked LIVE.
-        val extra = if (DirectArchive.isImessage(row.id) || row.isLocal) IMessageExtra.parse(row.extra) else NO_EXTRA
-        val parts = row.shownMedia(extra)
+        val extra = drawnExtra(row)
+        val parts = drawnParts(row, container.context, extra)
         if (parts.isEmpty()) {
             container.visibility = View.GONE
             return
@@ -1183,13 +1196,13 @@ class MessagesAdapter(
         // As large as a bubble can show it: its width on screen, and tall pictures up to the cap.
         val maxSide = maxOf((MEDIA_MAX_SIDE_DP * metrics.density).toInt(), (metrics.widthPixels * 0.8f).toInt())
         // Photos sent together in one iMessage show as one collage or stack, as on an iPhone (not an app's card).
-        val segments = if (DirectArchive.isImessage(row.id) && !opensApp) MediaStacks.segments(parts, extra) else parts.map { MediaStacks.Segment.Single(it) }
+        val segments = if (showsLocationCards(row) && !opensApp) MediaStacks.segments(parts, extra) else parts.map { MediaStacks.Segment.Single(it) }
         for (segment in segments) {
             when (segment) {
                 is MediaStacks.Segment.Stack -> container.addView(stackView(inflater, container, row, segment, maxSide))
                 is MediaStacks.Segment.Single -> {
                     val part = segment.part
-                    if (com.lightdecoder.imessage.direct.AppleLocation.isLocation(part.mime, part.fileName) && DirectArchive.isImessage(row.id)) {
+                    if (com.lightdecoder.imessage.direct.AppleLocation.isLocation(part.mime, part.fileName) && showsLocationCards(row)) {
                         container.addView(locationCard(inflater, container, row, part))
                     } else {
                         container.addView(partView(inflater, container, row, part, extra, contentColor, opensApp, maxSide))
@@ -1296,7 +1309,8 @@ class MessagesAdapter(
                 com.lightdecoder.imessage.direct.AppleLocation.shown(at.first), com.lightdecoder.imessage.direct.AppleLocation.shown(at.second),
             )
             numbers.visibility = View.VISIBLE
-            val shownAddress = addressOf(at)
+            // Only a location someone else sent is looked up: the user's own never leaves the phone this way.
+            val shownAddress = if (looksUpAddress(row)) addressOf(at) else null
             address.text = shownAddress.orEmpty()
             address.visibility = if (shownAddress.isNullOrEmpty()) View.GONE else View.VISIBLE
             root.contentDescription = context.getString(R.string.location_card_description, numbers.text)
@@ -1313,6 +1327,14 @@ class MessagesAdapter(
         }
         return root
     }
+
+    /** Whether a location card's address may be looked up: only one received from someone else, never the user's own. */
+    @androidx.annotation.VisibleForTesting
+    internal fun looksUpAddress(row: MessageRow): Boolean = !row.isLocal && !row.isOutgoing && row.direction == "in"
+
+    /** An iMessage (or the local copy of one being sent): its photos sent together show as one stack, its location's card as a card. */
+    private fun showsLocationCards(row: MessageRow): Boolean =
+        DirectArchive.isImessage(row.id) || (row.isLocal && DirectArchive.isImessage(row.conversationId))
 
     /** Shows [transferState] on one download's ring (found by its tag, the part's media id). */
     private fun applyTransfer(ring: TransferRing) {
@@ -1550,8 +1572,10 @@ class MessagesAdapter(
         val parts = ArrayList<String>()
         parts += who
         item.quote?.let { parts += context.getString(R.string.chat_replying_to, it.sender) }
-        if (row.media.isNotEmpty()) {
-            parts += context.resources.getQuantityString(R.plurals.chat_attachments, row.media.size, row.media.size)
+        // A Live Photo counts once (its moving part is not one of its own); a batch's waiting files count.
+        val shown = drawnParts(row, context)
+        if (shown.isNotEmpty()) {
+            parts += context.resources.getQuantityString(R.plurals.chat_attachments, shown.size, shown.size)
         }
         if (inked) parts += context.getString(R.string.imessage_invisible_ink_hidden) else if (row.text.isNotEmpty()) parts += row.text
         effect?.takeIf { !inked }?.let { parts += it }

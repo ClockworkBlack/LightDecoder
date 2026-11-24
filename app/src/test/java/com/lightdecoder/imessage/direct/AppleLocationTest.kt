@@ -83,6 +83,17 @@ class AppleLocationTest {
     }
 
     @Test
+    fun aGroupedUrlLineAsAnIphoneWritesItIsRead() {
+        val grouped = card("item1.URL;type=pref:http://maps.apple.com/?ll=37.331820\\,-122.031180&q=37.331820\\,-122.031180\nitem1.X-ABLabel:map url")
+        assertEquals(37.33182 to -122.03118, AppleLocation.coordinatesFrom(grouped))
+        assertEquals(1.0 to 2.0, AppleLocation.coordinatesFrom(card("ITEM2.url:https://maps.apple.com/?ll=1,2")))
+        // Only a short plain group name, then exactly URL.
+        assertNull(AppleLocation.coordinatesFrom(card("a.b.URL:https://maps.apple.com/?ll=1,2")))
+        assertNull(AppleLocation.coordinatesFrom(card("item1.URLX:https://maps.apple.com/?ll=1,2")))
+        assertNull(AppleLocation.coordinatesFrom(card("averyveryverylonggroup.URL:https://maps.apple.com/?ll=1,2")))
+    }
+
+    @Test
     fun anLlHiddenInAnotherParameterIsNotTaken() {
         assertNull(AppleLocation.coordinatesFrom(card("URL:https://maps.apple.com/?xll=1,2")))
         assertNull(AppleLocation.coordinatesFrom(card("URL:https://evil.example/?next=https://maps.apple.com/?ll=1,2")))

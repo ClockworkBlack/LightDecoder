@@ -542,6 +542,26 @@ class DirectLink private constructor(
     }
 
     /**
+     * Stops local copy [tmpId] before it reaches Apple, so that it can be deleted here: one still
+     * waiting its turn never goes; one uploading is stopped ([DirectWire.CANCEL] `tmp:<id>`). False
+     * when it can no longer be stopped (already with Apple, or past its upload): it then arrives as sent.
+     */
+    suspend fun stopBeforeSent(tmpId: String): Boolean {
+        if (!active) return false
+        // Not started yet: never sent ([deliver] only starts one still waiting).
+        if (repo.setLocalStateIf(tmpId, LocalState.PENDING, LocalState.FAILED)) return true
+        val key = DirectWire.sendKey(tmpId)
+        if (!DirectWire.isTransferKey(key) || _transfers.value[key] == null) return false
+        return try {
+            cancelTransfer(key)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
      * Sends an iMessage app's new card (a new game an extension app made, [com.lightdecoder.imessage.madrid.MadridHost]):
      * [app]'s balloon, with the picture [jpeg] if it has one. As a text: a local copy now
      * ("tmp:<tmpId>"), the sent card once Apple confirms it; the card is the root of its session.
@@ -844,8 +864,9 @@ class DirectLink private constructor(
     ) {
         val files = listOfNotNull(media) + more
         val transfer = DirectWire.sendKey(tmpId).takeIf { files.isNotEmpty() && DirectWire.isTransferKey(it) }
+        // Deleted (or stopped) while it waited its turn: it does not go.
+        if (!repo.setLocalStateIf(tmpId, LocalState.PENDING, LocalState.SENDING)) return
         try {
-            repo.setLocalState(tmpId, LocalState.SENDING)
             val target = targetOf(conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
             // A text with a link goes with the page's preview, as from an iPhone: fetched first (a few
             // seconds at most; without one it goes as it is), and shown on the copy here meanwhile.
@@ -2158,7 +2179,9 @@ class DirectLink private constructor(
         repo.applyReaction(update.messageId, who, update.emoji, update.enable, update.fromMe, update.atMs)
         // Which photo it is on, of several sent together (iOS 15): kept with the message, for its stack's grid.
         val extra = IMessageExtra.parse(row.extra)
-        val parts = IMessageExtra.withTapbackPart(extra.tapbackParts, who, update.part, update.enable)
+        // Kept only for a message of several pictures or files (the only kind with a grid to show it in).
+        val part = update.part?.takeIf { row.media.size >= 2 }
+        val parts = IMessageExtra.withTapbackPart(extra.tapbackParts, who, part, update.enable)
         if (parts != extra.tapbackParts) repo.setExtra(row.id, extra.copy(tapbackParts = parts).toJson())
         if (stickerKey != null && !sticker && (update.enable || update.emoji == DirectArchive.STICKER_TAPBACK)) {
             update.sticker?.let(::dropPicture)
@@ -2310,6 +2333,8 @@ class DirectLink private constructor(
         val row = repo.message(messageId) ?: return null
         val descriptor = String(part.key, Charsets.UTF_8).ifEmpty { return null }
         val by = if (row.isOutgoing || row.direction == "out") ME else row.senderId
+        // Not registered with Apple: nothing could be fetched, so none of its sender's hourly fetches is used.
+        if (!DirectPrefs.registered(app)) return null
         if (!autoFetches.take(by, System.currentTimeMillis())) {
             refused("a location", row.conversationId, "past what one person's changes may fetch in an hour")
             return null

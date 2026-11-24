@@ -119,12 +119,33 @@ class MediaTranscriptTest {
         three.getChildAt(0).performClick()
         assertEquals(listOf("stack p0,p1,p2"), taps)
 
-        val five = bound(a, row((0..4).map { part("p$it") }, id = "imsg:H")).binding.mediaContainer
+        // A fresh adapter: a second list is diffed off the main thread.
+        val five = bound(adapter(), row((0..4).map { part("p$it") }, id = "imsg:H")).binding.mediaContainer
         val stack = five.getChildAt(0).findViewById<MediaStackView>(R.id.stackView)
         assertEquals(3, stack.cards.size)
         val badge = five.getChildAt(0).findViewById<TextView>(R.id.stackCount)
         assertEquals(View.VISIBLE, badge.visibility)
         assertEquals("5", badge.text.toString())
+    }
+
+    @Test
+    fun aBatchBeingSentShowsAsItsStackFromTheOutboxOnly() {
+        val outbox = com.lightdecoder.archive.MediaCache.outboxDir(context, ChatService.IMESSAGE).apply { mkdirs() }
+        val second = java.io.File(outbox, "t-1").apply { writeBytes(byteArrayOf(1)) }
+        val third = java.io.File(outbox, "t-2").apply { writeBytes(byteArrayOf(2)) }
+        val outside = java.io.File(context.filesDir, "imessage/state.plist").apply { parentFile?.mkdirs(); writeText("x") }
+        fun pending(vararg files: java.io.File) = IMessageExtra(pending = files.map { IMessageExtra.PendingFile(it.path, "image/png", it.name) })
+        val local = row(listOf(part("p0").copy(messageId = "tmp:t", localPath = java.io.File(outbox, "t").path)), pending(second, third), id = "tmp:t")
+        val box = bound(adapter(), local).binding.mediaContainer
+        val stack = box.getChildAt(0).findViewById<MediaStackView>(R.id.stackView)
+        assertNotNull("one stack while it goes", stack)
+        assertEquals(3, stack.cards.size)
+        // A file outside the outbox is never drawn.
+        val odd = bound(adapter(), row(listOf(part("p0").copy(messageId = "tmp:u")), pending(outside), id = "tmp:u")).binding.mediaContainer
+        assertEquals(1, odd.childCount)
+        assertNull(odd.getChildAt(0).findViewById<MediaStackView>(R.id.stackView))
+        // Nor is a message's that is no local copy.
+        assertTrue(MediaStacks.waitingParts(row(listOf(part("p0")), pending(second)), pending(second)) { true }.isEmpty())
     }
 
     @Test
@@ -135,7 +156,7 @@ class MediaTranscriptTest {
         assertNull(one.getChildAt(0).findViewById<MediaStackView>(R.id.stackView))
         assertNotNull(one.getChildAt(0).findViewById<View>(R.id.mediaImage))
         // Not an iMessage: each as it always was.
-        val other = bound(a, row((0..2).map { part("p$it") }, id = "m1")).binding.mediaContainer
+        val other = bound(adapter(), row((0..2).map { part("p$it") }, id = "m1")).binding.mediaContainer
         assertEquals(3, other.childCount)
     }
 
@@ -200,6 +221,32 @@ class MediaTranscriptTest {
     }
 
     @Test
+    fun onlyALocationSomeoneElseSentHasItsAddressLookedUp() {
+        val a = adapter()
+        val at = 37.33182 to -122.03118
+        a.locationOf = { _, _ -> at }
+        val looked = ArrayList<Pair<Double, Double>>()
+        a.addressOf = { looked += it; "1 Infinite Loop" }
+        val card = listOf(part("p0", "text/x-vlocation", "G-CL.loc.vcf"))
+        // Received: looked up, and shown.
+        val received = bound(a, row(card)).binding.mediaContainer.getChildAt(0)
+        assertEquals("1 Infinite Loop", received.findViewById<TextView>(R.id.locationAddress).text.toString())
+        assertEquals(listOf(at), looked)
+        // The user's own, sent from here or from their other devices: never.
+        val mine = row(card, id = "imsg:M").copy(isOutgoing = true, direction = "out")
+        // A fresh adapter (a second list on the same one is diffed off this thread).
+        val sent = adapter().also { it.locationOf = a.locationOf; it.addressOf = a.addressOf }
+        val shown = bound(sent, mine).binding.mediaContainer.getChildAt(0)
+        assertEquals(View.GONE, shown.findViewById<View>(R.id.locationAddress).visibility)
+        assertEquals(listOf(at), looked)
+        // Nor its local copy while it is sent.
+        assertTrue(!a.looksUpAddress(row(card, id = "tmp:x").copy(isOutgoing = true, direction = "out", tmpId = "x")))
+        assertTrue(!a.looksUpAddress(row(card, id = "tmp:y").copy(tmpId = "y")))
+        assertTrue(!a.looksUpAddress(mine))
+        assertTrue(a.looksUpAddress(row(card)))
+    }
+
+    @Test
     fun theNotificationNeverCountsAMovingPart() {
         // The still is the photo: "Photo", from the message's own media.
         val m = MessageDto(
@@ -217,5 +264,18 @@ class MediaTranscriptTest {
 
     private companion object {
         const val DB = "media-transcript-test.db"
+    }
+
+    @Test
+    fun aLocationCardThatCannotBeReadIsTriedLessAndLessOften() {
+        assertEquals(30_000L, ThreadActivity.locationRetryMs(1))
+        assertEquals(60_000L, ThreadActivity.locationRetryMs(2))
+        assertEquals(120_000L, ThreadActivity.locationRetryMs(3))
+        assertEquals(60 * 60_000L, ThreadActivity.locationRetryMs(50))
+        // At most a handful of tries an hour per card, far below a sender's hourly fetches.
+        var at = 0L
+        var tries = 0
+        while (at < 60 * 60_000L) { tries++; at += ThreadActivity.locationRetryMs(tries) }
+        assertTrue(tries < 10)
     }
 }

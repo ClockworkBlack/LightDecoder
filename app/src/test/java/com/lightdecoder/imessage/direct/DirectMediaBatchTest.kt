@@ -141,6 +141,10 @@ class DirectMediaBatchTest {
         }
     }
 
+    /** Message [id] stored with each of its files recorded (that comes right after, off this thread). */
+    private fun waitSent(id: String) =
+        waitFor("$id and its files") { repo.message(id)?.media?.all { it.localPath.isNotEmpty() } == true }
+
     private val png = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10)
 
     // --- photos sent together ----------------------------------------------------------------------
@@ -164,7 +168,7 @@ class DirectMediaBatchTest {
         assertEquals(listOf("IMG_2.png", "IMG_3.png"), pending.map { it.name })
         assertEquals(1, repo.messages(chat).count { it.isLocal })
         answered.countDown()
-        waitFor("the sent message") { repo.message("imsg:S1") != null }
+        waitSent("imsg:S1")
         // One SEND with all three.
         val request = DirectWire.SendRequest.fromJson(requests(DirectWire.SEND).single())
         assertEquals(listOf("IMG_1.png", "IMG_2.png", "IMG_3.png"), request.attachments.map { it.name })
@@ -209,7 +213,7 @@ class DirectMediaBatchTest {
         val tmpId = link.sendMediaBatch(chat, listOf(fileToSend("a.png", png), fileToSend("b.png", png + 1)), null, null)
         waitFor("the failure") { repo.message(MessageRow.tmpMessageId(tmpId))?.localState == LocalState.FAILED }
         assertTrue(link.retry(tmpId))
-        waitFor("the sent message") { repo.message("imsg:S3") != null }
+        waitSent("imsg:S3")
         val (first, second) = requests(DirectWire.SEND).map(DirectWire.SendRequest::fromJson)
         assertEquals(2, first.attachments.size)
         assertEquals(first.attachments, second.attachments)
@@ -221,7 +225,8 @@ class DirectMediaBatchTest {
         val link = link(sends("S8"))
         bobsChat(link)
         val tmpId = link.sendMediaBatch(chat, listOf(fileToSend("a.png", png), fileToSend("b.png", png + 1)), null, null)
-        waitFor("the sent message") { repo.message("imsg:S8") != null }
+        // Stored first, its files recorded right after: both waited for.
+        waitFor("the sent message and its files") { repo.message("imsg:S8")?.media?.let { m -> m.size == 2 && m.all { it.localPath.isNotEmpty() } } == true }
         // Apple said afterwards it could not deliver it.
         val sent = repo.message("imsg:S8")!!
         repo.upsertMessage(
@@ -251,7 +256,7 @@ class DirectMediaBatchTest {
         val extra = IMessageExtra.parse(row.extra).copy(pending = listOf(IMessageExtra.PendingFile(outside.path, "image/png", "x.png")))
         repo.setExtra(row.id, extra.toJson())
         assertTrue(link.retry(tmpId))
-        waitFor("the sent message") { repo.message("imsg:S4") != null }
+        waitSent("imsg:S4")
         val again = DirectWire.SendRequest.fromJson(requests(DirectWire.SEND).last())
         assertEquals(listOf(repo.outboxFileFor(tmpId).path), again.attachments.map { it.path })
     }
@@ -299,7 +304,7 @@ class DirectMediaBatchTest {
         assertEquals(2, bar.files)
         assertNull("another chat shows none", DirectLink.SendBars.sendBar(link.transfers.value, setOf("imsg:other")))
         release.countDown()
-        waitFor("the sent message") { repo.message("imsg:S6") != null }
+        waitSent("imsg:S6")
         assertTrue(link.transfers.value.isEmpty())
         // A text has none.
         link.sendText(chat, "hello", null)
@@ -351,6 +356,99 @@ class DirectMediaBatchTest {
 
     private val stopped = java.util.concurrent.atomic.AtomicBoolean(false)
 
+    @Test
+    fun aBatchDeletedWhileItUploadsIsStoppedFirstThenGone() {
+        val inSend = CountDownLatch(1)
+        val stop = CountDownLatch(1)
+        val link = link { what, request, onProgress ->
+            when (what) {
+                DirectWire.SEND -> {
+                    onProgress?.invoke(DirectWire.progress(1, 8, 0, 2))
+                    inSend.countDown()
+                    stop.await(5, TimeUnit.SECONDS)
+                    DirectWire.failure(Transfers.Stopped())
+                }
+                DirectWire.CANCEL -> {
+                    stop.countDown()
+                    DirectWire.cancelled(DirectWire.cancelKeyOf(request)?.startsWith("tmp:") == true)
+                }
+                else -> DirectWire.ok()
+            }
+        }
+        bobsChat(link)
+        val tmpId = link.sendMediaBatch(chat, listOf(fileToSend("a.png", png), fileToSend("b.png", png)), null, null)
+        assertTrue(inSend.await(5, TimeUnit.SECONDS))
+        waitFor("its upload") { link.transfers.value[DirectWire.sendKey(tmpId)] != null }
+        val files = repo.message(MessageRow.tmpMessageId(tmpId))!!.let { row ->
+            row.media.map { File(it.localPath) } + IMessageExtra.parse(row.extra).pending.map { File(it.path) }
+        }
+        assertEquals(2, files.size)
+        assertTrue(runBlocking { IMessageManager.get(context).deleteSending(tmpId) })
+        // CANCEL 25 named the send, before anything was deleted.
+        assertEquals("tmp:$tmpId", DirectWire.cancelKeyOf(requests(DirectWire.CANCEL).single()))
+        assertNull(repo.message(MessageRow.tmpMessageId(tmpId)))
+        waitFor("its files gone") { files.none { it.exists() } }
+    }
+
+    @Test
+    fun aCopyDeletedWhileItWaitsItsTurnNeverGoes() {
+        val inSend = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val answer = sends("S9")
+        val link = link { what, request, p ->
+            if (what == DirectWire.SEND) {
+                inSend.countDown()
+                release.await(5, TimeUnit.SECONDS)
+            }
+            answer(what, request, p)
+        }
+        bobsChat(link)
+        link.sendText(chat, "first", null)
+        assertTrue(inSend.await(5, TimeUnit.SECONDS))
+        val tmpId = link.sendMediaBatch(chat, listOf(fileToSend("a.png", png), fileToSend("b.png", png)), null, null)
+        assertEquals(LocalState.PENDING, repo.message(MessageRow.tmpMessageId(tmpId))!!.localState)
+        assertTrue(runBlocking { IMessageManager.get(context).deleteSending(tmpId) })
+        assertNull(repo.message(MessageRow.tmpMessageId(tmpId)))
+        release.countDown()
+        waitFor("the first one sent") { repo.message("imsg:S9") != null }
+        Thread.sleep(200)
+        assertEquals("only the first went", 1, requests(DirectWire.SEND).size)
+        // Nothing was asked to stop: it had not started.
+        assertTrue(requests(DirectWire.CANCEL).isEmpty())
+    }
+
+    @Test
+    fun aBatchsOtherFilesGoWithItsLocalCopyHoweverItGoes() {
+        fun batch(tmpId: String, chatId: String): List<File> {
+            val files = (0..2).map { i -> repo.outboxFileFor(if (i == 0) tmpId else "$tmpId-$i").apply { parentFile?.mkdirs(); writeBytes(png) } }
+            // A path outside the outbox is never deleted, whatever the extra says.
+            val outside = File(context.filesDir, "keep-$tmpId.png").apply { writeBytes(png) }
+            val extra = IMessageExtra(pending = (files.drop(1) + outside).map { IMessageExtra.PendingFile(it.path, "image/png", it.name) })
+            repo.insertLocalOutgoing(tmpId, chatId, "", files[0].path, "image/png", "a.png", null, 1L, extra.toJson())
+            return files + outside
+        }
+        val one = batch("t-del", chat)
+        repo.applyDeletion(MessageRow.tmpMessageId("t-del"))
+        assertTrue(one.dropLast(1).none { it.exists() })
+        assertTrue(one.last().exists())
+        val two = batch("t-conv", "imsg:tel:+15550000099")
+        repo.deleteConversationLocal("imsg:tel:+15550000099")
+        assertTrue(two.dropLast(1).none { it.exists() })
+        assertTrue(two.last().exists())
+    }
+
+    @Test
+    fun aCopyAlreadyWithAppleIsNotDeleted() {
+        val link = link { what, request, p -> if (what == DirectWire.CANCEL) DirectWire.cancelled(false) else sends("S10")(what, request, p) }
+        bobsChat(link)
+        // Not waiting and not uploading (say a text being sent): it cannot be stopped, and stays.
+        val tmpId = "t-sent"
+        repo.insertLocalOutgoing(tmpId, chat, "hi", null, null, null, null, 1L, "")
+        repo.setLocalState(tmpId, LocalState.SENDING)
+        assertFalse(runBlocking { IMessageManager.get(context).deleteSending(tmpId) })
+        assertNotNull(repo.message(MessageRow.tmpMessageId(tmpId)))
+    }
+
     // --- Live Photos -------------------------------------------------------------------------------
 
     @Test
@@ -374,6 +472,28 @@ class DirectMediaBatchTest {
         val after = repo.message("imsg:L1")!!
         assertEquals(listOf("p2"), after.media.map { it.partId })
         assertTrue(IMessageExtra.parse(after.extra).live.isEmpty())
+    }
+
+    @Test
+    fun theGalleryAndTheJunkReportNeverTakeAMovingPart() {
+        val link = link { _, _, _ -> DirectWire.ok() }
+        link.apply(
+            message(
+                "L2",
+                listOf(
+                    attachment(0, "IMG_7.HEIC", "public.heic"),
+                    attachment(1, "IMG_7.MOV", "com.apple.quicktime-movie", iris = true),
+                ),
+            ),
+        )
+        val row = repo.message("imsg:L2")!!
+        assertEquals(2, row.media.size)
+        // The photos of the chat: the still once.
+        val pictures = com.lightdecoder.ui.chat.PictureGalleryActivity.picturesOf(IMessageManager.get(context), chat)
+        assertEquals(listOf("p0"), pictures.filter { it.message.id == "imsg:L2" }.map { it.part.partId })
+        // Reported as junk: only what the chat shows.
+        val junk = JunkReports.message(row, DirectWire.Target(listOf(me, bob), null, null, me))!!
+        assertEquals(listOf("DESC-IMG_7.HEIC"), junk.attachments)
     }
 
     // --- location cards ----------------------------------------------------------------------------
@@ -411,6 +531,16 @@ class DirectMediaBatchTest {
     }
 
     @Test
+    fun aLocationCardIsNotFetchedBeforeThePhoneIsRegistered() {
+        val link = link { _, _, _ -> DirectWire.ok() }
+        link.apply(message("C5", listOf(attachment(0, "C5-CL.loc.vcf", "public.vlocation", type = AttachmentType.Mmcs(listOf(MmcsFile(byteArrayOf(1), "o", "https://x", byteArrayOf(2), 300UL)))))))
+        DirectPrefs.setRegistered(context, false)
+        // Nothing could be fetched, so none of its sender's hourly fetches is used either.
+        assertNull(runBlocking { link.locationOf("imsg:C5", "p0") })
+        assertTrue(requests(DirectWire.DOWNLOAD).isEmpty())
+    }
+
+    @Test
     fun aLocationCardThatCameInsideTheMessageNeedsNoFetch() {
         val vcf = AppleLocation.toVcf(1.5, 2.5).toByteArray()
         val link = link { _, _, _ -> DirectWire.ok() }
@@ -428,7 +558,7 @@ class DirectMediaBatchTest {
         val file = File(context.cacheDir, "shared-in/x/x-CL.loc.vcf").apply { parentFile?.mkdirs(); writeText(AppleLocation.toVcf(1.0, 2.0)) }
         link.sendFile(chat, file, AppleLocation.MIME, file.name)
         file.delete()
-        waitFor("the sent card") { repo.message("imsg:S7") != null }
+        waitSent("imsg:S7")
         val a = DirectWire.SendRequest.fromJson(requests(DirectWire.SEND).single()).attachments.single()
         assertEquals(AppleLocation.MIME, a.mime)
         assertEquals("x-CL.loc.vcf", a.name)
@@ -450,6 +580,19 @@ class DirectMediaBatchTest {
         assertEquals(mapOf(bob.removePrefix("tel:") to 1), IMessageExtra.parse(row.extra).tapbackParts)
         react(1, enable = false)
         assertTrue(IMessageExtra.parse(repo.message("imsg:P1")!!.extra).tapbackParts.isEmpty())
+        // The first photo is Apple's part 0: kept as such, so its pill shows on it.
+        react(0)
+        assertEquals(mapOf(bob.removePrefix("tel:") to 0), IMessageExtra.parse(repo.message("imsg:P1")!!.extra).tapbackParts)
+    }
+
+    @Test
+    fun aTapbackOnAMessageOfOnePictureKeepsNoPhoto() {
+        val link = link { _, _, _ -> DirectWire.ok() }
+        link.apply(message("P2", listOf(attachment(0, "a.png", "public.png"))))
+        link.apply(DirectArchive.Update.Reaction("imsg:P2", bob.removePrefix("tel:"), "❤️", true, false, 1_699_999_040_000L, chat, part = 0))
+        val row = repo.message("imsg:P2")!!
+        assertEquals("❤️", row.reactions.single().emoji)
+        assertTrue(IMessageExtra.parse(row.extra).tapbackParts.isEmpty())
     }
 
     private companion object {

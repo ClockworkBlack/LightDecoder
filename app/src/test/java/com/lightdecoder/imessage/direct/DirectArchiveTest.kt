@@ -497,10 +497,11 @@ class DirectArchiveTest {
     fun aTapbacksPhotoIsKept() {
         fun on(part: ULong?) = map(inst("R2", bob, PushChatMessage.React(ReactMessage("M1", part, ReactMessageType.React(Reaction.Heart, true), "", null)))) as DirectArchive.Update.Reaction
         assertEquals(2, on(2UL).part)
-        assertEquals(0, on(null).part)
+        // The first photo is part 0, apart from naming none.
         assertEquals(0, on(0UL).part)
-        // Out of any message's range: on the whole message.
-        assertEquals(0, on(ULong.MAX_VALUE).part)
+        assertNull(on(null).part)
+        // Out of any message's range: on none.
+        assertNull(on(ULong.MAX_VALUE).part)
     }
 
     @Test
@@ -509,7 +510,7 @@ class DirectArchiveTest {
             map(inst("R1", sender, PushChatMessage.React(ReactMessage("M1", 0UL, ReactMessageType.React(r, enable), "", null))))
         val heart = react(Reaction.Heart) as DirectArchive.Update.Reaction
         // With the chat it came in, so that it is only taken there.
-        assertEquals(DirectArchive.Update.Reaction("imsg:M1", "+15550000002", "❤️", true, false, 1_700_000_005_000L, "imsg:$bob"), heart)
+        assertEquals(DirectArchive.Update.Reaction("imsg:M1", "+15550000002", "❤️", true, false, 1_700_000_005_000L, "imsg:$bob", part = 0), heart)
         assertEquals("👍", (react(Reaction.Like) as DirectArchive.Update.Reaction).emoji)
         assertEquals("👎", (react(Reaction.Dislike) as DirectArchive.Update.Reaction).emoji)
         assertEquals("😂", (react(Reaction.Laugh) as DirectArchive.Update.Reaction).emoji)
@@ -518,7 +519,7 @@ class DirectArchiveTest {
         assertEquals("🦊", (react(Reaction.Emoji("🦊")) as DirectArchive.Update.Reaction).emoji)
         assertEquals("🖼️", (react(Reaction.Sticker(null, emptyList())) as DirectArchive.Update.Reaction).emoji)
         assertFalse((react(Reaction.Heart, enable = false) as DirectArchive.Update.Reaction).enable)
-        // On the message as a whole: part 0.
+        // On its first part, as Apple names it.
         assertEquals(0, heart.part)
         // The user's own, from another device.
         val mine = react(Reaction.Laugh, sender = me) as DirectArchive.Update.Reaction

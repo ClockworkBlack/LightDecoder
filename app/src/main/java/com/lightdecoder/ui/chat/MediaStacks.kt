@@ -93,6 +93,25 @@ object MediaStacks {
     }
 }
 
+/**
+ * The rest of a batch still being sent ([IMessageExtra.pending]: its local copy keeps only its first
+ * file as a part), as parts of their own, so the copy shows the whole stack while it goes: only files
+ * [allowed] (the outbox), at most [IMessageExtra.MAX_PENDING]. Nothing for any other message.
+ */
+fun MediaStacks.waitingParts(row: MessageRow, extra: IMessageExtra, allowed: (String) -> Boolean): List<MediaRow> {
+    if (!row.isLocal || extra.pending.isEmpty()) return emptyList()
+    return extra.pending.take(IMessageExtra.MAX_PENDING).withIndex().filter { allowed(it.value.path) }.map { (i, p) ->
+        MediaRow(
+            messageId = row.id, partId = "$WAITING_PART${i + 1}", mediaId = "", key = ByteArray(0), thumbMediaId = "", thumbKey = ByteArray(0),
+            mime = p.mime, fileName = p.name, size = 0, width = 0, height = 0, inlineData = ByteArray(0), needsFullSize = false,
+            localPath = p.path, thumbPath = "", fullSizeRequested = false, stickerChecked = false,
+        )
+    }
+}
+
+/** The part id a waiting file of a batch shows under ([waitingParts]): never one Apple numbers (`p<idx>`). */
+const val WAITING_PART = "waiting"
+
 /** This message's media as shown: without its Live Photos' moving parts ([IMessageExtra.live]), which are only played. */
 fun MessageRow.shownMedia(extra: IMessageExtra = IMessageExtra.parse(this.extra)): List<MediaRow> {
     val motion = extra.motionParts

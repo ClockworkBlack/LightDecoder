@@ -44,6 +44,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Before
@@ -447,9 +448,32 @@ class PhoneStyleScreenTest {
                             activity.getString(R.string.imessage_attach_photos), activity.getString(R.string.imessage_attach_stickers),
                             // A chat the iMessage library reaches can have a poll (iOS 26).
                             activity.getString(R.string.imessage_attach_poll),
+                            // And "Send My Current Location" (SPEC2 B4.4).
+                            activity.getString(R.string.location_attach),
                         ),
                         (0 until list.adapter.count).map { list.adapter.getItem(it).toString() },
                     )
+                    // Location: the permission is asked for only now, and without it nothing is looked up or sent.
+                    list.performItemClick(null, 3, 3)
+                    ShadowLooper.idleMainLooper()
+                    val asked = org.robolectric.Shadows.shadowOf(activity).lastRequestedPermission
+                    assertNotNull("asked for the location", asked)
+                    assertTrue(asked!!.requestedPermissions.toList().containsAll(com.lightdecoder.ui.chat.CurrentLocation.PERMISSIONS.toList()))
+                    assertFalse(asked.requestedPermissions.contains("android.permission.ACCESS_BACKGROUND_LOCATION"))
+                    assertFalse("nothing looked up", org.robolectric.shadows.ShadowToast.shownToastCount() > 0 &&
+                        org.robolectric.shadows.ShadowToast.getTextOfLatestToast() == activity.getString(R.string.location_finding))
+                    // Refused: it says so, and nothing is looked up, shown or sent.
+                    val menu = ShadowDialog.getLatestDialog()
+                    activity.onLocationPermission(ALICE_DIRECT, com.lightdecoder.ui.chat.CurrentLocation.PERMISSIONS.associateWith { false })
+                    ShadowLooper.idleMainLooper()
+                    assertEquals(activity.getString(R.string.location_permission_denied), org.robolectric.shadows.ShadowToast.getTextOfLatestToast())
+                    assertSame("no confirmation", menu, ShadowDialog.getLatestDialog())
+                    // Coarse alone is enough: the location is looked for (here there is none, so nothing is offered either).
+                    activity.onLocationPermission(
+                        ALICE_DIRECT,
+                        mapOf(android.Manifest.permission.ACCESS_COARSE_LOCATION to true, android.Manifest.permission.ACCESS_FINE_LOCATION to false),
+                    )
+                    assertTrue(org.robolectric.shadows.ShadowToast.showedToast(activity.getString(R.string.location_finding)))
                 }
             }
         } finally {

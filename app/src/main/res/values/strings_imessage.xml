@@ -546,6 +546,7 @@
     <string name="imessage_not_delivered_delete">Delete</string>
     <string name="imessage_not_delivered_again_failed">This message can\'t be sent again.</string>
     <string name="imessage_not_delivered_as_text_failed">It could not be sent as a text message: %1$s</string>
+    <string name="imessage_not_delivered_as_text_partly">%1$d of its %2$d files went as a text message; the others did not, and it stays here: %3$s</string>
     <!-- A conversation's long press, and the chat's menu. -->
     <string name="chat_action_mark_unread">Mark as Unread</string>
     <string name="chat_action_mark_read">Mark as Read</string>
@@ -684,6 +685,8 @@
     <string name="transfer_stop_download">Stop Download</string>
     <string name="transfer_downloading">Downloading, %1$d%%</string>
     <string name="transfer_stopped">Download stopped</string>
+    <string name="imessage_not_delivered_files_missing">Not every file of this message is still here, so it was not sent as a text message.</string>
+    <string name="transfer_send_not_stopped">This message is already on its way and can\'t be stopped.</string>
     <string name="transfer_sending">Sending %1$d of %2$d</string>
     <string name="media_stack_title">%1$d Photos</string>
     <string name="media_stack_description">%1$d photos</string>
@@ -701,6 +704,7 @@
     <string name="location_send">Send</string>
     <string name="location_finding">Finding your location…</string>
     <string name="location_unavailable">Your location is not available right now.</string>
+    <string name="location_unreadable">This location could not be read.</string>
     <string name="location_permission_denied">Allow location access to send your location.</string>
     <string name="location_show_addresses">Show addresses for locations</string>
     <string name="location_show_addresses_help">Looks up the address of a location someone sent with Android\'s address service, which sends its coordinates to that service. Off: only the coordinates show.</string>
