@@ -718,9 +718,15 @@ class IMessageManager private constructor(
 
     override suspend fun loadOlder(conversationId: String, count: Int): Int = 0
 
-    /** Removes it from this phone only; OpenBubbles keeps it. It is not taken in again from OpenBubbles' notification. */
+    /**
+     * Removes it from this phone only; OpenBubbles keeps it. It is not taken in again from OpenBubbles'
+     * notification, nor (an iMessage) from Apple. Through the iMessage library with "Delete on All
+     * Devices" on, the user's other devices delete it too.
+     */
     override suspend fun deleteMessage(messageId: String): Unit = withContext(Dispatchers.IO) {
         val row = repo.message(messageId)
+        val guid = com.lightdecoder.imessage.direct.DirectArchive.guidOf(messageId)
+        val recycle = if (row != null && guid != null) runCatching { direct.recycleTarget(row.conversationId) }.getOrNull() else null
         if (row != null && messageId.startsWith(SENT_PREFIX)) {
             deletedSent += Triple(row.conversationId, row.text, row.timestampMs)
             while (deletedSent.size > MAX_DELETED_SENT) deletedSent.poll()
@@ -729,18 +735,36 @@ class IMessageManager private constructor(
         // The pictures kept with it that are no attachment of it (its link's, the stickers on it) go with it.
         row?.let { runCatching { direct.forgetPictures(it) } }
         repo.applyDeletion(messageId)
+        if (recycle != null && guid != null) direct.sendRecycle(recycle, com.lightdecoder.imessage.direct.RecycleRules.OP_BIN, listOf(guid), row?.conversationId.orEmpty())
     }
 
     /**
-     * Removes the chat from this phone only; it comes back, from that
+     * Through the iMessage library: the chat goes to Recently Deleted on this phone, for
+     * [ArchiveRepository.RETENTION_MS] (recovered with [restoreDeletedLocally], or deleted for good
+     * with [purgeDeleted], or by [purgeExpired] after that); with "Delete on All Devices" on, on the
+     * user's other devices too. A Messages conversation deleted with its iMessage chats comes here
+     * for those chats (only they move). Without the library (OpenBubbles' notifications), as
+     * [deleteConversationForGood].
+     */
+    override suspend fun deleteConversation(conversationId: String): Unit = withContext(Dispatchers.IO) {
+        if (!direct.active) return@withContext deleteConversationForGood(conversationId)
+        val recycle = runCatching { direct.recycleTarget(conversationId) }.getOrNull()
+        MessageNotifier.cancel(appContext, conversationId, ChatService.IMESSAGE)
+        if (repo.moveToDeleted(conversationId)) {
+            IMessageLog.add(appContext, "${IMessageLog.chatRef(conversationId)}: moved to Recently Deleted")
+            direct.sendRecycle(recycle, com.lightdecoder.imessage.direct.RecycleRules.OP_BIN, conversationId = conversationId)
+        }
+    }
+
+    /**
+     * Removes the chat from this phone only, for good; it comes back, from that
      * moment on, if someone writes in it again. What is kept of it outside
      * the archive goes too: the pictures kept with its messages that are no
      * attachments (links' previews, stickers), a group's photo and version,
      * its own "Send Read Receipts" ([com.lightdecoder.imessage.direct.DirectLink.forgetConversation]).
-     * Report Junk and a Messages conversation deleted with its iMessage chats
-     * come here too.
+     * Report Junk comes here (never through Recently Deleted).
      */
-    override suspend fun deleteConversation(conversationId: String): Unit = withContext(Dispatchers.IO) {
+    suspend fun deleteConversationForGood(conversationId: String): Unit = withContext(Dispatchers.IO) {
         val newest = runCatching { repo.messages(conversationId).maxOfOrNull { it.timestampMs } }.getOrNull()
         IMessagePrefs.setClearedBefore(appContext, conversationId, maxOf(newest ?: 0L, System.currentTimeMillis()))
         MessageNotifier.cancel(appContext, conversationId, ChatService.IMESSAGE)
@@ -787,7 +811,7 @@ class IMessageManager private constructor(
         val addresses = numbers.map { it.trim() }.filter { it.isNotEmpty() }.distinctBy { IMessageAddress.key(it) ?: it }
         when (addresses.size) {
             0 -> throw com.lightdecoder.imessage.direct.DirectEngine.ImessageError(appContext.getString(com.lightdecoder.R.string.imessage_group_nobody))
-            1 -> direct.conversationFor(addresses[0])
+            1 -> direct.conversationFor(addresses[0], revive = true)
                 ?: throw com.lightdecoder.imessage.direct.DirectEngine.ImessageError(appContext.getString(com.lightdecoder.R.string.imessage_not_on_imessage, addresses[0]))
             else -> direct.startGroup(addresses, groupName)
         }
@@ -795,9 +819,48 @@ class IMessageManager private constructor(
 
     override suspend fun markNotSpam(conversationId: String): Unit = throw RelayException(WA_UNSUPPORTED, "no spam folder")
 
-    override suspend fun restoreDeletedLocally(conversationId: String): Boolean = false
+    /**
+     * "Recover": the chat comes back from Recently Deleted; with "Delete on All Devices" on, on the
+     * user's other devices too. False if it is not there.
+     */
+    override suspend fun restoreDeletedLocally(conversationId: String): Boolean = withContext(Dispatchers.IO) {
+        if (!repo.restoreDeleted(conversationId)) return@withContext false
+        direct.sendRecycle(runCatching { direct.recycleTarget(conversationId) }.getOrNull(), com.lightdecoder.imessage.direct.RecycleRules.OP_RECOVER, conversationId = conversationId)
+        true
+    }
 
-    override suspend fun purgeDeleted(conversationId: String?): Int = 0
+    /**
+     * "Delete" in Recently Deleted: [conversationId] (or, with null, every chat there) is deleted for
+     * good here; with "Delete on All Devices" on, on the user's other devices too. How many.
+     */
+    override suspend fun purgeDeleted(conversationId: String?): Int = withContext(Dispatchers.IO) {
+        val ids = runCatching { repo.conversations(Folder.DELETED, limit = 10_000).map { it.id } }.getOrDefault(emptyList())
+            .filter { conversationId == null || it == conversationId }
+        var purged = 0
+        for (id in ids) {
+            val recycle = runCatching { direct.recycleTarget(id) }.getOrNull()
+            if (direct.purgeForGood(id) > 0) {
+                purged++
+                direct.sendRecycle(recycle, com.lightdecoder.imessage.direct.RecycleRules.OP_PURGE, conversationId = id)
+            }
+        }
+        purged
+    }
+
+    /**
+     * The chats in Recently Deleted for longer than [ArchiveRepository.RETENTION_MS] are deleted for good,
+     * here only (the user's other devices keep their own time), and deleted ids older than kept are
+     * forgotten. At app start and as Recently Deleted opens. How many chats. Does not throw.
+     */
+    fun purgeExpired(now: Long = System.currentTimeMillis()): Int = try {
+        val expired = repo.expiredDeleted(now - ArchiveRepository.RETENTION_MS)
+        for (id in expired) direct.purgeForGood(id)
+        repo.pruneTombstones(now)
+        if (expired.isNotEmpty()) IMessageLog.add(appContext, "${expired.size} chat(s) deleted for good after ${ArchiveRepository.RETENTION_MS / 86_400_000L} days in Recently Deleted")
+        expired.size
+    } catch (e: RuntimeException) {
+        0
+    }
 
     /** Deletes the iMessage archive while Blue Bubbles is off. */
     override suspend fun deleteLocalArchive(): Boolean = withContext(Dispatchers.IO) {
@@ -833,7 +896,7 @@ class IMessageManager private constructor(
         private const val WA_UNSUPPORTED = "unsupported"
 
         /** What the iMessage library adds. */
-        private val DIRECT_CAPABILITIES = setOf(Capability.EDIT, Capability.NEW_GROUP)
+        private val DIRECT_CAPABILITIES = setOf(Capability.EDIT, Capability.NEW_GROUP, Capability.DELETED_FOLDER)
 
         @Volatile
         private var instance: IMessageManager? = null

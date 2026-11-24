@@ -111,6 +111,13 @@ class ArchiveRepository private constructor(
      */
     fun upsertConversation(dto: ConversationDto) = write { writeConversation(it, dto) }
 
+    /**
+     * As [upsertConversation]; should it make the conversation unread (it was read, or not stored),
+     * its unread messages begin at [unreadSinceMs] (the message it came with), which "Jump to first
+     * unread" goes to. While it is unread that time stays; read, it is cleared.
+     */
+    fun upsertConversation(dto: ConversationDto, unreadSinceMs: Long) = write { writeConversation(it, dto, unreadSinceMs) }
+
     /** Like [upsertConversation] for many, in one transaction. */
     fun upsertConversations(dtos: List<ConversationDto>) = write { b -> dtos.forEach { writeConversation(b, it) } }
 
@@ -123,7 +130,7 @@ class ArchiveRepository private constructor(
     /** Clears the local unread flag (the phone is told separately), a "Mark as Unread" with it. */
     fun markConversationRead(conversationId: String) = write { b ->
         marks.setUnread(conversationId, false)
-        b.db.update("conversations", ContentValues().apply { put("unread", 0) }, "conversation_id = ?", arrayOf(conversationId))
+        b.db.update("conversations", ContentValues().apply { put("unread", 0); put("first_unread_ts", 0) }, "conversation_id = ?", arrayOf(conversationId))
         b.changed(Kind.CONVERSATIONS, conversationId)
     }
 
@@ -187,7 +194,11 @@ class ArchiveRepository private constructor(
     }
 
     /** Deletes a conversation with its messages, media files, history cursor and queued sends. */
-    fun deleteConversationLocal(conversationId: String) = write { deleteConversation(it, conversationId) }
+    fun deleteConversationLocal(conversationId: String) = write { b ->
+        tombstoneConversation(b, conversationId)
+        deleteConversation(b, conversationId)
+        capTombstones(b.db)
+    }
 
     /**
      * Moves a conversation the phone deleted back to the inbox, here only.
@@ -195,12 +206,75 @@ class ArchiveRepository private constructor(
      */
     fun restoreDeleted(conversationId: String): Boolean = write { b ->
         val moved = b.db.update(
-            "conversations", ContentValues().apply { put("folder", Folder.INBOX.wire) },
+            "conversations", ContentValues().apply { put("folder", Folder.INBOX.wire); put("deleted_at", 0) },
             "conversation_id = ? AND folder = ?", arrayOf(conversationId, Folder.DELETED.wire),
         ) > 0
         if (moved) b.changed(Kind.CONVERSATIONS, conversationId)
         moved
     }
+
+    /**
+     * Moves [conversationId] to Recently Deleted ([Folder.DELETED]) as of [atMs], with its messages.
+     * False if there is no such conversation or it is there already (its time then stays).
+     */
+    fun moveToDeleted(conversationId: String, atMs: Long = System.currentTimeMillis()): Boolean = write { b ->
+        moveToDeleted(b, conversationId, atMs)
+    }
+
+    /**
+     * Sets when [conversationId] went to Recently Deleted to [atMs] (so that [purgeExpired] deletes it
+     * then). False if it is not in [Folder.DELETED].
+     */
+    fun setDeletedAt(conversationId: String, atMs: Long): Boolean = write { b ->
+        val changed = b.db.update(
+            "conversations", ContentValues().apply { put("deleted_at", atMs) },
+            "conversation_id = ? AND folder = ?", arrayOf(conversationId, Folder.DELETED.wire),
+        ) > 0
+        if (changed) b.changed(Kind.CONVERSATIONS, conversationId)
+        changed
+    }
+
+    /**
+     * The conversations in Recently Deleted since before [beforeMs]. One there with no time (moved
+     * there before the time was kept) gets now as its time first, so it is kept its full period.
+     */
+    fun expiredDeleted(beforeMs: Long): List<String> = write { b ->
+        b.db.update(
+            "conversations", ContentValues().apply { put("deleted_at", b.now) },
+            "folder = ? AND deleted_at <= 0", arrayOf(Folder.DELETED.wire),
+        )
+        query(
+            b.db, "SELECT conversation_id FROM conversations WHERE folder = ? AND deleted_at < ?",
+            arrayOf(Folder.DELETED.wire, beforeMs.toString()),
+        ) { it.getString(0) }
+    }
+
+    /** Deletes for good ([purgeDeleted]) every conversation in Recently Deleted since before [beforeMs]; how many. */
+    fun purgeExpired(beforeMs: Long): Int = expiredDeleted(beforeMs).sumOf { purgeDeleted(it) }
+
+    // --- deleted message ids ----------------------------------------------------------
+
+    /**
+     * Whether [messageId] was deleted here (or on the user's other devices) within the last
+     * [TOMBSTONE_DAYS] days: Apple handing it over again does not store it again.
+     */
+    fun isTombstoned(messageId: String): Boolean =
+        query("SELECT 1 FROM deleted_guids WHERE guid = ? LIMIT 1", arrayOf(messageId)) { true }.isNotEmpty()
+
+    /** Notes [messageIds] as deleted ([isTombstoned]); the oldest beyond [MAX_TOMBSTONES] go. */
+    fun tombstone(messageIds: Collection<String>, atMs: Long = System.currentTimeMillis()) = write { b ->
+        messageIds.forEach { addTombstone(b, it, atMs) }
+        capTombstones(b.db)
+    }
+
+    /** Forgets deleted ids older than [TOMBSTONE_DAYS] days, then all but the newest [MAX_TOMBSTONES]. */
+    fun pruneTombstones(now: Long = System.currentTimeMillis()) = write { b ->
+        b.db.delete("deleted_guids", "at < ?", arrayOf((now - TOMBSTONE_MS).toString()))
+        capTombstones(b.db)
+    }
+
+    /** How many deleted ids are kept. */
+    fun tombstoneCount(): Int = query("SELECT COUNT(*) FROM deleted_guids", emptyArray()) { it.getInt(0) }.firstOrNull() ?: 0
 
     /**
      * Deletes for good, as [deleteConversationLocal] does, the conversation
@@ -216,7 +290,11 @@ class ArchiveRepository private constructor(
                 arrayOf(conversationId, Folder.DELETED.wire),
             ) { it.getString(0) }
         }
-        ids.forEach { deleteConversation(b, it) }
+        ids.forEach {
+            tombstoneConversation(b, it)
+            deleteConversation(b, it)
+        }
+        capTombstones(b.db)
         ids.size
     }
 
@@ -980,12 +1058,21 @@ class ArchiveRepository private constructor(
         return result
     }
 
-    private fun writeConversation(b: Batch, dto: ConversationDto) {
+    private fun writeConversation(b: Batch, dto: ConversationDto, unreadSinceMs: Long = 0) {
         if (dto.id.isEmpty()) return
-        if (dto.folder == Folder.DELETED.wire) {
-            moveToDeleted(b, dto.id)
+        val stored = query(b.db, "SELECT unread, folder FROM conversations WHERE conversation_id = ?", arrayOf(dto.id)) {
+            (it.getInt(0) != 0) to (it.getString(1) ?: "")
+        }.firstOrNull()
+        // An iMessage chat kept in Recently Deleted is still updated (its members, name, whether the
+        // user is in it, its latest message), there and as of when it went there: should it come back,
+        // it is as it is now. Else a conversation the phone deleted moves there, with all else as it was.
+        val keptDeleted = dto.folder == Folder.DELETED.wire && service == ChatService.IMESSAGE && stored?.second == Folder.DELETED.wire
+        if (dto.folder == Folder.DELETED.wire && !keptDeleted) {
+            moveToDeleted(b, dto.id, b.now)
             return
         }
+        val unread = dto.unread || marks.unread(dto.id)
+        val wasUnread = stored?.first ?: false
         val values = ContentValues().apply {
             put("name", dto.name)
             put("is_group", dto.isGroup.toInt())
@@ -993,7 +1080,12 @@ class ArchiveRepository private constructor(
             put("folder", dto.folder)
             put("status_code", dto.statusCode)
             // The user's own "Mark as Unread" and pin outlast what the phone says.
-            put("unread", (dto.unread || marks.unread(dto.id)).toInt())
+            put("unread", unread.toInt())
+            // Where its unread messages begin: set as it becomes unread (only then), cleared once read.
+            if (!unread) put("first_unread_ts", 0)
+            else if (!wasUnread) put("first_unread_ts", unreadSinceMs.takeIf { it > 0 } ?: dto.lastMessageTs.coerceAtLeast(0))
+            // Out of Recently Deleted (or never in it); one kept there keeps its time.
+            if (!keptDeleted) put("deleted_at", 0)
             put("pinned", (marks.pinned(dto.id) ?: dto.pinned).toInt())
             put("read_only", dto.readOnly.toInt())
             // Google Messages does not report mute, so there it is only ever turned
@@ -1039,15 +1131,47 @@ class ArchiveRepository private constructor(
      * local deleted folder, with everything else as it was. One not stored
      * yet is not created for that.
      */
-    private fun moveToDeleted(b: Batch, conversationId: String) {
+    private fun moveToDeleted(b: Batch, conversationId: String, atMs: Long): Boolean {
         val moved = b.db.update(
             "conversations", ContentValues().apply {
                 put("folder", Folder.DELETED.wire)
+                put("deleted_at", atMs)
                 put("updated_at", b.now)
             },
             "conversation_id = ? AND folder != ?", arrayOf(conversationId, Folder.DELETED.wire),
         )
         if (moved > 0) b.changed(Kind.CONVERSATIONS, conversationId)
+        return moved > 0
+    }
+
+    /** Notes [messageId] as deleted ([isTombstoned]), when it is one whose id Apple may hand over again. */
+    private fun addTombstone(b: Batch, messageId: String, atMs: Long): Boolean {
+        if (!messageId.startsWith(TOMBSTONED_PREFIX) || messageId.length > MAX_TOMBSTONE_CHARS) return false
+        b.db.insertWithOnConflict("deleted_guids", null, ContentValues().apply {
+            put("guid", messageId)
+            put("at", atMs)
+        }, SQLiteDatabase.CONFLICT_REPLACE)
+        return true
+    }
+
+    /** The newest [TOMBSTONES_PER_CONVERSATION] message ids of [conversationId] are noted as deleted: it is going for good. */
+    private fun tombstoneConversation(b: Batch, conversationId: String) {
+        if (service != ChatService.IMESSAGE) return
+        query(
+            b.db,
+            "SELECT message_id FROM messages WHERE conversation_id = ? AND message_id LIKE ? " +
+                "ORDER BY timestamp_ms DESC, rowid DESC LIMIT $TOMBSTONES_PER_CONVERSATION",
+            arrayOf(conversationId, "$TOMBSTONED_PREFIX%"),
+        ) { it.getString(0) }.forEach { addTombstone(b, it, b.now) }
+    }
+
+    /** Keeps the newest [MAX_TOMBSTONES] deleted ids. */
+    private fun capTombstones(db: SQLiteDatabase) {
+        val count = query(db, "SELECT COUNT(*) FROM deleted_guids", emptyArray()) { it.getInt(0) }.firstOrNull() ?: 0
+        if (count <= MAX_TOMBSTONES) return
+        db.execSQL(
+            "DELETE FROM deleted_guids WHERE rowid NOT IN (SELECT rowid FROM deleted_guids ORDER BY at DESC, rowid DESC LIMIT $MAX_TOMBSTONES)",
+        )
     }
 
     private fun deleteConversation(b: Batch, conversationId: String) {
@@ -1210,6 +1334,8 @@ class ArchiveRepository private constructor(
         }
         b.db.execSQL("DELETE FROM messages_fts WHERE docid = ?", arrayOf<Any>(found.first))
         b.db.delete("messages", "message_id = ?", arrayOf(messageId)) // cascades to media
+        // Gone from iMessage's archive: Apple handing it over again does not bring it back.
+        if (service == ChatService.IMESSAGE && addTombstone(b, messageId, b.now)) capTombstones(b.db)
         b.changed(Kind.MESSAGES, found.second)
     }
 
@@ -1412,8 +1538,27 @@ class ArchiveRepository private constructor(
 
         private val TABLES = listOf(
             "messages_fts", "media", "messages", "participants", "sync_state", "conversations",
-            "contacts", "outbox_queue", "connection_health",
+            "contacts", "outbox_queue", "connection_health", "deleted_guids",
         )
+
+        /** How long a conversation stays in Recently Deleted before it is deleted for good ([purgeExpired]). */
+        const val RETENTION_MS = 30L * 24 * 60 * 60 * 1000
+
+        /** The most deleted message ids kept ([tombstone]): the oldest go first. */
+        const val MAX_TOMBSTONES = 5_000
+
+        /** How many days a deleted message id is kept ([tombstone]). */
+        const val TOMBSTONE_DAYS = 60
+        private const val TOMBSTONE_MS = TOMBSTONE_DAYS * 24L * 60 * 60 * 1000
+
+        /** How many of a conversation's newest message ids are kept when it is deleted for good. */
+        const val TOMBSTONES_PER_CONVERSATION = 2_000
+
+        /** The ids kept when a message is deleted: iMessage's (Apple may hand one over again). */
+        private const val TOMBSTONED_PREFIX = "imsg:"
+
+        /** The longest id kept as deleted (an iMessage GUID with its prefix, and some room). */
+        private const val MAX_TOMBSTONE_CHARS = 128
 
         /** The process's archive of each service, opened on first use. */
         private val instances = ConcurrentHashMap<ChatService, ArchiveRepository>()
@@ -1570,6 +1715,8 @@ private fun DbCursor.toConversation() = ConversationRow(
     avatarColor = str("avatar_color"),
     defaultOutgoingId = str("default_outgoing_id"),
     updatedAt = long("updated_at"),
+    deletedAt = long("deleted_at"),
+    firstUnreadTs = long("first_unread_ts"),
 )
 
 private fun DbCursor.toParticipant() = ParticipantRow(

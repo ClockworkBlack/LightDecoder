@@ -785,7 +785,38 @@ class TranscriptScreenTest {
             longPressPick(scenario, "Alice Martin", R.string.chat_action_delete)
             val question = ShadowDialog.getLatestDialog() as AlertDialog
             question.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
-            two.waitUntil("her iMessage chat gone with it") { "deleteConversation:$MESSAGES_ALICE" in messages.calls && imRepo.conversation(ALICE) == null }
+            // Through the iMessage library her chat goes to Recently Deleted with it.
+            two.waitUntil("her iMessage chat gone with it") {
+                "deleteConversation:$MESSAGES_ALICE" in messages.calls && imRepo.conversation(ALICE)?.folderEnum == Folder.DELETED
+            }
+        }
+    }
+
+    @Test
+    fun recentlyDeletedListsTheImessageChatWithItsDaysLeftAndRecoversIt() {
+        val messages = com.lightdecoder.ui.chat.FakeChatBackend(
+            ChatService.MESSAGES, two.env.repo, setOf(com.lightdecoder.chat.Capability.DELETED_FOLDER, com.lightdecoder.chat.Capability.SPAM_FOLDER),
+        )
+        com.lightdecoder.ui.chat.ScreenBackends.forTesting = { service -> if (service == ChatService.MESSAGES) messages else null }
+        aliceChat()
+        message("H1", "See you at 7", 60_000)
+        imRepo.moveToDeleted(ALICE, System.currentTimeMillis() - 24 * 3_600_000L - 60_000)
+        launchList().use { scenario ->
+            scenario.waitFor("the folders") { it.findViewById<com.google.android.material.tabs.TabLayout>(R.id.folders).tabCount > 1 }
+            scenario.onActivity { activity ->
+                val tabs = activity.findViewById<com.google.android.material.tabs.TabLayout>(R.id.folders)
+                val tab = (0 until tabs.tabCount).map { tabs.getTabAt(it)!! }.first { it.tag == Folder.DELETED }
+                assertEquals("Recently Deleted", tab.text.toString())
+                tab.select()
+            }
+            scenario.waitFor("the deleted chat") { titles(it) == listOf("Alice Martin") }
+            two.settle()
+            scenario.onActivity { activity ->
+                val list = activity.findViewById<RecyclerView>(R.id.list)
+                assertEquals("29 days", list.getChildAt(0).findViewById<TextView>(R.id.time).text.toString())
+            }
+            assertEquals(listOf("Recover", "Delete"), longPressPick(scenario, "Alice Martin", R.string.imessage_recover))
+            two.waitUntil("recovered") { imRepo.conversation(ALICE)?.folderEnum == Folder.INBOX }
         }
     }
 

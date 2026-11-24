@@ -328,6 +328,36 @@
                         android:text="@string/location_show_addresses_help"
                         android:textAppearance="?attr/textAppearanceBodySmall" />
 
+                    <!-- Screen effects for phrases ("Happy Birthday"), on as on an iPhone (DirectPrefs.phraseEffects, read by the chat screen). -->
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switchPhraseEffects"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:minHeight="48dp"
+                        android:text="@string/imessage_phrase_effects" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/imessage_phrase_effects_help"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                    <!-- Deletes on the user's other Apple devices too (DirectPrefs.deleteOnAllDevices): off, deletes stay here. -->
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switchDeleteOnAllDevices"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:minHeight="48dp"
+                        android:text="@string/imessage_delete_on_all_devices" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/imessage_delete_on_all_devices_help"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+
                     <!-- A mention notifies even with a chat's alerts hidden (DirectPrefs.notifyWhenMentioned, read in the main process). -->
                     <com.google.android.material.materialswitch.MaterialSwitch
                         android:id="@+id/switchNotifyMentions"

@@ -207,11 +207,41 @@ class DirectWordingTest {
             R.string.location_attach, R.string.location_send_title, R.string.location_send, R.string.location_finding,
             R.string.location_unavailable, R.string.location_unreadable, R.string.location_permission_denied, R.string.location_show_addresses,
             R.string.location_show_addresses_help, R.string.location_card_description,
+            // B5: Recently Deleted, "Delete on All Devices", catch-up, Forward, tapbacks from a notification, phrases.
+            R.string.imessage_recently_deleted, R.string.imessage_delete_on_all_devices, R.string.imessage_delete_on_all_devices_help,
+            R.string.imessage_delete_conversation_body_recently, R.string.imessage_delete_conversation_body_everywhere,
+            R.string.imessage_delete_message_question_everywhere, R.string.imessage_recover, R.string.imessage_recovered,
+            R.string.imessage_delete_for_good, R.string.imessage_delete_for_good_title, R.string.imessage_delete_for_good_body,
+            R.string.imessage_delete_for_good_body_everywhere, R.string.imessage_deleted_for_good, R.string.imessage_recover_all,
+            R.string.imessage_delete_all, R.string.imessage_delete_all_title, R.string.imessage_delete_all_body,
+            R.string.imessage_delete_all_body_everywhere, R.string.imessage_delete_companion_recently, R.string.imessage_delete_companion_everywhere,
+            R.string.imessage_recovered_all, R.string.imessage_empty_recently_deleted, R.string.catch_up_jump,
+            R.string.forward_action, R.string.forward_title, R.string.forward_preparing, R.string.forward_unavailable,
+            R.string.forward_no_conversations, R.string.tapback_react_action, R.string.tapback_title, R.string.tapback_react_a11y,
+            R.string.tapback_not_sent, R.string.imessage_phrase_effects, R.string.imessage_phrase_effects_help,
+            ServiceUi.deleteConversationBody(im, true, everywhere = true),
         )
         for (res in direct) {
             val text = context.getString(res)
             assertFalse(text, text.contains("OpenBubbles"))
         }
+        for (count in listOf(1, 29)) {
+            val left = context.resources.getQuantityString(R.plurals.imessage_deleted_days_left, count, count)
+            assertFalse(left, left.contains("OpenBubbles"))
+        }
+        // iPhone's words for Recently Deleted and the delete question.
+        assertEquals("Recently Deleted", context.getString(R.string.imessage_recently_deleted))
+        assertEquals("29 days", context.resources.getQuantityString(R.plurals.imessage_deleted_days_left, 29, 29))
+        assertEquals("This conversation will be moved to Recently Deleted on this phone for 30 days.", context.getString(ServiceUi.deleteConversationBody(im, true)))
+        assertTrue(context.getString(ServiceUi.deleteConversationBody(im, true, everywhere = true)).endsWith("and deleted from your other Apple devices."))
+        // A Messages conversation deleted with its iMessage chats says where they go; Delete All says it reaches the other devices.
+        assertEquals(null, ServiceUi.deleteCompanionsNote(companions = false, direct = true, everywhere = true))
+        assertEquals(null, ServiceUi.deleteCompanionsNote(companions = true, direct = false, everywhere = true))
+        assertEquals(R.string.imessage_delete_companion_recently, ServiceUi.deleteCompanionsNote(companions = true, direct = true, everywhere = false))
+        assertTrue(context.getString(ServiceUi.deleteCompanionsNote(true, true, true)!!).endsWith("and deleted from your other Apple devices."))
+        assertEquals(R.string.imessage_delete_all_body, ServiceUi.deleteAllBody(false))
+        assertTrue(context.getString(ServiceUi.deleteAllBody(true)).contains("your other Apple devices"))
+        assertEquals("Jump to first unread", context.getString(R.string.catch_up_jump))
         // iPhone's words for blocking.
         assertEquals("Block this Caller", context.getString(R.string.block_caller))
         assertEquals("Unblock this Caller", context.getString(R.string.unblock_caller))

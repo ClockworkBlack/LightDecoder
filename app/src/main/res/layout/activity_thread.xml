@@ -150,6 +150,21 @@
             android:clipToPadding="false"
             android:paddingVertical="8dp" />
 
+        <!-- "Jump to first unread": the round arrow at the top right of a chat opened with unread messages above the screen (CatchUp). -->
+        <ImageButton
+            android:id="@+id/catchUp"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_gravity="top|end"
+            android:layout_margin="12dp"
+            android:background="@drawable/bg_day_header"
+            android:contentDescription="@string/catch_up_jump"
+            android:elevation="4dp"
+            android:padding="8dp"
+            android:scaleType="centerInside"
+            android:src="@drawable/ic_arrow_upward"
+            android:visibility="gone" />
+
         <TextView
             android:id="@+id/emptyText"
             android:layout_width="match_parent"

@@ -49,6 +49,24 @@ object MessageNotifier {
     const val ACTION_DISMISSED = "com.lightdecoder.relay.action.DISMISSED"
     const val KEY_REPLY_TEXT = "com.lightdecoder.relay.REPLY_TEXT"
 
+    /**
+     * The message a tapback from the notification goes on: the newest message someone else sent that
+     * it shows (an iMessage's archive id). Always on Reply's intent, "" when there is none, so that what
+     * fills the intent in can never add one of its own ([ReplyReceiver] checks it again anyway).
+     */
+    const val EXTRA_TARGET_MESSAGE = "com.lightdecoder.relay.TARGET_MESSAGE"
+
+    /** Apple's six tapbacks, offered as Reply's choices on an iMessage's notification (and the only ones taken from it). */
+    val TAPBACK_CHOICES: List<String> = with(com.lightdecoder.imessage.direct.DirectArchive.Tapback) { listOf(LOVE, LIKE, DISLIKE, LAUGH, EMPHASIZE, QUESTION) }
+
+    /**
+     * Whether a "React…" button opens [com.lightdecoder.ui.chat.TapbackActivity] (immutable, unlocked
+     * first). Off: the tapbacks are Reply's choices, shown as chips. Only for phones whose notifications
+     * show no chips (a device check).
+     */
+    @Volatile
+    internal var reactButton = false
+
     /** All of a service's message notifications share one id; the conversation's tag tells them apart. */
     private const val NOTIFICATION_ID = 0x5245_4c10
     private const val NOTIFICATION_ID_WHATSAPP = 0x5245_4c11
@@ -98,7 +116,7 @@ object MessageNotifier {
             com.lightdecoder.imessage.IMessagePrefs.enabled(context)
     }
 
-    private class Line(val sender: String, val text: CharSequence, val timestampMs: Long, val fromMe: Boolean)
+    private class Line(val sender: String, val text: CharSequence, val timestampMs: Long, val fromMe: Boolean, val messageId: String = "")
 
     private data class Key(val service: ChatService, val conversationId: String)
 
@@ -124,7 +142,7 @@ object MessageNotifier {
 
         val sender = message.senderName.ifBlank { conversation?.name.orEmpty() }
             .ifBlank { context.getString(R.string.relay_notify_someone) }
-        val line = Line(sender, bodyOf(context, message), message.timestampMs.takeIf { it > 0 } ?: System.currentTimeMillis(), false)
+        val line = Line(sender, bodyOf(context, message), message.timestampMs.takeIf { it > 0 } ?: System.currentTimeMillis(), false, message.id)
         val key = Key(service, message.conversationId)
         post(context, key, conversation, add(key, line), alert = true, photo = photoFor(context, repo, message.conversationId, conversation))
     }
@@ -280,6 +298,8 @@ object MessageNotifier {
 
         val tag = tagFor(context, service, conversationId)
         val base = tag.hashCode() * 4
+        // An iMessage's newest line from someone else that can take a tapback: Reply offers the six as choices.
+        val target = tapbackTarget(context, service, conversationId, recent)
         val open = PendingIntent.getActivity(
             context, base, RelayIntents.thread(context, conversationId, service = service),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
@@ -289,14 +309,38 @@ object MessageNotifier {
             context.getString(R.string.relay_notify_reply),
             // RemoteInput fills in the reply, so this one must be mutable; the intent is explicit.
             PendingIntent.getBroadcast(
-                context, base + 1, receiverIntent(context, ACTION_REPLY, service, conversationId, tag),
+                context, base + 1,
+                receiverIntent(context, ACTION_REPLY, service, conversationId, tag).putExtra(EXTRA_TARGET_MESSAGE, target.orEmpty()),
                 PendingIntent.FLAG_UPDATE_CURRENT or mutableFlag(),
             ),
         )
-            .addRemoteInput(RemoteInput.Builder(KEY_REPLY_TEXT).setLabel(context.getString(R.string.relay_notify_reply)).build())
+            .addRemoteInput(
+                RemoteInput.Builder(KEY_REPLY_TEXT).setLabel(context.getString(R.string.relay_notify_reply))
+                    .apply { if (target != null && !reactButton) setChoices(TAPBACK_CHOICES.toTypedArray()) }
+                    .build(),
+            )
             .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_REPLY)
             .setShowsUserInterface(false)
+            // With the tapbacks as choices, the system's own suggestions (a 👍 among them) are not offered:
+            // they would come back as a choice too.
+            .apply { if (target != null) setAllowGeneratedReplies(false) }
             .build()
+        // The fallback: "React…" opens a small screen (immutable, explicit; the phone unlocked first).
+        val react = if (target != null && reactButton) {
+            NotificationCompat.Action.Builder(
+                R.drawable.ic_relay_reply,
+                context.getString(R.string.tapback_react_action),
+                PendingIntent.getActivity(
+                    context, base + 4, com.lightdecoder.ui.chat.TapbackActivity.intent(context, conversationId, target, tag),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                ),
+            )
+                .setAuthenticationRequired(true)
+                .setShowsUserInterface(true)
+                .build()
+        } else {
+            null
+        }
         val markRead = NotificationCompat.Action.Builder(
             R.drawable.ic_relay_done,
             context.getString(R.string.relay_notify_mark_read),
@@ -320,6 +364,7 @@ object MessageNotifier {
             .setDeleteIntent(dismissed)
             .addAction(reply)
             .addAction(markRead)
+            .apply { if (react != null) addAction(react) }
             .setAutoCancel(true)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setWhen(recent.lastOrNull()?.timestampMs ?: System.currentTimeMillis())
@@ -352,6 +397,24 @@ object MessageNotifier {
             .setData(Uri.Builder().scheme(INTENT_SCHEME).authority(service.key).appendPath(tag).build())
             .putExtra(RelayIntents.EXTRA_CONVERSATION_ID, conversationId)
             .putExtra(RelayIntents.EXTRA_SERVICE, service.key)
+
+    /**
+     * The message a tapback from [conversationId]'s notification goes on: the newest of [recent]'s lines
+     * from someone else, while it is an iMessage that can take one through the iMessage library
+     * (Android 9 on, for the choices). Null for none. Never throws.
+     */
+    private fun tapbackTarget(context: Context, service: ChatService, conversationId: String, recent: List<Line>): String? {
+        if (service != ChatService.IMESSAGE || Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return null
+        val id = recent.lastOrNull { !it.fromMe && it.messageId.isNotEmpty() }?.messageId ?: return null
+        if (!com.lightdecoder.imessage.direct.DirectArchive.isImessage(id)) return null
+        return try {
+            val link = com.lightdecoder.imessage.direct.DirectLink.get(context)
+            val row = ArchiveRepository.get(context, ChatService.IMESSAGE).message(id) ?: return null
+            id.takeIf { row.conversationId == conversationId && row.direction == "in" && !row.isOutgoing && link.canReact(row) }
+        } catch (e: RuntimeException) {
+            null
+        }
+    }
 
     private fun mutableFlag(): Int =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0

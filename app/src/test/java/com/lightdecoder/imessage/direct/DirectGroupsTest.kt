@@ -198,6 +198,22 @@ class DirectGroupsTest {
     // --- members ------------------------------------------------------------------------------------
 
     @Test
+    fun aGroupInRecentlyDeletedKeepsUpWithItsMembersAndComesBackAsItIsNow() {
+        val l = link()
+        group(l, listOf(me, bob, alice))
+        repo.moveToDeleted(id, 1_700_000_000_500L)
+        // Bob added Carol while it was in Recently Deleted: it stays there, as of when it went, with Carol in it.
+        l.apply(event("GA2", bob, PushChatMessage.ChangeParticipants(uniffi.rust_bridge.ChangeParticipantMessage(listOf(me, bob, alice, carol), 4UL)), listOf(me, bob, alice), ts = 1_700_000_001_000L))
+        val row = repo.conversation(id)!!
+        assertEquals(com.lightdecoder.relay.Folder.DELETED, row.folderEnum)
+        assertEquals(1_700_000_000_500L, row.deletedAt)
+        assertEquals(setOf(Handles.display(bob), Handles.display(alice), Handles.display(carol)), members())
+        assertEquals(4L, GroupVersions(context).of(id))
+        assertTrue(repo.restoreDeleted(id))
+        assertEquals(setOf(Handles.display(bob), Handles.display(alice), Handles.display(carol)), members())
+    }
+
+    @Test
     fun peopleAreAddedOnlyOnceAppleSaysTheyAreOnIMessageAsTheGroupsNextVersion() {
         val l = link(onIMessage = setOf(dave))
         group(l, listOf(me, bob, alice))
@@ -598,7 +614,10 @@ class DirectGroupsTest {
         val picture = GroupPhotos(context).pictureOf(id)!!
         l.setSendsReadReceipts(id, true)
         assertEquals(3L, GroupVersions(context).of(id))
+        // In Recently Deleted it keeps them; deleted there for good, they go.
         runBlocking { IMessageManager.get(context).deleteConversation(id) }
+        assertTrue(picture.exists())
+        runBlocking { IMessageManager.get(context).purgeDeleted(id) }
         assertNull(repo.conversation(id))
         assertFalse(picture.exists())
         assertEquals(GroupPhotos.Photo(null, 0, known = false), GroupPhotos(context).of(id))

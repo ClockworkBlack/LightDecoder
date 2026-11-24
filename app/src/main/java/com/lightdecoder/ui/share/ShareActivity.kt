@@ -6,12 +6,8 @@ import android.os.Bundle
 import android.view.View
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
-import com.google.android.material.tabs.TabLayout
 import com.lightdecoder.R
-import com.lightdecoder.archive.ArchiveChange
-import com.lightdecoder.archive.ArchiveEvents
 import com.lightdecoder.chat.ChatService
 import com.lightdecoder.imessage.IMessagePrefs
 import com.lightdecoder.chat.ChatBackend
@@ -19,15 +15,10 @@ import com.lightdecoder.chat.ShareShortcuts
 import com.lightdecoder.databinding.ActivityShareBinding
 import com.lightdecoder.relay.RelayIntents
 import com.lightdecoder.ui.chat.applySystemBarAndImePadding
-import com.lightdecoder.ui.chat.ChatUiPrefs
 import com.lightdecoder.ui.chat.ConversationItem
 import com.lightdecoder.ui.chat.ConversationTitles
-import com.lightdecoder.ui.chat.ConversationsAdapter
-import com.lightdecoder.ui.chat.InboxLists
 import com.lightdecoder.ui.chat.ScreenBackends
-import com.lightdecoder.ui.chat.ServiceUi
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -55,22 +46,9 @@ class ShareActivity : AppCompatActivity() {
     private lateinit var binding: ActivityShareBinding
     private lateinit var content: SharedContent
     private var backends: List<ChatBackend> = emptyList()
-    private var backend: ChatBackend? = null
-    private var all: List<ConversationItem> = emptyList()
     private var delivering = false
-    private var listing = false
-    private var reloadScheduled = false
-    private val adapter = ConversationsAdapter(onOpen = { deliver(it) }, onLongPress = {})
-
-    /** A conversation of the tab shown, or (in Messages) of its iMessage chats, changed: the list follows. */
-    private val onArchiveChange: (ArchiveChange) -> Unit = { change ->
-        val shown = backend
-        if (listing && shown != null && change.kind == ArchiveChange.Kind.CONVERSATIONS &&
-            (change.service == shown.service || (change.service == ChatService.IMESSAGE && shown.service == ChatService.MESSAGES))
-        ) {
-            scheduleReload()
-        }
-    }
+    private var picker: ConversationPicker? = null
+    private val listing: Boolean get() = picker?.listing == true
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -80,7 +58,6 @@ class ShareActivity : AppCompatActivity() {
         binding.toolbar.setNavigationIcon(R.drawable.ic_close)
         binding.toolbar.setNavigationContentDescription(android.R.string.cancel)
         binding.toolbar.setNavigationOnClickListener { finish() }
-        binding.list.adapter = adapter
 
         content = SharedContent.from(this, intent)
         if (content.isEmpty) {
@@ -93,6 +70,7 @@ class ShareActivity : AppCompatActivity() {
             stop(R.string.share_not_linked)
             return
         }
+        picker = ConversationPicker(this, binding, backends, onPick = { deliver(it) })
         // A conversation picked in the share sheet's top row: no list.
         val direct = ShareShortcuts.parse(intent.getStringExtra(Intent.EXTRA_SHORTCUT_ID))
         val directBackend = direct?.let { (service, _) -> backendOf(service) }
@@ -112,13 +90,11 @@ class ShareActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        ArchiveEvents.register(onArchiveChange)
-        // What changed while it was hidden.
-        if (listing) scheduleReload()
+        picker?.onStart()
     }
 
     override fun onStop() {
-        ArchiveEvents.unregister(onArchiveChange)
+        picker?.onStop()
         super.onStop()
     }
 
@@ -132,63 +108,7 @@ class ShareActivity : AppCompatActivity() {
         else backends.firstOrNull { it.service == service }
 
     private fun showPicker() {
-        listing = true
-        val first = backends.firstOrNull { it.service == ChatUiPrefs.lastService(this) } ?: backends.first()
-        if (backends.size > 1) {
-            binding.services.visibility = View.VISIBLE
-            for (b in backends) {
-                val tab = binding.services.newTab().setText(ServiceUi.tabLabel(b.service)).setTag(b)
-                binding.services.addTab(tab, b === first)
-            }
-            binding.services.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
-                override fun onTabSelected(tab: TabLayout.Tab) = show(tab.tag as ChatBackend)
-                override fun onTabUnselected(tab: TabLayout.Tab) = Unit
-                override fun onTabReselected(tab: TabLayout.Tab) = Unit
-            })
-        }
-        binding.query.doAfterTextChanged { filter() }
-        show(first)
-    }
-
-    private fun show(from: ChatBackend) {
-        backend = from
-        all = emptyList()
-        adapter.submitList(emptyList())
-        load(from)
-    }
-
-    /** Changes come in bursts (a sync writes many rows): the list is read again at most every [RELOAD_DEBOUNCE_MS]. */
-    private fun scheduleReload() {
-        if (reloadScheduled) return
-        reloadScheduled = true
-        lifecycleScope.launch {
-            delay(RELOAD_DEBOUNCE_MS)
-            reloadScheduled = false
-            backend?.let(::load)
-        }
-    }
-
-    private fun load(from: ChatBackend) {
-        lifecycleScope.launch {
-            val items = withContext(Dispatchers.IO) {
-                runCatching {
-                    InboxLists.inbox(this@ShareActivity, from)
-                        .also { ShareShortcuts.publishInbox(applicationContext, from.service, it) }
-                        .filter { !it.row.readOnly }
-                }.getOrDefault(emptyList())
-            }
-            if (backend !== from) return@launch
-            all = items
-            filter()
-        }
-    }
-
-    private fun filter() {
-        val query = binding.query.text?.toString()?.trim().orEmpty()
-        val shown = if (query.isEmpty()) all else all.filter { it.title.contains(query, ignoreCase = true) }
-        adapter.submitList(shown)
-        binding.empty.visibility = if (shown.isEmpty()) View.VISIBLE else View.GONE
-        if (shown.isEmpty()) binding.empty.setText(if (all.isEmpty()) R.string.share_no_conversations else R.string.share_no_match)
+        picker?.start()
     }
 
     /** Nothing to pick from: says why, with only "close" left. */
@@ -245,8 +165,4 @@ class ShareActivity : AppCompatActivity() {
     }
 
     private fun toast(message: Int) = Toast.makeText(this, message, Toast.LENGTH_LONG).show()
-
-    private companion object {
-        const val RELOAD_DEBOUNCE_MS = 200L
-    }
 }

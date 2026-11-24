@@ -225,6 +225,31 @@ object DirectPrefs {
     /** Turns "Use with Bluetooth and car" on or off (see [telecomOn]). */
     fun setTelecomOn(context: Context, on: Boolean) = setMarker(telecomOffMarker(context), !on)
 
+    private fun deleteOnAllDevicesMarker(context: Context) = File(context.filesDir, "imessage/delete-on-all-devices")
+
+    /**
+     * "Delete on All Devices": whether a chat or message deleted here is also moved to Recently
+     * Deleted on the user's other Apple devices (and recovered, or deleted for good, with it), and
+     * whether theirs are taken here ([RecycleRules]). Off by default: deletes stay on this phone. A
+     * file, like [faceTimeOn]: the setup screen and the main process set and read it, and the
+     * ":imessage" process reads it as an event from Apple arrives.
+     */
+    fun deleteOnAllDevices(context: Context): Boolean = deleteOnAllDevicesMarker(context).isFile
+
+    /** Turns "Delete on All Devices" on or off (see [deleteOnAllDevices]). */
+    fun setDeleteOnAllDevices(context: Context, on: Boolean) = setMarker(deleteOnAllDevicesMarker(context), on)
+
+    private fun phraseEffectsOffMarker(context: Context) = File(context.filesDir, "imessage/phrase-effects-off")
+
+    /**
+     * "Effects for Phrases": a message that is only "Happy birthday" (or another of [EffectPhrases]'
+     * phrases) goes with its screen effect, as an iPhone sends it. On by default.
+     */
+    fun phraseEffects(context: Context): Boolean = !phraseEffectsOffMarker(context).isFile
+
+    /** Turns "Effects for Phrases" on or off (see [phraseEffects]). */
+    fun setPhraseEffects(context: Context, on: Boolean) = setMarker(phraseEffectsOffMarker(context), !on)
+
     /** Puts [f] there ([present]) or takes it away, as a setting's marker. */
     private fun setMarker(f: File, present: Boolean) {
         runCatching {

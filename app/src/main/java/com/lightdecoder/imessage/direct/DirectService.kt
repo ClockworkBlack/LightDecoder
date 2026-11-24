@@ -127,6 +127,13 @@ class DirectService : Service() {
                 engine.unschedule(target(request), request.getString("guid"))
                 DirectWire.ok()
             }
+            DirectWire.RECYCLE -> {
+                val r = DirectWire.RecycleRequest.fromJson(request)
+                // With "Delete on All Devices" off, nothing of the kind ever goes, whoever asks.
+                if (!DirectPrefs.deleteOnAllDevices(this)) return@Server DirectWire.error("Delete on All Devices is off")
+                engine.recycle(r.target, r.op, r.messages)
+                DirectWire.ok()
+            }
             DirectWire.MARK_UNREAD -> {
                 val r = DirectWire.MarkUnreadRequest.fromJson(request)
                 engine.markUnread(r.target, r.guid)

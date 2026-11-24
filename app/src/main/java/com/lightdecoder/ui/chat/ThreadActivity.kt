@@ -214,6 +214,15 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private var targetMessageId: String? = null
     private var highlightId: String? = null
 
+    /**
+     * "Jump to first unread": where the unread messages began as the chat opened (the archive's
+     * [ConversationRow.firstUnreadTs], read before the chat was marked read), 0 for none, and the
+     * conversation it was read for. Cleared once that row has been on screen.
+     */
+    @VisibleForTesting
+    internal var catchUpMs = 0L
+    private var catchUpFor: String? = null
+
     private var replyTarget: MessageRow? = null
 
     /**
@@ -485,6 +494,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             it.blueOutgoing = service == ChatService.IMESSAGE
             it.blueFor = { row -> row.id in iMessageIds }
             it.appleReceipts = { row -> appleReceipts(row, manager.service, iMessageIds) }
+            it.doubleTapReacts = ::doubleTapReacts
             it.phoneStyle = phoneStyle
             it.onPicture = binding.chatBackground.visibility == View.VISIBLE
             it.voiceDuration = voicePlayer::durationOf
@@ -545,6 +555,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             readAloudSince = null
             dictationFor = null
             effectWatch.reset()
+            // A tap waiting for a second one, and the tapbacks open over a bubble, were the old chat's.
+            adapter.doubleTaps.reset()
+            tapbackPopup?.dismiss()
             effectPlayer.cancel()
             sentEffect = null
             arrivedEffect = null
@@ -724,6 +737,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             it.blueOutgoing = manager.service == ChatService.IMESSAGE
             it.blueFor = { row -> row.id in iMessageIds }
             it.appleReceipts = { row -> appleReceipts(row, manager.service, iMessageIds) }
+            it.doubleTapReacts = ::doubleTapReacts
             it.phoneStyle = phoneStyle
             it.onPicture = binding.chatBackground.visibility == View.VISIBLE
             it.voiceDuration = voicePlayer::durationOf
@@ -749,8 +763,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
             override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
                 if (dy < 0 && layoutManager.findFirstVisibleItemPosition() <= LOAD_OLDER_THRESHOLD) loadOlder()
+                renderCatchUp()
             }
         })
+        binding.catchUp.setOnClickListener { jumpToFirstUnread() }
         ItemTouchHelper(SwipeToReply()).attachToRecyclerView(binding.messages)
         // iPhone-style chats: the lines joining inline replies to what they answer.
         binding.messages.addItemDecoration(ReplyLines(this) { threadsInChat })
@@ -866,6 +882,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val companion: String? = null,
         val companionRows: List<MessageRow> = emptyList(),
         val companionUnread: Boolean = false,
+        /** Where the companion chat's unread messages begin ([ConversationRow.firstUnreadTs]; 0: none). */
+        val companionFirstUnread: Long = 0,
         /** An iMessage chat opened by itself that belongs inside this Messages conversation. */
         val moveTo: String? = null,
         /** The iMessage chats shown that the iMessage library can reach ([directReachable]). */
@@ -973,6 +991,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 companion = companion,
                 companionRows = companionRows,
                 companionUnread = companion != null && runCatching { imRepo!!.conversation(companion)?.unread == true }.getOrDefault(false),
+                companionFirstUnread = if (companion == null) 0 else runCatching { imRepo!!.conversation(companion)?.takeIf { it.unread }?.firstUnreadTs ?: 0 }.getOrDefault(0),
                 moveTo = moveTo,
                 directReachable = reachable,
                 iMessageChats = chats.toSet(),
@@ -1027,6 +1046,13 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         watchSendLater(messages)
         readNewAloud(messages)
         val unreadAtOpen = snapshot.conversation?.unread == true || snapshot.companionUnread
+        // Where the unread messages begin, read once as the chat opens (before it is marked read just below).
+        if (catchUpFor != id) {
+            catchUpFor = id
+            catchUpMs = CatchUp.earliest(
+                listOf(snapshot.conversation?.takeIf { it.unread }?.firstUnreadTs ?: 0L, snapshot.companionFirstUnread),
+            )
+        }
         effectWatch.arrived(messages, unreadAtOpen, System.currentTimeMillis(), effectPlays::contains)?.let { arrivedEffect = it.id }
 
         val scrollTo = target?.takeIf { t -> snapshot.rows.any { it.id == t } }
@@ -1200,6 +1226,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 atBottom -> if (items.isNotEmpty()) binding.messages.scrollToPosition(items.lastIndex)
                 anchor != null -> restoreAnchor(anchor)
             }
+            binding.messages.doOnLayout { list -> list.post { renderCatchUp() } }
             // Once the rows are laid out where they now go: an effect waiting for its bubble plays.
             if (sentEffect != null || arrivedEffect != null) {
                 binding.messages.doOnLayout { list -> list.post { playWaitingEffects() } }
@@ -1250,6 +1277,29 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private fun scrollToMessage(messageId: String) {
         val index = adapter.currentList.indexOfFirst { it is ThreadItem.Message && it.row.id == messageId }
         if (index >= 0) layoutManager.scrollToPositionWithOffset(index, binding.messages.height / 3)
+    }
+
+    /**
+     * The catch-up arrow ([CatchUp]): shown while the chat's first unread message is above the screen;
+     * once that message has been on screen, gone for this opening of the chat.
+     */
+    @VisibleForTesting
+    internal fun renderCatchUp() {
+        val index = CatchUp.firstUnreadIndex(adapter.currentList, catchUpMs)
+        val first = layoutManager.findFirstVisibleItemPosition()
+        val last = layoutManager.findLastVisibleItemPosition()
+        if (index >= 0 && first >= 0 && index in first..last) catchUpMs = 0
+        binding.catchUp.visibility = if (catchUpMs > 0 && CatchUp.shows(index, first)) View.VISIBLE else View.GONE
+    }
+
+    /** A tap on the catch-up arrow: the first unread message, scrolled to and marked for a moment. */
+    private fun jumpToFirstUnread() {
+        val item = adapter.currentList.getOrNull(CatchUp.firstUnreadIndex(adapter.currentList, catchUpMs)) as? ThreadItem.Message ?: return
+        catchUpMs = 0
+        binding.catchUp.visibility = View.GONE
+        scrollToMessage(item.row.id)
+        highlight(item.row.id)
+        resubmit()
     }
 
     private fun highlight(messageId: String) {
@@ -2242,7 +2292,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         confirmDialog?.dismiss()
         // The Text tab: a text effect on the whole message, which needs words to move.
         val onText: ((TextEffectKind) -> Unit)? = if (text.isEmpty()) null else { effect -> send(textEffect = effect) }
-        confirmDialog = EffectSheet.show(this, preview, onText, onSendLater = ::askSendLater) { effect -> send(effect = effect) }
+        confirmDialog = EffectSheet.show(this, preview, onText, onSendLater = ::askSendLater) { effect -> send(chosenEffect = effect) }
         return true
     }
 
@@ -2743,7 +2793,20 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      * Sends what the composer holds; [effect] is Apple's effect to send it with, [textEffect] a text
      * effect on all of its text, and its words' formatting goes too (iMessage through the library only).
      */
-    private fun send(effect: String? = null, textEffect: TextEffectKind? = null, scheduledAt: Long? = null) {
+    /**
+     * The screen effect an iMessage through the library goes with: [chosen], else (with "Effects for
+     * Phrases" on, no bubble effect, and only text) the one its whole text calls for, as an iPhone
+     * sends "Happy Birthday" with balloons ([com.lightdecoder.imessage.direct.EffectPhrases]).
+     */
+    @VisibleForTesting
+    internal fun phraseEffect(text: String, chosen: String?, textEffect: TextEffectKind?, textOnly: Boolean): String? {
+        if (chosen != null || textEffect != null || !textOnly) return chosen
+        if (!com.lightdecoder.imessage.direct.DirectPrefs.phraseEffects(this)) return null
+        return com.lightdecoder.imessage.direct.EffectPhrases.effectFor(text)
+    }
+
+    private fun send(chosenEffect: String? = null, textEffect: TextEffectKind? = null, scheduledAt: Long? = null) {
+        var effect = chosenEffect
         val (text, formatted) = TextRuns.trimmed(binding.input.text?.toString().orEmpty(), composerRuns())
         // Its mentions, over the text as it goes (trimmed as it is).
         val mentions = if (mentionsOffered()) {
@@ -2783,6 +2846,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             // An inline reply to one of the iMessages shown here (threads under it through the iMessage library).
             val replyTo = replyIdFor(companion)
             scrollToBottomNext = true
+            if (direct) effect = phraseEffect(text, effect, textEffect, files.isEmpty())
             if (effect != null) sentEffect = effect to System.currentTimeMillis()
             clearComposerForSend()
             clearReply()
@@ -2824,6 +2888,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         // Only ever a message of this conversation (onReply checks too).
         val replyTo = replyIdFor(id)
         scrollToBottomNext = true
+        if (iMessage != null && direct) effect = phraseEffect(text, effect, textEffect, files.isEmpty())
         if (effect != null) sentEffect = effect to System.currentTimeMillis()
         clearComposerForSend()
         clearReply()
@@ -3387,6 +3452,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 it.blueOutgoing = manager.service == ChatService.IMESSAGE
                 it.blueFor = { row -> row.id in iMessageIds }
                 it.appleReceipts = { row -> appleReceipts(row, manager.service, iMessageIds) }
+                it.doubleTapReacts = ::doubleTapReacts
                 it.voiceDuration = voicePlayer::durationOf
                 it.voiceState = voicePlayer.state.value
                 it.senderPhoto = ::senderPhoto
@@ -3582,6 +3648,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             sheet.dismiss()
             copy(row.text)
         }
+        // "Forward" (an iPhone's "More…" > forward): its text and files into another conversation's composer.
+        b.actionForward.visibility = if (ForwardContent.forwardable(row)) View.VISIBLE else View.GONE
+        b.actionForward.setOnClickListener {
+            sheet.dismiss()
+            if (isShown(row)) forward(row)
+        }
         // Without the iMessage library, one's own iMessage is edited and unsent in OpenBubbles
         // (Apple allows 15 minutes and 2), whose notifications cannot do either.
         val inOpenBubbles = isIMessage && !direct.active && (row.isOutgoing || row.direction == "out") &&
@@ -3644,6 +3716,32 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         sheet.setOnDismissListener { if (actionSheet === sheet) actionSheet = null }
         actionSheet = sheet
         sheet.show()
+    }
+
+    /**
+     * "Forward": [row]'s text and files ([ForwardContent]), each file fetched first when it is not here
+     * yet (as tapping it would), copied where shares are kept ([com.lightdecoder.ui.share.SharedContent.copyOwn]),
+     * then "Forward To" ([com.lightdecoder.ui.share.ForwardActivity], not exported) to pick the conversation.
+     */
+    @VisibleForTesting
+    internal fun forward(row: MessageRow) {
+        val link = backendFor(row)
+        val parts = ForwardContent.parts(row)
+        val text = ForwardContent.text(row)
+        if (parts.isNotEmpty()) toast(getString(R.string.forward_preparing))
+        lifecycleScope.launch {
+            val uris = withContext(Dispatchers.IO) {
+                val files = parts.mapNotNull { part ->
+                    runCatching { link.mediaFile(row.id, part.partId, thumbnail = false) }.getOrNull()?.let { it to part.mime }
+                }
+                com.lightdecoder.ui.share.SharedContent.copyOwn(applicationContext, files.map { it.first }, files.map { it.second })
+            }
+            if (uris.isEmpty() && text.isBlank()) {
+                toast(getString(R.string.forward_unavailable))
+                return@launch
+            }
+            startActivity(com.lightdecoder.ui.share.ForwardActivity.intent(this@ThreadActivity, text, uris))
+        }
     }
 
     /** Whether [row] is a local copy still waiting or sending through the iMessage library (one that can be stopped and deleted). */
@@ -4164,6 +4262,69 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      * takes it; else one that keeps its state in a web address opens in the browser; else it opens
      * only on an Apple device, which a toast says ([com.lightdecoder.imessage.direct.IMessageApps]).
      */
+    /**
+     * Whether a double tap on [row] opens the tapbacks ([MessagesAdapter.doubleTapReacts]): an iMessage
+     * through the library that can take one now (as the long-press sheet's reaction row is offered).
+     */
+    private fun doubleTapReacts(row: MessageRow): Boolean {
+        if (manager.service == ChatService.GMAIL || row.isLocal || row.direction == "system") return false
+        if (!com.lightdecoder.imessage.direct.DirectArchive.isImessage(row.id)) return false
+        if (backendFor(row).service != ChatService.IMESSAGE) return false
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(this)
+        return direct.active && direct.canReact(row, row.conversationId in directReachable)
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    /** The tapbacks over a double-tapped bubble, open (for tests). */
+    @VisibleForTesting
+    internal var tapbackPopup: android.widget.PopupWindow? = null
+
+    /**
+     * A bubble double-tapped ([doubleTapReacts]): Apple's six tapbacks and "+" in a bar above it, as on
+     * an iPhone; one tap puts it on (the same as the user's own takes it back), "+" any emoji.
+     */
+    override fun onMessageDoubleTap(row: MessageRow, anchor: View) {
+        if (!isShown(row) || !doubleTapReacts(row)) return
+        tapbackPopup?.dismiss()
+        val mine = row.reactions.firstOrNull { it.fromMe }?.emoji
+        val bar = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            setBackgroundResource(R.drawable.bg_day_header)
+            elevation = resources.displayMetrics.density * 6
+            setPadding(dp(4), 0, dp(4), 0)
+        }
+        val popup = android.widget.PopupWindow(bar, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, true)
+        val size = android.widget.LinearLayout.LayoutParams(dp(48), dp(56))
+        for (emoji in tapbacks(mine.takeUnless { it == com.lightdecoder.imessage.direct.DirectArchive.STICKER_TAPBACK })) {
+            val view = layoutInflater.inflate(R.layout.item_quick_reaction, bar, false) as TextView
+            view.text = emoji
+            view.isSelected = emoji == mine
+            view.contentDescription = getString(R.string.chat_react_with, emoji)
+            view.setOnClickListener {
+                popup.dismiss()
+                reactionPicked(row, emoji, mine, isIMessage = true)
+            }
+            bar.addView(view, android.widget.LinearLayout.LayoutParams(size))
+        }
+        val more = layoutInflater.inflate(R.layout.item_quick_reaction_more, bar, false)
+        more.findViewById<View>(R.id.reactionMore).setOnClickListener {
+            popup.dismiss()
+            showEmojiPicker(row, mine, isIMessage = true)
+        }
+        bar.addView(more, android.widget.LinearLayout.LayoutParams(size))
+        popup.isOutsideTouchable = true
+        popup.setOnDismissListener { if (tapbackPopup === popup) tapbackPopup = null }
+        bar.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
+        tapbackPopup = popup
+        try {
+            popup.showAsDropDown(anchor, 0, -(anchor.height + bar.measuredHeight))
+        } catch (e: RuntimeException) {
+            // The bubble's window went meanwhile.
+            tapbackPopup = null
+        }
+    }
+
     override fun onAppCardTap(row: MessageRow) {
         val app = com.lightdecoder.imessage.direct.IMessageExtra.parse(row.extra).app ?: return
         val apps = com.lightdecoder.imessage.direct.IMessageApps
@@ -4443,7 +4604,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 when {
                     // An iMessage goes from this device only: OpenBubbles (or, through the library, their phone) keeps it.
                     link.service == ChatService.IMESSAGE ->
-                        if (ServiceUi.direct(this, link.service)) R.string.imessage_delete_message_question_direct else R.string.imessage_delete_message_question
+                        when {
+                            !ServiceUi.direct(this, link.service) -> R.string.imessage_delete_message_question
+                            com.lightdecoder.imessage.direct.DirectPrefs.deleteOnAllDevices(this) -> R.string.imessage_delete_message_question_everywhere
+                            else -> R.string.imessage_delete_message_question_direct
+                        }
                     linked -> R.string.chat_delete_message_question
                     else -> R.string.chat_delete_message_question_local
                 }
@@ -4694,7 +4859,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         lifecycleScope.launch {
             var chat = withContext(Dispatchers.IO) { iMessage.conversationWith(address) }
             if (chat == null && direct.active) {
-                chat = withContext(Dispatchers.IO) { relayAttempt { direct.conversationFor(address) } }
+                chat = withContext(Dispatchers.IO) { relayAttempt { direct.conversationFor(address, revive = true) } }
                     .getOrElse {
                         toast(errorText(iMessage, it))
                         return@launch
@@ -4944,7 +5109,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         lifecycleScope.launch {
             log("started; ${im.setupSummary()}")
             if (direct.active) {
-                val chat = companion ?: withContext(Dispatchers.IO) { relayAttempt { direct.conversationFor(address!!) } }
+                val chat = companion ?: withContext(Dispatchers.IO) { relayAttempt { direct.conversationFor(address!!, revive = true) } }
                     .getOrElse {
                         log("Apple could not be asked whether they have iMessage")
                         toast(errorText(im, it))
@@ -5093,8 +5258,16 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         menu.findItem(R.id.action_not_spam)?.isVisible =
             conv?.folderEnum == Folder.SPAM && Capability.SPAM_FOLDER in manager.capabilities
         // Deleted on the phone already: what is left is this device's copy.
-        menu.findItem(R.id.action_restore)?.isVisible = deleted
-        menu.findItem(R.id.action_delete_forever)?.isVisible = deleted
+        // An iMessage chat in Recently Deleted: "Recover" and "Delete", as on an iPhone.
+        val recently = deleted && manager.service == ChatService.IMESSAGE
+        menu.findItem(R.id.action_restore)?.apply {
+            isVisible = deleted
+            setTitle(if (recently) R.string.imessage_recover else R.string.chat_action_restore)
+        }
+        menu.findItem(R.id.action_delete_forever)?.apply {
+            isVisible = deleted
+            setTitle(if (recently) R.string.imessage_delete_for_good else R.string.chat_action_delete_forever)
+        }
         menu.findItem(R.id.action_mute)?.apply {
             isVisible = conv != null && !deleted
             setTitle(if (conv?.muted == true) R.string.chat_action_unmute else R.string.chat_action_mute)
@@ -5161,7 +5334,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 runAction(R.string.chat_not_spam_done) { it.markNotSpam(conv.id) }
             }
             R.id.action_restore -> if (conv != null) {
-                runAction(R.string.chat_restored) { it.restoreDeletedLocally(conv.id) }
+                runAction(if (manager.service == ChatService.IMESSAGE) R.string.imessage_recovered else R.string.chat_restored) { it.restoreDeletedLocally(conv.id) }
             }
             R.id.action_delete_forever -> confirmDeleteForever()
             R.id.action_delete_conversation -> confirmDeleteConversation()
@@ -5291,11 +5464,15 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val link = manager
         val linked = link.isPaired()
         val companions = companions()
+        val everywhere = com.lightdecoder.imessage.direct.DirectPrefs.deleteOnAllDevices(this)
+        val body = getString(
+            if (linked) ServiceUi.deleteConversationBody(link.service, ServiceUi.direct(this, link.service), everywhere) else R.string.chat_delete_conversation_body_local
+        )
+        // Its iMessage chats go with it: where they go is said too.
+        val note = ServiceUi.deleteCompanionsNote(companions.isNotEmpty(), ServiceUi.direct(this, ChatService.IMESSAGE), everywhere)?.let(::getString)
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.chat_delete_conversation_title)
-            .setMessage(
-                if (linked) ServiceUi.deleteConversationBody(link.service, ServiceUi.direct(this, link.service)) else R.string.chat_delete_conversation_body_local
-            )
+            .setMessage(if (note != null) "$body $note" else body)
             .setPositiveButton(R.string.chat_action_delete) { _, _ ->
                 // Deleting is final: never for a conversation that is no longer the one on screen.
                 if (!isCurrent(link, id)) return@setPositiveButton
@@ -5318,10 +5495,17 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private fun confirmDeleteForever() {
         val id = conversation?.id ?: return
         val link = manager
+        val recently = link.service == ChatService.IMESSAGE
         MaterialAlertDialogBuilder(this)
-            .setTitle(R.string.chat_delete_forever_title)
-            .setMessage(R.string.chat_delete_forever_body)
-            .setPositiveButton(R.string.chat_action_delete_forever) { _, _ ->
+            .setTitle(if (recently) R.string.imessage_delete_for_good_title else R.string.chat_delete_forever_title)
+            .setMessage(
+                when {
+                    !recently -> R.string.chat_delete_forever_body
+                    com.lightdecoder.imessage.direct.DirectPrefs.deleteOnAllDevices(this) -> R.string.imessage_delete_for_good_body_everywhere
+                    else -> R.string.imessage_delete_for_good_body
+                },
+            )
+            .setPositiveButton(if (recently) R.string.imessage_delete_for_good else R.string.chat_action_delete_forever) { _, _ ->
                 if (!isCurrent(link, id)) return@setPositiveButton
                 lifecycleScope.launch {
                     relayAttempt { link.purgeDeleted(id) }

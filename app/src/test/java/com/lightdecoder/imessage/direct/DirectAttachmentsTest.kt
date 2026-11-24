@@ -518,6 +518,8 @@ class DirectAttachmentsTest {
             ),
         )
         runBlocking { IMessageManager.get(context).deleteConversation(chat) }
+        assertTrue("kept in Recently Deleted", copy.exists())
+        runBlocking { IMessageManager.get(context).purgeDeleted(chat) }
         assertNull(repo.conversation(chat))
         assertFalse(copy.exists())
         assertTrue(queued.exists())
@@ -600,6 +602,11 @@ class DirectAttachmentsTest {
     @Test
     fun iMessagesFilesCanBeHandedToAnotherApp() {
         // To open a voice message this phone cannot play, a document, or share a picture.
+        // FileProvider keeps the first test's folders for good; each test has its own.
+        runCatching {
+            val cache = androidx.core.content.FileProvider::class.java.getDeclaredField("sCache").apply { isAccessible = true }
+            (cache.get(null) as MutableMap<*, *>).clear()
+        }
         val authority = "${context.packageName}.fileprovider"
         val received = MediaCache.fileFor(context, "G7/p0", "caf", ChatService.IMESSAGE).apply { writeBytes(byteArrayOf(1)) }
         val waiting = repo.outboxFileFor("t-7").apply { parentFile?.mkdirs(); writeBytes(byteArrayOf(2)) }

@@ -709,4 +709,43 @@
     <string name="location_show_addresses">Show addresses for locations</string>
     <string name="location_show_addresses_help">Looks up the address of a location someone sent with Android\'s address service, which sends its coordinates to that service. Off: only the coordinates show.</string>
     <string name="location_card_description">Location, %1$s</string>
+    <!-- B5: Recently Deleted, delete sync, catch-up, Forward, tapbacks from notifications, double-tap, phrase effects -->
+    <string name="imessage_recently_deleted">Recently Deleted</string>
+    <string name="imessage_delete_on_all_devices">Delete on All Devices</string>
+    <string name="imessage_delete_on_all_devices_help">Conversations and messages you delete here are also deleted on your other Apple devices, and conversations deleted there move to Recently Deleted here. Off: what you delete here stays on your other devices.</string>
+    <string name="imessage_delete_conversation_body_recently">This conversation will be moved to Recently Deleted on this phone for 30 days.</string>
+    <string name="imessage_delete_conversation_body_everywhere">This conversation will be moved to Recently Deleted on this phone for 30 days and deleted from your other Apple devices.</string>
+    <string name="imessage_delete_message_question_everywhere">Delete this message from this phone and your other Apple devices? It stays on their phone.</string>
+    <plurals name="imessage_deleted_days_left">
+        <item quantity="one">%1$d day</item>
+        <item quantity="other">%1$d days</item>
+    </plurals>
+    <string name="imessage_recover">Recover</string>
+    <string name="imessage_recovered">Recovered</string>
+    <string name="imessage_delete_for_good">Delete</string>
+    <string name="imessage_delete_for_good_title">Delete Conversation?</string>
+    <string name="imessage_delete_for_good_body">This conversation will be deleted from this phone. This can\'t be undone.</string>
+    <string name="imessage_delete_for_good_body_everywhere">This conversation will be deleted from this phone and your other Apple devices. This can\'t be undone.</string>
+    <string name="imessage_deleted_for_good">Deleted</string>
+    <string name="imessage_recover_all">Recover All</string>
+    <string name="imessage_delete_all">Delete All</string>
+    <string name="imessage_delete_all_title">Delete All Conversations?</string>
+    <string name="imessage_delete_all_body">Every conversation in Recently Deleted will be deleted from this phone. This can\'t be undone.</string>
+    <string name="imessage_delete_all_body_everywhere">Every conversation in Recently Deleted will be deleted from this phone and your other Apple devices. This can\'t be undone.</string>
+    <string name="imessage_delete_companion_recently">Its iMessage conversation will be moved to Recently Deleted on this phone for 30 days.</string>
+    <string name="imessage_delete_companion_everywhere">Its iMessage conversation will be moved to Recently Deleted on this phone for 30 days and deleted from your other Apple devices.</string>
+    <string name="imessage_recovered_all">Conversations recovered</string>
+    <string name="imessage_empty_recently_deleted">No conversations. Conversations you delete stay here for 30 days, then are deleted.</string>
+    <string name="catch_up_jump">Jump to first unread</string>
+    <string name="forward_action">Forward</string>
+    <string name="forward_title">Forward To</string>
+    <string name="forward_preparing">Getting it ready…</string>
+    <string name="forward_unavailable">This message can\'t be forwarded.</string>
+    <string name="forward_no_conversations">No conversations to forward to.</string>
+    <string name="tapback_react_action">React…</string>
+    <string name="tapback_title">React</string>
+    <string name="tapback_react_a11y">React</string>
+    <string name="tapback_not_sent">The tapback was not sent.</string>
+    <string name="imessage_phrase_effects">Effects for Phrases</string>
+    <string name="imessage_phrase_effects_help">A message that is only “Happy Birthday”, “Congratulations”, “Happy New Year” or another such phrase is sent with its screen effect, as an iPhone sends it.</string>
 </resources>

@@ -73,6 +73,22 @@ class MessagesAdapter(
      */
     var threadTaps = true
 
+    /**
+     * Whether a double tap on [row]'s bubble opens the tapback picker ([Callbacks.onMessageDoubleTap]):
+     * an iMessage through the library that can take one. Where it is not, taps are as ever, at once.
+     */
+    var doubleTapReacts: (MessageRow) -> Boolean = { false }
+
+    private val tapHandler by lazy { android.os.Handler(android.os.Looper.getMainLooper()) }
+
+    /** Tells a bubble's double tap from its single tap ([DoubleTaps]). */
+    internal val doubleTaps by lazy {
+        DoubleTaps(
+            android.view.ViewConfiguration.getDoubleTapTimeout().toLong(), android.os.SystemClock::uptimeMillis,
+            { task, delay -> tapHandler.postDelayed(task, delay) }, tapHandler::removeCallbacks,
+        )
+    }
+
     /** A picture is behind the messages: iPhone-style times and notices keep their pill, to stay readable on it. */
     var onPicture = false
 
@@ -118,6 +134,9 @@ class MessagesAdapter(
 
         /** An iMessage app's card tapped (a game, a poll). */
         fun onAppCardTap(row: MessageRow) = Unit
+
+        /** A bubble double-tapped ([doubleTapReacts]), or TalkBack's "React" on it: the tapbacks above [anchor]. */
+        fun onMessageDoubleTap(row: MessageRow, anchor: View) = Unit
 
         /** "Replay" beside "Sent with Slam" tapped: play the message's effect again ([EffectPlayer]). */
         fun onReplayEffect(row: MessageRow) = Unit
@@ -218,6 +237,9 @@ class MessagesAdapter(
 
         /** The "Reply" accessibility action added at the last bind, removed before the next. */
         var replyActionId = View.NO_ID
+
+        /** The "React" accessibility action added at the last bind ([doubleTapReacts]), removed before the next. */
+        var reactActionId = View.NO_ID
 
         /** The "Show / Hide earlier versions" accessibility action added at the last bind ([historyShown]). */
         var historyActionId = View.NO_ID
@@ -606,11 +628,35 @@ class MessagesAdapter(
             textEffects.isNotEmpty() -> playText
             else -> openThread
         }
-        b.bubble.setOnClickListener(tap)
-        if (tap == null) b.bubble.isClickable = false
+        // Double tap to react (an iMessage through the library that can take a tapback; never a failed,
+        // waiting or poll row, nor one with pictures or files (their taps are theirs; double tap on media
+        // is left out for now), nor with TalkBack, for which a double tap is a click): the first tap
+        // waits for a second ([DoubleTaps]); invisible ink shows its text at once all the same. A link
+        // in the text opens on the first tap and never counts; the bubble's own controls (pictures,
+        // the link card, audio, the quote, "Edited", "Replay", "!") take their taps as ever.
+        val reacts = tick != Tick.FAILED && !row.isLocal && row.direction != "system" && poll == null && row.media.isEmpty() &&
+            !touchExploring(context) && doubleTapReacts(row)
+        if (reacts) {
+            val bubbleTap = View.OnClickListener { v ->
+                val double = { callbacks.onMessageDoubleTap(row, b.bubble) }
+                if (inked) {
+                    reveal.onClick(v)
+                    doubleTaps.onTap(row.id, null, double)
+                } else {
+                    doubleTaps.onTap(row.id, tap?.let { t -> { t.onClick(v) } }, double)
+                }
+            }
+            b.bubble.setOnClickListener(bubbleTap)
+            b.body.setOnClickListener { if (!b.body.tappedLink) bubbleTap.onClick(it) }
+        } else {
+            b.bubble.setOnClickListener(tap)
+            if (tap == null) b.bubble.isClickable = false
+        }
         // The text takes its own touches (for its links): hidden, a tap on it shows it. Otherwise it
         // is clickable only for its links, so a tap beside them reaches the bubble.
-        if (inked && tick != Tick.FAILED) {
+        if (reacts) {
+            // Set above.
+        } else if (inked && tick != Tick.FAILED) {
             b.body.setOnClickListener(reveal)
         } else if (textEffects.isNotEmpty() && tick != Tick.FAILED) {
             b.body.setOnClickListener(playText)
@@ -646,10 +692,25 @@ class MessagesAdapter(
                 true
             }
         }
+        // "React", next to Reply: the tapbacks, as a double tap opens them.
+        if (holder.reactActionId != View.NO_ID) ViewCompat.removeAccessibilityAction(b.bubble, holder.reactActionId)
+        holder.reactActionId = if (tick != Tick.FAILED && !row.isLocal && poll == null && doubleTapReacts(row)) {
+            ViewCompat.addAccessibilityAction(b.bubble, context.getString(R.string.tapback_react_a11y)) { _, _ ->
+                callbacks.onMessageDoubleTap(row, b.bubble)
+                true
+            }
+        } else {
+            View.NO_ID
+        }
         // The text view is hidden from TalkBack (the bubble reads it): its links are bubble actions.
         holder.linkActionIds = BubbleLinks.bind(b.bubble, b.body, holder.linkActionIds)
         if (textEffects.isNotEmpty() && b.body.visibility == View.VISIBLE) callbacks.onTextEffectsShown(row, b.body)
     }
+
+    /** Whether TalkBack (or another touch-exploring service) is on: a double tap is then a click. */
+    private fun touchExploring(context: android.content.Context): Boolean =
+        (context.getSystemService(android.content.Context.ACCESSIBILITY_SERVICE) as? android.view.accessibility.AccessibilityManager)
+            ?.isTouchExplorationEnabled == true
 
     /**
      * Inline replies in iPhone-style chats ([ThreadItem.Message.thread]): "N Replies" in blue under a

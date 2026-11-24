@@ -139,6 +139,13 @@ object DirectWire {
      */
     const val CANCEL = 25
 
+    /**
+     * "Delete on All Devices": tells the user's own devices (only them: [RecycleRules.outgoing]) that a
+     * chat went to Recently Deleted, came back, or was deleted for good, or that messages were
+     * deleted ([recycle]), answered with [ok] at once (Apple does not answer it).
+     */
+    const val RECYCLE = 26
+
     const val REPLY = 100
 
     /**
@@ -151,8 +158,37 @@ object DirectWire {
         "UNSCHEDULE" to UNSCHEDULE, "RENAME" to RENAME, "MEMBERS" to MEMBERS, "GROUP_PHOTO" to GROUP_PHOTO,
         "MARK_UNREAD" to MARK_UNREAD, "REPORT_JUNK" to REPORT_JUNK, "PEERS" to PEERS, "FT_CAPABLE" to FT_CAPABLE,
         "CALLER" to CALLER, "ACCOUNT" to ACCOUNT, "FT_STATE" to FT_STATE, "BLOCKLIST" to BLOCKLIST,
-        "PROGRESS" to PROGRESS, "CANCEL" to CANCEL,
+        "PROGRESS" to PROGRESS, "CANCEL" to CANCEL, "RECYCLE" to RECYCLE,
     )
+
+    /**
+     * The [RECYCLE] request: [op] ([RecycleRules.OP_BIN], [RecycleRules.OP_RECOVER] or
+     * [RecycleRules.OP_PURGE]) on the chat [target], or on its messages [messages] (GUIDs) when given.
+     */
+    fun recycle(target: Target, op: String, messages: List<String>? = null): JSONObject = JSONObject()
+        .put("target", target.toJson()).put("op", op)
+        .apply { if (messages != null) put("messages", JSONArray(messages)) }
+
+    /**
+     * What a [RECYCLE] request asks for, read strictly: an op of [RecycleRules.OPS], and messages (when
+     * named) [RecycleRules.MAX_MESSAGES] GUIDs at most, each a GUID; anything else throws (a failure).
+     */
+    data class RecycleRequest(val target: Target, val op: String, val messages: List<String>?) {
+        companion object {
+            fun fromJson(o: JSONObject): RecycleRequest {
+                val op = (o.opt("op") as? String)?.takeIf { it in RecycleRules.OPS } ?: throw org.json.JSONException("no op")
+                val messages = if (o.has("messages") && !o.isNull("messages")) {
+                    val a = o.optJSONArray("messages") ?: throw org.json.JSONException("no messages")
+                    if (a.length() == 0 || a.length() > RecycleRules.MAX_MESSAGES) throw org.json.JSONException("too many messages")
+                    (0 until a.length()).map { i -> (a.opt(i) as? String)?.takeIf(RecycleRules::isGuid) ?: throw org.json.JSONException("not a message") }
+                } else {
+                    null
+                }
+                if (op == RecycleRules.OP_RECOVER && messages != null) throw org.json.JSONException("messages are not recovered")
+                return RecycleRequest(Target.fromJson(o.getJSONObject("target")), op, messages)
+            }
+        }
+    }
 
     /** A [PROGRESS] message: [done] of [total] bytes of part [part] (from 0) of [parts]. */
     fun progress(done: Long, total: Long, part: Int = 0, parts: Int = 1): JSONObject =
@@ -930,6 +966,12 @@ object DirectWire {
             .put("participantId", u.participantId).put("typing", u.typing).apply { u.groupGuid?.let { put("groupGuid", it) } }
         is DirectArchive.Update.ReadElsewhere -> JSONObject().put("kind", "readElsewhere").put("messageId", u.messageId)
         is DirectArchive.Update.MarkUnread -> JSONObject().put("kind", "markUnread").put("messageId", u.messageId)
+        is DirectArchive.Update.Recycle -> JSONObject().put("kind", "recycle").put("messageIds", JSONArray(u.messageIds)).put("atMs", u.atMs)
+            .apply { u.conversationId?.let { put("conversationId", it) } }.apply { u.groupGuid?.let { put("groupGuid", it) } }
+        is DirectArchive.Update.Recover -> JSONObject().put("kind", "recover").put("conversationId", u.conversationId)
+            .apply { u.groupGuid?.let { put("groupGuid", it) } }
+        is DirectArchive.Update.Purge -> JSONObject().put("kind", "purge").put("messageIds", JSONArray(u.messageIds))
+            .apply { u.conversationId?.let { put("conversationId", it) } }.apply { u.groupGuid?.let { put("groupGuid", it) } }
         DirectArchive.Update.PeerCacheInvalidate -> JSONObject().put("kind", "peerCacheInvalidate")
         is DirectArchive.Update.Failed -> JSONObject().put("kind", "failed").put("messageId", u.messageId).put("error", u.error)
         is DirectArchive.Update.Background -> JSONObject().put("kind", "background").put("conversationId", u.conversationId)
@@ -1071,6 +1113,7 @@ object DirectWire {
         "readElsewhere" -> DirectArchive.Update.ReadElsewhere(o.getString("messageId"))
         "markUnread" -> o.optStringOrNull("messageId")?.takeIf { DirectArchive.isImessage(it) && it.length <= MAX_GUID_CHARS + DirectArchive.PREFIX.length }
             ?.let { DirectArchive.Update.MarkUnread(it) } ?: DirectArchive.Update.Ignore
+        "recycle", "recover", "purge" -> recycleOf(o)
         "peerCacheInvalidate" -> DirectArchive.Update.PeerCacheInvalidate
         "failed" -> DirectArchive.Update.Failed(o.getString("messageId"), o.optString("error"))
         "background" -> DirectArchive.Update.Background(
@@ -1121,6 +1164,36 @@ object DirectWire {
         "dropped" -> DirectArchive.Update.Dropped(o.optString("what"), o.optString("why"))
         "account" -> DirectArchive.Update.Account(AccountState.fromJson(o), restarting = o.opt("restarting") == true)
         else -> DirectArchive.Update.Ignore
+    }
+
+    /**
+     * A "recycle", "recover" or "purge" [UPDATE], read as untrusted: an iMessage conversation id
+     * ([MAX_CONVERSATION_ID_CHARS] at most), a group guid as [RecycleRules] takes them, and
+     * [RecycleRules.MAX_MESSAGES] message ids at most, each an iMessage one. Anything else is
+     * [DirectArchive.Update.Ignore]; so is one naming neither a chat nor messages.
+     */
+    private fun recycleOf(o: JSONObject): DirectArchive.Update {
+        val ignore = DirectArchive.Update.Ignore
+        val conversationId = if (o.has("conversationId") && !o.isNull("conversationId")) {
+            (o.opt("conversationId") as? String)?.takeIf { DirectArchive.isImessage(it) && it.length <= MAX_CONVERSATION_ID_CHARS } ?: return ignore
+        } else {
+            null
+        }
+        val groupGuid = if (o.has("groupGuid") && !o.isNull("groupGuid")) (o.opt("groupGuid") as? String)?.takeIf(RecycleRules::isGuid) ?: return ignore else null
+        val a = o.optJSONArray("messageIds")
+        if (a != null && a.length() > RecycleRules.MAX_MESSAGES) return ignore
+        val ids = (0 until (a?.length() ?: 0)).map { i ->
+            (a!!.opt(i) as? String)?.takeIf { DirectArchive.guidOf(it)?.let(RecycleRules::isGuid) == true } ?: return ignore
+        }.distinct()
+        return when (o.optString("kind")) {
+            "recycle" -> if (conversationId == null && ids.isEmpty()) ignore else {
+                val at = when (val v = o.opt("atMs")) { is Int -> v.toLong(); is Long -> v; else -> 0L }.takeIf { it > 0 } ?: return ignore
+                DirectArchive.Update.Recycle(conversationId, groupGuid, if (conversationId != null) emptyList() else ids, at)
+            }
+            "recover" -> conversationId?.let { DirectArchive.Update.Recover(it, groupGuid) } ?: ignore
+            "purge" -> if (conversationId == null && ids.isEmpty()) ignore else DirectArchive.Update.Purge(conversationId, groupGuid, if (conversationId != null) emptyList() else ids)
+            else -> ignore
+        }
     }
 
     private fun JSONObject.optStringOrNull(key: String): String? =

@@ -558,6 +558,29 @@
             </intent-filter>
         </receiver>
 
+        <!--
+            "Forward To" (a message's long-press sheet): only the chat screen starts it, with copies it
+            made; never the exported share screen.
+        -->
+        <activity
+            android:name=".ui.share.ForwardActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
+        <!--
+            A tapback from a message notification ("React…"), the fallback for phones that show no reply
+            chips: an immutable, explicit PendingIntent starts it; translucent, never over the lock screen
+            (the phone is unlocked first), and out of recents.
+        -->
+        <activity
+            android:name=".ui.chat.TapbackActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:showWhenLocked="false"
+            android:taskAffinity=""
+            android:theme="@style/Theme.LightDecoder.Translucent"
+            tools:targetApi="o_mr1" />
+
         <!-- Reply and Mark as read on message notifications. Only this app's notifications reach it. -->
         <receiver
             android:name=".relay.ReplyReceiver"

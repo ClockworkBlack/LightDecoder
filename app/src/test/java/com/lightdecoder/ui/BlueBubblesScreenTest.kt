@@ -1762,7 +1762,7 @@ class BlueBubblesScreenTest {
                 assertNotNull("the photo picker", shadowOf(activity).nextStartedActivity)
                 // Her game's card: not opened in OpenPigeon, nothing bound; it opens on an Apple device.
                 appCardOf(activity, "Your move")!!.findViewById<View>(R.id.bubble).performClick()
-                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                org.robolectric.shadows.ShadowLooper.idleMainLooper(400, java.util.concurrent.TimeUnit.MILLISECONDS)
                 assertEquals("GamePigeon can only be opened on an iPhone, iPad or Mac.", org.robolectric.shadows.ShadowToast.getTextOfLatestToast())
                 assertTrue("no install offer", ShadowDialog.getLatestDialog() === before)
                 assertEquals(null, shadowOf(activity).nextStartedActivity)
@@ -2713,9 +2713,11 @@ class BlueBubblesScreenTest {
                 assertTrue(bubble.findViewById<View>(R.id.bubble).contentDescription.toString().contains("With text effects: Big"))
                 // No "Sent with …" caption: text effects are the words' own.
                 assertEquals(View.GONE, bubble.findViewById<View>(R.id.effectRow).visibility)
-                // A tap on the text plays it again, as often as tapped.
+                // A tap on the text plays it again, as often as tapped (each a single tap: two at once would react).
                 body.performClick()
+                org.robolectric.shadows.ShadowLooper.idleMainLooper(400, java.util.concurrent.TimeUnit.MILLISECONDS)
                 body.performClick()
+                org.robolectric.shadows.ShadowLooper.idleMainLooper(400, java.util.concurrent.TimeUnit.MILLISECONDS)
                 assertEquals(listOf(com.lightdecoder.ui.chat.EffectPlayer.Reason.RECEIVED, com.lightdecoder.ui.chat.EffectPlayer.Reason.REPLAY, com.lightdecoder.ui.chat.EffectPlayer.Reason.REPLAY), textPlays(activity).map { it.reason })
                 // The list and its quote say the words alone.
                 assertEquals("Hello big world", imRepo.message("imsg:T1")!!.text)
@@ -2957,6 +2959,8 @@ class BlueBubblesScreenTest {
                     assertEquals(View.GONE, item.findViewById<View>(R.id.appSubcaption).visibility)
                     // The app that plays it here is not installed: it is offered, from the store.
                     item.findViewById<View>(R.id.bubble).performClick()
+                    // A single tap waits to be told from a double tap (which would react).
+                    org.robolectric.shadows.ShadowLooper.idleMainLooper(400, java.util.concurrent.TimeUnit.MILLISECONDS)
                     val install = latestDialog()
                     assertEquals(
                         "Install OpenPigeon to play GamePigeon games with iPhone users.",
@@ -2969,10 +2973,12 @@ class BlueBubblesScreenTest {
                     // With no app to play it here at all, it opens on an Apple device, and nothing is opened.
                     com.lightdecoder.imessage.direct.IMessageApps.host = null
                     item.findViewById<View>(R.id.bubble).performClick()
+                    org.robolectric.shadows.ShadowLooper.idleMainLooper(400, java.util.concurrent.TimeUnit.MILLISECONDS)
                     assertEquals("GamePigeon can only be opened on an iPhone, iPad or Mac.", org.robolectric.shadows.ShadowToast.getTextOfLatestToast())
                     assertEquals(null, shadowOf(activity).nextStartedActivity)
                     // An app that keeps its state in a web address opens in the browser.
                     appCardOf(activity, "Lunch?")!!.findViewById<View>(R.id.bubble).performClick()
+                    org.robolectric.shadows.ShadowLooper.idleMainLooper(400, java.util.concurrent.TimeUnit.MILLISECONDS)
                     assertEquals("https://example.com/poll", shadowOf(activity).nextStartedActivity.dataString)
                     // An installed extension takes the card first.
                     val engaged = ArrayList<String>()
@@ -2980,6 +2986,7 @@ class BlueBubblesScreenTest {
                         com.lightdecoder.imessage.direct.IMessageApps.Host { _, row, app -> engaged += row.id + " " + app.name; true }
                     org.robolectric.shadows.ShadowToast.reset()
                     item.findViewById<View>(R.id.bubble).performClick()
+                    org.robolectric.shadows.ShadowLooper.idleMainLooper(400, java.util.concurrent.TimeUnit.MILLISECONDS)
                     assertEquals(listOf("imsg:G1 GamePigeon"), engaged)
                     assertEquals(0, org.robolectric.shadows.ShadowToast.shownToastCount())
                     assertEquals(null, shadowOf(activity).nextStartedActivity)

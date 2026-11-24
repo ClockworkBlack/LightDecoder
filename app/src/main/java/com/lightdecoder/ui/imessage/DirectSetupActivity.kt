@@ -112,6 +112,12 @@ class DirectSetupActivity : AppCompatActivity() {
         binding.switchLinkPreviews.setOnCheckedChangeListener { _, on -> DirectPrefs.setLinkPreviews(this, on) }
         binding.switchLocationAddresses.isChecked = DirectPrefs.locationAddresses(this)
         binding.switchLocationAddresses.setOnCheckedChangeListener { _, on -> DirectPrefs.setLocationAddresses(this, on) }
+        // On by default; the chat screen (main process) reads it as a message goes.
+        binding.switchPhraseEffects.isChecked = DirectPrefs.phraseEffects(this)
+        binding.switchPhraseEffects.setOnCheckedChangeListener { _, on -> DirectPrefs.setPhraseEffects(this, on) }
+        // Off by default; both processes read it (deletes sent, and the user's other devices' deletes taken).
+        binding.switchDeleteOnAllDevices.isChecked = DirectPrefs.deleteOnAllDevices(this)
+        binding.switchDeleteOnAllDevices.setOnCheckedChangeListener { _, on -> DirectPrefs.setDeleteOnAllDevices(this, on) }
         binding.switchNotifyMentions.isChecked = DirectPrefs.notifyWhenMentioned(this)
         binding.switchNotifyMentions.setOnCheckedChangeListener { _, on -> DirectPrefs.setNotifyWhenMentioned(this, on) }
         // FaceTime: on by default; the call engine (this process) and the chat screens (main process) read it.

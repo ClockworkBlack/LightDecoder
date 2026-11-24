@@ -23,7 +23,12 @@ internal object InboxLists {
         val own = from.repo.conversations(folder).map { ConversationItem(it, ConversationTitles.of(context, from.repo, it), from.service) }
         val extra = if (iMessage == null) emptyList() else runCatching { iMessage.repo.conversations(folder) }.getOrDefault(emptyList())
             .map { ConversationItem(it, ConversationTitles.of(context, iMessage.repo, it), iMessage.service) }
-        val listed = if (extra.isEmpty()) own else foldIn(own, extra, BlueBubblesLinks.pairs(context.applicationContext))
+        // In Recently Deleted each chat is its own row: one recovered or deleted there is that chat alone.
+        val listed = when {
+            extra.isEmpty() -> own
+            folder == Folder.DELETED -> mergeByTime(own, extra)
+            else -> foldIn(own, extra, BlueBubblesLinks.pairs(context.applicationContext))
+        }
         // The pictures they are shown by: a group's photo, a person's picture.
         val pictured = runCatching { AvatarPhotos.withPhotos(context.applicationContext, listed) }.getOrDefault(listed)
         return runCatching { withBlocked(context, pictured, listOfNotNull(from, iMessage)) }.getOrDefault(pictured)

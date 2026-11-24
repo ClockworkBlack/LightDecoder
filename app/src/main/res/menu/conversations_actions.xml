@@ -47,6 +47,12 @@
         android:id="@+id/action_link_status"
         android:title="@string/chat_link_status"
         app:showAsAction="never" />
+    <!-- iMessage's Recently Deleted (the Deleted folder through the iMessage library), while it holds something. -->
+    <item
+        android:id="@+id/action_recover_all_deleted"
+        android:title="@string/imessage_recover_all"
+        android:visible="false"
+        app:showAsAction="never" />
     <!-- Only in the local Deleted folder, while it holds something. -->
     <item
         android:id="@+id/action_empty_deleted"

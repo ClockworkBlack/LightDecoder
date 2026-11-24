@@ -32,6 +32,10 @@ data class ConversationRow(
     val avatarColor: String,
     val defaultOutgoingId: String,
     val updatedAt: Long,
+    /** When it went to Recently Deleted ([Folder.DELETED]; ms), 0 when it is not there or that is not known. */
+    val deletedAt: Long = 0,
+    /** The time of the message it became unread with (ms), 0 when it is read or none is known ("Jump to first unread"). */
+    val firstUnreadTs: Long = 0,
 ) {
     /** The folder, including the local [Folder.DELETED]; null for "other" and anything unknown. */
     val folderEnum: Folder? get() = Folder.fromStored(folder)

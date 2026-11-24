@@ -33,6 +33,15 @@
         <item name="android:windowAnimationStyle">@android:style/Animation.Dialog</item>
     </style>
 
+    <!-- "React…" from a notification (ui.chat.TapbackActivity): a small dialog over whatever is behind it. -->
+    <style name="Theme.LightDecoder.Translucent" parent="Theme.Material3.DayNight.Dialog.Alert">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="windowNoTitle">true</item>
+        <item name="windowActionBar">false</item>
+    </style>
+
     <!--
         The FaceTime call screen: dark whatever the phone's theme (a call screen, and the other
         side's picture, read best on black), edge to edge.

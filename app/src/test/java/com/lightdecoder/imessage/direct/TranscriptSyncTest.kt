@@ -571,7 +571,11 @@ class TranscriptSyncTest {
         val o1 = repo.message("imsg:O1")!!
         repo.editText(o1.id, o1.text, 0, IMessageExtra(link = IMessageExtra.Link("https://example.com", "Example", image = IMessageExtra.linkImageKey("O1"))).toJson())
         assertEquals(listOf(DirectArchive.STICKER_TAPBACK), repo.message(p2.id)!!.reactions.map { it.emoji })
+        // Deleted, it waits in Recently Deleted with its pictures; deleted there, they go with it.
         runBlocking { IMessageManager.get(context).deleteConversation(aliceChat) }
+        assertEquals(com.lightdecoder.relay.Folder.DELETED, repo.conversation(aliceChat)!!.folderEnum)
+        assertTrue(linkPicture.exists())
+        runBlocking { IMessageManager.get(context).purgeDeleted(aliceChat) }
         assertNull(repo.conversation(aliceChat))
         assertFalse(linkPicture.exists())
         assertFalse(placed.exists())

@@ -118,6 +118,13 @@ class ConversationsActivity : AppCompatActivity() {
     /** Whether the list shows iMessage chats too: the Messages tab, with Blue Bubbles on. */
     private fun showsIMessage(): Boolean = backend.service == ChatService.MESSAGES && blueBubbles.isOn()
 
+    /**
+     * Whether the Deleted folder is iMessage's "Recently Deleted" too: in Messages, with the iMessage
+     * library's chats shown there. Its iMessage chats then stay 30 days, and are recovered or deleted.
+     */
+    private fun recentlyDeletedHere(): Boolean =
+        showsIMessage() && runCatching { com.lightdecoder.imessage.direct.DirectLink.get(this).active }.getOrDefault(false)
+
     private val onArchiveChange: (ArchiveChange) -> Unit = { change ->
         // The other service's conversations only change its tab's unread count.
         if (change.kind == ArchiveChange.Kind.CONVERSATIONS) scheduleBadges()
@@ -518,14 +525,18 @@ class ConversationsActivity : AppCompatActivity() {
         buildingFolderTabs = true
         tabs.clearOnTabSelectedListeners()
         tabs.removeAllTabs()
+        val recently = recentlyDeletedHere()
         available.forEach { (f, label) ->
-            tabs.addTab(tabs.newTab().setText(label).setTag(f), f == folder)
+            val shownLabel = if (f == Folder.DELETED && recently) R.string.imessage_recently_deleted else label
+            tabs.addTab(tabs.newTab().setText(shownLabel).setTag(f), f == folder)
         }
         buildingFolderTabs = false
         tabs.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
             override fun onTabSelected(tab: TabLayout.Tab) {
                 if (buildingFolderTabs) return
                 folder = tab.tag as Folder
+                // Recently Deleted opening: chats past their 30 days go first.
+                if (folder == Folder.DELETED && recentlyDeletedHere()) com.lightdecoder.imessage.direct.DirectLink.get(applicationContext).purgeExpiredSoon(force = true)
                 adapter.submitList(emptyList())
                 renderFolderControls()
                 reload()
@@ -575,7 +586,7 @@ class ConversationsActivity : AppCompatActivity() {
         val shown = folder
         val from = backend
         val iMessage = if (showsIMessage()) ScreenBackends.get(this, ChatService.IMESSAGE) else null
-        val iMessageHere = iMessage != null && (shown == Folder.INBOX || shown == Folder.ARCHIVE)
+        val iMessageHere = iMessage != null && (shown == Folder.INBOX || shown == Folder.ARCHIVE || (shown == Folder.DELETED && recentlyDeletedHere()))
         lifecycleScope.launch {
             val (items, stored) = withContext(Dispatchers.IO) {
                 val rows = InboxLists.items(this@ConversationsActivity, from, shown, if (iMessageHere) iMessage else null)
@@ -597,7 +608,7 @@ class ConversationsActivity : AppCompatActivity() {
                     Folder.INBOX -> if (paired) ServiceUi.emptyInbox(from.service, ServiceUi.direct(this@ConversationsActivity, from.service)) else R.string.chat_empty_unpaired
                     Folder.ARCHIVE -> R.string.chat_empty_archive
                     Folder.SPAM -> R.string.chat_empty_spam
-                    Folder.DELETED -> R.string.chat_empty_deleted
+                    Folder.DELETED -> if (recentlyDeletedHere()) R.string.imessage_empty_recently_deleted else R.string.chat_empty_deleted
                 }
             )
             binding.emptyText.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
@@ -709,7 +720,12 @@ class ConversationsActivity : AppCompatActivity() {
         // Without a pairing, what is listed is an archive an unpair kept: it can be deleted here.
         menu.findItem(R.id.action_delete_archive)?.isVisible = !paired && !ownArchiveEmpty
         menu.findItem(R.id.action_refresh)?.isVisible = paired && folder.listable
-        menu.findItem(R.id.action_empty_deleted)?.isVisible = folder == Folder.DELETED && hasDeleted && searchQuery == null
+        val recently = recentlyDeletedHere()
+        menu.findItem(R.id.action_empty_deleted)?.apply {
+            isVisible = folder == Folder.DELETED && hasDeleted && searchQuery == null
+            setTitle(if (recently) R.string.imessage_delete_all else R.string.chat_empty_deleted_folder)
+        }
+        menu.findItem(R.id.action_recover_all_deleted)?.isVisible = recently && folder == Folder.DELETED && hasDeleted && searchQuery == null
         return super.onPrepareOptionsMenu(menu)
     }
 
@@ -729,6 +745,7 @@ class ConversationsActivity : AppCompatActivity() {
             R.id.action_link_status -> startActivity(ServiceUi.status(this, backend.service))
             R.id.action_delete_archive -> LocalArchive.confirmDelete(this, backend) { reload() }
             R.id.action_empty_deleted -> confirmEmptyDeleted()
+            R.id.action_recover_all_deleted -> recoverAllDeleted()
             else -> return super.onOptionsItemSelected(item)
         }
         return true
@@ -807,7 +824,11 @@ class ConversationsActivity : AppCompatActivity() {
             Folder.SPAM -> actions += R.string.chat_action_not_spam to { markNotSpam(on, row) }
             else -> Unit
         }
-        if (row.folderEnum == Folder.DELETED) {
+        if (row.folderEnum == Folder.DELETED && item.service == ChatService.IMESSAGE) {
+            // Recently Deleted, as on an iPhone.
+            actions += R.string.imessage_recover to { runAction(on, R.string.imessage_recovered) { on.restoreDeletedLocally(row.id) } }
+            actions += R.string.imessage_delete_for_good to { confirmDeleteForever(on, item) }
+        } else if (row.folderEnum == Folder.DELETED) {
             // The phone already deleted it: only this device's copy is left to decide on.
             actions += R.string.chat_action_restore to { restoreDeleted(on, row) }
             actions += R.string.chat_action_delete_forever to { confirmDeleteForever(on, item) }
@@ -853,11 +874,18 @@ class ConversationsActivity : AppCompatActivity() {
     /** Deleted for good, here only: the phone already deleted it. */
     private fun confirmDeleteForever(on: ChatBackend, item: ConversationItem) {
         val id = item.row.id
+        val recently = on.service == ChatService.IMESSAGE
         MaterialAlertDialogBuilder(this)
-            .setTitle(R.string.chat_delete_forever_title)
-            .setMessage(R.string.chat_delete_forever_body)
-            .setPositiveButton(R.string.chat_action_delete_forever) { _, _ ->
-                runAction(on, R.string.chat_deleted_forever) { on.purgeDeleted(id) }
+            .setTitle(if (recently) R.string.imessage_delete_for_good_title else R.string.chat_delete_forever_title)
+            .setMessage(
+                when {
+                    !recently -> R.string.chat_delete_forever_body
+                    com.lightdecoder.imessage.direct.DirectPrefs.deleteOnAllDevices(this) -> R.string.imessage_delete_for_good_body_everywhere
+                    else -> R.string.imessage_delete_for_good_body
+                },
+            )
+            .setPositiveButton(if (recently) R.string.imessage_delete_for_good else R.string.chat_action_delete_forever) { _, _ ->
+                runAction(on, if (recently) R.string.imessage_deleted_for_good else R.string.chat_deleted_forever) { on.purgeDeleted(id) }
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
@@ -866,14 +894,30 @@ class ConversationsActivity : AppCompatActivity() {
     /** Everything in the Deleted folder, for good, here only. */
     private fun confirmEmptyDeleted() {
         val on = backend
+        // "Delete All" in Recently Deleted: the iMessage chats there too.
+        val iMessage = if (recentlyDeletedHere()) ScreenBackends.get(this, ChatService.IMESSAGE) else null
         MaterialAlertDialogBuilder(this)
-            .setTitle(R.string.chat_empty_deleted_title)
-            .setMessage(R.string.chat_empty_deleted_body)
-            .setPositiveButton(R.string.chat_empty_deleted_action) { _, _ ->
-                runAction(on, R.string.chat_emptied_deleted) { on.purgeDeleted(null) }
+            .setTitle(if (iMessage != null) R.string.imessage_delete_all_title else R.string.chat_empty_deleted_title)
+            .setMessage(
+                if (iMessage != null) ServiceUi.deleteAllBody(com.lightdecoder.imessage.direct.DirectPrefs.deleteOnAllDevices(this)) else R.string.chat_empty_deleted_body
+            )
+            .setPositiveButton(if (iMessage != null) R.string.imessage_delete_all else R.string.chat_empty_deleted_action) { _, _ ->
+                runAction(on, R.string.chat_emptied_deleted) {
+                    on.purgeDeleted(null)
+                    iMessage?.purgeDeleted(null)
+                }
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
+    }
+
+    /** "Recover All" in Recently Deleted: every chat there back in the inbox (each by its own service). */
+    private fun recoverAllDeleted() {
+        val rows = adapter.currentList.filter { it.row.folderEnum == Folder.DELETED }
+        val iMessage = ScreenBackends.get(this, ChatService.IMESSAGE)
+        runAction(backend, R.string.imessage_recovered_all) {
+            for (item in rows) (if (item.service == ChatService.IMESSAGE) iMessage else backend).restoreDeletedLocally(item.row.id)
+        }
     }
 
     private fun setMuted(on: ChatBackend, row: ConversationRow, muted: Boolean) = runAction(
@@ -888,11 +932,13 @@ class ConversationsActivity : AppCompatActivity() {
     private fun confirmDelete(on: ChatBackend, item: ConversationItem) {
         val linked = on.isPaired()
         val id = item.row.id
-        MaterialAlertDialogBuilder(this)
+        val everywhere = com.lightdecoder.imessage.direct.DirectPrefs.deleteOnAllDevices(this)
+        val body = getString(
+            if (linked) ServiceUi.deleteConversationBody(on.service, ServiceUi.direct(this, on.service), everywhere) else R.string.chat_delete_conversation_body_local
+        )
+        val dialog = MaterialAlertDialogBuilder(this)
             .setTitle(R.string.chat_delete_conversation_title)
-            .setMessage(
-                if (linked) ServiceUi.deleteConversationBody(on.service, ServiceUi.direct(this, on.service)) else R.string.chat_delete_conversation_body_local
-            )
+            .setMessage(body)
             .setPositiveButton(R.string.chat_action_delete) { _, _ ->
                 if (on.isPaired() != linked) {
                     confirmDelete(on, item)
@@ -902,6 +948,14 @@ class ConversationsActivity : AppCompatActivity() {
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
+        // Its iMessage chats go with it: the question says where (Recently Deleted, the user's other devices).
+        if (on.service == ChatService.MESSAGES && ServiceUi.direct(this, ChatService.IMESSAGE)) {
+            lifecycleScope.launch {
+                val companions = runCatching { companionsOf(on, item.row) }.getOrDefault(emptyList())
+                val note = ServiceUi.deleteCompanionsNote(companions.isNotEmpty(), true, everywhere) ?: return@launch
+                if (dialog.isShowing) dialog.setMessage("$body ${getString(note)}")
+            }
+        }
     }
 
     private fun runAction(on: ChatBackend, doneMessage: Int, block: suspend () -> Unit) {

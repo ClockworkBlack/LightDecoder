@@ -274,6 +274,23 @@ object DirectArchive {
         data class MarkUnread(val messageId: String) : Update()
 
         /**
+         * "Delete on All Devices" ([RecycleRules]), from the user's own verified devices: the chat
+         * [conversationId] (a group's guid [groupGuid] when it names one) went to Recently Deleted as of
+         * [atMs], or, with no chat, the messages [messageIds] were deleted.
+         */
+        data class Recycle(val conversationId: String?, val groupGuid: String?, val messageIds: List<String>, val atMs: Long) : Update()
+
+        /** The chat [conversationId] came back from Recently Deleted on the user's other device. */
+        data class Recover(val conversationId: String, val groupGuid: String?) : Update()
+
+        /**
+         * The chat [conversationId] was deleted for good on the user's other device (taken only for a chat
+         * in Recently Deleted here, and held there a day at least: [RecycleRules.purgeNow]); or, with no
+         * chat, the messages [messageIds].
+         */
+        data class Purge(val conversationId: String?, val groupGuid: String?, val messageIds: List<String>) : Update()
+
+        /**
          * The user's devices changed (one was added: Apple's library says so of the user's own account).
          * The people of the user's recent chats are to be told, so that their phones look the user's
          * devices up again (OpenBubbles' `invalidatePeerCaches`; DirectLink works out whom).
@@ -422,6 +439,8 @@ object DirectArchive {
         texts: Texts,
         describe: (MessageAttachment) -> String = { "" },
         now: Long = System.currentTimeMillis(),
+        /** "Delete on All Devices" ([DirectPrefs.deleteOnAllDevices]): without it no recycle is taken. */
+        deleteSync: Boolean = false,
     ): Update {
         val m = inst.message
         // The user's own devices changed: the library says so of the user's account itself, from nobody
@@ -532,8 +551,14 @@ object DirectArchive {
             is PushChatMessage.PermanentDelete -> {
                 val target = m.v1.target as? DeleteTarget.Messages
                 val guid = target?.v1?.singleOrNull()
-                if (fromMe && m.v1.isScheduled && guid != null) Update.Remove(messageId(guid), scheduledOnly = true) else Update.Ignore
+                if (m.v1.isScheduled) {
+                    if (fromMe && guid != null) Update.Remove(messageId(guid), scheduledOnly = true) else Update.Ignore
+                } else {
+                    RecycleRules.incoming(m, sender, inst.verificationFailed, me, deleteSync, now) ?: Update.Ignore
+                }
             }
+            is PushChatMessage.MoveToRecycleBin, is PushChatMessage.RecoverChat ->
+                RecycleRules.incoming(m, sender, inst.verificationFailed, me, deleteSync, now) ?: Update.Ignore
             else -> Update.Ignore
         }
     }
@@ -548,7 +573,8 @@ object DirectArchive {
         m is PushChatMessage.Delivered || m is PushChatMessage.Read || m is PushChatMessage.Edit ||
             m is PushChatMessage.Unsend || m is PushChatMessage.Typing || m is PushChatMessage.RenameMessage ||
             m is PushChatMessage.ChangeParticipants || m is PushChatMessage.IconChange || m is PushChatMessage.Error ||
-            m is PushChatMessage.PermanentDelete || m is PushChatMessage.SetTranscriptBackground ||
+            m is PushChatMessage.PermanentDelete || m is PushChatMessage.MoveToRecycleBin || m is PushChatMessage.RecoverChat ||
+            m is PushChatMessage.SetTranscriptBackground ||
             m is PushChatMessage.MarkUnread || m is PushChatMessage.PeerCacheInvalidate ||
             (m is PushChatMessage.React && m.v1.reaction.let { r -> r is ReactMessageType.Extension || (r as? ReactMessageType.React)?.reaction is Reaction.Sticker })
 

@@ -300,7 +300,7 @@ class DirectEngine private constructor(private val app: Context) {
             // main process fetches it once it took the change (the group stored, its sender in it).
             val mapped = when (inst.message) {
                 is PushChatMessage.SetTranscriptBackground -> backgrounds.receive(inst, me, Handles::display, texts)
-                else -> DirectArchive.map(inst, me, Handles::display, texts, ::describe)
+                else -> DirectArchive.map(inst, me, Handles::display, texts, ::describe, deleteSync = DirectPrefs.deleteOnAllDevices(app))
             }
             if (mapped is DirectArchive.Update.Upsert) keepInlineFiles(inst)
             keepPictures(inst, mapped)
@@ -1121,6 +1121,25 @@ class DirectEngine private constructor(private val app: Context) {
         val (conversation, from) = conversationOf(target)
         val toMe = conversation.copy(participants = listOf(from), afterGuid = null)
         sendOnly(s, uniffi.rust_bridge.newMsg(toMe, from, PushChatMessage.MarkUnread).copy(id = guid))
+    }
+
+    /**
+     * "Delete on All Devices": the user's own devices (only them: the user's own address alone) are
+     * told that the chat [target] went to Recently Deleted, came back or was deleted for good ([op],
+     * [RecycleRules]), or that its messages [guids] were, as OpenBubbles tells them. Apple does not
+     * answer it.
+     */
+    suspend fun recycle(target: DirectWire.Target, op: String, guids: List<String>?) {
+        val s = requireSession()
+        val (_, from) = conversationOf(target)
+        val chatGuid = target.peer?.let(chatGuids::guidFor)
+        val now = System.currentTimeMillis()
+        val (toMe, message) = try {
+            RecycleRules.outgoing(target, op, guids, from, myHandles, chatGuid, now)
+        } catch (e: IllegalArgumentException) {
+            throw ImessageError("Nothing to delete")
+        }
+        sendOnly(s, uniffi.rust_bridge.newMsg(toMe, from, message).copy(sentTimestamp = now.toULong()))
     }
 
     /**

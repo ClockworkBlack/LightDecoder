@@ -5,6 +5,7 @@ import com.lightdecoder.relay.ConversationDto
 import com.lightdecoder.relay.MessageDto
 import com.lightdecoder.relay.ParticipantDto
 import com.lightdecoder.relay.PartDto
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -597,6 +598,7 @@ class DirectWireTest {
             "EXTENSION" to 9, "UPDATE" to 10, "BACKGROUND" to 11, "UNSCHEDULE" to 12, "RENAME" to 13, "MEMBERS" to 14,
             "GROUP_PHOTO" to 15, "MARK_UNREAD" to 16, "REPORT_JUNK" to 17, "PEERS" to 18, "FT_CAPABLE" to 19, "CALLER" to 20,
             "ACCOUNT" to 21, "FT_STATE" to 22, "BLOCKLIST" to 23, "PROGRESS" to 24, "CANCEL" to 25,
+            "RECYCLE" to 26,
         )
         assertEquals(spec, DirectWire.REQUEST_CODES)
         assertEquals(DirectWire.REQUEST_CODES.size, DirectWire.REQUEST_CODES.values.toSet().size)
@@ -803,5 +805,52 @@ class DirectWireTest {
         assertNull((DirectWire.decode(DirectWire.encode(r).put("part", "3")) as DirectArchive.Update.Reaction).part)
         val far = DirectWire.encode(r).put("part", 1_000_000)
         assertEquals(DirectArchive.MAX_PART_INDEX, (DirectWire.decode(far) as DirectArchive.Update.Reaction).part)
+    }
+
+    // --- B5: RECYCLE and the recycle kinds ---------------------------------------------------------
+
+    @Test
+    fun aRecycleRequestIsReadStrictly() {
+        val target = DirectWire.Target(listOf("tel:+15550000002"), null, null, "tel:+15550000001")
+        val r = DirectWire.RecycleRequest.fromJson(JSONObject(DirectWire.recycle(target, RecycleRules.OP_BIN, listOf("M1", "M2")).toString()))
+        assertEquals(RecycleRules.OP_BIN, r.op)
+        assertEquals(listOf("M1", "M2"), r.messages)
+        assertEquals(target, r.target)
+        assertNull(DirectWire.RecycleRequest.fromJson(JSONObject(DirectWire.recycle(target, RecycleRules.OP_PURGE).toString())).messages)
+        fun refused(o: JSONObject) = try {
+            DirectWire.RecycleRequest.fromJson(o)
+            false
+        } catch (e: org.json.JSONException) {
+            true
+        }
+        assertTrue(refused(DirectWire.recycle(target, "wipe")))
+        assertTrue(refused(DirectWire.recycle(target, RecycleRules.OP_RECOVER, listOf("M1"))))
+        assertTrue(refused(DirectWire.recycle(target, RecycleRules.OP_BIN, emptyList())))
+        assertTrue(refused(DirectWire.recycle(target, RecycleRules.OP_BIN, (0..500).map { "M$it" })))
+        assertTrue(refused(DirectWire.recycle(target, RecycleRules.OP_BIN, listOf("../x"))))
+        assertTrue(refused(DirectWire.recycle(target, RecycleRules.OP_BIN).put("messages", JSONArray().put(5))))
+    }
+
+    @Test
+    fun theRecycleKindsRoundTripAndAreReadAsUntrusted() {
+        fun trip(u: DirectArchive.Update) = DirectWire.decode(JSONObject(DirectWire.encodeUpdate(u).toString()))
+        for (u in listOf(
+            DirectArchive.Update.Recycle("imsg:tel:+15550000002", null, emptyList(), 1_700L),
+            DirectArchive.Update.Recycle(null, null, listOf("imsg:M1", "imsg:M2"), 1_700L),
+            DirectArchive.Update.Recover("imsg:group:G-1", "G-1"),
+            DirectArchive.Update.Purge("imsg:tel:+15550000002", null, emptyList()),
+            DirectArchive.Update.Purge(null, null, listOf("imsg:M1")),
+        )) {
+            assertEquals(u, trip(u))
+        }
+        val ignore = DirectArchive.Update.Ignore
+        assertEquals(ignore, DirectWire.decode(JSONObject().put("kind", "recycle").put("atMs", 5)))
+        assertEquals(ignore, DirectWire.decode(JSONObject().put("kind", "recycle").put("conversationId", "12345").put("atMs", 5)))
+        assertEquals(ignore, DirectWire.decode(JSONObject().put("kind", "recycle").put("conversationId", "imsg:x").put("atMs", "5")))
+        assertEquals(ignore, DirectWire.decode(JSONObject().put("kind", "purge").put("messageIds", JSONArray().put("tmp:abc"))))
+        assertEquals(ignore, DirectWire.decode(JSONObject().put("kind", "purge").put("messageIds", JSONArray((0..500).map { "imsg:M$it" }))))
+        assertEquals(ignore, DirectWire.decode(JSONObject().put("kind", "recover")))
+        assertEquals(ignore, DirectWire.decode(JSONObject().put("kind", "recover").put("conversationId", "imsg:x").put("groupGuid", "a/b")))
+        assertEquals(ignore, DirectWire.decode(JSONObject().put("kind", "recover").put("conversationId", "imsg:" + "x".repeat(300))))
     }
 }

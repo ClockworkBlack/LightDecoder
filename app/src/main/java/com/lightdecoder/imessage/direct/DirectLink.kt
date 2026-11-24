@@ -299,15 +299,19 @@ class DirectLink private constructor(
      * The iMessage chat with [address] (number or email) if that address is on iMessage: the stored
      * one, or a new one. Null when the library is not set up or Apple says it cannot get iMessages;
      * throws [DirectEngine.ImessageError] when Apple could not be asked.
+     * [revive]: the user is writing to them, so a chat of theirs in Recently Deleted comes back; else
+     * (a conversation with them only opens: [reachOnce]) it stays there, untouched, and this is null.
      */
-    suspend fun conversationFor(address: String): String? {
+    suspend fun conversationFor(address: String, revive: Boolean = false): String? {
         if (!active) return null
         manager.conversationWith(address)?.let { return it }
         val reply = requests.call(DirectWire.REACH, DirectWire.reach(address), REACH_TIMEOUT_MS)
         // The library could not be asked: that says nothing about whether they have iMessage.
         DirectWire.errorOf(reply)?.let { throw DirectEngine.ImessageError(it) }
         val dto = reply.optJSONObject("conversation")?.let(ConversationDto::fromJson) ?: return null
-        val stored = toArchive(dto)
+        val stored = toArchive(dto, revive = revive)
+        // Only looked up, not written to: a chat of theirs in Recently Deleted stays there, untouched.
+        if (stored.folder == Folder.DELETED.wire) return null
         repo.upsertConversation(stored)
         return stored.id
     }
@@ -358,7 +362,7 @@ class DirectLink private constructor(
         }
         if (notOnIMessage.isEmpty() && people.size <= 1) {
             val only = people.values.singleOrNull() ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_group_nobody))
-            return conversationFor(only) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_not_on_imessage, Handles.display(only)))
+            return conversationFor(only, revive = true) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_not_on_imessage, Handles.display(only)))
         }
         var from = ""
         for (handle in people.values) {
@@ -1100,12 +1104,27 @@ class DirectLink private constructor(
      * no row of the archive names as a file.
      */
     fun forgetConversationPictures(conversationId: String) {
-        val rows = repo.messagesHolding(
-            conversationId,
-            extraNeedles = listOf("\"image\"", "\"stickers\""),
-            reactionNeedles = listOf(DirectArchive.STICKER_TAPBACK),
-        )
-        for (row in rows) forgetPictures(row)
+        for (row in picturesHeld(conversationId)) forgetPictures(row)
+    }
+
+    /** The messages of [conversationId] that have pictures kept with them ([forgetPictures]). */
+    private fun picturesHeld(conversationId: String): List<MessageRow> = repo.messagesHolding(
+        conversationId,
+        extraNeedles = listOf("\"image\"", "\"stickers\""),
+        reactionNeedles = listOf(DirectArchive.STICKER_TAPBACK),
+    )
+
+    /**
+     * [conversationId] is deleted for good from Recently Deleted ([ArchiveRepository.purgeDeleted]), and
+     * then (only if it was still there: a Recover just before keeps all of it) what is kept of it outside
+     * the archive goes ([forgetConversation], its pictures as they were before the purge). How many
+     * chats went (0 or 1). Throws as the archive does.
+     */
+    fun purgeForGood(conversationId: String): Int {
+        val held = runCatching { picturesHeld(conversationId) }.getOrDefault(emptyList())
+        val purged = repo.purgeDeleted(conversationId)
+        if (purged > 0) forgetConversation(conversationId, held)
+        return purged
     }
 
     /**
@@ -1115,8 +1134,8 @@ class DirectLink private constructor(
      * it come back, it starts again from what Apple says then, not from a version someone set before),
      * and its own "Send Read Receipts". Each is tried whatever happens to the others.
      */
-    fun forgetConversation(conversationId: String) {
-        runCatching { forgetConversationPictures(conversationId) }
+    fun forgetConversation(conversationId: String, held: List<MessageRow>? = null) {
+        runCatching { (held ?: picturesHeld(conversationId)).forEach(::forgetPictures) }
         runCatching { GroupPhotos(app).forget(conversationId) }
         runCatching { groupVersions.forget(conversationId) }
         runCatching { receiptChoices.set(conversationId, null) }
@@ -1464,6 +1483,13 @@ class DirectLink private constructor(
         IMessageLog.add(app, "${IMessageLog.chatRef(row.conversationId)}: tapback ${if (remove) "taken back" else "sent"} through the iMessage library (Apple confirmed)")
     }
 
+    /** What a notification says of the user's tapback [emoji] on [row]: "Loved “…”" (its text as it is shown: invisible ink stays hidden). */
+    fun tapbackLine(row: MessageRow, emoji: String): String {
+        val quoted = tapbackText(IMessageExtra.shownText(row.text, row.extra, inkedLabel())).takeIf { it.isNotBlank() }?.let { app.getString(R.string.imessage_tapback_quote, it) }
+            ?: app.getString(R.string.imessage_tapback_a_message)
+        return tapbackNotice(app, emoji, quoted)
+    }
+
     /** The user's tapback on [messageId], if any. */
     private fun myTapback(messageId: String): String? = repo.message(messageId)?.reactions?.firstOrNull { it.fromMe }?.emoji
 
@@ -1595,6 +1621,8 @@ class DirectLink private constructor(
         member: Boolean? = null,
         /** The members to store, when not [c]'s (a stored group's own: [upsert]). */
         members: List<ParticipantDto>? = null,
+        /** Whether a chat in Recently Deleted comes back to the inbox with this ([RecycleRules.revives]); else it stays there. */
+        revive: Boolean = false,
     ): ConversationDto {
         val group = c.isGroup || groupId != null
         val id = archiveIdOf(c, groupId)
@@ -1616,7 +1644,7 @@ class DirectLink private constructor(
             name = name,
             isGroup = group,
             type = IMessageManager.TRANSPORT,
-            folder = existing?.folder?.takeIf { it.isNotEmpty() && it != Folder.DELETED.wire } ?: Folder.INBOX.wire,
+            folder = existing?.folder?.takeIf { it.isNotEmpty() && (it != Folder.DELETED.wire || !revive) } ?: Folder.INBOX.wire,
             unread = existing?.unread == true,
             pinned = existing?.pinned == true,
             // A group the user was removed from or left: read only, as on an iPhone, until they are
@@ -1849,6 +1877,9 @@ class DirectLink private constructor(
             is DirectArchive.Update.FaceTime -> faceTimeChanged(update.state)
             is DirectArchive.Update.ReadElsewhere -> readElsewhere(update)
             is DirectArchive.Update.MarkUnread -> markedUnreadElsewhere(update)
+            is DirectArchive.Update.Recycle -> recycled(update)
+            is DirectArchive.Update.Recover -> recovered(update)
+            is DirectArchive.Update.Purge -> purged(update)
             DirectArchive.Update.PeerCacheInvalidate -> devicesChanged()
             is DirectArchive.Update.Background -> background(update)
             is DirectArchive.Update.GroupPhoto -> groupPhoto(update)
@@ -1884,6 +1915,11 @@ class DirectLink private constructor(
      * ([claimInlineFiles]); a dropped one's go ([dropInlineFiles]).
      */
     private fun upsert(update: DirectArchive.Update.Upsert) {
+        // Deleted here (or on the user's other devices): Apple handing it over again does not bring it back.
+        if (repo.isTombstoned(update.message.id)) {
+            IMessageLog.add(app, "a message deleted here and handed over again was dropped")
+            return dropInlineFiles(update.message)
+        }
         // A group down to one other person is still that group, when it is stored as one.
         val groupId = update.groupGuid?.let(DirectArchive::groupConversationId)?.takeIf { repo.conversation(it)?.isGroup == true }
         if (update.groupOnly && groupId == null) return dropInlineFiles(update.message)
@@ -1916,13 +1952,17 @@ class DirectLink private constructor(
         // Whether the user is in the group: a change of its members says; so does a message the
         // user wrote in it on another device.
         val member = update.member ?: true.takeIf { fromMe && !system }
-        val conversation = toArchive(update.conversation, groupId, if (DirectArchive.isGroup(target)) groupNameAfter(target, update) else null, member, members)
+        // A chat in Recently Deleted comes back only with a new message sent after it was deleted.
+        val revive = repo.conversation(target)?.let { c ->
+            c.folderEnum != Folder.DELETED || RecycleRules.revives(existing != null, false, system, update.message.timestampMs, c.deletedAt)
+        } ?: true
+        val conversation = toArchive(update.conversation, groupId, if (DirectArchive.isGroup(target)) groupNameAfter(target, update) else null, member, members, revive)
         val onScreen = MessageNotifier.visibleConversationId(ChatService.IMESSAGE) == conversation.id
         val incoming = !fromMe && !system
         // The message moves the chat's latest message, time and snippet (see toArchive).
         // Only a message not stored before makes the chat unread: Apple handing one over again
         // (after a restart) leaves a chat the user read as read.
-        repo.upsertConversation(conversation.copy(unread = (conversation.unread || (incoming && existing == null)) && !onScreen, lastMessageTs = 0))
+        repo.upsertConversation(conversation.copy(unread = (conversation.unread || (incoming && existing == null)) && !onScreen, lastMessageTs = 0), update.message.timestampMs)
         // The group's version a change of its members (or photo) carried: a change from here goes as the
         // next one. One far ahead of the group's is not taken (every change from here would go as one
         // after it, and the group's photo be held against any change); the user's own from here, one
@@ -2059,7 +2099,8 @@ class DirectLink private constructor(
     private fun notifyIfStillNew(message: MessageDto) {
         val row = repo.message(message.id) ?: return
         if (row.direction != "in") return
-        if (repo.conversation(row.conversationId)?.unread != true) return
+        val chat = repo.conversation(row.conversationId)
+        if (chat?.unread != true || chat.folderEnum == Folder.DELETED) return
         // A game is open in an extension app, which asked for quiet.
         if (appEvents?.silences(row.conversationId) == true) return
         // Mentioned in a group: heard of even with the group's alerts hidden, as an iPhone's "Notify Me"
@@ -3298,6 +3339,137 @@ class DirectLink private constructor(
         receiptChoices.set(conversationId, on)
     }
 
+    // --- "Delete on All Devices" ---------------------------------------------------------------------
+
+    /**
+     * The stored chat a recycle from the user's other device names ([RecycleRules.chatOf]): a group by
+     * its guid; a chat with one person (in Recently Deleted or not) by their address. Null when none is
+     * stored here: nothing is taken then.
+     */
+    private fun recycleChat(conversationId: String?, groupGuid: String?): String? {
+        groupGuid?.let(DirectArchive::groupConversationId)?.takeIf { repo.conversation(it)?.isGroup == true }?.let { return it }
+        val id = conversationId ?: return null
+        if (DirectArchive.isGroup(id)) return id.takeIf { repo.conversation(it)?.isGroup == true }
+        val peer = Handles.display(id.removePrefix(DirectArchive.PREFIX))
+        manager.conversationWith(peer)?.let { return it }
+        repo.conversation(id)?.takeIf { !it.isGroup }?.let { return it.id }
+        return repo.conversations(Folder.DELETED).firstOrNull { c ->
+            !c.isGroup && repo.participants(c.id).filter { !it.isMe }.singleOrNull()?.let { isAddressOf(it, peer) } == true
+        }?.id
+    }
+
+    private val lastRetention = java.util.concurrent.atomic.AtomicLong(0)
+
+    /**
+     * Deletes for good, off the caller's thread, the chats in Recently Deleted past their time
+     * ([IMessageManager.purgeExpired]): at most once an hour, unless [now] it must (Recently Deleted opens).
+     */
+    fun purgeExpiredSoon(force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        val last = lastRetention.get()
+        if (!force && last != 0L && now - last < RETENTION_CHECK_MS) return
+        if (!lastRetention.compareAndSet(last, now)) return
+        scope.launch { runCatching { manager.purgeExpired() } }
+    }
+
+    /** Whether "Delete on All Devices" is on: off, nothing of the user's other devices' deletes is taken (the ":imessage" process holds to it too). */
+    private fun deleteSyncOn(): Boolean = runCatching { DirectPrefs.deleteOnAllDevices(app) }.getOrDefault(false)
+
+    /**
+     * The user's other device moved a chat to Recently Deleted (it goes there here too, as of then,
+     * its notifications gone), or deleted messages (they go here, for good: there is no Recently
+     * Deleted for messages here).
+     */
+    private fun recycled(update: DirectArchive.Update.Recycle) {
+        if (!deleteSyncOn()) return
+        if (update.conversationId == null) return removeAll(update.messageIds, "deleted on another of the user's devices")
+        val id = recycleChat(update.conversationId, update.groupGuid) ?: return IMessageLog.add(app, "a chat deleted on another of the user's devices is not stored here")
+        // Held again here to what the other process may name (a day in Recently Deleted at least before retention takes it).
+        if (!repo.moveToDeleted(id, RecycleRules.clampDeletedAt(update.atMs, System.currentTimeMillis()))) return
+        MessageNotifier.cancel(app, id, ChatService.IMESSAGE)
+        IMessageLog.add(app, "${IMessageLog.chatRef(id)}: moved to Recently Deleted on another of the user's devices")
+    }
+
+    /** The user's other device recovered a chat from Recently Deleted: here too, when it is there. */
+    private fun recovered(update: DirectArchive.Update.Recover) {
+        if (!deleteSyncOn()) return
+        val id = recycleChat(update.conversationId, update.groupGuid) ?: return
+        if (repo.conversation(id)?.folderEnum != Folder.DELETED) return
+        if (repo.restoreDeleted(id)) IMessageLog.add(app, "${IMessageLog.chatRef(id)}: recovered on another of the user's devices")
+    }
+
+    /**
+     * The user's other device deleted a chat for good: taken only for one in Recently Deleted here,
+     * and only once it has been there a day ([RecycleRules.purgeNow]; until then it is set to go when
+     * that day is over). A chat that is not there loses nothing. Messages named go for good.
+     */
+    private fun purged(update: DirectArchive.Update.Purge, now: Long = System.currentTimeMillis()) {
+        if (!deleteSyncOn()) return
+        if (update.conversationId == null) return removeAll(update.messageIds, "deleted for good on another of the user's devices")
+        val id = recycleChat(update.conversationId, update.groupGuid) ?: return
+        val row = repo.conversation(id) ?: return
+        if (row.folderEnum != Folder.DELETED) {
+            refused("a deletion for good", id, "of a chat not in Recently Deleted")
+            return
+        }
+        when (val decision = RecycleRules.purgeNow(row.deletedAt, now)) {
+            is RecycleRules.PurgeNow.Defer -> {
+                repo.setDeletedAt(id, decision.deletedAt)
+                IMessageLog.add(app, "${IMessageLog.chatRef(id)}: deleted for good on another of the user's devices; kept here until its first day in Recently Deleted is over")
+            }
+            RecycleRules.PurgeNow.Delete -> {
+                if (purgeForGood(id) > 0) IMessageLog.add(app, "${IMessageLog.chatRef(id)}: deleted for good on another of the user's devices")
+            }
+        }
+    }
+
+    /** Messages [ids] go for good, with the pictures kept with them, and are noted as deleted ([ArchiveRepository.isTombstoned]). */
+    private fun removeAll(ids: List<String>, why: String) {
+        var removed = 0
+        for (id in ids.take(RecycleRules.MAX_MESSAGES)) {
+            if (!DirectArchive.isImessage(id)) continue
+            val row = repo.message(id)
+            row?.let(::forgetPictures)
+            if (row != null) {
+                repo.applyDeletion(id)
+                removed++
+            }
+        }
+        // Also those not stored yet: should Apple hand one over later, it stays deleted.
+        repo.tombstone(ids.filter(DirectArchive::isImessage))
+        if (removed > 0) IMessageLog.add(app, "$removed message(s) $why")
+    }
+
+    /**
+     * What the RECYCLE request for [conversationId] goes to: the chat as the library knows it. Null
+     * when "Delete on All Devices" is off, the library is not set up, or the chat is not one it can
+     * name. Made before a chat is deleted here, as its members are read from the archive.
+     */
+    fun recycleTarget(conversationId: String): DirectWire.Target? {
+        if (!active || !deleteSyncOn()) return null
+        return runCatching { targetOf(conversationId) }.getOrNull()
+    }
+
+    /**
+     * Tells the user's other devices, with "Delete on All Devices" on, of [op] on the chat [target]
+     * (from [recycleTarget]) or its messages [guids]. Never throws, and never waits for Apple: one
+     * that does not go is only logged.
+     */
+    fun sendRecycle(target: DirectWire.Target?, op: String, guids: List<String>? = null, conversationId: String = "") {
+        if (target == null || !active || !deleteSyncOn()) return
+        if (guids != null && guids.isEmpty()) return
+        scope.launch {
+            try {
+                val error = DirectWire.errorOf(requests.call(DirectWire.RECYCLE, DirectWire.recycle(target, op, guids?.take(RecycleRules.MAX_MESSAGES)), NOTICE_TIMEOUT_MS))
+                if (error != null) IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: the user's other devices were not told of a delete")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "the user's other devices were not told of a delete (${e::class.java.simpleName})")
+            }
+        }
+    }
+
     /**
      * The user marked a chat unread on another of their devices (only ever taken from the user's own
      * verified devices: [DirectArchive.map]): it is unread here too, as an iPhone shows it, with no
@@ -3442,7 +3614,7 @@ class DirectLink private constructor(
         withContext(NonCancellable) {
             failOn(requests.call(DirectWire.REPORT_JUNK, DirectWire.reportJunk(target, messages), SEND_TIMEOUT_MS))
             IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: ${messages.size} message(s) reported to Apple as junk through the iMessage library; the chat deleted here")
-            manager.deleteConversation(conversationId)
+            manager.deleteConversationForGood(conversationId)
         }
     }
 
@@ -3792,7 +3964,9 @@ class DirectLink private constructor(
             IMessageLog.add(app, "a missed FaceTime call from an unknown caller was not noted: too many new chats from missed calls this hour")
             return
         }
-        val chatId = theirs ?: toArchive(described).let { conversation ->
+        // A chat of theirs in Recently Deleted comes back with a new call made after it was deleted.
+        val revive = existing == null && startedMs > (repo.conversation(described.id)?.deletedAt ?: 0L)
+        val chatId = theirs ?: toArchive(described, revive = revive).let { conversation ->
             repo.upsertConversation(conversation.copy(lastMessageTs = 0))
             conversation.id
         }
@@ -3897,6 +4071,8 @@ class DirectLink private constructor(
                 IMessageLog.add(context, "iMessage library registered: Blue Bubbles turned on to show its chats")
             }
             DirectService.start(context)
+            // Chats in Recently Deleted past their time go (at most once an hour from here).
+            get(context).purgeExpiredSoon()
         }
 
         /**
@@ -4112,6 +4288,9 @@ class DirectLink private constructor(
 
         /** Typing and read receipts wait for no answer from Apple: only for the session coming up. */
         private const val NOTICE_TIMEOUT_MS = 30_000L
+
+        /** How often, at most, the app's start looks for chats past their time in Recently Deleted. */
+        private const val RETENTION_CHECK_MS = 60 * 60 * 1000L
 
         /** The Apple Account's state is answered at once (the process may have to start first). */
         private const val ACCOUNT_TIMEOUT_MS = 20_000L

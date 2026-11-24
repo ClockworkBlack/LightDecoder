@@ -851,7 +851,7 @@ class PhoneStyleScreenTest {
 
                 // And, new with the bubbles' own tap: a reply's bubble opens its thread here too.
                 assertTrue(rowOf(activity, "Perfect, I'll bring the poles")!!.findViewById<View>(R.id.bubble).performClick())
-                ShadowLooper.idleMainLooper()
+                ShadowLooper.idleMainLooper(DOUBLE_TAP_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
                 assertEquals("imsg:R3", activity.threadPanel!!.rootId)
                 activity.threadPanel!!.dismiss()
             }
@@ -935,7 +935,8 @@ class PhoneStyleScreenTest {
             view.dispatchTouchEvent(event)
             event.recycle()
         }
-        ShadowLooper.idleMainLooper()
+        // A bubble's single tap waits to be told from a double tap.
+        ShadowLooper.idleMainLooper(DOUBLE_TAP_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
     }
 
     @Test
@@ -998,7 +999,11 @@ class PhoneStyleScreenTest {
         launch(ALICE_DIRECT).use { scenario ->
             scenario.waitFor("the replies") { rowOf(it, "Turkey or ham, by the way?") != null && rowOf(it, "Lunch at the summit?") != null }
             scenario.onActivity { activity ->
-                fun opened(): List<String>? = activity.threadPanel?.also { assertTrue(it.isShowing) }?.let(::panelTexts)
+                fun opened(): List<String>? {
+                    // A bubble's single tap waits to be told from a double tap.
+                    ShadowLooper.idleMainLooper(DOUBLE_TAP_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    return activity.threadPanel?.also { assertTrue(it.isShowing) }?.let(::panelTexts)
+                }
                 fun close() {
                     activity.threadPanel?.dismiss()
                     ShadowLooper.idleMainLooper()
@@ -1013,7 +1018,12 @@ class PhoneStyleScreenTest {
                 assertEquals("imsg:R3", activity.threadPanel!!.rootId)
                 // In the thread view a bubble's tap opens nothing more.
                 val inPanel = activity.threadPanel!!.binding.threadMessages
-                assertTrue(two.findAll(inPanel) { it.id == R.id.bubble }.none { it.isClickable })
+                // (A double tap there reacts; a single tap opens nothing.)
+                for (b in two.findAll(inPanel) { it.id == R.id.bubble }) {
+                    b.performClick()
+                    ShadowLooper.idleMainLooper(DOUBLE_TAP_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    assertEquals("imsg:R3", activity.threadPanel!!.rootId)
+                }
                 assertTrue("no copies in it", two.findAll(inPanel) { it.id == R.id.threadQuote }.none { it.visibility == View.VISIBLE })
                 close()
                 // A reply to a reply: the thread of the first message.
@@ -1031,9 +1041,9 @@ class PhoneStyleScreenTest {
                 assertTrue(rowOf(activity, "Who's bringing the tent?")!!.findViewById<View>(R.id.replyCount).performClick())
                 assertEquals(tent, opened())
                 close()
-                // A message in no thread: a tap does nothing.
-                assertFalse(bubble(activity, "8 works").isClickable)
-                assertFalse(bubble(activity, "8 works").performClick())
+                // A message in no thread: a tap does nothing (it only waits for a second, which would react).
+                bubble(activity, "8 works").performClick()
+                ShadowLooper.idleMainLooper(DOUBLE_TAP_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
                 assertNull(activity.threadPanel)
                 // A long press is still the message's actions, not the thread.
                 assertTrue(bubble(activity, "Tent is in my car").performLongClick())
@@ -1099,7 +1109,7 @@ class PhoneStyleScreenTest {
                 // Invisible ink: the first tap shows the text.
                 val inked = rowOfId("imsg:T3")
                 assertTrue(inked.findViewById<View>(R.id.bubble).performClick())
-                ShadowLooper.idleMainLooper()
+                ShadowLooper.idleMainLooper(DOUBLE_TAP_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
                 assertNull("the first tap shows it", activity.threadPanel)
             }
             scenario.waitFor("the ink gone") { rowOf(it, "The secret spot") != null }
@@ -1107,7 +1117,7 @@ class PhoneStyleScreenTest {
                 val list = activity.findViewById<RecyclerView>(R.id.messages)
                 // The next tap is as on any reply.
                 assertTrue(bubble(activity, "The secret spot").performClick())
-                ShadowLooper.idleMainLooper()
+                ShadowLooper.idleMainLooper(DOUBLE_TAP_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
                 assertEquals("imsg:T1", activity.threadPanel?.rootId)
                 activity.threadPanel?.dismiss()
                 ShadowLooper.idleMainLooper()
@@ -1220,7 +1230,9 @@ class PhoneStyleScreenTest {
                 assertEquals(View.VISIBLE, row.findViewById<View>(R.id.quote).visibility)
                 assertEquals("Who's bringing the tent?", row.findViewById<TextView>(R.id.quoteText).text.toString())
                 assertEquals(View.GONE, row.findViewById<View>(R.id.threadQuote).visibility)
-                assertFalse("a tap on it opens nothing", row.findViewById<View>(R.id.bubble).performClick())
+                row.findViewById<View>(R.id.bubble).performClick()
+                ShadowLooper.idleMainLooper(DOUBLE_TAP_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+                assertNull("a tap on it opens nothing", activity.threadPanel)
                 assertEquals(View.GONE, rowOf(activity, "Who's bringing the tent?")!!.findViewById<View>(R.id.replyCount).visibility)
                 assertTrue(items(activity).filterIsInstance<ThreadItem.Message>().all { it.thread == null })
                 assertEquals(0, linesDrawn(activity.findViewById(R.id.messages)))
@@ -1353,6 +1365,8 @@ class PhoneStyleScreenTest {
     }
 
     companion object {
+        /** Longer than a double tap's timeout: a bubble's single tap has run by then ([com.lightdecoder.ui.chat.DoubleTaps]). */
+        const val DOUBLE_TAP_WAIT_MS = 400L
         const val IM_DB = "phone-style-test.db"
         const val ALICE_DIRECT = "imsg:tel:+15551234567"
         const val GROUP = "imsg:group:11111111-2222-3333-4444-555555555555"

@@ -69,7 +69,13 @@ class ConversationsAdapter(
         val snippet = if (item.blocked) context.getString(R.string.blocked_row) else snippetText(holder, row)
         b.snippet.text = snippet
         b.snippet.setTypeface(null, if (row.unread) Typeface.BOLD else Typeface.NORMAL)
-        val time = TimeFormat.listTime(context, row.lastMessageTs)
+        // In Recently Deleted an iMessage chat shows how long it is kept still ("29 days").
+        val time = if (item.service == com.lightdecoder.chat.ChatService.IMESSAGE && row.folderEnum == com.lightdecoder.relay.Folder.DELETED) {
+            val days = com.lightdecoder.imessage.direct.RecycleRules.daysLeft(row.deletedAt, System.currentTimeMillis())
+            context.resources.getQuantityString(R.plurals.imessage_deleted_days_left, days, days)
+        } else {
+            TimeFormat.listTime(context, row.lastMessageTs)
+        }
         b.time.text = time
         b.unreadDot.visibility = if (row.unread) View.VISIBLE else View.GONE
         b.pinned.visibility = if (row.pinned) View.VISIBLE else View.GONE

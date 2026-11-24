@@ -36,6 +36,18 @@ class ReplyReceiver : BroadcastReceiver() {
             ?.getCharSequence(MessageNotifier.KEY_REPLY_TEXT)
             ?.toString()?.trim()
         if (text.isNullOrEmpty()) return
+        // One of an iMessage notification's tapback chips: a tapback, never a text. Typed by hand (even
+        // "❤️"), it stays a reply. With the tapbacks offered (a target named), a choice it did not offer
+        // (the system's own suggestions are not then) is nothing. With none offered, a choice is the
+        // system's suggested reply, sent as text as ever (even "👍"), as other services' are.
+        if (service == ChatService.IMESSAGE && RemoteInput.getResultsSource(intent) == RemoteInput.SOURCE_CHOICE) {
+            val target = intent.getStringExtra(MessageNotifier.EXTRA_TARGET_MESSAGE).orEmpty()
+            if (target.isNotEmpty()) {
+                if (text in MessageNotifier.TAPBACK_CHOICES) tapback(context, service, conversationId, target, text)
+                else MessageNotifier.cancel(context, conversationId, service)
+                return
+            }
+        }
         val backend = ChatBackends.get(context, service)
         // Blue Bubbles: to someone with an iMessage chat, a reply from the notification goes as iMessage, never green.
         val companion = if (service == ChatService.MESSAGES && com.lightdecoder.imessage.IMessagePrefs.enabled(context)) {
@@ -80,6 +92,32 @@ class ReplyReceiver : BroadcastReceiver() {
     }
 
     /**
+     * A tapback chosen on a notification: put on [messageId] through the iMessage library, then shown
+     * in the notification ("You: Loved “…”"); the chat is not marked read. Nothing at all unless every
+     * check holds ([tapbackRow]); on failure the notification goes (its spinner with it).
+     */
+    private fun tapback(context: Context, service: ChatService, conversationId: String, messageId: String, emoji: String) {
+        val row = tapbackRow(context, service, conversationId, messageId, emoji)
+        if (row == null) {
+            MessageNotifier.cancel(context, conversationId, service)
+            return
+        }
+        val pending = goAsync()
+        background.launch {
+            try {
+                val link = com.lightdecoder.imessage.direct.DirectLink.get(context)
+                link.react(row.id, emoji, remove = false)
+                val repo = com.lightdecoder.archive.ArchiveRepository.get(context, ChatService.IMESSAGE)
+                MessageNotifier.onReplySent(context, repo, conversationId, link.tapbackLine(row, emoji))
+            } catch (t: Throwable) {
+                MessageNotifier.cancel(context, conversationId, service)
+            } finally {
+                pending.finish()
+            }
+        }
+    }
+
+    /**
      * Clears the notification at once; telling the phone may take longer
      * than a receiver may run, so that part carries on in the manager.
      */
@@ -95,7 +133,33 @@ class ReplyReceiver : BroadcastReceiver() {
         }
     }
 
-    private companion object {
+    internal companion object {
         val background = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+        /**
+         * The message a tapback from a notification may go on, checked in this order: the notification is
+         * iMessage's; [messageId] is stored; in [conversationId]; someone else's; an iMessage; one the
+         * library can put a tapback on now; [emoji] one of Apple's six; its sender not blocked. Null when
+         * any fails. What filled the intent in is never trusted for more than naming them.
+         */
+        fun tapbackRow(context: Context, service: ChatService, conversationId: String, messageId: String, emoji: String): com.lightdecoder.archive.MessageRow? = try {
+            if (service != ChatService.IMESSAGE || messageId.isEmpty()) {
+                null
+            } else {
+                val row = com.lightdecoder.archive.ArchiveRepository.get(context, ChatService.IMESSAGE).message(messageId)
+                val link = com.lightdecoder.imessage.direct.DirectLink.get(context)
+                row?.takeIf {
+                    it.conversationId == conversationId &&
+                        it.direction == "in" && !it.isOutgoing &&
+                        com.lightdecoder.imessage.direct.DirectArchive.isImessage(it.id) &&
+                        link.canReact(it) &&
+                        emoji in MessageNotifier.TAPBACK_CHOICES &&
+                        !com.lightdecoder.chat.BlockList.get(context).isBlocked(it.senderId) &&
+                        !link.blockedChat(conversationId)
+                }
+            }
+        } catch (e: RuntimeException) {
+            null
+        }
     }
 }

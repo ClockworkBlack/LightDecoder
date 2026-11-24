@@ -222,12 +222,35 @@ internal object ServiceUi {
     }
 
     @StringRes
-    fun deleteConversationBody(service: ChatService, direct: Boolean): Int = when (service) {
+    fun deleteConversationBody(service: ChatService, direct: Boolean, everywhere: Boolean = false): Int = when (service) {
         ChatService.MESSAGES -> R.string.chat_delete_conversation_body
         ChatService.WHATSAPP -> R.string.chat_wa_delete_conversation_body
         ChatService.GMAIL -> R.string.mail_delete_conversation_body
-        ChatService.IMESSAGE -> if (direct) R.string.imessage_delete_conversation_body_direct else R.string.imessage_delete_conversation_body
+        // Through the iMessage library it goes to Recently Deleted ("Delete on All Devices": on the user's other devices too).
+        ChatService.IMESSAGE -> when {
+            !direct -> R.string.imessage_delete_conversation_body
+            everywhere -> R.string.imessage_delete_conversation_body_everywhere
+            else -> R.string.imessage_delete_conversation_body_recently
+        }
     }
+
+    /**
+     * What a Messages conversation's delete dialog adds when its iMessage chats ([companions]: any)
+     * go with it through the iMessage library ([direct]): they move to Recently Deleted (with
+     * [everywhere], "Delete on All Devices", they are deleted from the user's other devices too).
+     * Null when nothing is added.
+     */
+    @StringRes
+    fun deleteCompanionsNote(companions: Boolean, direct: Boolean, everywhere: Boolean): Int? = when {
+        !companions || !direct -> null
+        everywhere -> R.string.imessage_delete_companion_everywhere
+        else -> R.string.imessage_delete_companion_recently
+    }
+
+    /** The body of "Delete All" in Recently Deleted: with [everywhere], from the user's other devices too. */
+    @StringRes
+    fun deleteAllBody(everywhere: Boolean): Int =
+        if (everywhere) R.string.imessage_delete_all_body_everywhere else R.string.imessage_delete_all_body
 }
 
 /**

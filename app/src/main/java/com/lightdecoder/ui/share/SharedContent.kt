@@ -80,6 +80,35 @@ data class SharedContent(val text: String, val streams: List<Uri>) {
         }
 
         /**
+         * Copies files this app has ([files]: a forwarded message's, read from its archive) into the
+         * same folder [copyIn] writes, as uris of the app's own provider ([isOwnCopy] takes them), in
+         * order ([mimes]: each one's type, for its name's extension), with the same limits ([MAX_STREAMS], [MAX_BYTES]): one that is missing, empty or too
+         * large is left out. Not on the main thread.
+         */
+        fun copyOwn(context: Context, files: List<File>, mimes: List<String?> = emptyList()): List<Uri> {
+            val root = File(context.cacheDir, DIR)
+            purge(root, System.currentTimeMillis())
+            return files.take(MAX_STREAMS).mapIndexedNotNull { i, source ->
+                if (!source.isFile || source.length() == 0L || source.length() > MAX_BYTES) return@mapIndexedNotNull null
+                val dir = File(root, UUID.randomUUID().toString())
+                try {
+                    dir.mkdirs()
+                    val file = File(dir, fileName(source.name, mimes.getOrNull(i)))
+                    val whole = source.inputStream().use { input -> file.outputStream().use { out -> copyCapped(input, out, MAX_BYTES) } }
+                    if (!whole || file.length() == 0L) {
+                        dir.deleteRecursively()
+                        null
+                    } else {
+                        FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+                    }
+                } catch (e: Exception) {
+                    dir.deleteRecursively()
+                    null
+                }
+            }
+        }
+
+        /**
          * Whether [uri] is one of [copyIn]'s copies (this app's provider, its "shared-in" folder):
          * the only files a conversation takes from a share ([com.lightdecoder.relay.RelayIntents.threadWithShared]).
          */

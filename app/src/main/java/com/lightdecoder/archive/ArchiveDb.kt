@@ -40,6 +40,19 @@ class ArchiveDb(context: Context, name: String? = NAME) :
         if (oldVersion < 2) MEDIA_PATH_INDEXES.forEach(db::execSQL)
         // Version 3: when a message was last edited, and a service's own display data.
         if (oldVersion < 3) addMessageColumns(db)
+        // Version 4: when a conversation went to Recently Deleted, where its unread messages begin,
+        // and the iMessage ids deleted here (so that Apple handing one over again does not bring it back).
+        if (oldVersion < 4) addVersion4(db)
+    }
+
+    /** The version 4 columns and table that are not there yet (an upgrade cut short may have added some). */
+    private fun addVersion4(db: SQLiteDatabase) {
+        val have = db.rawQuery("PRAGMA table_info(conversations)", null).use { c ->
+            buildSet { while (c.moveToNext()) add(c.getString(c.getColumnIndexOrThrow("name"))) }
+        }
+        // No conversations table at all is no archive to add to (only a test's partial database).
+        if (have.isNotEmpty()) for ((column, sql) in CONVERSATION_V4_COLUMNS) if (column !in have) db.execSQL(sql)
+        DELETED_GUIDS.forEach(db::execSQL)
     }
 
     /**
@@ -61,7 +74,7 @@ class ArchiveDb(context: Context, name: String? = NAME) :
         const val NAME_WHATSAPP = "whatsapp-archive.db"
         const val NAME_GMAIL = "gmail-archive.db"
         const val NAME_IMESSAGE = "imessage-archive.db"
-        const val VERSION = 3
+        const val VERSION = 4
 
         /** The database file of [service]'s archive. */
         fun nameFor(service: ChatService): String = when (service) {
@@ -92,10 +105,29 @@ class ArchiveDb(context: Context, name: String? = NAME) :
             "extra_json" to "ALTER TABLE messages ADD COLUMN extra_json TEXT NOT NULL DEFAULT ''",
         )
 
-        /** A new archive, as of [VERSION]. */
-        private val SCHEMA get() = BASE_SCHEMA + MEDIA_PATH_INDEXES
+        /**
+         * Version 4, on conversations: `deleted_at`, when it went to Recently Deleted (ms; 0 = not
+         * there, or not known), and `first_unread_ts`, the time of the message it became unread with
+         * (ms; 0 = read, or marked unread with no message: "Jump to first unread" then shows nothing).
+         */
+        private val CONVERSATION_V4_COLUMNS = listOf(
+            "deleted_at" to "ALTER TABLE conversations ADD COLUMN deleted_at INTEGER NOT NULL DEFAULT 0",
+            "first_unread_ts" to "ALTER TABLE conversations ADD COLUMN first_unread_ts INTEGER NOT NULL DEFAULT 0",
+        )
 
-        /** Version 1's tables, with the columns version 3 added to messages ([MESSAGE_V3_COLUMNS]). */
+        /**
+         * Version 4: the message ids deleted here (iMessage's), with when, kept to
+         * [ArchiveRepository.MAX_TOMBSTONES] and [ArchiveRepository.TOMBSTONE_DAYS] days.
+         */
+        private val DELETED_GUIDS = listOf(
+            "CREATE TABLE IF NOT EXISTS deleted_guids (guid TEXT PRIMARY KEY, at INTEGER NOT NULL)",
+            "CREATE INDEX IF NOT EXISTS idx_deleted_guids_at ON deleted_guids(at)",
+        )
+
+        /** A new archive, as of [VERSION]. */
+        private val SCHEMA get() = BASE_SCHEMA + MEDIA_PATH_INDEXES + DELETED_GUIDS
+
+        /** Version 1's tables, with the columns version 3 added to messages ([MESSAGE_V3_COLUMNS]) and version 4 to conversations ([CONVERSATION_V4_COLUMNS]). */
         private val BASE_SCHEMA = listOf(
             """CREATE TABLE conversations (
                 conversation_id TEXT PRIMARY KEY,
@@ -116,7 +148,9 @@ class ArchiveDb(context: Context, name: String? = NAME) :
                 avatar_color TEXT NOT NULL DEFAULT '',
                 default_outgoing_id TEXT NOT NULL DEFAULT '',
                 raw_json TEXT,
-                updated_at INTEGER NOT NULL
+                updated_at INTEGER NOT NULL,
+                deleted_at INTEGER NOT NULL DEFAULT 0,
+                first_unread_ts INTEGER NOT NULL DEFAULT 0
             )""",
             "CREATE INDEX idx_conversations_folder ON conversations(folder, pinned, last_message_ts)",
             """CREATE TABLE participants (
