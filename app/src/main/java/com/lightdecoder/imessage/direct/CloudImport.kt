@@ -168,9 +168,13 @@ class CloudImport(
         }
     }
 
-    /** Kept, unless the run was stopped meanwhile (a [forget] deletes what is kept once it ended). */
+    /**
+     * Kept, unless the run was stopped meanwhile (a [forget] deletes what is kept once it ended), or
+     * it is off now: the account went (S5: its tokens were deleted) while a page was on its way.
+     */
     private suspend fun save(state: State) {
         currentCoroutineContext().ensureActive()
+        if (!enabled()) return
         state.save(dir)
     }
 

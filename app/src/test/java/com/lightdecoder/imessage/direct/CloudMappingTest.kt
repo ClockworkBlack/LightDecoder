@@ -233,6 +233,16 @@ class CloudMappingTest {
     }
 
     @Test
+    fun aPageThatComesAfterTheAccountWentKeepsNoTokens() = runTest {
+        // The account goes (its tokens deleted, S5) while the first page is on its way.
+        bridge.chatPages += { on = false; CloudChatPage("c1".toByteArray(), emptyMap(), 1) }
+        val run = import(StandardTestDispatcher(testScheduler))
+        assertTrue(run.start(0))
+        run.join()
+        assertFalse("nothing written again", File(dir, "state.json").exists())
+    }
+
+    @Test
     fun forgetWaitsForTheRunSoNothingOfItIsWrittenAgain() = runBlocking {
         val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
         bridge.chatPages += { kotlinx.coroutines.runBlocking { gate.await() }; CloudChatPage("c".toByteArray(), emptyMap(), 1) }
