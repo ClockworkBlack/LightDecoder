@@ -337,3 +337,12 @@ cd ob && git fetch origin rustpush --tags
 git log origin/rustpush --format='%H %cs' -- rust/src/frb_generated.rs | while read h d; do
   echo "$(git show $h:rust/src/frb_generated.rs | grep -o 'CONTENT_HASH: i32 = -\?[0-9]*' | grep -o -- '-\?[0-9]*$') $h $d"; done
 ```
+
+## 0.5.74 (2026-11-24): FaceTime II, blocking, Telecom, media, optional Apple Account
+- Group FaceTime, picture-in-picture, return-to-call bar and the FaceTime list; blocking (local) and a
+  self-managed Telecom service for Bluetooth and car buttons; progress and cancel, photo stacks,
+  Live Photo playback and location cards; Recently Deleted with optional delete sync, Forward,
+  notification and double-tap tapbacks, phrase effects.
+- Optional "Sign in with Apple Account" (iCloud services only; iMessage stays on the phone number),
+  which unlocks Name & Photo, Focus and a read-only Messages in iCloud import. Everything is inert
+  while signed out. Sign-out is local only. See HANDOVER.md for the files and rules.

@@ -39,8 +39,8 @@ android {
         applicationId = "com.lightdecoder"
         minSdk = 26
         targetSdk = 36
-        versionCode = 84
-        versionName = "0.5.73"
+        versionCode = 85
+        versionName = "0.5.74"
         // On-device tests (app/src/androidTest): the Blue Bubbles round trip against the
         // stand-in OpenBubbles app (:fakebubbles), run on an emulator by .github/workflows/device-test.yml.
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

@@ -8,6 +8,40 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
    had earlier chosen "build with a warning", then "pause on Discord", and has now asked for
    the web-view tab only, with no bridge). **Instagram: skipped** (ban risk, like Messenger).
 
+## 0.5.74 (versionCode 85) - FaceTime II, blocking, Telecom, media, Recently Deleted, optional Apple Account
+- Branch `ccr-ffe9dbd4-xu00fq-isolated`. Plan with every rule and wire code: SPEC2 (session scratchpad);
+  wire codes 21-30 and UPDATE kinds account, callstate, recycle/recover/purge, profileOffer, focus,
+  cloudBatch. Includes the 0.5.73 hotfix (merged); its fit, rotation and zoom apply to every tile
+  through `ui/imessage/FittedVideo`.
+- **B1 Apple Account (optional):** `AppleAccountActivity`, `AppleAccount`, `AppleAccountRules`,
+  `AccountFiles`, `AccountBridge`, `ProcessRestart`. iCloud services only; iMessage stays on the
+  phone number. Password in :imessage memory only. Commit = :imessage restart, made only while a
+  LightDecoder screen is in sight (no timers), never during a call or an in-flight request. Sign-out
+  is local (`resetAppleLogin`) and wipes every account file and Keystore key. The S8 never-call list
+  is enforced by a source scan in `AppleAccountManifestTest`.
+- **B2 FaceTime II:** group calls (authenticated joiner only, per-call invite bucket, Ignore for
+  unknown group callers), tiles (`TileLayout`, at most 6 decoded + shared screen), participant
+  sheet, PiP (`PipParams`, Mute/Camera Off/End; camera pauses at screen-off and over the keyguard),
+  return-to-call bar, `CallsActivity` (FaceTime list).
+- **B3:** local block list (`chat/BlockList`, salted hashes to :imessage via BLOCKLIST=23), self-managed
+  Telecom (`FaceTimeConnectionService`, `TelecomCalls`; kill switch "Use with Bluetooth and car"),
+  cellular watcher (`CellularWatch`).
+- **B4:** progress/cancel (PROGRESS=24, CANCEL=25, `ProgressThrottle`, `Transfers`), batch send and
+  photo stacks (`MediaStacks`), Live Photo playback (`LivePhotoPlayer`, receive only), location cards
+  (`AppleLocation`, `CurrentLocation`; optional Geocoder never on own cards).
+- **B5:** archive schema v4 (deleted_at, first_unread_ts, deleted_guids), Recently Deleted (30 days)
+  with optional delete sync (`RecycleRules`, RECYCLE=26, owner's own devices only, 24 h hold from
+  when this phone saw it), jump to first unread (`CatchUp`), Forward (`ForwardActivity`),
+  notification tapback, double-tap, phrase effects.
+- **B6 (signed in only, inert otherwise):** Name & Photo (`Profiles`, `chat/SharedProfiles`), Focus
+  (`FocusStatus`, `FocusSharer`, `chat/FocusStates`), Messages in iCloud (`KeychainJoin` by device
+  approval, fails closed on ADP; `CloudImport`/`CloudMapping`, read-only; `CloudDownloads`).
+- Final security audit (5 areas): 11 findings, all fixed.
+- **Never run on a phone or against an iPhone, and the Apple Account never with a real Apple ID.**
+  Device checks are in SPEC2 section 8 and in the owner's 0.5.74 checklist.
+- Unit tests: 2055 (4 skipped), all passing. Not built: Find My, FaceTime links, sharing this
+  phone's screen, adding people mid-call, Live Photo sending, Apple-side sign-out.
+
 ## 0.5.73 (versionCode 84) - hotfix: FaceTime video stretched, no zoom (Galaxy Z Fold 7)
 - Made on branch `ccr-1d2709f2-vu6cl9` from `ccr-ffe9dbd4-xu00fq-isolated` at 0.5.72, apart from the
   session working there; merge it into that line.
@@ -25,7 +59,7 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
   usual phones (90 back / 270 front) give exactly OpenBubbles' old table.
 - **Not run on a phone.** If the other side's picture is upside down when they hold the phone
   upright, swap 0 and 1 in `VideoFit.degreesForStream`. Tests: `VideoFitTest`, `NativeCallTest`.
-  Next version: 0.5.74 / 85.
+  Merged into 0.5.74.
 
 ## 0.5.72 (versionCode 83) - FaceTime audio and video calls (one-to-one)
 - Owner asked for FaceTime. The bundled library has the signalling and the media engine; guide kept in
