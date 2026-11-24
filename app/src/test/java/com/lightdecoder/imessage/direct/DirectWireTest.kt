@@ -598,7 +598,7 @@ class DirectWireTest {
             "EXTENSION" to 9, "UPDATE" to 10, "BACKGROUND" to 11, "UNSCHEDULE" to 12, "RENAME" to 13, "MEMBERS" to 14,
             "GROUP_PHOTO" to 15, "MARK_UNREAD" to 16, "REPORT_JUNK" to 17, "PEERS" to 18, "FT_CAPABLE" to 19, "CALLER" to 20,
             "ACCOUNT" to 21, "FT_STATE" to 22, "BLOCKLIST" to 23, "PROGRESS" to 24, "CANCEL" to 25,
-            "RECYCLE" to 26,
+            "RECYCLE" to 26, "NOTIFY_ANYWAY" to 27, "PROFILE_FETCH" to 28, "PROFILE_SHARE" to 29, "FOCUS_SUBSCRIBE" to 30,
         )
         assertEquals(spec, DirectWire.REQUEST_CODES)
         assertEquals(DirectWire.REQUEST_CODES.size, DirectWire.REQUEST_CODES.values.toSet().size)
@@ -611,7 +611,7 @@ class DirectWireTest {
     fun theAccountsStateCrossesAsBooleansOnly() {
         val state = AccountState(signedIn = true, attention = false, icloud = true)
         val reply = JSONObject(state.toJson().toString())
-        assertEquals(setOf("signedIn", "attention", "icloud", "clique", "focus", "history"), reply.keys().asSequence().toSet())
+        assertEquals(setOf("signedIn", "attention", "icloud", "clique", "focus", "history", "profiles", "profile"), reply.keys().asSequence().toSet())
         for (key in reply.keys()) assertTrue(key, reply.get(key) is Boolean)
         assertEquals(state, AccountState.fromJson(reply))
         assertEquals(0, DirectWire.account().length())

@@ -24,6 +24,9 @@ class FocusStates internal constructor(private val file: File?) {
     private val notifiedAnyway = HashMap<String, Long>()
     private val subscribedKeys = HashSet<String>()
 
+    /** When each one-to-one iMessage chat was last opened (by its id), [MAX] at most: whose Focus is asked about. */
+    private val openedAt = LinkedHashMap<String, Long>()
+
     /** Bumped on every change, so a chat on screen shows it. */
     private val _changes = MutableStateFlow(0)
     val changes: StateFlow<Int> = _changes
@@ -72,11 +75,31 @@ class FocusStates internal constructor(private val file: File?) {
         now - last !in 0 until NOTIFY_ANYWAY_MS
     }
 
+    /** The chat [conversationId] was opened at [atMs]. */
+    fun opened(conversationId: String, atMs: Long) = synchronized(lock) {
+        if (!openable(conversationId)) return
+        openedAt.remove(conversationId)
+        openedAt[conversationId] = atMs
+        while (openedAt.size > MAX) openedAt.remove(openedAt.keys.first())
+        save()
+    }
+
+    /** The chats opened at or after [sinceMs] (and not after [now]), the latest first. */
+    fun openedSince(sinceMs: Long, now: Long): List<String> = synchronized(lock) {
+        openedAt.entries.filter { it.value in sinceMs..now }.sortedByDescending { it.value }.map { it.key }
+    }
+
+    /** Whether nothing is kept (no state, no subscription, no file). */
+    fun isEmpty(): Boolean = synchronized(lock) {
+        states.isEmpty() && notifiedAnyway.isEmpty() && subscribedKeys.isEmpty() && openedAt.isEmpty() && file?.isFile != true
+    }
+
     /** Signed out, or Focus status turned off: everything goes. */
     fun clear() = synchronized(lock) {
         states.clear()
         notifiedAnyway.clear()
         subscribedKeys.clear()
+        openedAt.clear()
         file?.delete()
         _changes.value++
     }
@@ -90,7 +113,14 @@ class FocusStates internal constructor(private val file: File?) {
         } catch (e: java.io.IOException) {
             return
         }
+        o.optJSONObject(OPENED)?.let { c ->
+            for (k in c.keys().asSequence().take(MAX)) {
+                val t = (c.opt(k) as? Number)?.toLong() ?: continue
+                if (openable(k) && t >= 0) openedAt[k] = t
+            }
+        }
         for (k in o.keys().asSequence().take(MAX)) {
+            if (k == OPENED) continue
             val v = o.optJSONObject(k) ?: continue
             if (IMessageAddress.key(k) != k) continue
             states[k] = State(v.opt("s") == true, v.optLong("t"))
@@ -101,6 +131,7 @@ class FocusStates internal constructor(private val file: File?) {
         val f = file ?: return
         val o = JSONObject()
         states.forEach { (k, v) -> o.put(k, JSONObject().put("s", v.silenced).put("t", v.atMs)) }
+        if (openedAt.isNotEmpty()) o.put(OPENED, JSONObject().apply { openedAt.forEach { (k, t) -> put(k, t) } })
         try {
             f.parentFile?.mkdirs()
             val tmp = File(f.parentFile, f.name + ".tmp")
@@ -114,6 +145,10 @@ class FocusStates internal constructor(private val file: File?) {
     companion object {
         const val MAX = 200
         const val NOTIFY_ANYWAY_MS = 5 * 60 * 1000L
+        private const val OPENED = "_opened"
+
+        /** An iMessage chat's id, as kept for [opened]. */
+        private fun openable(id: String): Boolean = id.startsWith("imsg:") && id.length <= 256 && id.none { it.isISOControl() }
 
         @Volatile
         private var instance: FocusStates? = null

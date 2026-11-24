@@ -387,7 +387,7 @@ object DirectArchive {
          * [restarting]: told right before that process ends for its restart (the main process checks
          * that it came back, [DirectLink]).
          */
-        data class Account(val state: AccountState, val restarting: Boolean = false) : Update()
+        data class Account(val state: AccountState, val restarting: Boolean = false, val removeImported: Boolean = false) : Update()
 
         /**
          * Someone shared their name and photo (B6, Apple Account only): [sender] in the chat with one

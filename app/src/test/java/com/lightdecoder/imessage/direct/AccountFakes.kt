@@ -190,7 +190,18 @@ class FakeAccountBridge(private val statePath: String) : AccountBridge {
             "resetClique", "resetCloudMessages", "joinCliqueWithBottle", "getBottles", "setAsideAccount", "approveCircle",
             "teardown2fa", "configureAppReview", "listCredentials", "savePassword", "syncPasswords", "getContactsHeaders",
             "getAnisetteHeaders", "updateAccountHeaders", "resetState", "circleSetupClique", "joinCliqueWithPreviousDevice",
+            // B6: nothing in iCloud is deleted, saved or reset; no other escrow change; no poster; no Find My (SPEC2 §6).
+            "deleteCloudAttachments", "deleteCloudChats", "deleteCloudMessages", "saveCloudAttachments", "saveCloudChats",
+            "saveCloudChatsWithPhotos", "saveCloudMessages", "getCloudQuota", "changeEscrowPassword", "parsePoster", "fromPoster",
+            "makeFindMyFriends", "makeFindMyPhone", "selectFriend", "selectBackgroundFriend", "getFollowing", "refreshFollowing",
+            "getBackgroundFollowing", "refreshBackgroundFollowing", "updateSecureLocationStates", "reconcileFriends", "getBeaconItems", "acceptBeaconShare", "deleteBeaconShare", "updateBeaconName",
         )
+
+        /**
+         * Called only by the keychain join (B6.5), in `KeychainJoin.kt` alone: `resetState` with
+         * `logout = false` (never a sign-out at Apple), and `circleSetupClique`.
+         */
+        val JOIN_ONLY = listOf("resetState", "circleSetupClique")
     }
 }
 

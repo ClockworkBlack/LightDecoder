@@ -31,9 +31,25 @@ internal object ConversationTitles {
     fun of(context: android.content.Context, repo: com.lightdecoder.archive.ArchiveRepository, row: ConversationRow): String {
         if (row.name.isNotBlank()) return row.name
         val people = repo.participants(row.id).filter { !it.isMe }
+        sharedName(context, row, people)?.let { return it }
+        val names = people
             .map { it.name.ifBlank { it.formattedNumber.ifBlank { it.number } } }
             .filter { it.isNotBlank() }
-        return if (people.isEmpty()) context.getString(R.string.chat_untitled) else people.joinToString(", ")
+        return if (names.isEmpty()) context.getString(R.string.chat_untitled) else names.joinToString(", ")
+    }
+
+    /**
+     * An iMessage chat with one person that has no name of its own (no contact, no name the user gave
+     * it): the name its person shared and the user took (B6.1), else null.
+     */
+    private fun sharedName(context: android.content.Context, row: ConversationRow, people: List<com.lightdecoder.archive.ParticipantRow>): String? {
+        if (row.isGroup || !com.lightdecoder.imessage.direct.DirectArchive.isImessage(row.id) || com.lightdecoder.imessage.direct.DirectArchive.isGroup(row.id)) return null
+        if (!com.lightdecoder.chat.SharedProfiles.dirOf(context).isDirectory) return null
+        val address = row.id.removePrefix(com.lightdecoder.imessage.direct.DirectArchive.PREFIX)
+        val shared = runCatching { com.lightdecoder.chat.SharedProfiles.get(context).nameFor(address) }.getOrNull() ?: return null
+        // The chat's own name: one it was given, else its person's (a contact's name; just the address without one).
+        val own = row.name.ifBlank { people.singleOrNull()?.name.orEmpty() }
+        return com.lightdecoder.chat.SharedProfileRules.title(own, address, shared).takeIf { it == shared && it != own }
     }
 }
 

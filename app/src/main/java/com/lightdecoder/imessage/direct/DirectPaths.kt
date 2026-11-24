@@ -40,6 +40,21 @@ object DirectPaths {
         excluded = emptyList(),
     )
 
+    /**
+     * Where a shared name's photo may be fetched to ([DirectWire.PROFILE_FETCH]): a new file, named
+     * `incoming-…`, directly in the main process's folder for them ([com.lightdecoder.chat.SharedProfiles]).
+     */
+    fun isProfileImage(context: Context, path: String): Boolean =
+        isProfileImage(path, com.lightdecoder.chat.SharedProfiles.dirOf(context))
+
+    fun isProfileImage(path: String, dir: File): Boolean {
+        if (!isAllowed(path, Rules(listOf(dir), emptyList()))) return false
+        val file = canonical(File(path)) ?: return false
+        val parent = canonical(dir) ?: return false
+        return file.parentFile == parent && file.name.startsWith(com.lightdecoder.chat.SharedProfiles.INCOMING_PREFIX) &&
+            file.name.length <= 80 && !file.exists()
+    }
+
     /** Whether [path] is a file under one of [rules]' roots and none of its excluded folders. */
     fun isAllowed(path: String, rules: Rules): Boolean {
         if (path.isEmpty() || '\u0000' in path) return false

@@ -231,6 +231,64 @@
                         android:textAppearance="?attr/textAppearanceBodyMedium"
                         android:visibility="gone" />
 
+                    <TextView
+                        android:id="@+id/appleKeychain"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:textAppearance="?attr/textAppearanceBodyMedium"
+                        android:visibility="gone" />
+
+                    <!-- Without an account: only that these need it. -->
+                    <TextView
+                        android:id="@+id/appleFeaturesHint"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:text="@string/apple_features_need_account"
+                        android:textAppearance="?attr/textAppearanceBodySmall"
+                        android:visibility="gone" />
+
+                    <!-- What the account brings (B6): only signed in, with iCloud's features on. -->
+                    <LinearLayout
+                        android:id="@+id/appleFeatures"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:orientation="vertical"
+                        android:visibility="gone">
+
+                        <TextView
+                            android:id="@+id/appleRowNamePhoto"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:background="?attr/selectableItemBackground"
+                            android:filterTouchesWhenObscured="true"
+                            android:gravity="center_vertical"
+                            android:minHeight="48dp"
+                            android:textAppearance="?attr/textAppearanceBodyLarge" />
+
+                        <TextView
+                            android:id="@+id/appleRowFocus"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:background="?attr/selectableItemBackground"
+                            android:filterTouchesWhenObscured="true"
+                            android:gravity="center_vertical"
+                            android:minHeight="48dp"
+                            android:textAppearance="?attr/textAppearanceBodyLarge" />
+
+                        <TextView
+                            android:id="@+id/appleRowIcloud"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:background="?attr/selectableItemBackground"
+                            android:filterTouchesWhenObscured="true"
+                            android:gravity="center_vertical"
+                            android:minHeight="48dp"
+                            android:textAppearance="?attr/textAppearanceBodyLarge" />
+                    </LinearLayout>
+
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/appleAccountAction"
                         style="@style/Widget.Material3.Button.TonalButton"

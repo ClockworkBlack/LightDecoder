@@ -1139,6 +1139,10 @@ class DirectLink private constructor(
         runCatching { GroupPhotos(app).forget(conversationId) }
         runCatching { groupVersions.forget(conversationId) }
         runCatching { receiptChoices.set(conversationId, null) }
+        runCatching {
+            val peer = if (DirectArchive.isGroup(conversationId)) null else conversationId.removePrefix(DirectArchive.PREFIX)
+            com.lightdecoder.chat.SharedProfiles.get(app).forget(conversationId, peer)
+        }
     }
 
     /** The pictures kept with [row] that are no attachment of it (its link's, the stickers on it) go: the message is gone. */
@@ -1201,13 +1205,15 @@ class DirectLink private constructor(
         val file = repo.mediaFileFor(part.mediaId, DirectMedia.extensionFor(part.mime, part.fileName))
         if (file.length() <= 0) {
             // Nothing to download it by: a file that came inside the message, whose copy is gone.
-            val descriptor = String(part.key, Charsets.UTF_8).ifEmpty { return null }
+            // An imported iCloud attachment (B6.5): fetched by its record id, into this file.
+            val record = CloudMapping.recordOf(part.key)
+            val descriptor = if (record != null) "" else String(part.key, Charsets.UTF_8).ifEmpty { return null }
             // Shown with its progress while it comes, and stoppable ([cancelTransfer]); waited for while it moves.
             val key = DirectWire.transferKey(part.mediaId).takeIf(DirectWire::isTransferKey)
             if (key != null) started(key, part.size, 1, upload = false, conversationId = repo.message(messageId)?.conversationId.orEmpty())
             val reply = try {
                 requests.call(
-                    DirectWire.DOWNLOAD, DirectWire.download(descriptor, file.path, transfer = key), MEDIA_MAX_MS,
+                    DirectWire.DOWNLOAD, DirectWire.download(descriptor, file.path, transfer = key, cloudRecord = record), MEDIA_MAX_MS,
                     onProgress = key?.let { k -> { o: JSONObject -> heard(k, o, part.size, upload = false) } },
                     idleMs = DOWNLOAD_TIMEOUT_MS,
                 )
@@ -1583,7 +1589,7 @@ class DirectLink private constructor(
         // No read receipt goes to someone the user blocked.
         if (blockedChat(conversationId)) return
         val (guid, target) = try {
-            val guid = repo.latestIncomingMessageId(conversationId, DirectArchive.PREFIX)?.let(DirectArchive::guidOf) ?: return
+            val guid = repo.latestIncomingMessageId(conversationId, DirectArchive.PREFIX, IMPORTED_MARK)?.let(DirectArchive::guidOf) ?: return
             guid to (targetOf(conversationId) ?: return)
         } catch (e: RuntimeException) {
             Log.w(TAG, "read receipt not sent", e)
@@ -1623,6 +1629,8 @@ class DirectLink private constructor(
         members: List<ParticipantDto>? = null,
         /** Whether a chat in Recently Deleted comes back to the inbox with this ([RecycleRules.revives]); else it stays there. */
         revive: Boolean = false,
+        /** For a live message of the chat (Apple's, not imported): an imported group it turns out to be is not read-only any more. */
+        live: Boolean = false,
     ): ConversationDto {
         val group = c.isGroup || groupId != null
         val id = archiveIdOf(c, groupId)
@@ -1649,7 +1657,9 @@ class DirectLink private constructor(
             pinned = existing?.pinned == true,
             // A group the user was removed from or left: read only, as on an iPhone, until they are
             // in it again ([DirectArchive.Update.Upsert.member]).
-            readOnly = if (group && member != null) !member else existing?.readOnly == true,
+            // A group made by the Messages in iCloud import (read-only, nothing but imported messages
+            // in it) that turns out to be a live one: not read-only from its first live message.
+            readOnly = if (group && member != null) !member else existing?.readOnly == true && !(live && group && importedOnly(id)),
             muted = existing?.muted == true,
             avatarColor = existing?.avatarColor.orEmpty(),
             // A chat's latest message (time, id, snippet) moves with its messages only
@@ -1673,6 +1683,9 @@ class DirectLink private constructor(
         val existingId = if (!c.isGroup && others.size == 1) manager.conversationWith(Handles.display(others[0].id)) else null
         return existingId ?: c.id
     }
+
+    /** Whether the group [id] holds only messages imported from Messages in iCloud (or none). */
+    private fun importedOnly(id: String): Boolean = runCatching { !repo.hasMessageWithout(id, IMPORTED_MARK, DirectArchive.PREFIX) }.getOrDefault(false)
 
     /** A member as the archive keeps them: the address without its scheme, and their contact name. */
     private fun personOf(handle: String): ParticipantDto {
@@ -1702,6 +1715,17 @@ class DirectLink private constructor(
         if (DirectWire.errorOf(reply) != null) return
         val state = AccountState.fromJson(reply)
         _account.value = state
+        // Signed out, as this answer says: what the account brought goes now even when the sign-out's
+        // own telling never came (the main process was not up, or it timed out), the imported messages
+        // too when the user asked for that (said again by every answer until it was told).
+        if (!state.signedIn) {
+            val remove = DirectWire.removeImportedOf(reply)
+            try {
+                synchronized(this) { if (remove || !accountStoresEmpty()) accountGone(remove) }
+            } catch (e: RuntimeException) {
+                Log.w(TAG, "what the Apple Account brought was not removed (${e::class.java.simpleName})")
+            }
+        }
         when {
             state.signedIn || DirectWire.restartPendingOf(reply) -> seeAccount(true)
             // Neither, and nothing told since it was asked (which the answer may not have known of).
@@ -1753,6 +1777,337 @@ class DirectLink private constructor(
             askAccount()
         }
     }
+
+    // --- what the Apple Account brings (B6) -------------------------------------------------------
+
+    private val sharedProfiles: com.lightdecoder.chat.SharedProfiles get() = com.lightdecoder.chat.SharedProfiles.get(app)
+    private val focusStates: com.lightdecoder.chat.FocusStates get() = com.lightdecoder.chat.FocusStates.get(app)
+
+    /** Bumped when a chat's banners may have changed (an offer fetched, a Focus status): a chat on screen reads them again. */
+    private val _accountBanners = MutableStateFlow(0)
+    val accountBanners: StateFlow<Int> = _accountBanners
+
+    /** What a chat with one person shows of the Apple Account's features at its top and above its composer. */
+    data class AccountBanners(
+        /** "<name> shared their name and photo": an offer waiting for "Update" or "Not Now". */
+        val offerName: String? = null,
+        /** "Share your name and photo with <name>?". */
+        val askShare: Boolean = false,
+        /** "<name> has notifications silenced", with "Notify Anyway". */
+        val silenced: Boolean = false,
+    ) {
+        val any: Boolean get() = offerName != null || askShare || silenced
+    }
+
+    /** The person of a stored iMessage chat with one person, as an address; null for anything else. */
+    private fun peerOf(conversationId: String): String? {
+        if (!DirectArchive.isImessage(conversationId) || DirectArchive.isGroup(conversationId)) return null
+        val row = repo.conversation(conversationId) ?: return null
+        if (row.isGroup) return null
+        val p = repo.participants(conversationId).filter { !it.isMe }.singleOrNull() ?: return null
+        return Handles.normalize(p.number.ifBlank { p.id })
+    }
+
+    /** The banners of chat [conversationId] (nothing without a signed-in account with iCloud's services). Runs on IO. */
+    fun accountBannersFor(conversationId: String): AccountBanners {
+        // As known (never asked for here: an account is told by the ":imessage" process when it changes).
+        val st = _account.value
+        if (!active || !st.features) return AccountBanners()
+        return try {
+            val peer = peerOf(conversationId) ?: return AccountBanners()
+            if (blocked(peer)) return AccountBanners()
+            val offer = if (st.profiles) sharedProfiles.offerFor(conversationId) else null
+            val wrote = st.profile && !sharedProfiles.shareAnswered(conversationId) && repo.hasOutgoing(conversationId)
+            AccountBanners(
+                offerName = offer?.let { it.name.ifBlank { Handles.display(peer) } },
+                askShare = wrote && canSend(conversationId),
+                silenced = st.focus && focusStates.silenced(peer),
+            )
+        } catch (e: RuntimeException) {
+            AccountBanners()
+        }
+    }
+
+    /** The name a chat with one person is shown by: its own, else the one its person shared and the user took ([com.lightdecoder.chat.SharedProfileRules.title]). */
+    fun sharedTitle(conversationId: String, stored: String): String {
+        if (!_account.value.signedIn) return stored
+        val peer = runCatching { peerOf(conversationId) }.getOrNull() ?: return stored
+        // The chat's own name: one it was given, else its person's as stored (a contact's name, or just the address).
+        val own = stored.ifBlank {
+            runCatching { repo.participants(conversationId).filter { !it.isMe }.singleOrNull()?.name }.getOrNull().orEmpty()
+        }
+        val title = com.lightdecoder.chat.SharedProfileRules.title(own, peer, runCatching { sharedProfiles.nameFor(peer) }.getOrNull())
+        return if (title == own) stored else title
+    }
+
+    /** "Update" on the offer in [conversationId]: its name and photo are the person's from now on. */
+    fun acceptProfile(conversationId: String) {
+        runCatching { sharedProfiles.accept(conversationId) }
+        _accountBanners.value++
+    }
+
+    /** "Not Now" on the offer in [conversationId]. */
+    fun dismissProfile(conversationId: String) {
+        runCatching { sharedProfiles.dismiss(conversationId) }
+        _accountBanners.value++
+    }
+
+    /** "Share" on "Share your name and photo with …?": the user's own goes to that one chat ([DirectWire.PROFILE_SHARE]). */
+    suspend fun shareProfile(conversationId: String) {
+        if (!_account.value.profile) throw DirectEngine.ImessageError(app.getString(R.string.apple_profile_share_off))
+        val target = targetOf(conversationId)?.takeIf { it.groupGuid == null && it.participants.size == 1 }
+            ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
+        failOn(requests.call(DirectWire.PROFILE_SHARE, DirectWire.profileShare(target), SEND_TIMEOUT_MS))
+        sharedProfiles.answerShare(conversationId)
+        IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: the user's name and photo shared through the iMessage library")
+        _accountBanners.value++
+    }
+
+    /** "Not Now" on "Share your name and photo with …?". */
+    fun declineShare(conversationId: String) {
+        runCatching { sharedProfiles.answerShare(conversationId) }
+        _accountBanners.value++
+    }
+
+    /**
+     * "Notify Anyway" in [conversationId]: its person, whose notifications are silenced, is notified of
+     * the user's last message there ([DirectWire.NOTIFY_ANYWAY]). It never makes this phone ring past
+     * Do Not Disturb, and nothing like it from others does either.
+     */
+    suspend fun notifyAnyway(conversationId: String) {
+        val peer = peerOf(conversationId) ?: return
+        val target = targetOf(conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
+        val last = repo.messages(conversationId, limit = 50).filter { it.isOutgoing && it.direction == "out" && !it.isLocal }
+            .maxByOrNull { it.timestampMs }?.id?.let(DirectArchive::guidOf)?.takeIf(RecycleRules::isGuid)
+            ?: throw DirectEngine.ImessageError(app.getString(R.string.focus_notify_nothing))
+        failOn(requests.call(DirectWire.NOTIFY_ANYWAY, DirectWire.notifyAnyway(target, last), SEND_TIMEOUT_MS))
+        focusStates.notifiedAnyway(peer, System.currentTimeMillis())
+        IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: Notify Anyway sent")
+        _accountBanners.value++
+    }
+
+    @Volatile
+    private var focusAskedAt = 0L
+
+    /**
+     * A chat was opened: with Focus status on, the people of the one-to-one iMessage chats opened in
+     * the last 14 days ([MAX_FOCUS_HANDLES][DirectWire.MAX_FOCUS_HANDLES] at most) are asked about,
+     * at most once every 10 minutes; with them, those the user wrote to in the last 30 days, who may
+     * see the user's own Focus once "Share Focus Status" is on. Nothing without the account.
+     */
+    fun focusOpened(conversationId: String? = null) {
+        // As known (never asked for here: an account is told by the ":imessage" process when it changes).
+        val st = _account.value
+        if (!active || !st.features || !st.focus) return
+        val now = System.currentTimeMillis()
+        // Opened (one with one person over iMessage): whose Focus is asked about is those opened lately.
+        val opened1 = conversationId?.takeIf { DirectArchive.isImessage(it) && !DirectArchive.isGroup(it) }
+        val ask = now - focusAskedAt !in 0 until FOCUS_ASK_MS
+        if (!ask && opened1 == null) return
+        if (ask) focusAskedAt = now
+        // Off the caller's thread (a chat's screen): kept on disk there.
+        scope.launch {
+            if (opened1 != null) runCatching { focusStates.opened(opened1, now) }
+            if (!ask) return@launch
+            try {
+                val rows = repo.conversations(folder = Folder.INBOX, limit = 300).filter { DirectArchive.isImessage(it.id) && !it.isGroup }
+                val opened = focusStates.openedSince(now - 14 * DAY_MS, now)
+                val handles = opened.mapNotNull { peerOf(it) }.filterNot(::blocked).distinct().take(DirectWire.MAX_FOCUS_HANDLES)
+                val wrote = rows.filter { now - it.lastMessageTs in 0 until 30 * DAY_MS }.filter { c ->
+                    repo.messages(c.id, limit = 30).any { it.isOutgoing && it.direction == "out" && now - it.timestampMs in 0 until 30 * DAY_MS }
+                }.mapNotNull { peerOf(it.id) }.filterNot(::blocked).distinct().take(DirectWire.MAX_FOCUS_HANDLES)
+                focusStates.subscribed(handles)
+                val reply = requests.call(DirectWire.FOCUS_SUBSCRIBE, DirectWire.focusSubscribe(handles, wrote), NOTICE_TIMEOUT_MS)
+                if (DirectWire.errorOf(reply) != null) focusAskedAt = 0L
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                focusAskedAt = 0L
+            }
+        }
+    }
+
+    /**
+     * An offer of a name and photo (B6.1): taken only for a chat with that one person that is already
+     * here, within [com.lightdecoder.chat.SharedProfileRules]' limits; only then is it fetched
+     * ([DirectWire.PROFILE_FETCH], into a file chosen here). The banner then asks "Update" or "Not Now".
+     */
+    private fun profileOffer(update: DirectArchive.Update.ProfileOffer, again: Boolean = false) {
+        val st = _account.value
+        if (!st.features || !st.profiles) {
+            // The account as last known here may be older than the offer (this process just made): asked once more.
+            if (!again) refreshAccount { profileOffer(update, again = true) }
+            return
+        }
+        val descriptor = ProfileDescriptor.decode(update.descriptor) ?: return
+        val id = archiveConversationId(update.conversationId, Handles.display(update.sender))
+        val peer = runCatching { peerOf(id) }.getOrNull()
+        val chat = peer != null && IMessageAddress.same(peer, update.sender)
+        val decision = sharedProfiles.take(update.sender, descriptor.record, chat)
+        if (decision != com.lightdecoder.chat.SharedProfileRules.Decision.FETCH) {
+            IMessageLog.add(app, "a shared name and photo was not taken (${decision.name.lowercase()})")
+            return
+        }
+        scope.launch {
+            val incoming = sharedProfiles.incomingFile()
+            try {
+                val reply = requests.call(DirectWire.PROFILE_FETCH, DirectWire.profileFetch(update.descriptor, incoming.path), PROFILE_FETCH_MS)
+                val r = DirectWire.ProfileReply.fromJson(reply) ?: return@launch
+                val name = com.lightdecoder.chat.SharedNames.shown(r.name, r.first, r.last)
+                if (sharedProfiles.offered(id, update.sender, descriptor.record, name, incoming.takeIf { r.image }) != null) {
+                    IMessageLog.add(app, "${IMessageLog.chatRef(id)}: a shared name and photo is offered")
+                    _accountBanners.value++
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "a shared name and photo was not fetched (${e::class.java.simpleName})")
+            } finally {
+                incoming.delete()
+            }
+        }
+    }
+
+    /** Someone's Focus status (B6.3): only for someone this phone asked about. */
+    private fun focusChanged(update: DirectArchive.Update.Focus, again: Boolean = false) {
+        if (!_account.value.features || !_account.value.focus) {
+            if (!again) refreshAccount { focusChanged(update, again = true) }
+            return
+        }
+        if (focusStates.update(update.handle, update.silenced, update.atMs)) _accountBanners.value++
+    }
+
+    /** "Delivered Quietly" on [ids], delivered by [sender] while their notifications were silenced. */
+    private fun markQuietly(ids: Collection<String>, sender: String) {
+        if (!focusStates.deliveredQuietly(sender, System.currentTimeMillis())) return
+        for (id in ids) {
+            val row = repo.message(id) ?: continue
+            if (!row.isOutgoing || repo.conversation(row.conversationId)?.isGroup != false) continue
+            val extra = IMessageExtra.parse(row.extra)
+            if (!extra.quietly) repo.setExtra(id, extra.copy(quietly = true).toJson())
+        }
+    }
+
+    /**
+     * Older messages from Messages in iCloud (B6.5), stored as any message is, read-only: never a
+     * notification, an unread chat, an effect or a receipt. Only while Messages in iCloud is on. A
+     * message already here, deleted here (a tombstone), or from someone blocked is left out; a chat is
+     * made only when there is none and it was never deleted here for good
+     * ([ArchiveRepository.conversationDeletedAt]: nothing from before that is brought back into it
+     * either). An imported group that is not a live one stays read-only, until a live message of it
+     * comes ([toArchive]).
+     *
+     * Only with Messages in iCloud on, as the account was last told here. Otherwise (this copy may be
+     * older than the batch: a main process just made) it is not taken for now ([AccountNotKnown], so
+     * the ":imessage" process hands it over again and keeps its page's token until it is), and the
+     * account is asked again meanwhile.
+     */
+    private fun cloudBatch(update: DirectArchive.Update.CloudBatch) {
+        val st = _account.value
+        if (!st.features || !st.history) {
+            refreshAccount()
+            throw AccountNotKnown()
+        }
+        val ids = HashMap<String, String>()
+        val deletedAt = HashMap<String, Long?>()
+        fun deletedAt(id: String): Long? = deletedAt.getOrPut(id) { repo.conversationDeletedAt(id) }
+        for (c in update.chats.take(DirectWire.MAX_CLOUD_CHATS)) {
+            val people = c.participants.filter { !it.isMe }.mapNotNull { CallIds.handle(it.id) }.take(CloudMapping.MAX_PARTICIPANTS)
+            if (people.isEmpty()) continue
+            if (!c.isGroup && (people.size != 1 || blocked(people[0]))) continue
+            val id = if (c.isGroup) c.id.takeIf(DirectArchive::isGroup) ?: continue else archiveConversationId(c.id, Handles.display(people[0]))
+            if (repo.conversation(id) == null && deletedAt(id) != null) continue
+            ids[c.id] = id
+            if (repo.conversation(id) != null) continue
+            val dto = toArchive(c.copy(id = id, participants = people.map { ParticipantDto(id = it, name = "", number = it, formattedNumber = it) }), groupId = id.takeIf { c.isGroup }, groupName = c.name)
+            repo.upsertConversation(dto.copy(unread = false, readOnly = c.isGroup || dto.readOnly))
+        }
+        val fresh = ArrayList<MessageDto>()
+        for (m in update.messages.take(DirectWire.MAX_CLOUD_MESSAGES)) {
+            if (!IMessageExtra.parse(m.extra).imported) continue
+            if (repo.isTombstoned(m.id) || repo.message(m.id) != null) continue
+            val id = ids[m.conversationId] ?: if (DirectArchive.isGroup(m.conversationId)) m.conversationId else archiveConversationId(m.conversationId, Handles.display(m.conversationId.removePrefix(DirectArchive.PREFIX)))
+            val conv = repo.conversation(id) ?: continue
+            if (deletedAt(id)?.let { m.timestampMs <= it } == true) continue
+            val sender = if (m.fromMe) "" else CallIds.handle(m.senderId) ?: continue
+            if (sender.isNotEmpty() && blocked(sender)) continue
+            if (conv.isGroup && sender.isNotEmpty() && !isMember(id, Handles.display(sender))) continue
+            fresh += m.copy(
+                conversationId = id,
+                senderId = if (m.fromMe) "" else Handles.display(sender),
+                senderName = if (m.fromMe) "" else nameOf(sender),
+                transport = IMessageManager.TRANSPORT,
+                isOld = true,
+                parts = m.parts.filter { !it.isMedia || CloudMapping.recordOf(it.key) != null }.map { it.copy(inlineData = ByteArray(0)) },
+            )
+        }
+        if (fresh.isNotEmpty()) repo.upsertMessages(fresh)
+        if (ids.isNotEmpty() || fresh.isNotEmpty()) IMessageLog.add(app, "Messages in iCloud: ${ids.size} chat(s), ${fresh.size} message(s) imported")
+    }
+
+    /**
+     * Signed out (§4.5 step 6): the names and photos people shared, and Focus states, go; imported
+     * messages too when the user ticked "Also remove imported messages".
+     */
+    private fun accountGone(removeImported: Boolean) {
+        runCatching { if (!sharedProfiles.isEmpty()) sharedProfiles.clear() }
+        runCatching { focusStates.clear() }
+        _accountBanners.value++
+        // Once per process is enough: the ":imessage" process says it again until it was told.
+        if (!removeImported || !importedRemoved.compareAndSet(false, true)) return
+        try {
+            var removed = 0
+            for (c in repo.conversations(folder = null, limit = 5_000).filter { DirectArchive.isImessage(it.id) }) {
+                while (true) {
+                    val rows = repo.messagesWithExtra(c.id, IMPORTED_MARK, limit = 500)
+                    if (rows.isEmpty()) break
+                    // Copies: their ids are not noted as deleted (that would push the real deletions' out).
+                    rows.forEach { repo.removeCopy(it.id) }
+                    removed += rows.size
+                    if (rows.size < 500) break
+                }
+            }
+            if (removed > 0) IMessageLog.add(app, "Apple Account: $removed imported message(s) removed with the sign-out")
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "imported messages not removed", e)
+        }
+    }
+
+    /** An update for the Apple Account's features came while the account, as known here, does not allow it: not taken for now. */
+    class AccountNotKnown : IllegalStateException("the Apple Account is not known to allow this yet")
+
+    private val accountRefreshing = java.util.concurrent.atomic.AtomicBoolean()
+
+    /** Asks the ":imessage" process where the account stands (one ask at a time), then [then] (under this link's lock). */
+    private fun refreshAccount(then: (() -> Unit)? = null) {
+        if (!active) return
+        if (then == null && !accountRefreshing.compareAndSet(false, true)) return
+        scope.launch {
+            try {
+                askAccount()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "the Apple Account was not asked about (${e::class.java.simpleName})")
+            } finally {
+                if (then == null) accountRefreshing.set(false)
+            }
+            if (then != null) {
+                try {
+                    synchronized(this@DirectLink) { then() }
+                } catch (e: RuntimeException) {
+                    Log.w(TAG, "an update for the Apple Account's features was not taken (${e::class.java.simpleName})")
+                }
+            }
+        }
+    }
+
+    /** Whether a sign-out's "Also remove imported messages" was carried out in this process. */
+    private val importedRemoved = java.util.concurrent.atomic.AtomicBoolean()
+
+    /** Whether nothing the Apple Account brought is kept here (shared names and photos, Focus states). */
+    private fun accountStoresEmpty(): Boolean =
+        runCatching { (!com.lightdecoder.chat.SharedProfiles.dirOf(app).isDirectory || sharedProfiles.isEmpty()) && focusStates.isEmpty() }.getOrDefault(false)
 
     /** How [apply] took a change. */
     enum class Applied {
@@ -1810,6 +2165,8 @@ class DirectLink private constructor(
             is DirectArchive.Update.PollChange -> update.row.message.takeIf { !it.fromMe }?.senderId
             is DirectArchive.Update.Edit -> update.sender.takeIf { !update.fromMe }
             is DirectArchive.Update.Unsent -> update.sender.takeIf { !update.fromMe }
+            is DirectArchive.Update.ProfileOffer -> update.sender
+            is DirectArchive.Update.Focus -> update.handle
             else -> null
         }
         if (sender.isNullOrBlank() || !blocked(sender)) return false
@@ -1820,7 +2177,7 @@ class DirectLink private constructor(
             is DirectArchive.Update.Sticker -> DirectArchive.guidOf(update.messageId)?.let { dropPicture(IMessageExtra.stickerKey(it, update.stickerGuid)) }
             else -> Unit
         }
-        if (update !is DirectArchive.Update.Typing) IMessageLog.add(app, "a message from a blocked sender was dropped")
+        if (update !is DirectArchive.Update.Typing && update !is DirectArchive.Update.Focus) IMessageLog.add(app, "a message from a blocked sender was dropped")
         return true
     }
 
@@ -1873,7 +2230,15 @@ class DirectLink private constructor(
             is DirectArchive.Update.Note -> IMessageLog.add(app, FaceTimeLog.PREFIX + loggableNote(update.line))
             is DirectArchive.Update.Dropped ->
                 IMessageLog.add(app, "an event from Apple was not taken (${loggableText(update.what, 40)}): ${loggableText(update.why, 160)}")
-            is DirectArchive.Update.Account -> accountChanged(update.state, update.restarting)
+            is DirectArchive.Update.Account -> {
+                accountChanged(update.state, update.restarting)
+                if (update.state.signedIn) importedRemoved.set(false)
+                if (!update.state.signedIn) accountGone(update.removeImported)
+                else if (!update.state.focus) runCatching { com.lightdecoder.chat.FocusStates.get(app).clear() }
+            }
+            is DirectArchive.Update.ProfileOffer -> profileOffer(update)
+            is DirectArchive.Update.Focus -> focusChanged(update)
+            is DirectArchive.Update.CloudBatch -> cloudBatch(update)
             is DirectArchive.Update.FaceTime -> faceTimeChanged(update.state)
             is DirectArchive.Update.ReadElsewhere -> readElsewhere(update)
             is DirectArchive.Update.MarkUnread -> markedUnreadElsewhere(update)
@@ -1956,7 +2321,7 @@ class DirectLink private constructor(
         val revive = repo.conversation(target)?.let { c ->
             c.folderEnum != Folder.DELETED || RecycleRules.revives(existing != null, false, system, update.message.timestampMs, c.deletedAt)
         } ?: true
-        val conversation = toArchive(update.conversation, groupId, if (DirectArchive.isGroup(target)) groupNameAfter(target, update) else null, member, members, revive)
+        val conversation = toArchive(update.conversation, groupId, if (DirectArchive.isGroup(target)) groupNameAfter(target, update) else null, member, members, revive, live = true)
         val onScreen = MessageNotifier.visibleConversationId(ChatService.IMESSAGE) == conversation.id
         val incoming = !fromMe && !system
         // The message moves the chat's latest message, time and snippet (see toArchive).
@@ -2131,6 +2496,8 @@ class DirectLink private constructor(
         if (taken.isEmpty()) return
         val advanced = HashSet<String>()
         repo.advanceMessageStatus(taken, update.status, DirectArchive.statusCode(update.status), DirectArchive::statusRank, advanced)
+        // "Delivered Quietly" (B6.3): delivered while its person had notifications silenced, no "Notify Anyway" since.
+        if (update.status == DirectArchive.STATUS_DELIVERED && advanced.isNotEmpty() && _account.value.focus) markQuietly(advanced, update.sender)
         // "Read 9:41" under the message: when it was seen to be read. Only a message this
         // receipt made read: one read before (the same receipt handed over again, or a
         // message read before read times were kept) keeps its time, or has none.
@@ -3491,7 +3858,7 @@ class DirectLink private constructor(
         runCatching { repo.markConversationUnread(conversationId) }
         if (!active) return
         val (guid, target) = try {
-            val guid = repo.latestIncomingMessageId(conversationId, DirectArchive.PREFIX)?.let(DirectArchive::guidOf) ?: return
+            val guid = repo.latestIncomingMessageId(conversationId, DirectArchive.PREFIX, IMPORTED_MARK)?.let(DirectArchive::guidOf) ?: return
             guid to (targetOf(conversationId) ?: return)
         } catch (e: RuntimeException) {
             Log.w(TAG, "unread mark not sent (${e::class.java.simpleName}): ${com.lightdecoder.imessage.Redact.text(e.message.orEmpty())}")
@@ -3581,7 +3948,7 @@ class DirectLink private constructor(
             val address = other?.let { it.number.ifBlank { it.formattedNumber }.ifBlank { it.id } }.orEmpty()
             val handle = Handles.normalize(address)
             val known = other != null && handle != null && knownName(other, handle)
-            val incoming = repo.latestIncomingMessageId(conversationId, DirectArchive.PREFIX) != null
+            val incoming = repo.latestIncomingMessageId(conversationId, DirectArchive.PREFIX, IMPORTED_MARK) != null
             JunkReports.offered(
                 isGroup = row.isGroup, readOnly = row.readOnly, deleted = row.folderEnum == Folder.DELETED, others = others.size,
                 knownContact = known, wroteIn = repo.hasOutgoing(conversationId), somethingToReport = incoming,
@@ -4058,6 +4425,9 @@ class DirectLink private constructor(
     companion object {
         private const val TAG = "DirectLink"
 
+        /** How a message imported from Messages in iCloud is marked in its `extra_json` ([IMessageExtra.imported]): never read-receipted, marked unread or reported. */
+        internal const val IMPORTED_MARK = "\"imported\":true"
+
         /**
          * At app start (main process): with the library registered, Blue Bubbles is turned on the
          * first time (so its chats show in Messages; turning it off later is respected) and the
@@ -4294,6 +4664,13 @@ class DirectLink private constructor(
 
         /** The Apple Account's state is answered at once (the process may have to start first). */
         private const val ACCOUNT_TIMEOUT_MS = 20_000L
+
+        /** A shared name and photo's fetch: the ":imessage" process gives Apple 20 s of it. */
+        private const val PROFILE_FETCH_MS = 30_000L
+
+        /** Focus status is asked about at most this often. */
+        private const val FOCUS_ASK_MS = 10 * 60_000L
+        private const val DAY_MS = 24 * 60 * 60_000L
 
         /** How long after a change of the Apple Account the ":imessage" process should be back from its restart. */
         const val RESTART_CHECK_MS = 15_000L

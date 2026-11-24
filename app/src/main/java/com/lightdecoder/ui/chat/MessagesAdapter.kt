@@ -1606,12 +1606,7 @@ class MessagesAdapter(
         }
     }
 
-    /** "Delivered", "Read 9:41" (or just "Read" when it is not known when). */
-    private fun receiptText(context: android.content.Context, receipt: Receipt): String = when {
-        !receipt.read -> context.getString(R.string.imessage_receipt_delivered)
-        receipt.readAtMs <= 0 -> context.getString(R.string.imessage_receipt_read)
-        else -> context.getString(R.string.imessage_receipt_read_at, TimeFormat.receiptTime(context, receipt.readAtMs))
-    }
+    private fun receiptText(context: android.content.Context, receipt: Receipt): String = Companion.receiptText(context, receipt)
 
     /**
      * What TalkBack reads for a bubble: who, what (not invisible ink's words while [inked]), the
@@ -1652,7 +1647,15 @@ class MessagesAdapter(
 
     private fun isVisual(part: MediaRow): Boolean = isVisualPart(part)
 
-    private companion object {
+    internal companion object {
+        /** "Delivered", "Delivered Quietly" (B6.3), "Read 9:41" (or just "Read" when it is not known when). */
+        fun receiptText(context: android.content.Context, receipt: Receipt): String = when {
+            !receipt.read && receipt.quietly -> context.getString(R.string.imessage_receipt_delivered_quietly)
+            !receipt.read -> context.getString(R.string.imessage_receipt_delivered)
+            receipt.readAtMs <= 0 -> context.getString(R.string.imessage_receipt_read)
+            else -> context.getString(R.string.imessage_receipt_read_at, TimeFormat.receiptTime(context, receipt.readAtMs))
+        }
+
         const val TYPE_HEADER = 0
         const val TYPE_DAY = 1
         const val TYPE_MESSAGE = 2

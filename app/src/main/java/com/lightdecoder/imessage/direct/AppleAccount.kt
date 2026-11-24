@@ -86,6 +86,12 @@ class AppleAccount internal constructor(
 
         /** Deletes the Keystore keys that are the account's own (never the registration's). */
         fun deleteAccountKeys()
+
+        /**
+         * A sign-out's first step (§4.5 step 1): the account's features stop (the import, Focus status
+         * asked for and shared, what they keep). Nothing for an engine without them.
+         */
+        suspend fun stopFeatures() = Unit
     }
 
     sealed class SignOut {
@@ -858,6 +864,12 @@ class AppleAccount internal constructor(
         if (tell) scope.launch { tellQuietly() }
     }
 
+    /**
+     * The keychain join (B6.5) took the live session's connection, and no new session holds it: as
+     * after a sign-in that worked on the session (S12), iMessage restarts the next moment it may.
+     */
+    internal fun liveSessionTouched() = wantRestart()
+
     /** A sign-in is under way: its screen shows a step of it (once committed it is not). */
     private fun underWay(): Boolean = currentFlow()?.let { !it.done } ?: false
 
@@ -996,7 +1008,15 @@ class AppleAccount internal constructor(
                 dropCredentials()
                 it.closeAll()
             }
-            // (Later features that use the account stop here first.)
+            // The account's features stop first (the import, Focus status asked for and shared).
+            try {
+                hooks.stopFeatures()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                Log.w(TAG, "Apple Account: its features did not all stop (${e::class.java.simpleName})")
+            }
+            inClique = false
             try {
                 bridge.resetAppleLogin(statePath)
             } catch (e: Throwable) {
@@ -1199,9 +1219,34 @@ class AppleAccount internal constructor(
         }
     }
 
+    /** Whether this phone is in the account's iCloud Keychain, as last read (B6); false without an account. */
+    @Volatile
+    internal var inClique = false
+
+    /** Whether the session has iCloud's services, as read at the last start (B6's features need them). */
+    val hasIcloud: Boolean get() = icloud
+
     private fun stateOf(flag: AccountFlag): AccountState {
         val signedIn = flag.state != FlagState.NONE
-        return AccountState(signedIn = signedIn, attention = flag.state == FlagState.ATTENTION, icloud = signedIn && icloud)
+        val ic = signedIn && icloud
+        // The features (B6): only signed in, not needing a sign-in, with iCloud's services.
+        val on = ic && flag.state == FlagState.SIGNED_IN
+        return AccountState(
+            signedIn = signedIn,
+            attention = flag.state == FlagState.ATTENTION,
+            icloud = ic,
+            clique = on && inClique,
+            focus = on && flag.focusIn && !flag.focusUnavailable,
+            history = on && flag.history == AccountFlag.HISTORY_ON,
+            profiles = on && flag.profilesIn,
+            profile = on && flag.profileShare && files.myProfileFile.isFile,
+        )
+    }
+
+    /** A feature's setting or state changed (B6): published, and the main process told. Nothing without an account. */
+    fun featuresChanged() {
+        publish()
+        if (files.readFlag().state != FlagState.NONE || _state.value.signedIn) scope.launch { tellQuietly() }
     }
 
     private fun publish() {

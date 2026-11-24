@@ -227,11 +227,36 @@ class DirectSetupActivity : AppCompatActivity() {
                     binding.appleAccountAction.setText(R.string.apple_account_sign_out)
                 }
             }
+            showFeatures(state)
             if (account.restartPending) binding.appleAccountIcloud.apply {
                 visibility = View.VISIBLE
                 text = restartPendingText()
             }
         }
+    }
+
+    /**
+     * What the account brings (B6): its three rows, only signed in with iCloud's features on; without
+     * an account, only a line saying they need it. Each row opens its page ([AppleAccountActivity.feature]).
+     */
+    private fun showFeatures(state: com.lightdecoder.imessage.direct.AccountState) {
+        val on = state.features && !account.restartPending
+        binding.appleFeaturesHint.visibility = if (!state.signedIn) View.VISIBLE else View.GONE
+        binding.appleFeatures.visibility = if (on) View.VISIBLE else View.GONE
+        binding.appleKeychain.visibility = if (on) View.VISIBLE else View.GONE
+        if (!on) return
+        binding.appleKeychain.setText(if (state.clique) R.string.apple_keychain_joined else R.string.apple_keychain_not_joined)
+        fun row(label: Int, value: Boolean) = getString(label) + "  ·  " + getString(if (value) R.string.apple_row_on else R.string.apple_row_off)
+        binding.appleRowNamePhoto.text = row(R.string.apple_row_name_photo, state.profile)
+        binding.appleRowFocus.text = row(R.string.apple_row_focus, state.focus)
+        binding.appleRowIcloud.text = row(R.string.apple_row_icloud, state.history)
+        binding.appleRowNamePhoto.setOnClickListener { openFeature(AppleAccountActivity.FEATURE_PROFILE) }
+        binding.appleRowFocus.setOnClickListener { openFeature(AppleAccountActivity.FEATURE_FOCUS) }
+        binding.appleRowIcloud.setOnClickListener { openFeature(AppleAccountActivity.FEATURE_ICLOUD) }
+    }
+
+    private fun openFeature(which: String) {
+        startActivity(android.content.Intent(this, AppleAccountActivity::class.java).putExtra(AppleAccountActivity.EXTRA_FEATURE, which))
     }
 
     private fun onAppleAccountAction() {
@@ -245,10 +270,24 @@ class DirectSetupActivity : AppCompatActivity() {
 
     /** Sign Out, asked first: on this phone only; iMessage restarts for it. */
     private fun confirmSignOut() {
+        // Whether messages imported from Messages in iCloud go too: offered whether or not it is on now
+        // (turned off, what it imported stays).
+        val remove = android.widget.CheckBox(this).apply {
+            setText(R.string.apple_sign_out_remove_imported)
+        }
+        val box = android.widget.FrameLayout(this).apply {
+            val pad = (20 * resources.displayMetrics.density).toInt()
+            setPadding(pad, 0, pad, 0)
+            addView(remove)
+        }
         val dialog = MaterialAlertDialogBuilder(this)
             .setTitle(R.string.apple_account_sign_out_title)
             .setMessage(R.string.apple_account_sign_out_body)
-            .setPositiveButton(R.string.apple_account_sign_out) { _, _ -> signOut() }
+            .setView(box)
+            .setPositiveButton(R.string.apple_account_sign_out) { _, _ ->
+                com.lightdecoder.imessage.direct.AccountFeatures.of(this).removeImported = remove.isChecked
+                signOut()
+            }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
         dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE)?.filterTouchesWhenObscured = true
@@ -256,7 +295,12 @@ class DirectSetupActivity : AppCompatActivity() {
 
     private fun signOut() {
         lifecycleScope.launch {
-            when (account.signOut()) {
+            val result = account.signOut()
+            // Not signed out: "Also remove imported messages" is not kept for a later one.
+            if (result != AppleAccount.SignOut.Done) {
+                runCatching { com.lightdecoder.imessage.direct.AccountFeatures.of(this@DirectSetupActivity).removeImported = false }
+            }
+            when (result) {
                 AppleAccount.SignOut.Done -> {
                     // What to do at Apple, read first: nothing else restarts iMessage under it meanwhile
                     // (this screen coming back, a chat or the call screen), which would take it away.

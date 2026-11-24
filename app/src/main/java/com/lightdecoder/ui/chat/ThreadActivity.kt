@@ -441,6 +441,16 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 com.lightdecoder.imessage.direct.DirectLink.get(applicationContext).transfers.collect(::showTransfers)
             }
         }
+        // The Apple Account's banners (an offer fetched, a Focus status told): read again while in sight.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                if (!directMode()) return@repeatOnLifecycle
+                var first = true
+                com.lightdecoder.imessage.direct.DirectLink.get(applicationContext).accountBanners.collect {
+                    if (first) first = false else reload()
+                }
+            }
+        }
         if (VoicePrefs.readNewAloud(this) && !reader.isAvailable) noteReaderUnavailable()
         savedInstanceState?.getString(STATE_REPLY_TO)?.let(::restoreReply)
         if (savedInstanceState == null) takeShared(intent)
@@ -548,6 +558,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             knownRows = emptyMap()
             timeReveal.reset()
             junkOffered = false
+            accountChat = null
+            sharedTitle = null
+            focusAskedFor = null
             renderJunk()
             closeOptionsMenu()
             // Leaving the thread: stop reading its messages; the next one's are new from its first read.
@@ -914,6 +927,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         /** The iMessage chat a FaceTime call from here goes from ([faceTimeChat]), and what is known of whether its person can be called. */
         val faceTimeChat: String? = null,
         val faceTimeCapable: Boolean? = null,
+        /** The iMessage chat with one person the Apple Account's banners are for (B6), and what they show. */
+        val accountChat: String? = null,
+        val banners: com.lightdecoder.imessage.direct.DirectLink.AccountBanners = com.lightdecoder.imessage.direct.DirectLink.AccountBanners(),
+        /** The name the person shared and the user took, shown where the chat has no name of its own. */
+        val sharedTitle: String? = null,
     )
 
     /**
@@ -978,6 +996,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             val faceTimeGroup = link.service == ChatService.IMESSAGE && conversation?.isGroup == true
             val faceTimeChat = (if (link.service == ChatService.IMESSAGE) id else companion)
                 ?.takeIf { direct != null && if (faceTimeGroup) direct.faceTimeGroup(it) != null else it in reachable && direct.faceTimeTarget(it) != null }
+            // The Apple Account's banners (B6): only for an iMessage chat with one person through the library.
+            val accountChat = (if (link.service == ChatService.IMESSAGE) id else companion)
+                ?.takeIf { direct?.active == true && !com.lightdecoder.imessage.direct.DirectArchive.isGroup(it) && conversation?.isGroup != true }
             // Replies among the person's iMessages shown here quote from the iMessage archive.
             val known = HashMap<String, MessageRow>()
             val quotes = quotesFor(listOfNotNull(repo, imRepo), shown, known)
@@ -1006,6 +1027,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 othersUnread = if (imRepo == null) emptyList() else chats.drop(1).filter { runCatching { imRepo.conversation(it)?.unread == true }.getOrDefault(false) },
                 faceTimeChat = faceTimeChat,
                 faceTimeCapable = faceTimeChat?.let { if (faceTimeGroup) direct?.faceTimeGroupCapableKnown(it) else direct?.faceTimeCapableKnown(it) },
+                accountChat = accountChat,
+                banners = accountChat?.let { direct?.accountBannersFor(it) } ?: com.lightdecoder.imessage.direct.DirectLink.AccountBanners(),
+                sharedTitle = accountChat?.takeIf { link.service == ChatService.IMESSAGE }?.let { c ->
+                    val stored = conversation?.name.orEmpty()
+                    direct?.sharedTitle(c, stored)?.takeIf { it != stored }
+                },
             )
         }
         if (grow) growPending = false
@@ -1040,6 +1067,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             invalidateOptionsMenu()
         }
         showFaceTime(snapshot.faceTimeChat, snapshot.faceTimeCapable)
+        accountChat = snapshot.accountChat
+        sharedTitle = snapshot.sharedTitle
+        renderAccountBanners(snapshot.banners)
         renderJunk()
         renderConversation()
         renderBackground(snapshot.background)
@@ -1123,9 +1153,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val marks = ThreadItems.receipts(rows, hasReceipts)
         if (marks.isEmpty()) return emptyMap()
         val times = runCatching { com.lightdecoder.reactions.ReadTimes.get(applicationContext) }.getOrNull()
+        val byId = rows.associateBy { it.id }
         return marks.mapValues { (id, read) ->
             val at = if (read) runCatching { times?.timeFor(ChatService.IMESSAGE, id)?.atMs }.getOrNull() ?: 0L else 0L
-            Receipt(read, at)
+            // "Delivered Quietly" (B6.3): delivered while its person had notifications silenced.
+            val quietly = !read && byId[id]?.let { com.lightdecoder.imessage.direct.IMessageExtra.parse(it.extra).quietly } == true
+            Receipt(read, at, quietly)
         }
     }
 
@@ -1373,7 +1406,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private fun renderConversation() {
         val conv = conversation
         val others = participants.filter { !it.isMe }
-        title = conv?.name?.takeIf { it.isNotBlank() }
+        title = sharedTitle ?: conv?.name?.takeIf { it.isNotBlank() }
             ?: others.map { it.name.ifBlank { it.formattedNumber.ifBlank { it.number } } }.filter { it.isNotBlank() }
                 .joinToString(", ").ifBlank { getString(R.string.chat_untitled) }
         // The person's (or group's) avatar next to the name, as in the conversation list:
@@ -5417,6 +5450,122 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         toast(getString(R.string.chat_marked_unread))
         openConversations()
         finish()
+    }
+
+    // --- the Apple Account's banners (B6) ----------------------------------------------------------
+
+    /** The iMessage chat with one person the Apple Account's banners are for, as the last load found. */
+    private var accountChat: String? = null
+
+    /** The name its person shared and the user took (shown where the chat has no name of its own). */
+    private var sharedTitle: String? = null
+
+    /** Which of the two the top banner shows: the person's name and photo offered, or sharing the user's own. */
+    private var bannerOffer = false
+
+    private var focusAskedFor: String? = null
+
+    /**
+     * "<name> shared their name and photo" ([Update] / [Not Now]) or "Share your name and photo with
+     * <name>?" at the top, and "<name> has notifications silenced" with "Notify Anyway" above the
+     * composer, as an iPhone shows them. Nothing without a signed-in Apple Account.
+     */
+    private fun renderAccountBanners(b: com.lightdecoder.imessage.direct.DirectLink.AccountBanners) {
+        val chat = accountChat
+        val name = sharedTitle ?: conversation?.name?.takeIf { it.isNotBlank() }
+            ?: participants.filter { !it.isMe }.firstOrNull()?.let { it.name.ifBlank { it.formattedNumber.ifBlank { it.number } } }.orEmpty()
+        bannerOffer = b.offerName != null
+        when {
+            chat != null && b.offerName != null -> {
+                binding.profileBanner.visibility = View.VISIBLE
+                binding.profileBannerText.text = getString(R.string.profile_offer_banner, b.offerName)
+                binding.profileBannerYes.setText(R.string.profile_update)
+            }
+            chat != null && b.askShare -> {
+                binding.profileBanner.visibility = View.VISIBLE
+                binding.profileBannerText.text = getString(R.string.profile_share_ask, name)
+                binding.profileBannerYes.setText(R.string.profile_share)
+            }
+            else -> binding.profileBanner.visibility = View.GONE
+        }
+        val silenced = chat != null && b.silenced
+        // "Notified" stays only for the chat it went in, while its banner stays up, for the 5 minutes it counts.
+        val notified = focusNotified
+        if (!silenced || notified == null || notified.first != chat ||
+            System.currentTimeMillis() - notified.second !in 0 until com.lightdecoder.chat.FocusStates.NOTIFY_ANYWAY_MS
+        ) {
+            if (notified != null) focusNotified = null
+            binding.focusNotify.isEnabled = true
+            binding.focusNotify.setText(R.string.focus_notify_anyway)
+        }
+        binding.focusBanner.visibility = if (silenced) View.VISIBLE else View.GONE
+        if (chat != null && b.silenced) binding.focusText.text = getString(R.string.focus_silenced, name)
+        binding.profileBannerYes.setOnClickListener { chat?.let { if (bannerOffer) acceptProfile(it) else shareProfile(it) } }
+        binding.profileBannerNo.setOnClickListener { chat?.let { if (bannerOffer) dismissProfile(it) else declineShare(it) } }
+        binding.focusNotify.setOnClickListener { chat?.let(::notifyAnyway) }
+        // Opened: Focus status asked about (at most every 10 minutes, nothing without the account).
+        if (chat != null && focusAskedFor != chat) {
+            focusAskedFor = chat
+            com.lightdecoder.imessage.direct.DirectLink.get(applicationContext).focusOpened(chat)
+        }
+    }
+
+    private fun acceptProfile(chat: String) {
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(applicationContext)
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) { direct.acceptProfile(chat) }
+            reload()
+        }
+    }
+
+    private fun dismissProfile(chat: String) {
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(applicationContext)
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) { direct.dismissProfile(chat) }
+            reload()
+        }
+    }
+
+    private fun shareProfile(chat: String) {
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(applicationContext)
+        val link = manager
+        lifecycleScope.launch {
+            relayAttempt { withContext(Dispatchers.IO) { direct.shareProfile(chat) } }
+                .onSuccess { toast(getString(R.string.profile_shared)) }
+                .onFailure { toast(getString(R.string.profile_share_failed, errorText(link, it))) }
+            reload()
+        }
+    }
+
+    private fun declineShare(chat: String) {
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(applicationContext)
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) { direct.declineShare(chat) }
+            reload()
+        }
+    }
+
+    /** The chat "Notify Anyway" last went in, and when: its button says "Notified" meanwhile. */
+    private var focusNotified: Pair<String, Long>? = null
+
+    private fun notifyAnyway(chat: String) {
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(applicationContext)
+        val link = manager
+        binding.focusNotify.isEnabled = false
+        // Under way: the banner drawn again meanwhile leaves the button as it is.
+        focusNotified = chat to System.currentTimeMillis()
+        lifecycleScope.launch {
+            relayAttempt { withContext(Dispatchers.IO) { direct.notifyAnyway(chat) } }
+                .onSuccess {
+                    focusNotified = chat to System.currentTimeMillis()
+                    binding.focusNotify.setText(R.string.focus_notified)
+                }
+                .onFailure {
+                    focusNotified = null
+                    binding.focusNotify.isEnabled = true
+                    toast(getString(R.string.focus_notify_failed, errorText(link, it)))
+                }
+        }
     }
 
     // --- "Report Junk" -------------------------------------------------------------------------

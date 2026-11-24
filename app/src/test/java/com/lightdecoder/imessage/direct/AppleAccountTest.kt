@@ -961,7 +961,7 @@ class AppleAccountTest {
         val restartWords = Regex("screenInSight|screenShown|restartNow|finishSignIn|callScreenEnded|nudgeRestart|restartForAccount|whenFree|ProcessRestart|account\\.cancel")
         // The request handler itself reaches none of it, whatever the request.
         val handler = service.substringAfter("private val server = DirectIpc.Server(").substringBefore("    /**\n     * Once a request's answer has gone.")
-        assertTrue(handler, handler.contains("DirectWire.ACCOUNT -> DirectWire.accountReply(engine.account.state.value, engine.account.restartPending)"))
+        assertTrue(handler, handler.contains("DirectWire.ACCOUNT -> DirectWire.accountReply(engine.account.state.value, engine.account.restartPending, engine.features.removeImported)"))
         assertEquals(handler, null, restartWords.find(handler)?.value)
         // Once an answer has gone: only through restartsAfter, and only the account's screenInSight.
         val after = service.substringAfter("private fun afterReply(what: Int, request: JSONObject) {").substringBefore("\n    }")

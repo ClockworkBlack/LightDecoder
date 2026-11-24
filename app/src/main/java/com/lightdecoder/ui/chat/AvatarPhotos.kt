@@ -23,7 +23,7 @@ internal object AvatarPhotos {
             val photo = when {
                 item.service == ChatService.IMESSAGE && item.row.isGroup -> groups[item.row.id]
                 item.row.isGroup -> null
-                else -> people.forConversation(item.service, item.row.id)
+                else -> people.forConversation(item.service, item.row.id) ?: sharedPhoto(context, item.service, item.row.id)
             }
             if (photo == null) item else item.copy(photo = photo.path)
         }
@@ -36,8 +36,21 @@ internal object AvatarPhotos {
                 service == ChatService.IMESSAGE && isGroup -> GroupPhotos(context).pictureOf(conversationId)
                 isGroup -> null
                 else -> participants.filter { !it.isMe }.singleOrNull()?.let { com.lightdecoder.relay.ContactPhotos.get(context).forPerson(it) }
+                    ?: sharedPhoto(context, service, conversationId)
             }
         }.getOrNull()
+
+    /**
+     * For an iMessage chat with one person with no contact picture: the photo they shared and the user
+     * took ([com.lightdecoder.chat.SharedProfiles], B6.1); null for anything else.
+     */
+    private fun sharedPhoto(context: Context, service: ChatService, conversationId: String): File? {
+        if (service != ChatService.IMESSAGE || !com.lightdecoder.imessage.direct.DirectArchive.isImessage(conversationId)) return null
+        if (com.lightdecoder.imessage.direct.DirectArchive.isGroup(conversationId)) return null
+        val dir = com.lightdecoder.chat.SharedProfiles.dirOf(context)
+        if (!dir.isDirectory) return null
+        return runCatching { com.lightdecoder.chat.SharedProfiles.get(context).photoFor(conversationId.removePrefix(com.lightdecoder.imessage.direct.DirectArchive.PREFIX)) }.getOrNull()
+    }
 
     /** A group's members' pictures ([participants] as stored), by their address's key ([com.lightdecoder.imessage.IMessageAddress.key]). */
     fun members(context: Context, participants: List<ParticipantRow>): Map<String, File> = runCatching {

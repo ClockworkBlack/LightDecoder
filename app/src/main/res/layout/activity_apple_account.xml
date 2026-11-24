@@ -56,6 +56,14 @@
             <include
                 android:id="@+id/message"
                 layout="@layout/page_apple_account_message" />
+
+            <!-- What the account brings (B6): one feature's page, built in code (AppleFeaturePages). -->
+            <LinearLayout
+                android:id="@+id/featurePage"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone" />
         </LinearLayout>
     </ScrollView>
 </LinearLayout>

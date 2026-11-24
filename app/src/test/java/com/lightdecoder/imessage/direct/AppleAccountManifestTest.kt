@@ -3,6 +3,7 @@ package com.lightdecoder.imessage.direct
 import java.io.File
 import javax.xml.parsers.DocumentBuilderFactory
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -63,17 +64,59 @@ class AppleAccountManifestTest {
         assertTrue(register.contains("statePath, config, conn, anisette, null, result.users ?: users, identity, null, pipeline!!,"))
     }
 
-    @Test
-    fun nothingCallsWhatTheSignInMustNeverUse() {
+    /** Every call of one of [names] in LightDecoder's own sources (comments left out), as "File.kt:line: call". */
+    private fun callsOf(names: List<String>): List<String> {
         val root = File("src/main/java/com/lightdecoder")
         assertTrue(root.isDirectory)
-        val call = Regex("(?<![A-Za-z0-9_])(" + FakeAccountBridge.NEVER.joinToString("|") + ")\\s*\\(")
-        val found = root.walkTopDown().filter { it.isFile && it.extension == "kt" }.flatMap { f ->
+        val call = Regex("(?<![A-Za-z0-9_])(" + names.joinToString("|") + ")\\s*\\(")
+        return root.walkTopDown().filter { it.isFile && it.extension == "kt" }.flatMap { f ->
             f.readLines().mapIndexedNotNull { i, line ->
                 val code = line.substringBefore("//").trimStart()
-                if (code.startsWith("*") || code.startsWith("/*")) null else call.find(code)?.let { "${f.name}:${i + 1}: ${it.value}" }
+                if (code.startsWith("*") || code.startsWith("/*")) null else call.findAll(code).joinToString { it.value }.takeIf { it.isNotEmpty() }?.let { "${f.name}:${i + 1}: $it" }
             }
         }.toList()
+    }
+
+    /** The scan covers every source file, the Apple Account's features (B6) among them. */
+    @Test
+    fun theScanCoversTheFeaturesFiles() {
+        val names = File("src/main/java/com/lightdecoder").walkTopDown().filter { it.isFile && it.extension == "kt" }.map { it.name }.toSet()
+        for (f in listOf("AccountFeatures.kt", "FeatureBridge.kt", "Profiles.kt", "FocusStatus.kt", "FocusSharer.kt", "CloudImport.kt", "CloudMapping.kt", "KeychainJoin.kt", "SharedProfiles.kt", "FocusStates.kt", "AppleFeaturePages.kt")) {
+            assertTrue(f, f in names)
+        }
+    }
+
+    @Test
+    fun nothingCallsWhatTheSignInMustNeverUse() {
+        val found = callsOf(FakeAccountBridge.NEVER - FakeAccountBridge.JOIN_ONLY.toSet())
         assertTrue(found.joinToString("\n"), found.isEmpty())
+    }
+
+    /**
+     * The keychain join (B6.5) is the one place `resetState` (always with `logout = false`: never a
+     * sign-out at Apple) and `circleSetupClique` are called; nothing else ever calls them.
+     */
+    @Test
+    fun onlyTheKeychainJoinResetsTheRegistrationAndJoinsTheKeychainAndNeverSignsOutAtApple() {
+        val found = callsOf(FakeAccountBridge.JOIN_ONLY)
+        assertTrue(found.joinToString("\n"), found.all { it.startsWith("KeychainJoin.kt:") })
+        val resets = found.filter { "resetState(" in it }
+        assertEquals(found.joinToString("\n"), 1, resets.size)
+        assertEquals(1, found.count { "circleSetupClique(" in it })
+        val source = File("src/main/java/com/lightdecoder/imessage/direct/KeychainJoin.kt").readText()
+        assertTrue(source.contains("uniffi.rust_bridge.resetState(old, statePath, false, false)"))
+        // The join is only by the approving device's voucher: never an escrow record of another device's.
+        for (never in listOf("joinCliqueWithBottle(", "getBottles(", "resetClique(", "joinCliqueWithPreviousDevice(", "changeEscrowPassword(")) {
+            assertFalse(never, source.contains(never))
+        }
+    }
+
+    /** The import is read-only: of iCloud's Messages functions only the syncs and the attachments' download are called. */
+    @Test
+    fun messagesInIcloudIsOnlyRead() {
+        val root = File("src/main/java/com/lightdecoder")
+        val call = Regex("uniffi\\.rust_bridge\\.([a-z]+Cloud[A-Za-z]*)\\(")
+        val used = root.walkTopDown().filter { it.isFile && it.extension == "kt" }.flatMap { f -> call.findAll(f.readText()).map { it.groupValues[1] } }.toSet()
+        assertEquals(setOf("syncCloudChats", "syncCloudMessages", "syncCloudAttachments", "downloadCloudAttachments"), used)
     }
 }

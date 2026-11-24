@@ -105,6 +105,8 @@ class DirectService : Service() {
                 val r = DirectWire.DownloadRequest.fromJson(request)
                 // Written only into the app's own media folders, never over the library's state or outside the app.
                 DirectPaths.require(this, r.path, getString(R.string.imessage_direct_attachment_not_saved))
+                // An imported iCloud attachment: by its record id, into the path LightDecoder chose (B6.5).
+                r.cloudRecord?.let { record -> return@Server DirectWire.downloaded(engine.downloadCloud(record, r.path, r.maxBytes)) }
                 // Progress only for one the user asked for (never an automatic one), and only when it can be stopped.
                 DirectWire.downloaded(
                     engine.download(r.descriptor, r.path, r.maxBytes, r.automaticMs, r.transfer, if (r.automaticMs == null && r.transfer != null) progress else null),
@@ -152,8 +154,28 @@ class DirectService : Service() {
                 val r = DirectWire.CapableRequest.fromJson(request)
                 DirectWire.capable(engine.faceTimeCapable(r.targets, r.from))
             }
+            // The Apple Account's features (B6): each does nothing without a signed-in account.
+            DirectWire.NOTIFY_ANYWAY -> {
+                val r = DirectWire.NotifyAnywayRequest.fromJson(request)
+                engine.notifyAnyway(r.target, r.guid)
+                DirectWire.ok()
+            }
+            DirectWire.PROFILE_FETCH -> {
+                val r = DirectWire.ProfileFetchRequest.fromJson(request)
+                // Only a new file where the main process keeps shared names and photos, never anything else.
+                if (!DirectPaths.isProfileImage(this, r.imagePath)) return@Server DirectWire.error("Not a photo's place")
+                engine.features.fetchProfile(r)?.toJson() ?: DirectWire.error("Name and Photo is off")
+            }
+            DirectWire.PROFILE_SHARE -> DirectWire.guid(engine.shareProfile(target(request)))
+            DirectWire.FOCUS_SUBSCRIBE -> {
+                val handles = DirectWire.focusHandlesOf(request)
+                val invite = DirectWire.focusInviteesOf(request)
+                engine.features.focusRequest(handles, invite)
+                DirectWire.ok()
+            }
             // The optional Apple Account: where it stands, Booleans only (never the Apple ID).
-            DirectWire.ACCOUNT -> DirectWire.accountReply(engine.account.state.value, engine.account.restartPending)
+            // With a sign-out's "Also remove imported messages" not yet told (never while signed in: accountReply).
+            DirectWire.ACCOUNT -> DirectWire.accountReply(engine.account.state.value, engine.account.restartPending, engine.features.removeImported)
             // Where FaceTime stands, for the main process's "return to call" bar: only the call there is, if any (nothing is made to answer it).
             DirectWire.FT_STATE -> com.lightdecoder.imessage.facetime.FaceTimeNotices.state(this, com.lightdecoder.imessage.facetime.FaceTimeCalls.peek()?.state?.value).toJson()
             // The user's block list, as salted hashes only: FaceTime drops a blocked caller's ring here, with no question to the main process.

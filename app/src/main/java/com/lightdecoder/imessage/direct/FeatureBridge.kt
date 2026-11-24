@@ -6,6 +6,7 @@ import uniffi.rust_bridge.CloudChatPage
 import uniffi.rust_bridge.CloudMessagePage
 import uniffi.rust_bridge.IMessageNameRecord
 import uniffi.rust_bridge.IMessageNicknameRecord
+import uniffi.rust_bridge.MessageSummaryInfo
 import uniffi.rust_bridge.SharedPushStateHandle
 import uniffi.rust_bridge.StatusKitInvitee
 
@@ -55,6 +56,9 @@ interface FeatureBridge {
 
     /** `decodeAttributedBody`: an imported message's body (bounded by the caller first). */
     fun decodeAttributedBody(data: ByteArray): AttributedBody
+
+    /** `decodeMessageSummaryInfo`: an imported message's edits and unsends (bounded by the caller first). */
+    fun decodeMessageSummaryInfo(data: ByteArray): MessageSummaryInfo
 }
 
 /** The real [FeatureBridge]: `uniffi.rust_bridge` on the session [session] gives (the engine's). */
@@ -91,4 +95,6 @@ class NativeFeatureBridge(private val session: () -> SharedPushStateHandle?) : F
     override suspend fun downloadCloudAttachments(files: Map<String, String>) = uniffi.rust_bridge.downloadCloudAttachments(live(), files)
 
     override fun decodeAttributedBody(data: ByteArray): AttributedBody = uniffi.rust_bridge.decodeAttributedBody(data)
+
+    override fun decodeMessageSummaryInfo(data: ByteArray): MessageSummaryInfo = uniffi.rust_bridge.decodeMessageSummaryInfo(data)
 }

@@ -66,6 +66,8 @@ class DirectSinkService : Service() {
         }
 
         private fun isForNow(e: Throwable): Boolean =
-            e is SQLiteFullException || e is SQLiteDatabaseLockedException || e is SQLiteDiskIOException || e is SQLiteCantOpenDatabaseException
+            e is SQLiteFullException || e is SQLiteDatabaseLockedException || e is SQLiteDiskIOException || e is SQLiteCantOpenDatabaseException ||
+                // Not allowed by the Apple Account as known here yet: asked again meanwhile.
+                e is DirectLink.AccountNotKnown
     }
 }

@@ -221,10 +221,10 @@ object DirectWire {
         fun toJson(): JSONObject = ok().put("name", name).put("first", first).put("last", last).put("image", image)
 
         companion object {
-            /** Read as untrusted: each name [SharedNames.MAX_RAW] characters at most; an error answer is null. */
+            /** Read as untrusted: each name [com.lightdecoder.chat.SharedNames.MAX_RAW] characters at most; an error answer is null. */
             fun fromJson(o: JSONObject): ProfileReply? {
                 if (errorOf(o) != null) return null
-                fun text(k: String) = (o.opt(k) as? String)?.take(SharedNames.MAX_RAW).orEmpty()
+                fun text(k: String) = (o.opt(k) as? String)?.take(com.lightdecoder.chat.SharedNames.MAX_RAW).orEmpty()
                 return ProfileReply(text("name"), text("first"), text("last"), o.opt("image") == true)
             }
         }
@@ -233,8 +233,22 @@ object DirectWire {
     /** The [PROFILE_SHARE] request: the chat with one person [target]. */
     fun profileShare(target: Target): JSONObject = JSONObject().put("target", target.toJson())
 
-    /** The [FOCUS_SUBSCRIBE] request: [handles], a full replacement. */
-    fun focusSubscribe(handles: List<String>): JSONObject = JSONObject().put("handles", JSONArray(handles.take(MAX_FOCUS_HANDLES)))
+    /**
+     * The [FOCUS_SUBSCRIBE] request: [handles], a full replacement; with [invite] (added to SPEC2 §3's
+     * request), the people the user wrote to lately, who may see the user's own Focus once "Share
+     * Focus Status" is on (nothing is shared because of it alone).
+     */
+    fun focusSubscribe(handles: List<String>, invite: List<String> = emptyList()): JSONObject =
+        JSONObject().put("handles", JSONArray(handles.take(MAX_FOCUS_HANDLES)))
+            .apply { if (invite.isNotEmpty()) put("invite", JSONArray(invite.take(MAX_FOCUS_HANDLES))) }
+
+    /** The invitees of a [FOCUS_SUBSCRIBE] request, read as [focusHandlesOf] reads its handles; none when absent. */
+    fun focusInviteesOf(o: JSONObject): List<String> {
+        if (!o.has("invite")) return emptyList()
+        val a = o.optJSONArray("invite") ?: throw org.json.JSONException("no invitees")
+        if (a.length() > MAX_FOCUS_HANDLES) throw org.json.JSONException("too many invitees")
+        return (0 until a.length()).mapNotNull { CallIds.handle(a.opt(it) as? String) }.distinctBy(CallIds::key)
+    }
 
     /** The handles of a [FOCUS_SUBSCRIBE] request, read strictly: addresses only, each once, [MAX_FOCUS_HANDLES] at most (more: a failure). */
     fun focusHandlesOf(o: JSONObject): List<String> {
@@ -407,8 +421,16 @@ object DirectWire {
      * The [ACCOUNT] answer: [state], and `"restartPending": true` while a restart for the account is
      * still to be made (so the main process goes on saying when its screens are in sight). Booleans only.
      */
-    fun accountReply(state: AccountState, restartPending: Boolean): JSONObject =
-        state.toJson().apply { if (restartPending) put(KEY_RESTART_PENDING, true) }
+    fun accountReply(state: AccountState, restartPending: Boolean, removeImported: Boolean = false): JSONObject =
+        state.toJson().apply {
+            if (restartPending) put(KEY_RESTART_PENDING, true)
+            if (removeImported && !state.signedIn) put(KEY_REMOVE_IMPORTED, true)
+        }
+
+    /** Whether an [ACCOUNT] answer says the user signed out asking for imported messages to go too (B6.5): only a real `true`, and never while signed in. */
+    fun removeImportedOf(reply: JSONObject): Boolean = reply.opt(KEY_REMOVE_IMPORTED) == true && reply.opt("signedIn") != true
+
+    private const val KEY_REMOVE_IMPORTED = "removeImported"
 
     /** Whether an [ACCOUNT] answer says a restart is still pending: only a real `true`; an error answer, never. */
     fun restartPendingOf(reply: JSONObject): Boolean = reply.opt(KEY_RESTART_PENDING) == true
@@ -1106,6 +1128,7 @@ object DirectWire {
         is DirectArchive.Update.Note -> JSONObject().put("kind", "note").put("line", u.line.take(MAX_NOTE_CHARS))
         is DirectArchive.Update.Dropped -> JSONObject().put("kind", "dropped").put("what", u.what).put("why", u.why)
         is DirectArchive.Update.Account -> u.state.toJson().put("kind", "account").apply { if (u.restarting) put("restarting", true) }
+            .apply { if (u.removeImported && !u.state.signedIn) put("removeImported", true) }
         is DirectArchive.Update.ProfileOffer -> JSONObject().put("kind", "profileOffer").put("conversationId", u.conversationId)
             .put("sender", u.sender).put("descriptor", u.descriptor)
         is DirectArchive.Update.Focus -> JSONObject().put("kind", "focus").put("handle", u.handle).put("silenced", u.silenced).put("atMs", u.atMs)
@@ -1280,7 +1303,9 @@ object DirectWire {
         "callstate" -> DirectArchive.Update.FaceTime(FaceTimeState.fromJson(o))
         "note" -> o.optStringOrNull("line")?.takeIf { it.isNotBlank() }?.let { DirectArchive.Update.Note(it.take(MAX_NOTE_CHARS)) } ?: DirectArchive.Update.Ignore
         "dropped" -> DirectArchive.Update.Dropped(o.optString("what"), o.optString("why"))
-        "account" -> DirectArchive.Update.Account(AccountState.fromJson(o), restarting = o.opt("restarting") == true)
+        "account" -> AccountState.fromJson(o).let { st ->
+            DirectArchive.Update.Account(st, restarting = o.opt("restarting") == true, removeImported = !st.signedIn && o.opt("removeImported") == true)
+        }
         "profileOffer" -> profileOfferOf(o)
         "focus" -> {
             val handle = CallIds.handle(o.opt("handle") as? String)

@@ -79,6 +79,8 @@ class ChatDetailsActivity : AppCompatActivity() {
         val faceTime: DirectLink.FaceTimeTarget? = null,
         /** A group's FaceTime call (its members); null where it has none (not a group, not through the library, "FaceTime" off, or Apple says nobody of it can be called). */
         val faceTimeGroup: DirectLink.FaceTimeGroup? = null,
+        /** The title is the name its person shared (B6.1): labelled "Shared by <number>". */
+        val sharedName: Boolean = false,
     )
 
     @VisibleForTesting
@@ -235,9 +237,15 @@ class ChatDetailsActivity : AppCompatActivity() {
             val address = p.number.ifBlank { p.formattedNumber }.ifBlank { p.id }
             Member(address, p.name.ifBlank { p.formattedNumber.ifBlank { address } }, pictures.forPerson(p))
         }
+        val title = ConversationTitles.of(this, repo, row)
+        // A name the person shared, shown because the chat has none of its own: said whose word it is.
+        val sharedName = !row.isGroup && iMessage && title != row.name && members.singleOrNull()?.let { m ->
+            title != m.name && runCatching { com.lightdecoder.chat.SharedProfiles.dirOf(applicationContext).isDirectory && com.lightdecoder.chat.SharedProfiles.get(applicationContext).nameFor(m.address) == title }.getOrDefault(false)
+        } == true
         return Details(
             conversation = row,
-            title = ConversationTitles.of(this, repo, row),
+            title = title,
+            sharedName = sharedName,
             members = members,
             photo = AvatarPhotos.forConversation(applicationContext, link.service, id, row.isGroup, people),
             rules = rules,
@@ -267,7 +275,8 @@ class ChatDetailsActivity : AppCompatActivity() {
         binding.avatar.contentDescription = getString(R.string.chat_details_photo, d.title)
         binding.name.text = d.title
         // A person's address under their name; a group says how many it is over its members instead.
-        val subtitle = if (row.isGroup) "" else d.members.singleOrNull()?.address?.takeIf { it != d.title }.orEmpty()
+        val subtitle = if (row.isGroup) "" else d.members.singleOrNull()?.address?.takeIf { it != d.title }
+            ?.let { if (d.sharedName) getString(R.string.profile_shared_by, it) else it }.orEmpty()
         binding.subtitle.text = subtitle
         binding.subtitle.visibility = if (subtitle.isEmpty()) View.GONE else View.VISIBLE
         binding.changeNamePhoto.visibility = if (d.rules.manageable) View.VISIBLE else View.GONE

@@ -190,12 +190,48 @@ class DirectEngine private constructor(private val app: Context) {
 
                 override suspend fun tell(state: AccountState, restarting: Boolean) {
                     val s = sink ?: return
-                    withTimeoutOrNull(ACCOUNT_TELL_MS) { s.deliver(DirectArchive.Update.Account(state, restarting)) }
+                    // Signed out with "Also remove imported messages" ticked: the main process removes them (B6.5).
+                    // The choice is kept until this was told (else the next ACCOUNT answer carries it).
+                    val remove = !state.signedIn && features.removeImported
+                    val told = withTimeoutOrNull(ACCOUNT_TELL_MS) { s.deliver(DirectArchive.Update.Account(state, restarting, removeImported = remove)) }
+                    if (told == Delivery.STORED) features.importedRemovalTold(state.signedIn)
                 }
 
                 override fun deleteAccountKeys() = AccountKeys.delete()
+
+                override suspend fun stopFeatures() = features.stopForSignOut()
             },
         )
+    }
+
+    /**
+     * What the Apple Account unlocks (B6): Name & Photo, Focus status, Messages in iCloud. Inert
+     * without an account ([AccountFeatures.on]): nothing of it calls the library then.
+     */
+    private val featuresOnce = lazy {
+        AccountFeatures(
+            account,
+            AccountFiles.of(app, statePath),
+            NativeFeatureBridge { session },
+            lock,
+            busy = { FaceTimeCalls.peek()?.busy == true },
+            sender = { Handles.preferredSender(myHandles) },
+            deliver = { u -> store(u).let { it == Delivery.STORED || it == Delivery.BLOCKED } },
+            joinSteps = {
+                NativeKeychainSteps(statePath, { session }, { pipeline }, swap = ::swapSession, phoneUser = { PhoneUserStore.of(app).load() }, keepUser = ::keepPhoneUser)
+            },
+            keepCode = { code -> PhoneUserStore.keychainCode(app).save(code) },
+            watcher = { onChange -> FocusSharer.Watcher(app, onChange) },
+        )
+    }
+    val features: AccountFeatures by featuresOnce
+
+    /** A session rebuilt for the Apple Account's keychain join (or the number registered alone again) put in place: never during a FaceTime call. */
+    private suspend fun swapSession(started: SharedPushStateHandle) {
+        val waited = SessionSwap.whenFree(callBridge.guard, busy = { FaceTimeCalls.peek()?.busy == true }) { session = started }
+        if (waited) Log.w(TAG, "the rebuilt session waited for a FaceTime call to end")
+        sessionCameUp()
+        refreshStatus()
     }
 
     /** The main process's requests being answered by [DirectService] (set while it runs): a restart waits for them. */
@@ -265,6 +301,8 @@ class DirectEngine private constructor(private val app: Context) {
                 // Only handed on (queued there): a ring waits for nothing here, nor anything for it.
                 // With "FaceTime" off it is acknowledged unread.
                 EventRoute.FACETIME -> if (DirectPrefs.faceTimeOn(app)) FaceTimeCalls.get(app).onEvent((event as PushEvent.FaceTime).v1)
+                // Someone's Focus status: only with the Apple Account's Focus status on, and for someone asked about.
+                EventRoute.STATUSKIT -> features.onStatusKit((event as PushEvent.StatusKit).v1)
                 // The rest (an Apple Account's sign-in requests, Find My, shared albums, ...) unread, and never logged.
                 EventRoute.ACKNOWLEDGE -> Unit
             }
@@ -301,6 +339,9 @@ class DirectEngine private constructor(private val app: Context) {
             val mapped = when (inst.message) {
                 is PushChatMessage.SetTranscriptBackground -> backgrounds.receive(inst, me, Handles::display, texts)
                 else -> DirectArchive.map(inst, me, Handles::display, texts, ::describe, deleteSync = DirectPrefs.deleteOnAllDevices(app))
+            }.let { m ->
+                // A name and photo offered: only with the Apple Account's Name & Photo on (nothing is fetched here).
+                if (m is DirectArchive.Update.ProfileOffer && !features.takes(m)) DirectArchive.Update.Ignore else m
             }
             if (mapped is DirectArchive.Update.Upsert) keepInlineFiles(inst)
             keepPictures(inst, mapped)
@@ -314,8 +355,14 @@ class DirectEngine private constructor(private val app: Context) {
         } finally {
             attempts.ended()
         }
+        // A name and photo that came with a message or a tapback: offered too, only as a ShareProfile is.
+        val embedded = if (update is DirectArchive.Update.Upsert || update is DirectArchive.Update.Reaction) {
+            DirectArchive.embeddedProfileOf(inst, me)?.takeIf { features.takes(it) }
+        } else {
+            null
+        }
         // Dropped by the main process as from someone the user blocked: they are not told it arrived.
-        storeThenAcknowledge(update, { store(it) }) {
+        val delivery = storeThenAcknowledge(update, { store(it) }) {
             attempts.risky()
             try {
                 sendDeliveryAck(inst, me)
@@ -323,6 +370,7 @@ class DirectEngine private constructor(private val app: Context) {
                 attempts.ended()
             }
         }
+        if (embedded != null && delivery == Delivery.STORED) store(embedded)
     }
 
     /** The library's description of an attachment, from which it is downloaded later; empty if it has none. */
@@ -464,11 +512,16 @@ class DirectEngine private constructor(private val app: Context) {
                         // right before the session is built from disk (nothing at all without one).
                         account.atStartLocked()
                         session = uniffi.rust_bridge.restoreSession(statePath, pipeline!!)
+                        // A keychain join cut short (B6.5): the number registered alone again when it left none.
+                        features.atStartLocked(session != null)
                         sessionCameUp()
                         restored = session != null
                     }
                     refreshStatus()
-                    if (restored) account.sessionUpLocked()
+                    if (restored) {
+                        account.sessionUpLocked()
+                        scope.launch { features.sessionUp() }
+                    }
                 } catch (e: Throwable) {
                     fail(e)
                 }
@@ -1116,6 +1169,53 @@ class DirectEngine private constructor(private val app: Context) {
      * address alone (the chat named by its guid, as the user's devices know it), carrying the GUID
      * of the message it is unread from ([guid]). Apple does not answer it.
      */
+    /**
+     * "Notify Anyway" (B6.3): tells the person of the chat with one person [target], whose
+     * notifications are silenced, to notify them of the user's message [guid]. Apple Account only.
+     */
+    suspend fun notifyAnyway(target: DirectWire.Target, guid: String) {
+        if (!features.on()) throw ImessageError("Focus status needs the Apple Account.")
+        val s = requireSession()
+        val (conversation, from) = conversationOf(target)
+        sendOnly(s, uniffi.rust_bridge.newMsg(conversation, from, PushChatMessage.NotifyAnyways).copy(id = guid))
+    }
+
+    /**
+     * Shares the user's own name and photo with the chat with one person [target] (B6.2), from this
+     * phone's number: only once the user published it and turned sharing on. The new message's GUID.
+     */
+    suspend fun shareProfile(target: DirectWire.Target): String {
+        val pointer = features.profiles.pointer() ?: throw ImessageError("Share Name and Photo is off.")
+        if (target.groupGuid != null || target.participants.size != 1) throw ImessageError("Only to one person.")
+        val s = requireSession()
+        val (conversation, from) = conversationOf(target)
+        val inst = uniffi.rust_bridge.newMsg(conversation, Handles.preferredSender(myHandles) ?: from, PushChatMessage.ShareProfile(pointer.toMessage()))
+        sendAndConfirm(s, inst, Sent.MESSAGE)
+        return inst.id
+    }
+
+    /**
+     * An imported iCloud attachment (B6.5) into [path] (LightDecoder's, checked by the caller), by its
+     * record id: only one the user asked for, [maxBytes] at most, through the library's
+     * `downloadCloudAttachments` (read-only). Its size.
+     */
+    suspend fun downloadCloud(record: String, path: String, maxBytes: Long): Long {
+        if (!features.on() || !DirectWire.isCloudRecord(record)) throw ImessageError(app.getString(R.string.imessage_direct_attachment_not_saved))
+        val file = File(path)
+        file.parentFile?.mkdirs()
+        val partial = File.createTempFile(file.name + ".", MediaCache.PART_SUFFIX, file.parentFile)
+        try {
+            partial.delete()
+            call { NativeFeatureBridge { session }.downloadCloudAttachments(mapOf(record to partial.path)) }
+            val size = partial.length()
+            if (size > maxBytes.coerceIn(1L, DirectMedia.MAX_DOWNLOAD_BYTES)) throw tooBigToDownload(maxBytes)
+            if (size <= 0 || !partial.renameTo(file)) throw ImessageError(app.getString(R.string.imessage_direct_attachment_not_saved))
+            return file.length()
+        } finally {
+            partial.delete()
+        }
+    }
+
     suspend fun markUnread(target: DirectWire.Target, guid: String) {
         val s = requireSession()
         val (conversation, from) = conversationOf(target)
@@ -1473,6 +1573,9 @@ class DirectEngine private constructor(private val app: Context) {
             /** A FaceTime call's event: handed to the calls. */
             FACETIME,
 
+            /** Someone's Focus status (B6.3): handed to the Apple Account's features, which take it only when asked for. */
+            STATUSKIT,
+
             /**
              * Acknowledged unread, and never logged: also the ones an Apple Account brings (other
              * devices' sign-in requests and their teardown, two-factor notices, the iCloud Keychain's,
@@ -1484,6 +1587,7 @@ class DirectEngine private constructor(private val app: Context) {
         internal fun routeOf(event: PushEvent): EventRoute = when (event) {
             is PushEvent.Message -> EventRoute.MESSAGE
             is PushEvent.FaceTime -> EventRoute.FACETIME
+            is PushEvent.StatusKit -> EventRoute.STATUSKIT
             else -> EventRoute.ACKNOWLEDGE
         }
 

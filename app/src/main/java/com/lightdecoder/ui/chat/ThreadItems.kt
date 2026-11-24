@@ -74,7 +74,7 @@ sealed class ThreadItem {
  * What an iPhone writes under one of the user's iMessages: "Delivered", or "Read" with when
  * ([readAtMs], 0 when that is not known).
  */
-data class Receipt(val read: Boolean, val readAtMs: Long = 0)
+data class Receipt(val read: Boolean, val readAtMs: Long = 0, val quietly: Boolean = false)
 
 /** Turns a thread's messages into what the list draws. Pure, so it can be tested. */
 object ThreadItems {

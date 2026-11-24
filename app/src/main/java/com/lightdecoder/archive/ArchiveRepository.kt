@@ -267,14 +267,36 @@ class ArchiveRepository private constructor(
         capTombstones(b.db)
     }
 
-    /** Forgets deleted ids older than [TOMBSTONE_DAYS] days, then all but the newest [MAX_TOMBSTONES]. */
+    /** Forgets deleted ids older than [TOMBSTONE_DAYS] days, then all but the newest [MAX_TOMBSTONES] (a deleted chat's mark stays: [conversationDeletedAt]). */
     fun pruneTombstones(now: Long = System.currentTimeMillis()) = write { b ->
-        b.db.delete("deleted_guids", "at < ?", arrayOf((now - TOMBSTONE_MS).toString()))
+        b.db.delete("deleted_guids", "at < ? AND $NOT_CHAT_MARK", arrayOf((now - TOMBSTONE_MS).toString()))
         capTombstones(b.db)
     }
 
-    /** How many deleted ids are kept. */
-    fun tombstoneCount(): Int = query("SELECT COUNT(*) FROM deleted_guids", emptyArray()) { it.getInt(0) }.firstOrNull() ?: 0
+    /** How many deleted message ids are kept. */
+    fun tombstoneCount(): Int = query("SELECT COUNT(*) FROM deleted_guids WHERE $NOT_CHAT_MARK", emptyArray()) { it.getInt(0) }.firstOrNull() ?: 0
+
+    /**
+     * When the iMessage chat [conversationId] was deleted here for good (permanently, or as a local
+     * delete), the latest time; null when it never was (or the mark went, the oldest beyond
+     * [MAX_CHAT_TOMBSTONES]). Kept apart from the messages' ids, which are capped and expire: what
+     * an import of older messages (Messages in iCloud) must not bring back.
+     */
+    fun conversationDeletedAt(conversationId: String): Long? =
+        query("SELECT at FROM deleted_guids WHERE guid = ? LIMIT 1", arrayOf(CHAT_MARK + conversationId)) { it.getLong(0) }.firstOrNull()
+
+    /** Whether [conversationId] holds a message (from the phone or Apple, [prefix]) whose `extra_json` lacks [needle]. */
+    fun hasMessageWithout(conversationId: String, needle: String, prefix: String = "imsg:"): Boolean = query(
+        "SELECT 1 FROM messages WHERE conversation_id = ? AND substr(message_id, 1, ${prefix.length}) = ? AND instr(extra_json, ?) = 0 LIMIT 1",
+        arrayOf(conversationId, prefix, needle),
+    ) { true }.isNotEmpty()
+
+    /**
+     * Deletes the message [messageId] with its media, as [applyDeletion] does but noting nothing as
+     * deleted: for copies the user asked to remove (imported history), whose ids must not push the
+     * real deletions' out of [MAX_TOMBSTONES]. False when it is not stored.
+     */
+    fun removeCopy(messageId: String): Boolean = write { b -> deleteMessage(b, messageId, tombstone = false) }
 
     /**
      * Deletes for good, as [deleteConversationLocal] does, the conversation
@@ -371,7 +393,7 @@ class ArchiveRepository private constructor(
     }
 
     /** Removes a message the phone deleted, with its search entry and media files. */
-    fun applyDeletion(messageId: String) = write { deleteMessage(it, messageId) }
+    fun applyDeletion(messageId: String) = write { deleteMessage(it, messageId); Unit }
 
     /**
      * Moves messages this account sent forward to [status] (with
@@ -602,11 +624,12 @@ class ArchiveRepository private constructor(
         return rows.mapNotNull { row -> chats.getOrPut(row.conversationId) { conversation(row.conversationId) }?.let { row to it } }
     }
 
-    /** Like [latestMessageId], among the messages other people sent. */
-    fun latestIncomingMessageId(conversationId: String, prefix: String = "imsg:"): String? = query(
+    /** Like [latestMessageId], among the messages other people sent; with [excludingExtra], none whose `extra_json` holds it. */
+    fun latestIncomingMessageId(conversationId: String, prefix: String = "imsg:", excludingExtra: String = ""): String? = query(
         "SELECT message_id FROM messages WHERE conversation_id = ? AND substr(message_id, 1, ${prefix.length}) = ? " +
-            "AND is_outgoing = 0 AND direction = 'in' ORDER BY timestamp_ms DESC, rowid DESC LIMIT 1",
-        arrayOf(conversationId, prefix),
+            "AND is_outgoing = 0 AND direction = 'in' " + (if (excludingExtra.isEmpty()) "" else "AND instr(extra_json, ?) = 0 ") +
+            "ORDER BY timestamp_ms DESC, rowid DESC LIMIT 1",
+        if (excludingExtra.isEmpty()) arrayOf(conversationId, prefix) else arrayOf(conversationId, prefix, excludingExtra),
     ) { it.getString(0) }.firstOrNull()
 
     /**
@@ -1157,6 +1180,12 @@ class ArchiveRepository private constructor(
     /** The newest [TOMBSTONES_PER_CONVERSATION] message ids of [conversationId] are noted as deleted: it is going for good. */
     private fun tombstoneConversation(b: Batch, conversationId: String) {
         if (service != ChatService.IMESSAGE) return
+        if (conversationId.startsWith(TOMBSTONED_PREFIX) && conversationId.length + CHAT_MARK.length <= MAX_TOMBSTONE_CHARS) {
+            b.db.insertWithOnConflict("deleted_guids", null, ContentValues().apply {
+                put("guid", CHAT_MARK + conversationId)
+                put("at", b.now)
+            }, SQLiteDatabase.CONFLICT_REPLACE)
+        }
         query(
             b.db,
             "SELECT message_id FROM messages WHERE conversation_id = ? AND message_id LIKE ? " +
@@ -1165,13 +1194,22 @@ class ArchiveRepository private constructor(
         ) { it.getString(0) }.forEach { addTombstone(b, it, b.now) }
     }
 
-    /** Keeps the newest [MAX_TOMBSTONES] deleted ids. */
+    /** Keeps the newest [MAX_TOMBSTONES] deleted message ids, and apart from them the newest [MAX_CHAT_TOMBSTONES] deleted chats' marks. */
     private fun capTombstones(db: SQLiteDatabase) {
-        val count = query(db, "SELECT COUNT(*) FROM deleted_guids", emptyArray()) { it.getInt(0) }.firstOrNull() ?: 0
-        if (count <= MAX_TOMBSTONES) return
-        db.execSQL(
-            "DELETE FROM deleted_guids WHERE rowid NOT IN (SELECT rowid FROM deleted_guids ORDER BY at DESC, rowid DESC LIMIT $MAX_TOMBSTONES)",
-        )
+        val count = query(db, "SELECT COUNT(*) FROM deleted_guids WHERE $NOT_CHAT_MARK", emptyArray()) { it.getInt(0) }.firstOrNull() ?: 0
+        if (count > MAX_TOMBSTONES) {
+            db.execSQL(
+                "DELETE FROM deleted_guids WHERE $NOT_CHAT_MARK AND rowid NOT IN " +
+                    "(SELECT rowid FROM deleted_guids WHERE $NOT_CHAT_MARK ORDER BY at DESC, rowid DESC LIMIT $MAX_TOMBSTONES)",
+            )
+        }
+        val chats = query(db, "SELECT COUNT(*) FROM deleted_guids WHERE NOT ($NOT_CHAT_MARK)", emptyArray()) { it.getInt(0) }.firstOrNull() ?: 0
+        if (chats > MAX_CHAT_TOMBSTONES) {
+            db.execSQL(
+                "DELETE FROM deleted_guids WHERE NOT ($NOT_CHAT_MARK) AND rowid NOT IN " +
+                    "(SELECT rowid FROM deleted_guids WHERE NOT ($NOT_CHAT_MARK) ORDER BY at DESC, rowid DESC LIMIT $MAX_CHAT_TOMBSTONES)",
+            )
+        }
     }
 
     private fun deleteConversation(b: Batch, conversationId: String) {
@@ -1316,10 +1354,10 @@ class ArchiveRepository private constructor(
         return UpsertResult(inserted = existingRowId == null, replacedTmpId = replacedTmpId, newMediaParts = newMedia)
     }
 
-    private fun deleteMessage(b: Batch, messageId: String) {
+    private fun deleteMessage(b: Batch, messageId: String, tombstone: Boolean = true): Boolean {
         val found = query(b.db, "SELECT rowid, conversation_id FROM messages WHERE message_id = ?", arrayOf(messageId)) {
             it.getLong(0) to it.getString(1)
-        }.firstOrNull() ?: return
+        }.firstOrNull() ?: return false
         media(b.db, messageId).forEach {
             b.maybeOrphaned.add(it.localPath)
             b.maybeOrphaned.add(it.thumbPath)
@@ -1335,8 +1373,9 @@ class ArchiveRepository private constructor(
         b.db.execSQL("DELETE FROM messages_fts WHERE docid = ?", arrayOf<Any>(found.first))
         b.db.delete("messages", "message_id = ?", arrayOf(messageId)) // cascades to media
         // Gone from iMessage's archive: Apple handing it over again does not bring it back.
-        if (service == ChatService.IMESSAGE && addTombstone(b, messageId, b.now)) capTombstones(b.db)
+        if (tombstone && service == ChatService.IMESSAGE && addTombstone(b, messageId, b.now)) capTombstones(b.db)
         b.changed(Kind.MESSAGES, found.second)
+        return true
     }
 
     /** Creates a placeholder for a conversation the phone has not described yet. */
@@ -1556,6 +1595,13 @@ class ArchiveRepository private constructor(
 
         /** The ids kept when a message is deleted: iMessage's (Apple may hand one over again). */
         private const val TOMBSTONED_PREFIX = "imsg:"
+
+        /** How a deleted chat is marked among the deleted ids ([conversationDeletedAt]): never a message's id, which starts with [TOMBSTONED_PREFIX]. */
+        private const val CHAT_MARK = "chat:"
+        private const val NOT_CHAT_MARK = "substr(guid, 1, 5) != 'chat:'"
+
+        /** The most deleted chats' marks kept ([conversationDeletedAt]): the oldest go first. */
+        const val MAX_CHAT_TOMBSTONES = 2_000
 
         /** The longest id kept as deleted (an iMessage GUID with its prefix, and some room). */
         private const val MAX_TOMBSTONE_CHARS = 128

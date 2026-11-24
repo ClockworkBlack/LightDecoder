@@ -59,15 +59,46 @@ data class AccountFlag(
     val sinceMs: Long = 0,
     val limits: AppleAccountRules.Limits = AppleAccountRules.Limits(),
     val notice: AccountNotice? = null,
+    /** Messages in iCloud (B6.5): [HISTORY_OFF], [HISTORY_ON], or [HISTORY_JOINING] while the keychain join commits. */
+    val history: String = HISTORY_OFF,
+    /** Share Focus Status (B6.4): off by default. */
+    val focusShare: Boolean = false,
+    /** Receiving other people's Focus status (B6.3): on once signed in, can be turned off. */
+    val focusIn: Boolean = true,
+    /** Apple refused Focus status (no keychain): "Not available" until it is asked again. */
+    val focusUnavailable: Boolean = false,
+    /** Taking names and photos people share (B6.1): on once signed in, can be turned off. */
+    val profilesIn: Boolean = true,
+    /** Sharing the user's own name and photo (B6.2), asked per chat: off by default. */
+    val profileShare: Boolean = false,
+    /** How far back Messages in iCloud imports ([CloudImport.sinceOf]). */
+    val window: String = CloudImport.WINDOW_YEAR,
 ) {
     fun toJson(): JSONObject = JSONObject()
         .apply { state.wire?.let { put("state", it).put("since", sinceMs) } }
+        .apply { if (state != FlagState.NONE) featuresJson(this) }
         .apply { if (limits.passwordFailures.isNotEmpty()) put("pw", JSONArray(limits.passwordFailures)) }
         .apply { if (limits.deviceCodes.isNotEmpty()) put("dev", JSONArray(limits.deviceCodes)) }
         .apply { if (limits.textCodes.isNotEmpty()) put("sms", JSONArray(limits.textCodes)) }
         .apply { notice?.let { put("notice", it.wire) } }
 
+    private fun featuresJson(o: JSONObject) {
+        if (history != HISTORY_OFF) o.put("history", history)
+        if (focusShare) o.put("focusShare", true)
+        if (!focusIn) o.put("focusOff", true)
+        if (focusUnavailable) o.put("focusNA", true)
+        if (!profilesIn) o.put("profilesOff", true)
+        if (profileShare) o.put("profileShare", true)
+        if (window != CloudImport.WINDOW_YEAR) o.put("window", window)
+    }
+
     companion object {
+        const val HISTORY_OFF = "off"
+        const val HISTORY_ON = "on"
+        const val HISTORY_JOINING = "joining"
+        private val HISTORIES = setOf(HISTORY_OFF, HISTORY_ON, HISTORY_JOINING)
+        private val WINDOWS = setOf(CloudImport.WINDOW_MONTH, CloudImport.WINDOW_YEAR, CloudImport.WINDOW_ALL)
+
         /** [text] read strictly: anything not as written here is left out; text that is no JSON at all is no flag. */
         fun fromJson(text: String?): AccountFlag {
             val o = try {
@@ -81,6 +112,13 @@ data class AccountFlag(
                 sinceMs = if (state == FlagState.NONE) 0 else (o.opt("since") as? Number)?.toLong()?.coerceAtLeast(0) ?: 0,
                 limits = AppleAccountRules.Limits(stamps(o, "pw"), stamps(o, "dev"), stamps(o, "sms")),
                 notice = AccountNotice.of(o.opt("notice") as? String),
+                history = (o.opt("history") as? String)?.takeIf { it in HISTORIES && state != FlagState.NONE } ?: HISTORY_OFF,
+                focusShare = state != FlagState.NONE && o.opt("focusShare") == true,
+                focusIn = o.opt("focusOff") != true,
+                focusUnavailable = o.opt("focusNA") == true,
+                profilesIn = o.opt("profilesOff") != true,
+                profileShare = state != FlagState.NONE && o.opt("profileShare") == true,
+                window = (o.opt("window") as? String)?.takeIf { it in WINDOWS } ?: CloudImport.WINDOW_YEAR,
             )
         }
 
@@ -108,6 +146,35 @@ class AccountFiles(private val filesDir: File, val statePath: String) {
     val keychainCodeFile = File(filesDir, "imessage/keychain-code.enc")
     val cloudDir = File(filesDir, "imessage/cloud")
     val myProfileFile = File(filesDir, "imessage/my-profile.json")
+
+    /** Those the user's Focus was shared with (B6.4): taken off when sharing ends. Removed by a sign-out (after that). */
+    val focusInvitedFile = File(filesDir, "imessage/focus-invited.json")
+
+    /**
+     * "Also remove imported messages" ticked at a sign-out (B6.5): kept until the main process was
+     * told of the sign-out with it, or until the next sign-in. Not one of the account's files (a
+     * sign-out deletes those first); empty.
+     */
+    val removeImportedMarker = File(filesDir, "imessage/remove-imported")
+
+    /**
+     * A keychain join's commit under way (B6.5, R15): written before the registration is deleted,
+     * gone only once the phone's number is registered again (or the join finished). Not one of the
+     * account's files, nor in the account's flag, so that nothing a start or a sign-out does to
+     * those loses it; empty.
+     */
+    val joinMarker = File(filesDir, "imessage/keychain-join")
+
+    /** Writes or deletes the empty marker [f]. */
+    fun mark(f: File, on: Boolean) {
+        if (!on) {
+            f.delete()
+            return
+        }
+        if (f.isFile) return
+        f.parentFile?.mkdirs()
+        FileOutputStream(f).use { it.fd.sync() }
+    }
 
     /** The library's saved account: the one sign of an account on this phone that counts. */
     val accountPlist = File(statePath, "account.plist")
@@ -183,6 +250,7 @@ class AccountFiles(private val filesDir: File, val statePath: String) {
         keychainCodeFile.delete()
         cloudDir.deleteRecursively()
         myProfileFile.delete()
+        focusInvitedFile.delete()
         deleteLibraryLogs()
     }
 
@@ -202,7 +270,7 @@ class AccountFiles(private val filesDir: File, val statePath: String) {
  * keys a sign-in makes). Never any other `imessage:` key: the phone's registration needs them.
  */
 internal object AccountKeys {
-    val ALIASES = listOf(DirectKeystore.PREFIX + "gsa:password")
+    val ALIASES = listOf(DirectKeystore.PREFIX + "gsa:password", PhoneUserStore.CODE_ALIAS)
 
     fun delete() {
         val store = KeyStore.getInstance(DirectKeystore.ANDROID_KEYSTORE).apply { load(null) }
@@ -291,15 +359,22 @@ class PhoneUserStore(private val file: File, private val ciphers: AccountCiphers
         private const val TAG_BYTES = 16
         private val LOCK = Any()
 
-        fun of(context: Context) = PhoneUserStore(AccountFiles.phoneUserFile(context.filesDir), AccountCiphers { iv -> AccountCiphers.forKey(keystoreKey()).cipher(iv) })
+        fun of(context: Context) = PhoneUserStore(AccountFiles.phoneUserFile(context.filesDir), keystoreCiphers(KEY_ALIAS))
+
+        /** The iCloud Keychain's code (B6.5), kept only if the user asked, under a Keystore key of its own ([CODE_ALIAS]). */
+        fun keychainCode(context: Context) = PhoneUserStore(java.io.File(context.filesDir, "imessage/keychain-code.enc"), keystoreCiphers(CODE_ALIAS))
+
+        const val CODE_ALIAS = "ld-keychain-code"
+
+        fun keystoreCiphers(alias: String) = AccountCiphers { iv -> AccountCiphers.forKey(keystoreKey(alias)).cipher(iv) }
 
         /** The Keystore key, made on first use. Not tied to the lock screen: registration may run with the phone locked. */
-        private fun keystoreKey(): SecretKey {
+        private fun keystoreKey(alias: String): SecretKey {
             val store = KeyStore.getInstance(DirectKeystore.ANDROID_KEYSTORE).apply { load(null) }
-            (store.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
+            (store.getKey(alias, null) as? SecretKey)?.let { return it }
             return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, DirectKeystore.ANDROID_KEYSTORE).apply {
                 init(
-                    KeyGenParameterSpec.Builder(KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+                    KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
                         .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
                         .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                         .setKeySize(256)

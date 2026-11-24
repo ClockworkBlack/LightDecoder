@@ -53,6 +53,9 @@ class AppleAccountActivity : AppCompatActivity() {
     private var countdown: Job? = null
     private var leaving = false
 
+    /** One feature's page (B6: Name & Photo, Focus Status, Messages in iCloud) instead of the sign-in, when asked for. */
+    private var featurePages: AppleFeaturePages? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
@@ -67,6 +70,11 @@ class AppleAccountActivity : AppCompatActivity() {
                 override fun handleOnBackPressed() = leave()
             },
         )
+        val feature = intent.getStringExtra(EXTRA_FEATURE)
+        if (feature != null) {
+            featurePages = AppleFeaturePages(this, binding, feature).also { it.show() }
+            return
+        }
         wire()
         // A sign-in under way (the screen made again) goes on where it was.
         val resumed = account.page
@@ -75,12 +83,18 @@ class AppleAccountActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        if (featurePages != null) return
         // In sight, iMessage's service may be started: a restart still pending is made now. Not under
         // a page that waits to be read ("Signed in", Apple's words, the terms): its "OK" makes it.
         if (!waitsForOk(shown)) account.screenShown()
     }
 
     override fun onDestroy() {
+        featurePages?.let {
+            it.destroy()
+            super.onDestroy()
+            return
+        }
         // The password is never left behind a screen that is gone (S2).
         account.dropCredentials()
         if (isFinishing && !leaving) {
@@ -366,6 +380,11 @@ class AppleAccountActivity : AppCompatActivity() {
 
     /** Leaves the screen; a sign-in not finished is let go of entirely. On "Signed in" it is "OK". */
     private fun leave() {
+        featurePages?.let {
+            it.leave()
+            finish()
+            return
+        }
         if (shown == Page.Done) {
             messageOk()
             return
@@ -419,5 +438,11 @@ class AppleAccountActivity : AppCompatActivity() {
     companion object {
         private const val CODE_LENGTH = 6
         const val IFORGOT = "https://iforgot.apple.com"
+
+        /** Which of the account's features to show ([FEATURE_PROFILE], [FEATURE_FOCUS], [FEATURE_ICLOUD]) instead of the sign-in. */
+        const val EXTRA_FEATURE = "com.lightdecoder.extra.APPLE_FEATURE"
+        const val FEATURE_PROFILE = "profile"
+        const val FEATURE_FOCUS = "focus"
+        const val FEATURE_ICLOUD = "icloud"
     }
 }
