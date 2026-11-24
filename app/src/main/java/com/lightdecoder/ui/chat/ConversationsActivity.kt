@@ -746,6 +746,8 @@ class ConversationsActivity : AppCompatActivity() {
             R.id.action_delete_archive -> LocalArchive.confirmDelete(this, backend) { reload() }
             R.id.action_empty_deleted -> confirmEmptyDeleted()
             R.id.action_recover_all_deleted -> recoverAllDeleted()
+            R.id.action_backup_chats -> startActivity(com.lightdecoder.ui.backup.BackupActivity.backupIntent(this))
+            R.id.action_restore_chats -> startActivity(com.lightdecoder.ui.backup.BackupActivity.restoreIntent(this))
             else -> return super.onOptionsItemSelected(item)
         }
         return true

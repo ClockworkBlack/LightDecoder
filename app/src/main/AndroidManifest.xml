@@ -213,6 +213,17 @@
             </intent-filter>
         </activity>
 
+        <!--
+            Back up chats / Restore chats: an encrypted file the user picks (backup/ChatBackup). The
+            passphrase is typed here. Not recreated on rotation, folding, a theme or font change, so a
+            running backup is not cut off.
+        -->
+        <activity
+            android:name=".ui.backup.BackupActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|density|uiMode|locale|layoutDirection|fontScale"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
         <!-- About > Licences: NOTICE and the licence texts in the app's assets. -->
         <activity
             android:name=".ui.LicensesActivity"

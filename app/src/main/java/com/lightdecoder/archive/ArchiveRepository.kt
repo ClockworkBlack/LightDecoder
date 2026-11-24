@@ -842,8 +842,10 @@ class ArchiveRepository private constructor(
      * Runs [block], which writes a file into the media cache and records its
      * path ([setMediaLocalPath]), so that no cleanup of unused files deletes
      * it in between. Keep it short: other writes' cleanups wait for it.
+     * The archive's gates are taken first, as a write takes them before the
+     * cleanup takes this lock: the two are always taken in the same order.
      */
-    fun <T> withMediaFileLock(block: () -> T): T = synchronized(mediaFileLock) { block() }
+    fun <T> withMediaFileLock(block: () -> T): T = gated(writes = true) { synchronized(mediaFileLock) { block() } }
 
     fun setMediaLocalPath(messageId: String, partId: String, cacheKey: String, path: String, thumbnail: Boolean): Boolean =
         when {
@@ -1054,9 +1056,18 @@ class ArchiveRepository private constructor(
     }
 
     private fun <T> write(block: (Batch) -> T): T {
+        val (result, batch) = gated(writes = true) {
+            val b = Batch(helper.writableDatabase, service)
+            writeUnderGate(b, block) to b
+        }
+        batch.changes.forEach(ArchiveEvents::notify)
+        return result
+    }
+
+    /** [write]'s transaction and file cleanup, run while the gates are held (no change is announced here). */
+    private fun <T> writeUnderGate(batch: Batch, block: (Batch) -> T): T {
         sweepStaleParts()
-        val db = helper.writableDatabase
-        val batch = Batch(db, service)
+        val db = batch.db
         val result: T
         val orphans: List<String>
         db.beginTransaction()
@@ -1077,7 +1088,6 @@ class ArchiveRepository private constructor(
             }
         }
         batch.outboxFiles.mapNotNull { outboxFileOrNull(it) }.forEach { it.delete() }
-        batch.changes.forEach(ArchiveEvents::notify)
         return result
     }
 
@@ -1481,10 +1491,68 @@ class ArchiveRepository private constructor(
         }.firstOrNull()?.let { b.changed(Kind.MESSAGES, it) }
     }
 
+    // --- backup and restore -----------------------------------------------------
+
+    /**
+     * Runs [block] while the gates let this archive be read ([writes] false) or written: a
+     * backup snapshot ([snapshotTo]) waits for a write in progress and holds new ones back, and
+     * a restore ([closeAllForRestore]) waits for every read and write and holds all of them back.
+     */
+    private fun <T> gated(writes: Boolean, block: () -> T): T {
+        val activity = activityGate.readLock()
+        activity.lock()
+        try {
+            if (!writes) return block()
+            val write = writeGate.readLock()
+            write.lock()
+            try {
+                return block()
+            } finally {
+                write.unlock()
+            }
+        } finally {
+            activity.unlock()
+        }
+    }
+
+    /**
+     * Copies this archive's database file, as of the last write that finished, to [dest]
+     * (with its write-ahead log next to it, as [dest] + "-wal", when there is one: whoever opens
+     * the copy gets both). No write of any service runs meanwhile; reads go on. False when this
+     * archive has no database file (the service was never used). While it waits for a write in
+     * progress, [cancel] is called every so often (it throws to stop waiting).
+     */
+    fun snapshotTo(dest: File, cancel: () -> Unit = {}): Boolean {
+        val name = helper.databaseName ?: return false
+        val source = helper.appContext.getDatabasePath(name)
+        val wal = File(source.path + "-wal")
+        val destWal = File(dest.path + "-wal")
+        val lock = writeGate.writeLock()
+        while (!lock.tryLock(SNAPSHOT_WAIT_STEP_MS, java.util.concurrent.TimeUnit.MILLISECONDS)) cancel()
+        try {
+            if (!source.isFile) return false
+            dest.parentFile?.mkdirs()
+            source.copyTo(dest, overwrite = true)
+            if (wal.isFile) wal.copyTo(destWal, overwrite = true) else destWal.delete()
+            return true
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    /** Where this archive's database file is (whether or not it exists yet); null for an in-memory one. */
+    fun databaseFile(): File? = helper.databaseName?.let { helper.appContext.getDatabasePath(it) }
+
+    /** The directory of this archive's downloaded media. */
+    fun mediaDirectory(): File = mediaDir
+
+    /** The directory of this archive's attachments waiting to be sent. */
+    fun outboxDirectory(): File = outboxDir
+
     // --- reading helpers --------------------------------------------------------
 
     private fun <T> query(sql: String, args: Array<String>, map: (DbCursor) -> T): List<T> =
-        query(helper.readableDatabase, sql, args, map)
+        gated(writes = false) { query(helper.readableDatabase, sql, args, map) }
 
     private fun <T> query(db: SQLiteDatabase, sql: String, args: Array<String>, map: (DbCursor) -> T): List<T> =
         db.rawQuery(sql, args).use { c ->
@@ -1647,6 +1715,35 @@ class ArchiveRepository private constructor(
         /** The range of message ids the FaceTime calls' rows have ("ftcall:" up to the next character after ':'). */
         private const val CALL_ROWS_FROM = "ftcall:"
         private const val CALL_ROWS_TO = "ftcall;"
+        /** How long [snapshotTo] waits for the writes at a time before it asks whether to go on waiting. */
+        private const val SNAPSHOT_WAIT_STEP_MS = 200L
+
+        /** Held (shared) by every read and write; held alone by a restore that replaces the files. */
+        private val activityGate = java.util.concurrent.locks.ReentrantReadWriteLock()
+
+        /** Held (shared) by every write; held alone while a backup copies the files. */
+        private val writeGate = java.util.concurrent.locks.ReentrantReadWriteLock()
+
+        /**
+         * For a restore: waits (at most [timeoutMs]) until no archive of any service is being read
+         * or written, then holds every read and write back, closes each open archive and forgets
+         * it, so the files can be replaced. Null when that did not happen in time (nothing was
+         * closed). Until [ArchiveRestoreHold.release] nothing reads or writes an archive in this process;
+         * the restore normally never releases it, and the process is restarted instead.
+         */
+        fun closeAllForRestore(timeoutMs: Long): ArchiveRestoreHold? {
+            val lock = activityGate.writeLock()
+            if (!lock.tryLock(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)) return null
+            try {
+                val open = instances.values.toList()
+                instances.clear()
+                open.forEach { runCatching { it.helper.close() } }
+            } catch (e: Throwable) {
+                lock.unlock()
+                throw e
+            }
+            return ArchiveRestoreHold(lock)
+        }
 
         /**
          * Turns what the user typed into an FTS4 query that cannot be misread
@@ -1914,4 +2011,16 @@ private fun reactionsFrom(json: String): List<ReactionDto> = try {
     ReactionDto.listFromJson(JSONArray(json))
 } catch (e: JSONException) {
     emptyList()
+}
+
+/** What [ArchiveRepository.closeAllForRestore] holds: every archive read and write of this process waits for [release]. */
+class ArchiveRestoreHold internal constructor(private val lock: java.util.concurrent.locks.ReentrantReadWriteLock.WriteLock) {
+    private var released = false
+
+    /** Lets reads and writes go on again (each archive is opened afresh by [ArchiveRepository.get]). Only the thread that closed may call it. */
+    fun release() {
+        if (released) return
+        released = true
+        lock.unlock()
+    }
 }

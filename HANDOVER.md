@@ -41,6 +41,40 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
   Device checks are in SPEC2 section 8 and in the owner's 0.5.74 checklist.
 - Unit tests: 2055 (4 skipped), all passing. Not built: Find My, FaceTime links, sharing this
   phone's screen, adding people mid-call, Live Photo sending, Apple-side sign-out.
+## 0.5.73.1 (versionCode 86) - hotfix: Back up chats / Restore chats
+- Made on branch `hotfix-0.5.73.1` from release 0.5.73 (a41c75c), not from the 0.5.74 line. The owner
+  uninstalled the app and lost every chat: Android/Samsung backup stays off on purpose
+  (`allowBackup=false`, `data_extraction_rules.xml` unchanged), so this adds the user's own encrypted
+  backup to a file they pick. Next full update: **0.5.76 / 87** (0.5.74 / 85 was a build already sent).
+- Menu items "Back up chats" / "Restore chats" in the sticker inbox's and the conversation list's
+  overflow menus open `ui/backup/BackupActivity` (FLAG_SECURE, passphrase twice, min 8 characters,
+  strength hint only, no autofill, not kept in saved state, char arrays wiped). One line on the
+  iMessage screen points to it. Nothing runs at app start.
+- `backup/ChatBackup`: every service's archive (`relay-`, `whatsapp-`, `gmail-`, `imessage-archive.db`)
+  copied under a new write gate in `ArchiveRepository` (`snapshotTo`: db + -wal while no write runs,
+  then folded into one file in a cache work folder), plus the files rows point to in each archive's
+  own media/outbox folders (100 MB per file cap, count reported). Queued sends come back as FAILED (a
+  restore never sends by itself); the `connection_health` row (paired account) is deleted with
+  secure_delete. Not in it: any session/cookie/pairing, iMessage registration and library state,
+  Keystore material, passwords, the Messenger notification inbox, reaction/read-time side tables,
+  iMessage group photos and chat backgrounds.
+- `backup/BackupCipher`: "LDBK" v1, PBKDF2-HMAC-SHA256 (310000 iterations, 16-byte salt, both in the
+  header), AES-256-GCM in 1 MiB chunks, nonce = 8-byte random prefix + chunk counter, header + index +
+  final flag in the AAD. ZIP inside: manifest.json (first), db/<archive>, media/<folder>/<file>.
+- Restore: decrypt and check everything in a cache work folder first (all chunks, entry names and
+  sizes, integrity_check, schema not newer than `ArchiveDb.VERSION`; older ones upgrade on open), file
+  paths re-pointed at this phone's folders; then `ArchiveRepository.closeAllForRestore` holds every
+  archive read/write, files are swapped by rename (undone on failure), and the app restarts
+  (`backup/AppRestart`, with a 30 s fallback). iMessage must be registered again.
+- After review: the backup copy is scrubbed of what was deleted on the phone (FTS optimize, every
+  table copied out and back with the same rowids under secure_delete, free pages zeroed; no VACUUM);
+  unsent bubbles come back `failed` (Retry); `withMediaFileLock` takes the archive gates before its
+  monitor (fixed a lock-order deadlock with a backup) and `snapshotTo` waits cancellably; one backup
+  or restore per process (BUSY); restore deletes only archives the manifest does not list; it stops
+  before filling the phone (NO_SPACE, 200 MB margin); a swap cut off by the process dying is put
+  back by the next restore (`chat-restore-pending` marker in filesDir, nothing at app start);
+  BackupActivity survives fold/theme/font changes and any new instance shows the restart dialog.
+- **Not run on a phone.** Tests: `BackupCipherTest`, `ChatBackupTest`.
 
 ## 0.5.73 (versionCode 84) - hotfix: FaceTime video stretched, no zoom (Galaxy Z Fold 7)
 - Made on branch `ccr-1d2709f2-vu6cl9` from `ccr-ffe9dbd4-xu00fq-isolated` at 0.5.72, apart from the

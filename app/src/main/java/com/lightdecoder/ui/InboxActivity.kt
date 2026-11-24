@@ -266,6 +266,8 @@ class InboxActivity : AppCompatActivity() {
             R.id.action_log -> showLog()
             R.id.action_clear -> confirmClear()
             R.id.action_about -> showAbout()
+            R.id.action_backup_chats -> startActivity(com.lightdecoder.ui.backup.BackupActivity.backupIntent(this))
+            R.id.action_restore_chats -> startActivity(com.lightdecoder.ui.backup.BackupActivity.restoreIntent(this))
             R.id.action_report -> lifecycleScope.launch {
                 val report = withContext(Dispatchers.IO) { ProblemReport.build(this@InboxActivity) }
                 ProblemReport.share(this@InboxActivity, report)

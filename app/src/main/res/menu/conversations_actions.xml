@@ -53,6 +53,15 @@
         android:title="@string/imessage_recover_all"
         android:visible="false"
         app:showAsAction="never" />
+    <!-- Every tab: the user's own encrypted backup of all chats (ui.backup.BackupActivity). -->
+    <item
+        android:id="@+id/action_backup_chats"
+        android:title="@string/backup_menu"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_restore_chats"
+        android:title="@string/restore_menu"
+        app:showAsAction="never" />
     <!-- Only in the local Deleted folder, while it holds something. -->
     <item
         android:id="@+id/action_empty_deleted"

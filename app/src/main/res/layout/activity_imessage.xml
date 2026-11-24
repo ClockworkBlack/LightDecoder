@@ -137,6 +137,13 @@
                         android:text="@string/imessage_register_body"
                         android:textAppearance="?attr/textAppearanceBodyMedium" />
 
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:text="@string/imessage_backup_hint"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+
                     <com.google.android.material.textfield.TextInputLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
