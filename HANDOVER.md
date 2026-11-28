@@ -8,11 +8,56 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
    had earlier chosen "build with a warning", then "pause on Discord", and has now asked for
    the web-view tab only, with no bridge). **Instagram: skipped** (ban risk, like Messenger).
 
+## 0.5.73.2 (versionCode 87) - hotfix: iMessage history, FaceTime picture shape, polls, Add People
+- On branch `hotfix-0.5.73.1` (0.5.73.1 + this), not the 0.5.74 line (whose start-up crash on the owner's
+  Fold 7 is still not found). Next full update: **0.5.76 / 88**. **Not run on a phone.**
+- **"We are losing old iMessage texts"** was the thread screen, not the archive. A Messages conversation
+  shows the person's iMessage chats in it (`BlueBubblesLinks`); the window was cut from the conversation's
+  own rows and the iMessages laid over it, at most `windowSize` of them, and `windowSize` followed the
+  own rows only. With 4 texts and 230 iMessages the screen stopped at 104 rows under "Start of the
+  conversation" (measured on 0.5.73.1 with the new test). Now `ui/chat/ThreadWindow` cuts the window from
+  both archives together; `windowSize` counts everything shown; the phone is asked for older texts
+  only once the window reaches the oldest stored one, one page per scroll (`grewForPhone`); "Start of
+  the conversation" shows only when the archives have nothing older (`archivesShown`); a jump target
+  (search hit) is looked for among the iMessages too and survives the redirect of an iMessage chat
+  into its Messages conversation. Tests: `ThreadWindowTest`,
+  `BlueBubblesScreenTest.everyOldIMessageCanBeScrolledBackToInAConversationWithFewTexts`.
+- **FaceTime picture pulled wide ("fun house") on the Fold 7.** 0.5.73 laid the picture out by the
+  rotation the library *said*, default "not turned". OpenBubbles (decompiled, `VideoRotation.DEFAULT = 0`,
+  `rotations[stream] ?: 0`) takes a rotation never said as a quarter turn, and never turns a tile: the
+  decoder turns the frames (`rotation-degrees`). So for an iPhone held upright with no rotation said,
+  the upright frames were given a 16:9 box. Also `videoSize`/`streamRotation` were dropped unless that
+  stream already owned the view. Now: `CallSurfaces` keeps size and rotation per stream and hands them
+  over at `buildSurface`; `Media.remoteRotation` starts as `ROTATION_UNKNOWN` (shown as a quarter turn);
+  the call screen reads every frame's SurfaceTexture transform (`VideoFit.textureTurn`) and
+  `VideoFit.shape` goes by that: a quarter turn there swaps the sides whatever was said; the view turns
+  the picture itself only when a rotation was said and the frames are not turned. Each change of the
+  layout is one line in the iMessage log (`pictureLine`: decoded size, rotation said or not, how the
+  frames come, shape shown, view size): **if it still looks wrong, that line says why.** Tests:
+  `VideoFitTest`, `FaceTimeCallsTest`. The 0.5.74 line's `FittedVideo` needs the same (see its section).
+- **Polls the user made** (Apple's Messages has neither): "Edit Poll" on the card > "Remove a choice"
+  (`DirectLink.removePollChoice`: the card sent again without it, count + 1, at least two stay) and
+  "Lock choices" (`setPollLocked`, kept in `IMessageExtra.pollLocked` on this phone only, nothing sent:
+  the wire format is untouched). Locked: no "Add Choice" here; someone else's added choice is not
+  taken, its card still counts as the poll's (votes sent to it), and the poll is sent again as it is
+  (`reassertPoll`: after 4 s, once for several, at most 3 times in 10 minutes per poll). Where this
+  app shows a poll, a card from the poll's maker (the sender of its first card) may take choices off
+  (`Polls.merged(byMaker)`). **Unknown: what an iPhone shows for a poll card sent again with fewer
+  choices** (latest card wins, as OpenBubbles shows it, or a merge). Tests: `PollsTest`,
+  `DirectContentTest`, `MessageContentScreenTest`.
+- **Add people to a group already started**: it existed only behind a tap on the group's name
+  (details > Add Member). Now also "Add People" and "Details" in the chat's menu. And a real fault:
+  member and photo changes carry the group's version (Apple's "pv"); only changes carry it, the kept
+  versions do not survive a reinstall, and an unknown one went as 0 (OpenBubbles' way), which in any
+  group that ever changed is a change long past. Now 0 only for a group made here
+  (`GroupVersions.noteNew`), else `UNKNOWN_FIRST` (500). Inferred from how versions work, not tried
+  against iPhones. Tests: `DirectGroupsTest`, `GroupPhotosTest`.
+
 ## 0.5.73.1 (versionCode 86) - hotfix: Back up chats / Restore chats
 - Made on branch `hotfix-0.5.73.1` from release 0.5.73 (a41c75c), not from the 0.5.74 line. The owner
   uninstalled the app and lost every chat: Android/Samsung backup stays off on purpose
   (`allowBackup=false`, `data_extraction_rules.xml` unchanged), so this adds the user's own encrypted
-  backup to a file they pick. Next full update: **0.5.76 / 87** (0.5.74 / 85 was a build already sent).
+  backup to a file they pick. (0.5.74 / 85 was a build already sent; see 0.5.73.2 for the next number.)
 - Menu items "Back up chats" / "Restore chats" in the sticker inbox's and the conversation list's
   overflow menus open `ui/backup/BackupActivity` (FLAG_SECURE, passphrase twice, min 8 characters,
   strength hint only, no autofill, not kept in saved state, char arrays wiped). One line on the
