@@ -526,6 +526,22 @@
     <string name="imessage_poll_option_description">%1$s, %2$s</string>
     <!-- The same for one the user chose. -->
     <string name="imessage_poll_option_mine_description">%1$s, %2$s, your vote</string>
+    <string name="imessage_poll_edit">Edit Poll</string>
+    <string name="imessage_poll_choices_locked">Choices locked</string>
+    <string name="imessage_poll_lock">Lock choices</string>
+    <string name="imessage_poll_unlock">Unlock choices</string>
+    <string name="imessage_poll_remove_choice">Remove a choice</string>
+    <string name="imessage_poll_lock_title">Lock this poll\'s choices?</string>
+    <string name="imessage_poll_lock_body">Nobody can add a choice from this phone, and a choice someone else adds is taken off again: the poll is sent again as you made it. iPhones have no such lock, so they still offer Add Choice.</string>
+    <string name="imessage_poll_locked_done">Choices locked.</string>
+    <string name="imessage_poll_unlocked_done">Choices unlocked.</string>
+    <string name="imessage_poll_remove_title">Remove which choice?</string>
+    <string name="imessage_poll_remove_confirm">Remove “%1$s” from the poll for everyone? Votes for it go with it.</string>
+    <string name="imessage_poll_remove">Remove</string>
+    <string name="imessage_poll_remove_failed">The choice was not removed: %1$s</string>
+    <string name="imessage_poll_keeps_two">A poll keeps at least two choices.</string>
+    <string name="imessage_poll_not_yours">Only whoever made a poll can change it like that.</string>
+    <string name="imessage_poll_locked_here">This poll\'s choices are locked. Unlock them first.</string>
     <string name="imessage_poll_vote_action">Vote</string>
     <string name="imessage_poll_unvote_action">Take back your vote</string>
 

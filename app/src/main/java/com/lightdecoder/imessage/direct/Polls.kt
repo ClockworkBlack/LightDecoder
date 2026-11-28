@@ -15,6 +15,13 @@ import org.json.JSONObject
  * participantHandle}]},"version":1}` (the latest from each person counts). "Add Choice" sends the
  * card again with one choice more, its count one higher.
  *
+ * Apple's Messages has no way to take a choice off a poll again, nor to stop others from adding
+ * theirs. A poll the user made can do both here, by the same means "Add Choice" works by: the card
+ * sent again in the state it is to have ([removeChoice]: one choice fewer; [reasserted]: the maker's
+ * own choices again, after someone added one to a poll locked here), its count higher than any card
+ * of its session so far. What an iPhone shows for a card sent again with fewer choices could not be
+ * tried here; here, and wherever this app shows the poll, the maker's card is the poll ([merged]).
+ *
  * What comes from Apple is anyone's in the chat to write: decoded only up to [MAX_JSON_BYTES], with
  * at most [MAX_OPTIONS] choices and short texts; a vote counts for whoever sent it, never for whom
  * its JSON names. Pure. Tested in PollsTest.
@@ -187,16 +194,47 @@ object Polls {
      * end, in the order they came. Its count is one more than the stored one, or a few more
      * ([MAX_COUNT_STEP]) for changes missed, and at most as many choices are added as it went up;
      * one older, as old, or far ahead is not taken (nor could one then hold back every later one).
+     *
+     * [byMaker]: the change is from whoever made the poll (the sender of its first card, never whom
+     * its JSON names). Theirs may also take choices off ([removeChoice], [reasserted]): the choices
+     * stored that their card no longer has go, the rest stay as they are, in their order. A card
+     * that would leave the poll without any choice is not taken.
      */
-    fun merged(stored: Poll, changed: Poll): Poll? {
+    fun merged(stored: Poll, changed: Poll, byMaker: Boolean = false): Poll? {
         val step = changed.count.toLong() - stored.count
         if (step < 1 || step > MAX_COUNT_STEP || changed.count > MAX_COUNT) return null
         val known = stored.options.map { it.id }.toSet()
-        val texts = stored.options.map { it.text.lowercase() }.toMutableSet()
+        val still = if (byMaker) changed.options.map { it.id }.toSet() else known
+        val kept = stored.options.filter { it.id in still }
+        val texts = kept.map { it.text.lowercase() }.toMutableSet()
         val added = changed.options.filter { it.id !in known && texts.add(it.text.lowercase()) }
-            .take(minOf(step.toInt(), MAX_OPTIONS - stored.options.size))
-        if (added.isEmpty()) return null
-        return stored.copy(options = stored.options + added, count = changed.count)
+            .take(minOf(step.toInt(), MAX_OPTIONS - kept.size))
+        if (added.isEmpty() && kept.size == stored.options.size) return null
+        if (kept.isEmpty() && added.isEmpty()) return null
+        return stored.copy(options = kept + added, count = changed.count)
+    }
+
+    /** The fewest choices a poll is left with when one is taken off (what a new one needs, [create]). */
+    const val MIN_OPTIONS = 2
+
+    /**
+     * [poll] without the choice [optionId], its count one higher, for its maker to send again; null
+     * when it cannot go: not one of its choices, only [MIN_OPTIONS] left, or its count at [MAX_COUNT].
+     */
+    fun removeChoice(poll: Poll, optionId: String): Poll? {
+        if (poll.options.none { it.id == optionId } || poll.options.size <= MIN_OPTIONS || poll.count >= MAX_COUNT) return null
+        return poll.copy(options = poll.options.filter { it.id != optionId }, count = poll.count + 1)
+    }
+
+    /**
+     * [poll] as its maker has it, to send again over a card of its session that went as far as
+     * [seenCount] (someone's choice added to a poll locked here): the same choices, its count above
+     * both. Null when that count could not be read back ([MAX_COUNT]).
+     */
+    fun reasserted(poll: Poll, seenCount: Int): Poll? {
+        val count = maxOf(poll.count, seenCount).toLong() + 1
+        if (count > MAX_COUNT) return null
+        return poll.copy(count = count.toInt())
     }
 
     /** The poll a card's address [url] holds, or null when it holds none that can be read. */

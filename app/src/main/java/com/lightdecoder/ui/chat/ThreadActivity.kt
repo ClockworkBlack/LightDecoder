@@ -2721,6 +2721,80 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     }
 
     /**
+     * "Edit Poll" on a poll the user made: its choices locked or unlocked
+     * ([com.lightdecoder.imessage.direct.DirectLink.setPollLocked]), or one of them taken off for
+     * everyone ([com.lightdecoder.imessage.direct.DirectLink.removePollChoice]).
+     */
+    override fun onPollEdit(row: MessageRow) {
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(this)
+        val current = messages.firstOrNull { it.id == row.id } ?: row
+        if (!direct.ownsPoll(current, reachable = current.conversationId in directReachable)) return
+        val locked = direct.pollLocked(current)
+        val choices = arrayOf(getString(if (locked) R.string.imessage_poll_unlock else R.string.imessage_poll_lock), getString(R.string.imessage_poll_remove_choice))
+        confirmDialog?.dismiss()
+        confirmDialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.imessage_poll_edit)
+            .setItems(choices) { _, which ->
+                when (which) {
+                    0 -> if (locked) setPollLocked(current, false) else confirmPollLock(current)
+                    else -> pickPollChoiceToRemove(current)
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /** What locking a poll does, said once before it is locked. */
+    private fun confirmPollLock(row: MessageRow) {
+        confirmDialog?.dismiss()
+        confirmDialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.imessage_poll_lock_title)
+            .setMessage(R.string.imessage_poll_lock_body)
+            .setPositiveButton(R.string.imessage_poll_lock) { _, _ -> setPollLocked(row, true) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun setPollLocked(row: MessageRow, locked: Boolean) {
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(this)
+        lifecycleScope.launch {
+            relayAttempt { withContext(Dispatchers.IO) { direct.setPollLocked(row.id, locked) } }
+                .onSuccess { toast(getString(if (locked) R.string.imessage_poll_locked_done else R.string.imessage_poll_unlocked_done)) }
+                .onFailure { toast(errorText(iMessageLink, it)) }
+        }
+    }
+
+    /** The poll's choices to pick one from; the one picked is taken off once the user says so again. */
+    private fun pickPollChoiceToRemove(row: MessageRow) {
+        val poll = com.lightdecoder.imessage.direct.IMessageExtra.parse(row.extra).app?.let { com.lightdecoder.imessage.direct.Polls.decode(it.url) } ?: return
+        if (poll.options.size <= com.lightdecoder.imessage.direct.Polls.MIN_OPTIONS) {
+            toast(getString(R.string.imessage_poll_keeps_two))
+            return
+        }
+        confirmDialog?.dismiss()
+        confirmDialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.imessage_poll_remove_title)
+            .setItems(poll.options.map { it.text }.toTypedArray()) { _, which ->
+                val option = poll.options.getOrNull(which) ?: return@setItems
+                confirmDialog = MaterialAlertDialogBuilder(this)
+                    .setMessage(getString(R.string.imessage_poll_remove_confirm, option.text))
+                    .setPositiveButton(R.string.imessage_poll_remove) { _, _ -> removePollChoice(row, option.id) }
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun removePollChoice(row: MessageRow, optionId: String) {
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(this)
+        lifecycleScope.launch {
+            relayAttempt { direct.removePollChoice(row.id, optionId) }
+                .onFailure { toast(getString(R.string.imessage_poll_remove_failed, errorText(iMessageLink, it))) }
+        }
+    }
+
+    /**
      * The iMessage chat a game would be sent to ("Games" in the attach choices): this iMessage chat,
      * or the person's iMessage chat shown in this Messages conversation, when the library can reach
      * it and iMessage games are on (OpenPigeon installed or not); else null.

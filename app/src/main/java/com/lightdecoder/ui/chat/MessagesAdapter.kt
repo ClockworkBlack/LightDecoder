@@ -140,6 +140,9 @@ class MessagesAdapter(
         /** A poll's "Add Choice" tapped. */
         fun onPollAddChoice(row: MessageRow) = Unit
 
+        /** "Edit Poll" tapped on a poll the user made: its choices locked or unlocked, or one taken off. */
+        fun onPollEdit(row: MessageRow) = Unit
+
         /** A FaceTime call's row tapped ([anchor]: the row's words): call back, with video or audio. */
         fun onCallRowTap(row: MessageRow, anchor: View) = Unit
     }
@@ -737,6 +740,7 @@ class MessagesAdapter(
         if (poll == null) {
             b.pollCard.visibility = View.GONE
             b.pollAddChoice.setOnClickListener(null)
+            b.pollEdit.setOnClickListener(null)
             return
         }
         val context = b.root.context
@@ -804,10 +808,19 @@ class MessagesAdapter(
             }
             box.addView(line)
         }
-        val canAdd = votable && poll.options.size < Polls.MAX_OPTIONS
+        // A poll the user made and locked here: no choice is added to it (nor by others: [com.lightdecoder.imessage.direct.DirectLink.setPollLocked]).
+        val locked = extra.pollLocked
+        val canAdd = votable && !locked && poll.options.size < Polls.MAX_OPTIONS
         b.pollAddChoice.visibility = if (canAdd) View.VISIBLE else View.GONE
         b.pollAddChoice.setTextColor(accent)
         b.pollAddChoice.setOnClickListener(if (canAdd) View.OnClickListener { callbacks.onPollAddChoice(row) } else null)
+        b.pollLockedNote.visibility = if (locked) View.VISIBLE else View.GONE
+        b.pollLockedNote.setTextColor(metaColor)
+        // The user's own poll: its choices can be locked, and taken off again.
+        val owned = votable && row.isOutgoing
+        b.pollEdit.visibility = if (owned) View.VISIBLE else View.GONE
+        b.pollEdit.setTextColor(accent)
+        b.pollEdit.setOnClickListener(if (owned) View.OnClickListener { callbacks.onPollEdit(row) } else null)
     }
 
     /** Polls read from their cards' addresses, by address (a card is bound again and again). */
