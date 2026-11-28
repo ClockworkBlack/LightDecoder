@@ -243,6 +243,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     internal var junkOffered = false
         private set
 
+    /** This is an iMessage group the iMessage library can add people to: "Add People" is in the menu (set with each load). */
+    @VisibleForTesting
+    internal var groupManageable = false
+        private set
+
     /**
      * The user marked the conversation unread from its menu and is leaving it: nothing marks it read
      * again on the way out ([markReadIfNeeded]).
@@ -530,6 +535,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             knownRows = emptyMap()
             timeReveal.reset()
             junkOffered = false
+            groupManageable = false
             renderJunk()
             closeOptionsMenu()
             // Leaving the thread: stop reading its messages; the next one's are new from its first read.
@@ -885,6 +891,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         /** The iMessage chat a FaceTime call from here goes from ([faceTimeChat]), and what is known of whether its person can be called. */
         val faceTimeChat: String? = null,
         val faceTimeCapable: Boolean? = null,
+        /** An iMessage group the iMessage library can add people to ([com.lightdecoder.imessage.direct.DirectLink.groupRules]): "Add People" is offered. */
+        val groupManageable: Boolean = false,
         /** The archive holds no row of this conversation's own older than the ones shown ([ThreadWindow.Read.ownExhausted]). */
         val ownExhausted: Boolean,
         /** How many rows of its own the archive is known to hold ([ThreadWindow.Read.ownStored]). */
@@ -977,6 +985,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 othersUnread = if (imRepo == null) emptyList() else chats.drop(1).filter { runCatching { imRepo.conversation(it)?.unread == true }.getOrDefault(false) },
                 faceTimeChat = faceTimeChat,
                 faceTimeCapable = faceTimeChat?.let { direct?.faceTimeCapableKnown(it) },
+                groupManageable = link.service == ChatService.IMESSAGE && conversation?.isGroup == true && direct != null &&
+                    runCatching { direct.groupRules(id).manageable }.getOrDefault(false),
                 ownExhausted = window.ownExhausted,
                 ownStored = window.ownStored,
                 allShown = window.allShown,
@@ -1013,8 +1023,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         historyComplete = snapshot.historyComplete
         avatarPhoto = snapshot.photo
         memberPhotos = snapshot.memberPhotos
-        if (junkOffered != snapshot.junk) {
+        if (junkOffered != snapshot.junk || groupManageable != snapshot.groupManageable) {
             junkOffered = snapshot.junk
+            groupManageable = snapshot.groupManageable
             invalidateOptionsMenu()
         }
         showFaceTime(snapshot.faceTimeChat, snapshot.faceTimeCapable)
@@ -4841,6 +4852,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         menu.findItem(R.id.action_unlink_imessage)?.isVisible = manager.service == ChatService.MESSAGES && companionId != null
         // The chat's background (iOS 26): only an iMessage chat the iMessage library reaches.
         menu.findItem(R.id.action_chat_background)?.isVisible = backgroundChat() != null
+        // An iMessage group: people added to it from here too, not only from its details (a tap on its name).
+        menu.findItem(R.id.action_add_people)?.isVisible = groupManageable && conv != null && conv.folderEnum != Folder.DELETED
+        menu.findItem(R.id.action_chat_details)?.isVisible = hasDetails() && conv?.folderEnum != Folder.DELETED
         val checking = com.lightdecoder.imessage.IMessageChecks.current.value?.let { it.running && it.conversationId == conversationId } == true
         menu.findItem(R.id.action_check_imessage)?.setTitle(if (checking) R.string.imessage_check_running else R.string.imessage_check)
         val archived = conv?.folderEnum == Folder.ARCHIVE
@@ -4915,6 +4929,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 }
             }
             R.id.action_mark_unread -> if (conv != null) markUnreadAndLeave(conv.id)
+            R.id.action_add_people -> if (conv != null && groupManageable) startActivity(NewConversationActivity.addMembers(this, conv.id))
+            R.id.action_chat_details -> openDetails()
             R.id.action_report_junk -> confirmReportJunk()
             R.id.action_not_spam -> if (conv != null) {
                 runAction(R.string.chat_not_spam_done) { it.markNotSpam(conv.id) }

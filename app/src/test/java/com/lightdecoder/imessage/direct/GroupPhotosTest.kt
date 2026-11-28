@@ -239,8 +239,16 @@ class GroupPhotosTest {
         val versions = GroupVersions(context)
         val id = "imsg:group:V-${System.nanoTime()}"
         assertNull(versions.of(id))
-        // Never seen one: 0, as OpenBubbles starts.
-        assertEquals(0L, versions.next(id))
+        // Never seen one, in a group not made here: how often it changed is not known, so well past where it may be
+        // (0, as OpenBubbles starts, is a change long past in any group that ever changed: iPhones leave it out).
+        assertEquals(GroupVersions.UNKNOWN_FIRST, versions.next(id))
+        // Made here: nothing changed in it yet, the first is 0.
+        val made = "imsg:group:M-${System.nanoTime()}"
+        versions.noteNew(made)
+        assertNull(versions.of(made))
+        assertEquals(0L, versions.next(made))
+        versions.note(made, 0)
+        assertEquals(1L, versions.next(made))
         versions.note(id, 4)
         assertEquals(5L, versions.next(id))
         // An older one says nothing new.
@@ -254,7 +262,7 @@ class GroupPhotosTest {
         versions.note(id, Long.MAX_VALUE)
         assertEquals(Long.MAX_VALUE, versions.next(id))
         versions.forget(id)
-        assertEquals(0L, versions.next(id))
+        assertEquals(GroupVersions.UNKNOWN_FIRST, versions.next(id))
         assertEquals(0L, GroupVersions.nextAfter(null))
         assertEquals(1L, GroupVersions.nextAfter(0))
     }

@@ -252,6 +252,8 @@ class DirectLink private constructor(
                 ),
             )
             groupNames.note(id, name.orEmpty(), System.currentTimeMillis())
+            // Made here: nothing has changed in it, so its first change counts from the start.
+            groupVersions.noteNew(id)
         }
         IMessageLog.add(app, "${IMessageLog.chatRef(id)}: iMessage group of ${members.size + 1} started through the iMessage library")
         return id
@@ -2464,7 +2466,7 @@ class DirectLink private constructor(
             val texts = DirectTexts(app)
             val text = texts.added(texts.you, added.joinToString(", ") { nameOf(it) })
             synchronized(this) { upsert(ownGroupEvent(conversationId, now, reply, text, members = others, member = true, groupVersion = version)) }
-            IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: ${added.size} member(s) added through the iMessage library (Apple confirmed)")
+            IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: ${added.size} member(s) added through the iMessage library (Apple confirmed; as the group's change $version)")
         }
     }
 
@@ -2493,7 +2495,7 @@ class DirectLink private constructor(
             synchronized(this) {
                 upsert(ownGroupEvent(conversationId, now, reply, texts.removed(texts.you, nameOf(removed)), members = others, member = true, groupVersion = version))
             }
-            IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: a member removed through the iMessage library (Apple confirmed)")
+            IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: a member removed through the iMessage library (Apple confirmed; as the group's change $version)")
         }
     }
 
@@ -2544,7 +2546,7 @@ class DirectLink private constructor(
         }
     }
 
-    /** The version a group photo set here goes as: after the group's, and after its photo's. */
+    /** The version a group photo set here goes as: after the group's ([GroupVersions.next]), and after its photo's. */
     private fun nextPhotoVersion(conversationId: String): Long {
         val photo = GroupPhotos(app).of(conversationId)
         val afterPhoto = if (photo.known) GroupVersions.nextAfter(photo.version) else 0

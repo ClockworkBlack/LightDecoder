@@ -4,15 +4,31 @@ import android.content.Context
 
 /**
  * Each iMessage group's version, by conversation id: the highest Apple's events said it is at (a
- * change of its members or of its photo carries the group's version, rustpush's `group_version`).
- * A change made here goes as the next one ([next]), as OpenBubbles counts them: one more than the
- * highest seen, 0 when none was ever seen. Main process only.
+ * change of its members or of its photo carries the group's version, rustpush's `group_version`,
+ * Apple's "pv"). A change made here goes as the next one ([next]), as OpenBubbles counts them: one
+ * more than the highest seen.
+ *
+ * The version is what lets a phone tell a newer change of a group from an older one: a change as of
+ * a version the group is past already is not taken. Only changes carry it, so of a group this
+ * phone never saw change (one others made long ago; any group after the app was installed again:
+ * what is kept here does not survive that) the version is not known. OpenBubbles counts from 0
+ * then, which is right only for a group nothing ever changed in: in any other, adding someone from
+ * here went as a change long past, and the iPhones in it left it out. So only a group made here
+ * ([noteNew]) starts at 0; one whose version is not known goes as [UNKNOWN_FIRST], past where a
+ * group gets by people coming, going and changing its photo. Main process only.
  */
 class GroupVersions(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)
 
     /** The highest version seen for [conversationId], or null when none was. */
-    fun of(conversationId: String): Long? = if (prefs.contains(conversationId)) prefs.getLong(conversationId, 0) else null
+    fun of(conversationId: String): Long? =
+        if (prefs.contains(conversationId)) prefs.getLong(conversationId, 0).takeIf { it >= 0 } else null
+
+    /** [conversationId] was made here just now: nothing has changed in it, and its first change goes as 0. */
+    @Synchronized
+    fun noteNew(conversationId: String) {
+        if (!prefs.contains(conversationId)) prefs.edit().putLong(conversationId, NEW).apply()
+    }
 
     /** [conversationId] is at [version] (or higher, when a higher one was seen before). */
     @Synchronized
@@ -22,8 +38,11 @@ class GroupVersions(context: Context) {
         if (known == null || version > known) prefs.edit().putLong(conversationId, version).apply()
     }
 
-    /** The version a change made here goes as: one more than the highest seen, 0 when none was ever seen. */
-    fun next(conversationId: String): Long = nextAfter(of(conversationId))
+    /**
+     * The version a change made here goes as: one more than the highest seen; 0 in a group made here
+     * that nothing changed in yet ([noteNew]); [UNKNOWN_FIRST] in one whose version was never seen.
+     */
+    fun next(conversationId: String): Long = if (prefs.contains(conversationId)) nextAfter(of(conversationId)) else UNKNOWN_FIRST
 
     /** Forgets [conversationId] (deleted here). */
     fun forget(conversationId: String) {
@@ -32,6 +51,16 @@ class GroupVersions(context: Context) {
 
     companion object {
         private const val FILE = "imessage_group_versions"
+
+        /** Kept for a group made here that nothing changed in yet ([noteNew]): no version seen, the first is 0. */
+        private const val NEW = -1L
+
+        /**
+         * What the first change from here goes as in a group whose version was never seen: beyond what
+         * a group reaches by its changes (each counts one), and within what a change from someone
+         * else may be ahead by here ([MAX_STEP]).
+         */
+        const val UNKNOWN_FIRST = 500L
 
         /** The version after [known]: 0 for none; never past a Long's end. */
         fun nextAfter(known: Long?): Long = when {
