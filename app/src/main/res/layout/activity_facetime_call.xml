@@ -170,6 +170,72 @@
                 android:visibility="gone" />
         </LinearLayout>
 
+        <!-- Someone calls while the user is in a call: who, and "End & Accept" or Decline. -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/waitingCard"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top"
+            android:layout_marginHorizontal="12dp"
+            android:layout_marginTop="60dp"
+            android:visibility="gone"
+            app:cardBackgroundColor="#F21C1C1E"
+            app:cardCornerRadius="20dp"
+            app:cardElevation="10dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="14dp">
+
+                <TextView
+                    android:id="@+id/waitingName"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:textColor="#FFFFFFFF"
+                    android:textSize="18sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/waitingKind"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:textColor="#CCFFFFFF"
+                    android:textSize="14sp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/waitingDecline"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="6dp"
+                        android:layout_weight="1"
+                        android:text="@string/facetime_decline"
+                        android:textColor="#FFFFFFFF"
+                        app:backgroundTint="#FFFF3B30" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/waitingAccept"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="6dp"
+                        android:layout_weight="1"
+                        android:text="@string/facetime_end_and_accept"
+                        android:textColor="#FFFFFFFF"
+                        app:backgroundTint="#FF34C759" />
+                </LinearLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
         <!-- The user's own camera, small, in a rounded corner. -->
         <com.google.android.material.card.MaterialCardView
             android:id="@+id/previewCard"

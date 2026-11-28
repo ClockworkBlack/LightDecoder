@@ -333,6 +333,8 @@ class CallSurfaces {
         owner = null
         screenOwner = null
         tileOwners.clear()
+        sizes.clear()
+        rotations.clear()
         tilesOnly = group
         _requested.value = emptyList()
     }

@@ -242,6 +242,11 @@ class FaceTimeCallActivity : AppCompatActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) { calls.messages.collect(::onMessage) }
         }
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) { calls.waiting.collect(::renderWaiting) }
+        }
+        binding.waitingDecline.setOnClickListener { calls.waiting.value?.let { calls.decline(it.guid) } }
+        binding.waitingAccept.setOnClickListener { calls.waiting.value?.let { answer(it.guid, withCamera = it.video) } }
         take(intent, fresh = savedInstanceState == null)
     }
 
@@ -480,8 +485,17 @@ class FaceTimeCallActivity : AppCompatActivity() {
         calls.place(request.peer, request.name, video, request.from, request.conversationId, request.photo, request.peers)
     }
 
+    /** Someone calling while the user is in a call ([FaceTimeCalls.waiting]): who, over the call, with "End & Accept" and Decline. */
+    private fun renderWaiting(call: Call?) {
+        binding.waitingCard.visibility = if (call == null) View.GONE else View.VISIBLE
+        if (call == null) return
+        binding.waitingName.text = FaceTimeNotices.nameOf(call)
+        binding.waitingKind.text = getString(R.string.facetime_waiting_kind, FaceTimeNotices.kind(this, call.video))
+    }
+
     private fun answer(guid: String, withCamera: Boolean) {
-        val call = calls.state.value
+        // The ringing call, or the one that waits while the user is in another (answered, that one ends).
+        val call = calls.waiting.value?.takeIf { it.guid == guid } ?: calls.state.value
         if (call == null || call.guid != guid || call.phase != Phase.RINGING_IN) {
             // Answered from a notice that outlived its call.
             if (call == null) refuse(Refusal.GONE)

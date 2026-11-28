@@ -679,12 +679,18 @@ class DirectContentTest {
         val asked = Collections.synchronizedList(ArrayList<JSONObject>())
         val link = DirectLink.installForTesting(context) { what, request, _ ->
             if (what == DirectWire.SEND) asked += request
-            DirectWire.sent("NP1", 1_700_000_010_000L)
+            DirectWire.sent("NP${asked.size}", 1_700_000_010_000L + asked.size)
         }
         aGroup(link)
         link.sendPoll(group, "Where to?", listOf("Beach", "Hills"))
-        waitFor("the poll") { repo.message("imsg:NP1") != null }
-        val request = DirectWire.SendRequest.fromJson(asked.single())
+        waitFor("the poll, then its question") { repo.message("imsg:NP1") != null && repo.message("imsg:NP2") != null }
+        // An iPhone shows a poll's choices only: the question also goes as a text of its own, right after the card.
+        assertEquals(2, asked.size)
+        val question = DirectWire.SendRequest.fromJson(asked[1])
+        assertEquals("Where to?", question.text)
+        assertNull(question.app)
+        assertEquals("Where to?", repo.message("imsg:NP2")!!.text)
+        val request = DirectWire.SendRequest.fromJson(asked.first())
         val app = request.app!!
         assertTrue(Polls.isPoll(app))
         assertEquals("", request.text)
@@ -696,6 +702,11 @@ class DirectContentTest {
         assertEquals("Poll: Where to?", stored.text)
         assertEquals("imsg:NP1", IMessageExtra.parse(stored.extra).app!!.root)
         assertTrue(runCatching { link.sendPoll(group, "Q", listOf("Only one")) }.isFailure)
+        // A poll without a question is the card alone.
+        link.sendPoll(group, "", listOf("Yes", "No"))
+        waitFor("the poll alone") { asked.size == 3 }
+        Thread.sleep(150)
+        assertEquals(3, asked.size)
     }
 
     private fun pollChange(guid: String, p: Polls.Poll, from: String = bob) = map(

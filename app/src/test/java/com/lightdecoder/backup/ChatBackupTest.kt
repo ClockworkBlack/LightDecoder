@@ -232,6 +232,31 @@ class ChatBackupTest {
     }
 
     @Test
+    fun theChatsBackgroundsGoWithTheBackupAndABackupWithoutThemLeavesThemAlone() {
+        val backgrounds = { com.lightdecoder.imessage.direct.ChatBackgrounds(context) }
+        fun picture(color: Int): File = com.lightdecoder.imessage.direct.ChatBackgrounds.incomingFile(context, "test").apply {
+            parentFile?.mkdirs()
+            writeBytes(byteArrayOf(color.toByte(), 1, 2, 3))
+        }
+        seed(ChatService.IMESSAGE, "i1", 1, withPicture = false)
+        // A backup made before any background was set has none in it.
+        val without = backup()
+        backgrounds().apply("i1", picture(7), 100)
+        val hearts = backgrounds().pictureOf("i1")!!.readBytes()
+        val with = backup()
+        // Changed after the backup: the restore brings back the one the backup has (what the other side's phone still shows).
+        backgrounds().apply("i1", picture(9), 200)
+        restore(with)
+        assertEquals(100L, backgrounds().of("i1").version)
+        assertArrayEquals(hearts, backgrounds().pictureOf("i1")!!.readBytes())
+        // An older backup, without backgrounds: the ones here stay as they are.
+        restore(without)
+        assertEquals(100L, backgrounds().of("i1").version)
+        assertArrayEquals(hearts, backgrounds().pictureOf("i1")!!.readBytes())
+        assertTrue(workDirs().isEmpty())
+    }
+
+    @Test
     fun wrongPassphraseFailsWithoutChanges() {
         seed(ChatService.MESSAGES, "c1", 2)
         val bytes = backup()

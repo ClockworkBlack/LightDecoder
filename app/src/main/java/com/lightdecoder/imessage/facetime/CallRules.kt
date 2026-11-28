@@ -208,19 +208,104 @@ class CallRules(
 
         /** A line for the iMessage log: what happened, in words that name nobody. */
         data class Note(val text: String) : Effect()
+
+        /**
+         * Someone calls while the user is in a call ([call] waits): it is offered over the call there
+         * is ("End & Accept", Decline), ringing as any call does, and the call there is goes on.
+         */
+        data class ShowWaiting(val call: Call) : Effect()
+        data class HideWaiting(val guid: String) : Effect()
     }
 
     data class Step(val state: Call?, val effects: List<Effect> = emptyList())
 
+    /**
+     * The call that waits while the user is in another ([Effect.ShowWaiting]): one at most. Answered
+     * ([Input.Answer]), the call the user is in ends and this one is joined in its place; declined,
+     * timed out or given up by its caller, it goes as a ringing call would. When the call the user is
+     * in ends first, it becomes the call that rings. Only touched from [reduce] (one queue).
+     */
+    var waiting: Call? = null
+        private set
+
     fun reduce(state: Call?, input: Input): Step {
-        val step = step(state, input)
+        val step = waitingStep(state, input) ?: reduceOne(state, input)
         // A call that was here and is no longer (declined, hung up, missed, ended): its caller's ring
         // was handled, so no invitation that follows rings it again.
         if (state != null && step.state?.guid != state.guid) ringJoins.remove(state.guid)
+        // The call the user was in is over while another waits: that one is the call now, ringing as usual.
+        val w = waiting
+        if (w != null && (step.state == null || !step.state.live)) {
+            waiting = null
+            val ring = if (w.phase == Phase.RINGING_IN) listOf(Effect.HideWaiting(w.guid), Effect.ShowIncoming(w)) else emptyList()
+            return Step(w, step.effects + listOfNotNull(step.state?.let { Effect.StopTimer(it.guid) }) + ring)
+        }
         return step
     }
 
-    private fun step(state: Call?, input: Input): Step = when (input) {
+    /** What [input] does when it is about the call that waits; null when it is not. */
+    private fun waitingStep(state: Call?, input: Input): Step? {
+        val w = waiting ?: return null
+        fun gone(outcome: Outcome, vararg more: Effect): Step {
+            waiting = null
+            return Step(state, listOf(Effect.StopTimer(w.guid), Effect.HideWaiting(w.guid)) + more + Effect.LogCall(entry(w, outcome, nowOf(input))))
+        }
+        return when (input) {
+            is Input.Caller -> if (input.guid != w.guid || w.phase != Phase.SCREENING) null else {
+                val known = input.info?.known == true
+                if ((input.settings.silenceUnknown && !known) || (!known && !limiter.unknownRing(input.now))) {
+                    waiting = null
+                    Step(state, listOf(Effect.LogCall(entry(w, Outcome.MISSED, input.now).copy(quiet = true)), Effect.Note("a FaceTime call from an unknown caller during a call was not offered")))
+                } else {
+                    val call = w.copy(phase = Phase.RINGING_IN, name = CallIds.name(input.info?.name), conversationId = input.info?.conversationId, photo = input.info?.photo)
+                    waiting = call
+                    Step(state, listOf(Effect.ShowWaiting(call), Effect.StartTimer(call.guid, Phase.RINGING_IN, RING_IN_MS)))
+                }
+            }
+            is Input.Answer -> if (input.guid != w.guid || w.phase != Phase.RINGING_IN) null else {
+                // The call the user is in ends, and this one is joined in its place.
+                val ended = if (state != null && state.live) hangUp(state, Input.HangUp(state.guid, input.now)).effects else emptyList()
+                waiting = null
+                val next = w.copy(phase = Phase.CONNECTING, withCamera = input.withCamera && w.video)
+                Step(next, ended + listOf(Effect.HideWaiting(next.guid), Effect.StartTimer(next.guid, Phase.CONNECTING, CONNECT_MS), Effect.StartNative(next)))
+            }
+            is Input.DeclineByUser -> if (input.guid != w.guid) null else gone(Outcome.DECLINED, Effect.DeclineCall(w.guid))
+            is Input.HangUp -> if (input.guid != w.guid) null else gone(Outcome.DECLINED, Effect.DeclineCall(w.guid))
+            is Input.Timeout -> if (input.guid != w.guid) null else if (input.phase == w.phase) gone(Outcome.MISSED) else Step(state)
+            is Input.Event -> if (input.event.guid != w.guid) null else {
+                val mine = (input.myHandles + input.sessions.firstOrNull { it.guid == w.guid }?.myHandles.orEmpty()).map(CallIds::key).toSet()
+                fun isMine(handle: String) = handle.isNotEmpty() && CallIds.key(handle) in mine
+                when (val e = input.event) {
+                    // Declined, or answered, on another of the user's devices.
+                    is CallEvent.Decline -> if (isMine(e.handle)) gone(Outcome.DECLINED) else Step(state)
+                    is CallEvent.Elsewhere -> gone(Outcome.ELSEWHERE)
+                    // The caller gave up.
+                    is CallEvent.Leave -> if (isMine(e.handle)) Step(state) else gone(Outcome.MISSED)
+                    // It rings again: it waits already.
+                    else -> Step(state)
+                }
+            }
+            else -> null
+        }
+    }
+
+    private fun nowOf(input: Input): Long = when (input) {
+        is Input.Event -> input.now
+        is Input.Caller -> input.now
+        is Input.Place -> input.now
+        is Input.Placed -> input.now
+        is Input.Answer -> input.now
+        is Input.DeclineByUser -> input.now
+        is Input.HangUp -> input.now
+        is Input.Timeout -> input.now
+        is Input.NativeUp -> input.now
+        is Input.NativeFailed -> input.now
+        is Input.Participants -> input.now
+        is Input.Failed -> input.now
+        is Input.BecameVideo -> 0L
+    }
+
+    private fun reduceOne(state: Call?, input: Input): Step = when (input) {
         is Input.Event -> event(state, input)
         is Input.Caller -> caller(state, input)
         is Input.Place -> place(state, input)
@@ -409,6 +494,18 @@ class CallRules(
             // Handed over again after a restart, for a call that began long before.
             input.sinceStartMs < REPLAY_WINDOW_MS && abs(input.now - startMs) > MAX_RING_AGE_MS ->
                 notRung("an old FaceTime ring handed over after a restart was not rung", quiet = true)
+            // In a call: this one waits, offered over it (one at a time; a second one meanwhile is a missed call).
+            state != null && state.phase == Phase.ACTIVE && waiting == null -> when (limiter.ring(who, guid, input.now)) {
+                RingLimiter.Verdict.RING -> {
+                    waiting = Call(
+                        guid = guid, peer = caller, name = "", video = session.video, outgoing = false, phase = Phase.SCREENING,
+                        from = session.myHandles.firstOrNull() ?: input.myHandles.firstOrNull(), startedMs = input.now,
+                    )
+                    Step(state, listOf(Effect.LookupCaller(guid, caller)))
+                }
+                RingLimiter.Verdict.MISSED_ONLY -> Step(state, listOf(Effect.LogCall(missed.copy(quiet = true)), Effect.Note("a FaceTime ring past the caller's limit was not offered")))
+                RingLimiter.Verdict.DROP -> Step(state, listOf(Effect.Note("a FaceTime ring was dropped: the same call again, or too many from this caller")))
+            }
             state != null && state.live -> notRung("a FaceTime call during another call was not rung", quiet = false)
             // An invitation rings no call its caller could not ring here now: their own limits hold.
             invite && group && !limiter.allows(CallIds.key(caller), input.now) ->

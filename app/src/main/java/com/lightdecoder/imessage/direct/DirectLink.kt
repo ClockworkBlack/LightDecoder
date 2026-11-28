@@ -3829,7 +3829,17 @@ class DirectLink private constructor(
         val target = targetOf(conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
         val poll = Polls.create(question, choices, Handles.display(target.from)) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_poll_needs_two))
         val card = Polls.card(poll, UUID.randomUUID().toString().uppercase())
-        return sendAppCard(conversationId, card, null, DirectTexts(app).poll(poll.title))
+        val sent = sendAppCard(conversationId, card, null, DirectTexts(app).poll(poll.title))
+        // An iPhone shows a poll's choices only, never its question (Apple's own polls have none: what a
+        // poll is about is a message sent with it). So the question also goes as a text, right after the poll.
+        if (poll.title.isNotBlank()) {
+            try {
+                sendText(conversationId, poll.title, null, null, emptyList())
+            } catch (e: DirectEngine.ImessageError) {
+                Log.w(TAG, "a poll's question was not sent as a text")
+            }
+        }
+        return sent
     }
 
     // --- a chat's own "Send Read Receipts" ----------------------------------------------------------

@@ -437,13 +437,120 @@ class CallRulesTest {
         assertEquals(BOB, missed.peer)
         assertFalse(second.has<Effect.LookupCaller>())
         assertFalse(second.has<Effect.ShowIncoming>())
-        // In a call, too.
+    }
+
+    // --- a call while in a call: it waits ----------------------------------------------------------
+
+    /** In an audio call with Alice ([IN]), Bob calls ([THIRD]) and is offered over it. */
+    private fun bobWaits(video: Boolean = true): List<Effect> {
+        ringing()
         send(Input.Answer(IN, false, t))
         send(Input.NativeUp(IN, false, t))
         t += 60_000
-        val third = event(CallEvent.Join(THIRD, BOB, ring = true), listOf(session(IN), session(THIRD, BOB)))
+        val rung = event(CallEvent.Join(THIRD, BOB, ring = true), listOf(session(IN), session(THIRD, BOB, video)))
+        assertEquals("the call goes on", IN, state?.guid)
         assertEquals(Phase.ACTIVE, state?.phase)
-        assertEquals(Outcome.MISSED, third.only<Effect.LogCall>().entry.outcome)
+        assertEquals("who is it: asked first, as for any ring", THIRD, rung.only<Effect.LookupCaller>().guid)
+        assertFalse(rung.has<Effect.LogCall>())
+        val offered = send(Input.Caller(THIRD, CallerInfo("Bob Stone", known = true, conversationId = "imsg:tel:+15559876543"), t, on))
+        assertEquals(IN, state?.guid)
+        assertEquals("Bob Stone", offered.only<Effect.ShowWaiting>().call.name)
+        assertEquals(Phase.RINGING_IN, rules.waiting?.phase)
+        assertEquals(CallRules.RING_IN_MS, offered.only<Effect.StartTimer>().ms)
+        return offered
+    }
+
+    @Test
+    fun aCallDuringACallWaitsAndEndAndAcceptSwitchesToIt() {
+        bobWaits()
+        t += 5_000
+        val out = send(Input.Answer(THIRD, withCamera = true, now = t))
+        // The call with Alice ends (with its time), and Bob's is joined in its place: never a moment with no call.
+        assertEquals(THIRD, state?.guid)
+        assertEquals(Phase.CONNECTING, state?.phase)
+        assertTrue(state!!.withCamera)
+        assertNull(rules.waiting)
+        assertEquals(IN, out.only<Effect.EndNative>().call.guid)
+        val ended = out.only<Effect.LogCall>().entry
+        assertEquals(IN, ended.guid)
+        assertEquals(Outcome.ANSWERED, ended.outcome)
+        assertEquals(65_000L, ended.durationMs)
+        assertEquals(THIRD, out.only<Effect.StartNative>().call.guid)
+        assertEquals(THIRD, out.only<Effect.HideWaiting>().guid)
+        assertTrue("the old call is left before the new one is joined", out.indexOfFirst { it is Effect.EndNative } < out.indexOfFirst { it is Effect.StartNative })
+        send(Input.NativeUp(THIRD, video = true, now = t))
+        assertEquals(Phase.ACTIVE, state?.phase)
+        // What the old call's library still says changes nothing.
+        assertTrue(send(Input.Participants(IN, 0, t)).isEmpty())
+        assertEquals(THIRD, state?.guid)
+    }
+
+    @Test
+    fun aWaitingCallIsDeclinedOrGivenUpWhileTheCallGoesOn() {
+        bobWaits()
+        val declined = send(Input.DeclineByUser(THIRD, t))
+        assertEquals(IN, state?.guid)
+        assertEquals(Phase.ACTIVE, state?.phase)
+        assertNull(rules.waiting)
+        assertEquals(THIRD, declined.only<Effect.DeclineCall>().guid)
+        assertEquals(THIRD, declined.only<Effect.HideWaiting>().guid)
+        assertEquals(Outcome.DECLINED, declined.only<Effect.LogCall>().entry.outcome)
+        assertFalse(declined.has<Effect.EndNative>())
+        // Another caller: gives up before it is answered. A missed call; the call goes on.
+        t += 60_000
+        event(CallEvent.Join(OTHER, CAROL, ring = true), listOf(session(IN), session(OTHER, CAROL)))
+        send(Input.Caller(OTHER, CallerInfo("Carol", known = true, conversationId = "c"), t, on))
+        assertEquals(OTHER, rules.waiting?.guid)
+        val left = event(CallEvent.Leave(OTHER, CAROL), listOf(session(IN)))
+        assertNull(rules.waiting)
+        assertEquals(Outcome.MISSED, left.only<Effect.LogCall>().entry.outcome)
+        assertTrue(left.has<Effect.HideWaiting>())
+        assertEquals(Phase.ACTIVE, state?.phase)
+    }
+
+    @Test
+    fun aWaitingCallNobodyAnswersIsAMissedCallAndASecondOneWaitingIsMissedAtOnce() {
+        bobWaits()
+        // Someone else meanwhile: one waits at a time.
+        val second = event(CallEvent.Join(OTHER, CAROL, ring = true), listOf(session(IN), session(THIRD, BOB), session(OTHER, CAROL)))
+        assertEquals(Outcome.MISSED, second.only<Effect.LogCall>().entry.outcome)
+        assertEquals(THIRD, rules.waiting?.guid)
+        t += CallRules.RING_IN_MS
+        val out = send(Input.Timeout(THIRD, Phase.RINGING_IN, t))
+        assertNull(rules.waiting)
+        assertEquals(Outcome.MISSED, out.only<Effect.LogCall>().entry.outcome)
+        assertEquals(THIRD, out.only<Effect.HideWaiting>().guid)
+        assertEquals(IN, state?.guid)
+    }
+
+    @Test
+    fun whenTheCallEndsFirstTheWaitingCallRingsAsAnyCallDoes() {
+        bobWaits()
+        t += 2_000
+        val out = send(Input.HangUp(IN, t))
+        assertEquals("Bob's call is the call now", THIRD, state?.guid)
+        assertEquals(Phase.RINGING_IN, state?.phase)
+        assertNull(rules.waiting)
+        assertEquals(IN, out.only<Effect.EndNative>().call.guid)
+        assertEquals(THIRD, out.only<Effect.ShowIncoming>().call.guid)
+        // And is answered as usual.
+        val answered = send(Input.Answer(THIRD, true, t))
+        assertEquals(Phase.CONNECTING, state?.phase)
+        assertEquals(THIRD, answered.only<Effect.StartNative>().call.guid)
+    }
+
+    @Test
+    fun aCallerNobodyKnowsDoesNotWaitWhenUnknownCallersAreSilenced() {
+        ringing()
+        send(Input.Answer(IN, false, t))
+        send(Input.NativeUp(IN, false, t))
+        val silence = FaceTimeSettings(on = true, silenceUnknown = true)
+        event(CallEvent.Join(THIRD, BOB, ring = true), listOf(session(IN), session(THIRD, BOB)), settings = silence)
+        val out = send(Input.Caller(THIRD, CallerInfo("", known = false, conversationId = null), t, silence))
+        assertNull(rules.waiting)
+        assertFalse(out.has<Effect.ShowWaiting>())
+        assertTrue(out.only<Effect.LogCall>().entry.quiet)
+        assertEquals(IN, state?.guid)
     }
 
     @Test

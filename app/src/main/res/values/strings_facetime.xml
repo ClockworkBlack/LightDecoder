@@ -36,6 +36,8 @@
     <string name="facetime_declined">Declined</string>
     <string name="facetime_failed">The call could not be connected</string>
     <string name="facetime_end">End</string>
+    <string name="facetime_end_and_accept">End &amp; Accept</string>
+    <string name="facetime_waiting_kind">%1$s · calling now</string>
     <string name="facetime_call_again">Call Again</string>
     <string name="facetime_close">Close</string>
     <string name="facetime_mute">Mute</string>

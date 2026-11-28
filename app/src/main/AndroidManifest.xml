@@ -394,6 +394,7 @@
             android:exported="false"
             android:launchMode="singleInstance"
             android:process=":imessage"
+            android:resizeableActivity="true"
             android:showWhenLocked="true"
             android:supportsPictureInPicture="true"
             android:taskAffinity=":facetime"

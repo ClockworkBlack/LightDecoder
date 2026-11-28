@@ -20,10 +20,12 @@ object VideoFit {
 
     /**
      * Filling a view of another shape cuts the picture's edges. Up to this much (the longer of the
-     * two shapes over the shorter) a call fills the screen, as FaceTime does on a phone; beyond it
-     * (a 9:16 picture on a Fold's near-square screen, or a picture on its side) it is shown whole.
+     * two shapes over the shorter) a call fills the screen, as FaceTime does on a phone and as a
+     * messenger's call does on an unfolded Galaxy Z Fold (an upright picture over all of its
+     * near-square screen, its top and bottom cut); beyond it (a picture on its side on an upright
+     * phone) it is shown whole. A double tap switches between the two.
      */
-    const val FILL_LIMIT = 1.4f
+    const val FILL_LIMIT = 2.0f
 
     /** The library's stream rotation (0..3; 3 is "not turned") as degrees clockwise that make the picture upright. */
     fun degreesForStream(rotation: Int): Int = when (rotation) {
