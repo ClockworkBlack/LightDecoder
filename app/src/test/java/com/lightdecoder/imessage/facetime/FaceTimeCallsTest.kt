@@ -636,6 +636,59 @@ class FaceTimeCallsTest {
     }
 
     @Test
+    fun whatTheLibrarySaysOfAPictureBeforeItAsksForTheViewIsNotLost() {
+        placeAndGetAnswered(video = true)
+        val native = natives.last
+        val host = native.host!!
+        // The library says a stream's size and rotation once, when they change: here before there is a view for it.
+        host.videoSize(7, CallSurfaces.STREAM_CAMERA, 1920, 1080)
+        host.streamRotation(7, CallSurfaces.STREAM_CAMERA, 3)
+        assertEquals("nothing is shown yet", 0, calls.media.value.remoteWidth)
+        val view = surface()
+        calls.attachRemote(view)
+        await("the library asked to ask again") { native.calls.last() == "refreshSurfaces:77" }
+        assertSame(view, host.buildSurface(7, CallSurfaces.STREAM_CAMERA))
+        assertEquals(1920 to 1080, calls.media.value.let { it.remoteWidth to it.remoteHeight })
+        assertEquals(3, calls.media.value.remoteRotation)
+        assertEquals("not turned: as it is", 1920 to 1080, calls.media.value.remoteShown)
+        // The view goes away and comes back (the screen folded, or behind another app): still known.
+        var released = false
+        calls.detachRemote(view) { released = true }
+        await("the view let go") { released }
+        host.streamRotation(7, CallSurfaces.STREAM_CAMERA, 0)
+        val again = surface()
+        calls.attachRemote(again)
+        assertSame(again, host.buildSurface(7, CallSurfaces.STREAM_CAMERA))
+        assertEquals("the rotation said while the view was away", 0, calls.media.value.remoteRotation)
+        assertEquals(1080 to 1920, calls.media.value.remoteShown)
+    }
+
+    @Test
+    fun aPictureWithNoRotationSaidIsTakenAsAnUprightPhones() {
+        placeAndGetAnswered(video = true)
+        val native = natives.last
+        val host = native.host!!
+        val view = surface()
+        calls.attachRemote(view)
+        await("the library asked to ask again") { native.calls.last() == "refreshSurfaces:77" }
+        assertSame(view, host.buildSurface(7, CallSurfaces.STREAM_CAMERA))
+        // The library does not say the rotation a stream starts out with (an iPhone held upright): only its size.
+        host.videoSize(7, CallSurfaces.STREAM_CAMERA, 1920, 1080)
+        assertEquals(Media.ROTATION_UNKNOWN, calls.media.value.remoteRotation)
+        assertEquals("as OpenBubbles takes it: turned a quarter", 1080 to 1920, calls.media.value.remoteShown)
+        // Another stream's rotation is not this one's.
+        host.streamRotation(8, CallSurfaces.STREAM_CAMERA, 3)
+        assertEquals(Media.ROTATION_UNKNOWN, calls.media.value.remoteRotation)
+        // The stream goes and another comes: nothing of the first is left on it.
+        host.streamRotation(7, CallSurfaces.STREAM_CAMERA, 2)
+        host.streamsRemoved(7, intArrayOf(CallSurfaces.STREAM_CAMERA))
+        assertEquals(Media.ROTATION_UNKNOWN, calls.media.value.remoteRotation)
+        assertSame(view, host.buildSurface(7, CallSurfaces.STREAM_CAMERA_ALTERNATE))
+        assertEquals(0, calls.media.value.remoteWidth)
+        assertEquals(Media.ROTATION_UNKNOWN, calls.media.value.remoteRotation)
+    }
+
+    @Test
     fun turningTheScreenTellsTheLibraryHowTheCameraLies() {
         placeAndGetAnswered()
         val native = natives.last

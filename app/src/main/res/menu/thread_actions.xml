@@ -67,6 +67,18 @@
         android:title="@string/imessage_unlink"
         android:visible="false"
         app:showAsAction="never" />
+    <!-- An iMessage group the iMessage library can change: people added to it (the same as "Add Member" in its details). -->
+    <item
+        android:id="@+id/action_add_people"
+        android:title="@string/imessage_group_add_people"
+        android:visible="false"
+        app:showAsAction="never" />
+    <!-- An iMessage chat (or a conversation with one in it): its details, as a tap on the name at the top opens them. -->
+    <item
+        android:id="@+id/action_chat_details"
+        android:title="@string/chat_details_open"
+        android:visible="false"
+        app:showAsAction="never" />
     <!-- An iMessage chat the iMessage library can reach: its background (iOS 26), as on an iPhone. -->
     <item
         android:id="@+id/action_chat_background"

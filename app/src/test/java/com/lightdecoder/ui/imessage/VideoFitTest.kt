@@ -31,7 +31,7 @@ class VideoFitTest {
     fun anIPhoneHeldUprightIsShownUprightAndUnstretchedOnTheFoldsInnerScreen() {
         // The iPhone's encoder makes 1920 x 1080 pictures and says "turn a quarter" (0 or 1).
         for (rotation in listOf(0, 1)) {
-            val m = FaceTimeCallActivity.remoteTransform(1968, 2184, 1920, 1080, rotation)
+            val m = FaceTimeCallActivity.remoteTransform(1968, 2184, 1920, 1080, rotation, turn = VideoFit.Turn.NONE)
             val r = shown(m, 1968, 2184)
             assertEquals("upright 9:16", 1080f / 1920f, aspect(r), 0.005f)
             // A 9:16 picture on a near-square screen is shown whole (not cut to a sliver): the full height, bars at the sides.
@@ -65,7 +65,7 @@ class VideoFitTest {
     @Test
     fun aDecoderThatTurnsThePictureItselfIsNotTurnedAgain() {
         // The view then already gets it upright, stretched: only its shape is put right.
-        val m = FaceTimeCallActivity.remoteTransform(1968, 2184, 1920, 1080, 0, decoderTurns = true)
+        val m = FaceTimeCallActivity.remoteTransform(1968, 2184, 1920, 1080, 0, turn = VideoFit.Turn.QUARTER)
         val values = FloatArray(9).also(m::getValues)
         assertEquals(0f, values[Matrix.MSKEW_X], 0.0001f)
         assertEquals(0f, values[Matrix.MSKEW_Y], 0.0001f)
@@ -75,6 +75,100 @@ class VideoFitTest {
         assertTrue(VideoFit.textureIsTurned(floatArrayOf(0f, -1f, 0f, 0f, -1f, 0f, 0f, 0f, 0f, 0f, 1f, 0f, 1f, 1f, 0f, 1f)))
         assertTrue(VideoFit.textureIsTurned(floatArrayOf(-1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f, 0f, 1f, 0f, 0f, 1f)))
         assertFalse(VideoFit.textureIsTurned(FloatArray(3)))
+    }
+
+    private val quarter = VideoFit.Turn.QUARTER
+    private val asItIs = VideoFit.Turn.NONE
+
+    /** The picture's width over its height as it ends up on the screen, and whether the screen turns it. */
+    private fun laidOut(viewWidth: Int, viewHeight: Int, width: Int, height: Int, rotation: Int, turn: VideoFit.Turn?): Pair<Float, Boolean> {
+        val m = FaceTimeCallActivity.remoteTransform(viewWidth, viewHeight, width, height, rotation, turn)
+        val values = FloatArray(9).also(m::getValues)
+        val turned = kotlin.math.abs(values[Matrix.MSKEW_X]) > 0.0001f || values[Matrix.MSCALE_X] < 0f
+        return aspect(shown(m, viewWidth, viewHeight)) to turned
+    }
+
+    @Test
+    fun anUprightIPhonesPictureIsNotPulledWideWhenTheLibrarySaysNoRotation() {
+        // What looked like a fun house (0.5.73): the iPhone's 1920 x 1080 frames come turned upright by
+        // the decoder, the library says no rotation for them (it does not say the one a stream starts
+        // with), and the upright picture was given the shape it has lying on its side: 16:9, over three times too wide.
+        for ((vw, vh) in listOf(1968 to 2184, 1080 to 2520, 1080 to 2340)) {
+            val (shape, turned) = laidOut(vw, vh, 1920, 1080, Media.ROTATION_UNKNOWN, quarter)
+            assertEquals("upright 9:16 in a $vw x $vh view", 1080f / 1920f, shape, 0.005f)
+            assertFalse("not turned a second time", turned)
+        }
+        // Before its first frame it is laid out as it will come (an upright phone's).
+        assertEquals(1080f / 1920f, laidOut(1968, 2184, 1920, 1080, Media.ROTATION_UNKNOWN, null).first, 0.005f)
+    }
+
+    @Test
+    fun thePicturesShapeGoesByHowItsFramesComeWhateverWasSaid() {
+        // Frames turned a quarter by the decoder: upright, sides changed over, whatever rotation was said (late, wrong, or none).
+        for (rotation in listOf(Media.ROTATION_UNKNOWN, 0, 1, 2, Media.ROTATION_NONE)) {
+            val (shape, turned) = laidOut(1968, 2184, 1920, 1080, rotation, quarter)
+            assertEquals("rotation $rotation", 1080f / 1920f, shape, 0.005f)
+            assertFalse(turned)
+        }
+        // Frames turned half: the same shape, the right way up already.
+        for (rotation in listOf(Media.ROTATION_UNKNOWN, 0, 2, Media.ROTATION_NONE)) {
+            val (shape, turned) = laidOut(1968, 2184, 1920, 1080, rotation, VideoFit.Turn.HALF)
+            assertEquals(1920f / 1080f, shape, 0.005f)
+            assertFalse(turned)
+        }
+        // Frames as they are and nothing said, or "not turned" said: a phone on its side, shown as it comes.
+        for (rotation in listOf(Media.ROTATION_UNKNOWN, Media.ROTATION_NONE)) {
+            val (shape, turned) = laidOut(1968, 2184, 1920, 1080, rotation, asItIs)
+            assertEquals(1920f / 1080f, shape, 0.005f)
+            assertFalse(turned)
+        }
+        // Only a picture the library says is turned while its frames are not is turned by the screen.
+        for (rotation in listOf(0, 1)) {
+            val (shape, turned) = laidOut(1968, 2184, 1920, 1080, rotation, asItIs)
+            assertEquals(1080f / 1920f, shape, 0.005f)
+            assertTrue(turned)
+        }
+        assertEquals(VideoFit.Shape(1920, 1080, 180), VideoFit.shape(1920, 1080, 2, asItIs))
+        // A 4:3 stream (FaceTime on a slow connection) the same way.
+        assertEquals(480f / 640f, laidOut(1080, 2520, 640, 480, Media.ROTATION_UNKNOWN, quarter).first, 0.005f)
+        assertEquals(640f / 480f, laidOut(1080, 2520, 640, 480, Media.ROTATION_NONE, asItIs).first, 0.005f)
+    }
+
+    @Test
+    fun theOtherSideTurningTheirPhoneFollowsTheFramesNotTheOrderThingsAreSaidIn() {
+        // Upright, then on its side: the library says "not turned" (3) before the frames change, and after.
+        assertEquals(VideoFit.Shape(1080, 1920, 0), VideoFit.shape(1920, 1080, 0, quarter))
+        assertEquals("said first, frames still turned", VideoFit.Shape(1080, 1920, 0), VideoFit.shape(1920, 1080, 3, quarter))
+        assertEquals("the frames follow", VideoFit.Shape(1920, 1080, 0), VideoFit.shape(1920, 1080, 3, asItIs))
+        // On its side, then upright, with the frames changing before it is said.
+        assertEquals("frames first", VideoFit.Shape(1080, 1920, 0), VideoFit.shape(1920, 1080, 3, quarter))
+        assertEquals(VideoFit.Shape(1080, 1920, 0), VideoFit.shape(1920, 1080, 0, quarter))
+        // Nothing to lay out without a size.
+        assertFalse(VideoFit.shape(0, 0, 0, quarter).known)
+        assertTrue(FaceTimeCallActivity.remoteTransform(1968, 2184, VideoFit.shape(0, 0, Media.ROTATION_UNKNOWN, quarter)).isIdentity)
+        // Which turn a frame's transform is (column-major 4x4, as SurfaceTexture gives it).
+        assertEquals(asItIs, VideoFit.textureTurn(floatArrayOf(1f, 0f, 0f, 0f, 0f, -1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 1f, 0f, 1f)))
+        assertEquals(quarter, VideoFit.textureTurn(floatArrayOf(0f, -1f, 0f, 0f, -1f, 0f, 0f, 0f, 0f, 0f, 1f, 0f, 1f, 1f, 0f, 1f)))
+        assertEquals(quarter, VideoFit.textureTurn(floatArrayOf(0f, 1f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f)))
+        // With the decoder's own cut of the frame's edge in it (a 1080 picture in a 1088 buffer).
+        assertEquals(quarter, VideoFit.textureTurn(floatArrayOf(0f, -0.9926f, 0f, 0f, -1f, 0f, 0f, 0f, 0f, 0f, 1f, 0f, 1f, 0.9963f, 0f, 1f)))
+        assertEquals(VideoFit.Turn.HALF, VideoFit.textureTurn(floatArrayOf(-1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f, 0f, 1f, 0f, 0f, 1f)))
+        assertEquals(asItIs, VideoFit.textureTurn(FloatArray(3)))
+    }
+
+    @Test
+    fun whatIsSaidOfThePictureInTheLogKeepsItsNumbers() {
+        val line = FaceTimeCallActivity.pictureLine(1920, 1080, Media.ROTATION_UNKNOWN, quarter, VideoFit.Shape(1080, 1920, 0), 1968, 2184, false)
+        assertEquals(
+            "the other side's picture is 1920x1080 as decoded (no rotation said; its frames come turned a quarter): " +
+                "shown as 1080x1920, whole in a 1968x2184 view",
+            line,
+        )
+        // Sizes are not taken for phone numbers on their way into the log.
+        assertEquals(line, com.lightdecoder.imessage.Redact.text(line))
+        val turned = FaceTimeCallActivity.pictureLine(1280, 720, 1, asItIs, VideoFit.Shape(720, 1280, 270), 1080, 2520, true)
+        assertTrue(turned.contains("rotation 1 said; its frames come as they are") && turned.contains("turned 270 more by the screen") && turned.endsWith("filling a 1080x2520 view"))
+        assertEquals(turned, com.lightdecoder.imessage.Redact.text(turned))
     }
 
     @Test

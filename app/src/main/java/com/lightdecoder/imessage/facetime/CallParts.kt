@@ -36,10 +36,14 @@ data class Media(
     val routes: List<Route> = listOf(Route.EARPIECE, Route.SPEAKER),
     /** The other side's camera picture is being drawn into the call screen's view. */
     val remoteVideo: Boolean = false,
-    /** The other side's picture, as its decoder makes it, and its rotation (the library's 0..3; 0 and 1 are quarter turns). */
+    /**
+     * The other side's picture, as its decoder makes it (0 until the library says), and its rotation:
+     * the library's 0..3 (0 and 1 are quarter turns), or [ROTATION_UNKNOWN] while the library has
+     * not said one for the stream shown.
+     */
     val remoteWidth: Int = 0,
     val remoteHeight: Int = 0,
-    val remoteRotation: Int = ROTATION_NONE,
+    val remoteRotation: Int = ROTATION_UNKNOWN,
     /** Someone's shared screen is being drawn into the call screen's view for it, and its picture as its decoder makes it. */
     val screenVideo: Boolean = false,
     val screen: Picture = Picture(),
@@ -48,22 +52,35 @@ data class Media(
     /** A phone call rings on this phone meanwhile ([CellularWatch]): "Phone call incoming". */
     val phoneRinging: Boolean = false,
 ) {
-    /** The picture's width and height as shown: turned a quarter, they change places. */
+    /**
+     * The picture's width and height as shown: turned a quarter, they change places. A rotation the
+     * library has not said counts as a quarter turn (an iPhone held upright), as OpenBubbles takes it
+     * (its `VideoRotation.DEFAULT`): the library does not say the rotation a stream starts out with.
+     */
     val remoteShown: Pair<Int, Int>
         get() = Picture(remoteWidth, remoteHeight, remoteRotation).shown
 
     /** Whether any picture of the other side (a camera's, a shared screen) is shown. */
     val anyPicture: Boolean get() = remoteVideo || screenVideo || tiles.isNotEmpty()
 
-    /** One picture's size as its decoder makes it, and its rotation (the library's 0..3; 0 and 1 are quarter turns). */
-    data class Picture(val width: Int = 0, val height: Int = 0, val rotation: Int = ROTATION_NONE) {
-        /** Its width and height as shown: turned a quarter, they change places. */
-        val shown: Pair<Int, Int> get() = if (rotation == 0 || rotation == 1) height to width else width to height
+    /**
+     * One picture's size as its decoder makes it (0 until the library says), and its rotation: the
+     * library's 0..3 (0 and 1 are quarter turns), or [ROTATION_UNKNOWN] while the library said none.
+     */
+    data class Picture(val width: Int = 0, val height: Int = 0, val rotation: Int = ROTATION_UNKNOWN) {
+        /** Its width and height as shown: turned a quarter (or with no rotation said, [remoteShown]), they change places. */
+        val shown: Pair<Int, Int> get() = if (quarterTurn(rotation)) height to width else width to height
     }
 
     companion object {
         /** The library's value for "not turned". */
         const val ROTATION_NONE = 3
+
+        /** No rotation said by the library yet (never one of its own values). */
+        const val ROTATION_UNKNOWN = -1
+
+        /** Whether a picture with [rotation] is shown with its sides changed over ([ROTATION_UNKNOWN]: yes, see [remoteShown]). */
+        fun quarterTurn(rotation: Int): Boolean = rotation == 0 || rotation == 1 || rotation == ROTATION_UNKNOWN
     }
 }
 
@@ -166,6 +183,35 @@ class CallSurfaces {
     private var screenOwner: Pair<Long, Int>? = null
     private val tiles = HashMap<Long, Surface>()
     private val tileOwners = HashMap<Long, Int>()
+
+    /**
+     * What the library said of each stream's picture, kept whether or not that stream is the one
+     * shown (as OpenBubbles keeps them, by stream): the library says a size or a rotation once, when
+     * it changes, and may say it before it asks for the stream's view ([forStream]), or while the
+     * view is away. One said then must not be lost: the picture would be laid out in another shape
+     * than it has (squeezed or pulled wide) until the other side turned their phone.
+     */
+    private val sizes = HashMap<Pair<Long, Int>, Pair<Int, Int>>()
+    private val rotations = HashMap<Pair<Long, Int>, Int>()
+
+    /** [stream] of [participant] makes pictures [width] x [height] from now on (kept whichever view shows it, or none yet). */
+    fun noteSize(participant: Long, stream: Int, width: Int, height: Int): Unit = synchronized(lock) {
+        val key = participant to stream
+        if (key in sizes || sizes.size < MAX_STREAMS) sizes[key] = width to height
+    }
+
+    /** [stream] of [participant] is turned [rotation] (the library's 0..3) from now on (kept whichever view shows it, or none yet). */
+    fun noteRotation(participant: Long, stream: Int, rotation: Int): Unit = synchronized(lock) {
+        val key = participant to stream
+        if (key in rotations || rotations.size < MAX_STREAMS) rotations[key] = rotation
+    }
+
+    /** The picture of [stream] of [participant] as the library last said it: its size (0 when it said none) and rotation ([Media.ROTATION_UNKNOWN] when it said none). */
+    fun pictureOf(participant: Long, stream: Int): Media.Picture = synchronized(lock) {
+        val key = participant to stream
+        val size = sizes[key]
+        Media.Picture(size?.first ?: 0, size?.second ?: 0, rotations[key] ?: Media.ROTATION_UNKNOWN)
+    }
 
     /** The call screen's small view of the user's own camera, while it is there. */
     @Volatile
@@ -301,6 +347,8 @@ class CallSurfaces {
         preview = null
         tilesOnly = false
         _requested.value = emptyList()
+        sizes.clear()
+        rotations.clear()
     }
 
     companion object {
@@ -313,6 +361,9 @@ class CallSurfaces {
 
         /** The most streams remembered as asked for. */
         const val MAX_REQUESTED = 64
+
+        /** The most streams a size and a rotation are kept for (a call with one person has a handful). */
+        const val MAX_STREAMS = 64
 
         /** The encoder groups that are not the first camera's: a shared screen, and a second camera. */
         const val GROUP_SCREEN = 3

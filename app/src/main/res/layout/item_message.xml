@@ -229,18 +229,55 @@
                     android:layout_height="wrap_content"
                     android:orientation="vertical" />
 
-                <TextView
-                    android:id="@+id/pollAddChoice"
-                    android:layout_width="wrap_content"
+                <!-- Under the choices: "Add Choice" (or that the choices are locked), and on a poll the user made, "Edit Poll". -->
+                <LinearLayout
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:background="?attr/selectableItemBackground"
                     android:gravity="center_vertical"
-                    android:minHeight="40dp"
-                    android:paddingHorizontal="4dp"
-                    android:text="@string/imessage_poll_add_choice"
-                    android:textAppearance="?attr/textAppearanceLabelLarge"
-                    android:textStyle="bold"
-                    android:visibility="gone" />
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:id="@+id/pollAddChoice"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:background="?attr/selectableItemBackground"
+                        android:gravity="center_vertical"
+                        android:minHeight="40dp"
+                        android:paddingHorizontal="4dp"
+                        android:text="@string/imessage_poll_add_choice"
+                        android:textAppearance="?attr/textAppearanceLabelLarge"
+                        android:textStyle="bold"
+                        android:visibility="gone" />
+
+                    <TextView
+                        android:id="@+id/pollLockedNote"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:gravity="center_vertical"
+                        android:minHeight="40dp"
+                        android:paddingHorizontal="4dp"
+                        android:text="@string/imessage_poll_choices_locked"
+                        android:textAppearance="?attr/textAppearanceLabelMedium"
+                        android:visibility="gone" />
+
+                    <Space
+                        android:layout_width="0dp"
+                        android:layout_height="1dp"
+                        android:layout_weight="1" />
+
+                    <TextView
+                        android:id="@+id/pollEdit"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:background="?attr/selectableItemBackground"
+                        android:gravity="center_vertical"
+                        android:minHeight="40dp"
+                        android:paddingHorizontal="4dp"
+                        android:text="@string/imessage_poll_edit"
+                        android:textAppearance="?attr/textAppearanceLabelLarge"
+                        android:textStyle="bold"
+                        android:visibility="gone" />
+                </LinearLayout>
             </LinearLayout>
 
             <!-- The text, with iOS 18's formatting; its text effects play on it. -->

@@ -397,6 +397,8 @@ class DirectLink private constructor(
                 ),
             )
             groupNames.note(id, name.orEmpty(), System.currentTimeMillis())
+            // Made here: nothing has changed in it, so its first change counts from the start.
+            groupVersions.noteNew(id)
         }
         IMessageLog.add(app, "${IMessageLog.chatRef(id)}: iMessage group of ${members.size + 1} started through the iMessage library")
         return id
@@ -2865,7 +2867,11 @@ class DirectLink private constructor(
         val shown = extra.app?.takeIf(Polls::isPoll) ?: return
         val stored = Polls.decode(shown.url) ?: return
         val incoming = Polls.decode(changed.url) ?: return
-        val poll = Polls.merged(stored, incoming)
+        // A poll the user made and locked here: nobody else's choice is added to it.
+        if (extra.pollLocked && card.isOutgoing && !row.fromMe) return lockedPollChange(card, extra, guid, row.id, stored, incoming)
+        // The poll's maker (whoever sent its first card) may also take choices off their own poll.
+        val byMaker = if (row.fromMe) card.isOutgoing else !card.isOutgoing && card.senderId.isNotBlank() && IMessageAddress.same(card.senderId, row.senderId)
+        val poll = Polls.merged(stored, incoming, byMaker)
             ?: return refused("a poll's change", card.conversationId, "that is no choice added to it")
         val next = extra.copy(
             app = shown.copy(url = Polls.encode(poll), ldText = Polls.ldText(poll), root = shown.root.ifEmpty { card.id }),
@@ -2876,6 +2882,72 @@ class DirectLink private constructor(
         // Votes on the new card that came before it.
         replayHeld(row.id)
         IMessageLog.add(app, "${IMessageLog.chatRef(card.conversationId)}: a poll's new state shown on its card (through the iMessage library)")
+    }
+
+    /**
+     * Someone else's change ([incoming], the card [guid], row [rowId]) to the poll [card] ([stored])
+     * the user made and locked here: its choices are not taken. The card is still one of the poll's
+     * session (votes sent to it count on the poll's card), and when it would have added a choice the
+     * poll is sent again as it is ([reassertPoll]), so the other phones go back to the maker's
+     * choices too.
+     */
+    private fun lockedPollChange(card: MessageRow, extra: IMessageExtra, guid: String, rowId: String, stored: Polls.Poll, incoming: Polls.Poll) {
+        val next = extra.copy(pollCards = (extra.pollCards + guid).takeLast(IMessageExtra.MAX_POLL_CARDS))
+        repo.editText(card.id, card.text, card.editedAtMs, next.toJson(), snippetOf(card.text, card.extra))
+        replayHeld(rowId)
+        refused("a poll's change", card.conversationId, "to a poll that is locked here")
+        if (Polls.merged(stored, incoming) != null) reassertPoll(card.id, card.conversationId, incoming.count)
+    }
+
+    /** How long [reassertPoll] waits before it sends (tests shorten it). */
+    @Volatile
+    internal var pollReassertDelayMs: Long = POLL_REASSERT_DELAY_MS
+
+    /** Locked polls waiting to be sent again ([reassertPoll]), by card: the highest count seen on a card of theirs. */
+    private val pollsToReassert = HashMap<String, Int>()
+
+    /** When each locked poll was sent again ([reassertPoll]), by card. */
+    private val pollReasserts = HashMap<String, ArrayDeque<Long>>()
+
+    /**
+     * Sends the locked poll [cardId] again as it is stored, over a card of its session that went as
+     * far as [seenCount] ([Polls.reasserted]). Once for several choices added in a row (it waits
+     * [POLL_REASSERT_DELAY_MS] first), and at most [MAX_POLL_REASSERTS] times in
+     * [POLL_REASSERT_WINDOW_MS] for one poll: someone who keeps adding is then only left out here,
+     * never answered card for card. Never throws: what does not go is said in the log.
+     */
+    private fun reassertPoll(cardId: String, conversationId: String, seenCount: Int) {
+        val now = System.currentTimeMillis()
+        synchronized(pollsToReassert) {
+            val times = pollReasserts.getOrPut(cardId) { ArrayDeque() }
+            while (times.isNotEmpty() && now - times.first() > POLL_REASSERT_WINDOW_MS) times.removeFirst()
+            val waiting = pollsToReassert[cardId]
+            if (waiting != null) {
+                pollsToReassert[cardId] = maxOf(waiting, seenCount)
+                return
+            }
+            if (times.size >= MAX_POLL_REASSERTS) {
+                IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: a locked poll was changed again; not sent again so soon")
+                return
+            }
+            if (pollReasserts.size > MAX_POLLS_TRACKED) pollReasserts.keys.firstOrNull { it != cardId }?.let(pollReasserts::remove)
+            times.addLast(now)
+            pollsToReassert[cardId] = seenCount
+        }
+        scope.launch {
+            try {
+                kotlinx.coroutines.delay(pollReassertDelayMs)
+                val seen = synchronized(pollsToReassert) { pollsToReassert.remove(cardId) } ?: return@launch
+                val (row, poll, card) = pollFor(cardId)
+                // Unlocked meanwhile: the choice someone added stays left out here, and nothing is sent.
+                if (!IMessageExtra.parse(row.extra).pollLocked) return@launch
+                val next = Polls.reasserted(poll, seen) ?: return@launch
+                sendPollAgain(cardId, row, card, next, "a locked poll sent again as it is")
+            } catch (e: Exception) {
+                synchronized(pollsToReassert) { pollsToReassert.remove(cardId) }
+                IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: a locked poll could not be sent again (${e::class.java.simpleName})")
+            }
+        }
     }
 
     /**
@@ -3311,7 +3383,7 @@ class DirectLink private constructor(
             val texts = DirectTexts(app)
             val text = texts.added(texts.you, added.joinToString(", ") { nameOf(it) })
             synchronized(this) { upsert(ownGroupEvent(conversationId, now, reply, text, members = others, member = true, groupVersion = version)) }
-            IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: ${added.size} member(s) added through the iMessage library (Apple confirmed)")
+            IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: ${added.size} member(s) added through the iMessage library (Apple confirmed; as the group's change $version)")
         }
     }
 
@@ -3340,7 +3412,7 @@ class DirectLink private constructor(
             synchronized(this) {
                 upsert(ownGroupEvent(conversationId, now, reply, texts.removed(texts.you, nameOf(removed)), members = others, member = true, groupVersion = version))
             }
-            IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: a member removed through the iMessage library (Apple confirmed)")
+            IMessageLog.add(app, "${IMessageLog.chatRef(conversationId)}: a member removed through the iMessage library (Apple confirmed; as the group's change $version)")
         }
     }
 
@@ -3391,7 +3463,7 @@ class DirectLink private constructor(
         }
     }
 
-    /** The version a group photo set here goes as: after the group's, and after its photo's. */
+    /** The version a group photo set here goes as: after the group's ([GroupVersions.next]), and after its photo's. */
     private fun nextPhotoVersion(conversationId: String): Long {
         val photo = GroupPhotos(app).of(conversationId)
         val afterPhoto = if (photo.known) GroupVersions.nextAfter(photo.version) else 0
@@ -3662,11 +3734,22 @@ class DirectLink private constructor(
      */
     suspend fun addPollChoice(messageId: String, text: String) {
         val (row, poll, card) = pollFor(messageId)
+        if (IMessageExtra.parse(row.extra).pollLocked) throw DirectEngine.ImessageError(app.getString(R.string.imessage_poll_locked_here))
         val first = targetOf(row.conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
         val next = Polls.addChoice(poll, text, Handles.display(first.from))
             ?: throw DirectEngine.ImessageError(
                 if (poll.options.size >= Polls.MAX_OPTIONS) app.getString(R.string.imessage_poll_too_many, Polls.MAX_OPTIONS) else app.getString(R.string.imessage_poll_choice_not_added),
             )
+        sendPollAgain(messageId, row, card, next, "a choice added to a poll")
+    }
+
+    /**
+     * Sends the poll card [messageId] ([row], its balloon [card]) again to its session in the state
+     * [next] (its count higher than the stored one), as OpenBubbles sends "Add Choice": in turn with
+     * the chat's sends; once Apple confirmed it, the card here shows that state. Throws
+     * [DirectEngine.ImessageError] saying why when it does not go through.
+     */
+    private suspend fun sendPollAgain(messageId: String, row: MessageRow, card: IMessageExtra.App, next: Polls.Poll, what: String) {
         val root = card.root.ifEmpty { row.id }
         val rootGuid = DirectArchive.guidOf(root) ?: DirectArchive.guidOf(row.id)!!
         // Its session as it came (Apple's), else the poll's first card's GUID, as OpenBubbles sends one; a UUID either way (the library takes no other).
@@ -3686,8 +3769,54 @@ class DirectLink private constructor(
                 val updated = extra.copy(app = balloon, pollCards = (extra.pollCards + sent.guid).distinct().takeLast(IMessageExtra.MAX_POLL_CARDS))
                 repo.editText(current.id, current.text, current.editedAtMs, updated.toJson(), snippetOf(current.text, current.extra))
             }
-            IMessageLog.add(app, "${IMessageLog.chatRef(row.conversationId)}: a choice added to a poll through the iMessage library (Apple confirmed)")
+            IMessageLog.add(app, "${IMessageLog.chatRef(row.conversationId)}: $what through the iMessage library (Apple confirmed)")
         }
+    }
+
+    /**
+     * Whether the poll card [row] is one the user made and may lock or take choices off
+     * ([setPollLocked], [removePollChoice]): theirs (its first card went from the user), and one
+     * they can vote in ([canVote]).
+     */
+    fun ownsPoll(row: MessageRow, reachable: Boolean? = null): Boolean = row.isOutgoing && canVote(row, reachable)
+
+    /** Whether the poll card [row] is locked here ([setPollLocked]). */
+    fun pollLocked(row: MessageRow): Boolean = IMessageExtra.parse(row.extra).pollLocked
+
+    /**
+     * Locks the poll card [messageId], one the user made ([ownsPoll]), or unlocks it. Locked, a
+     * choice someone else adds is not taken here and the poll is sent again as it is
+     * ([reassertPoll]), and "Add Choice" is not offered here. Kept on this phone only: nothing is
+     * sent for it (Apple's Messages has no such lock; other phones follow the poll as it is sent
+     * again). Throws [DirectEngine.ImessageError] for a poll that is not the user's.
+     */
+    fun setPollLocked(messageId: String, locked: Boolean) {
+        synchronized(this) {
+            val (row, _, _) = pollFor(messageId)
+            if (!row.isOutgoing) throw DirectEngine.ImessageError(app.getString(R.string.imessage_poll_not_yours))
+            val extra = IMessageExtra.parse(row.extra)
+            if (extra.pollLocked == locked) return
+            repo.editText(row.id, row.text, row.editedAtMs, extra.copy(pollLocked = locked).toJson(), snippetOf(row.text, row.extra))
+            IMessageLog.add(app, "${IMessageLog.chatRef(row.conversationId)}: a poll ${if (locked) "locked" else "unlocked"} here")
+        }
+    }
+
+    /**
+     * Takes the choice [optionId] off the poll card [messageId], one the user made ([ownsPoll]): the
+     * poll's card sent again to its session without it ([Polls.removeChoice]), its count one higher.
+     * Once Apple confirmed it, the card here shows it without the choice (and without the votes for
+     * it). Throws [DirectEngine.ImessageError] saying why when it does not go through (not the
+     * user's poll, only two choices left, not sent).
+     */
+    suspend fun removePollChoice(messageId: String, optionId: String) {
+        val (row, poll, card) = pollFor(messageId)
+        if (!row.isOutgoing) throw DirectEngine.ImessageError(app.getString(R.string.imessage_poll_not_yours))
+        targetOf(row.conversationId) ?: throw DirectEngine.ImessageError(app.getString(R.string.imessage_direct_unreachable))
+        val next = Polls.removeChoice(poll, optionId)
+            ?: throw DirectEngine.ImessageError(
+                app.getString(if (poll.options.size <= Polls.MIN_OPTIONS) R.string.imessage_poll_keeps_two else R.string.imessage_poll_unreadable),
+            )
+        sendPollAgain(messageId, row, card, next, "a choice taken off a poll")
     }
 
     /**
@@ -4655,6 +4784,16 @@ class DirectLink private constructor(
 
         /** The longest group name sent. */
         private const val MAX_GROUP_NAME = 255
+
+        /** How long a locked poll waits before it is sent again: several choices added in a row are answered once. */
+        const val POLL_REASSERT_DELAY_MS = 4_000L
+
+        /** A locked poll is sent again at most [MAX_POLL_REASSERTS] times in this long. */
+        const val POLL_REASSERT_WINDOW_MS = 10 * 60_000L
+        const val MAX_POLL_REASSERTS = 3
+
+        /** How many locked polls' sends are remembered for that. */
+        private const val MAX_POLLS_TRACKED = 64
 
         /**
          * The size a design ([BackgroundThemes]) is drawn at for a screen of [width] x [height]:

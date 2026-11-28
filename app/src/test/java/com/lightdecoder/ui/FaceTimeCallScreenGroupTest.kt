@@ -332,7 +332,7 @@ class FaceTimeCallScreenGroupTest {
                 val frame = activity.findViewById<FrameLayout>(R.id.tiles).getChildAt(0) as FrameLayout
                 val video = (0 until frame.childCount).map(frame::getChildAt).filterIsInstance<TextureView>().single()
                 assertEquals("one person's tile fills the screen", activity.findViewById<View>(R.id.tiles).width, frame.width)
-                val expected = FaceTimeCallActivity.remoteTransform(video.width, video.height, 1920, 1080, 1, false, com.lightdecoder.ui.imessage.VideoFit.Zoom())
+                val expected = FaceTimeCallActivity.remoteTransform(video.width, video.height, 1920, 1080, 1, null, com.lightdecoder.ui.imessage.VideoFit.Zoom())
                 assertFalse(expected.isIdentity)
                 assertEquals("the tile is laid out as the big picture of a call with one person", values(expected), values(transformOf(video)))
                 // The window's shape: the picture upright (1080 x 1920), as the screen shows it.
@@ -349,7 +349,7 @@ class FaceTimeCallScreenGroupTest {
             scenario.onActivity { activity ->
                 val screen = activity.findViewById<TextureView>(R.id.screenVideo)
                 val whole = com.lightdecoder.ui.imessage.VideoFit.Zoom().apply { fill = false }
-                val expected = FaceTimeCallActivity.remoteTransform(screen.width, screen.height, 2532, 1170, 0, false, whole)
+                val expected = FaceTimeCallActivity.remoteTransform(screen.width, screen.height, 2532, 1170, 0, null, whole)
                 assertEquals(values(expected), values(transformOf(screen)))
                 assertEquals(com.lightdecoder.imessage.facetime.PipParams.aspect(1170, 2532), activity.pipAspect(calls.state.value!!, calls.media.value))
             }

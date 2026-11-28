@@ -859,10 +859,12 @@ class FaceTimeCalls internal constructor(
         override fun buildSurface(participant: Long, stream: Int): Surface? {
             if (!current()) return null
             val surface = surfaces.forStream(participant, stream) ?: return null
+            // With what the library said of this stream so far, also before it asked for the view.
+            val said = surfaces.pictureOf(participant, stream)
             when {
-                surfaces.showsScreen(participant, stream) -> _media.update { it.copy(screenVideo = true) }
-                surfaces.showsTile(participant, stream) -> _media.update { m -> if (participant in m.tiles) m else m.copy(tiles = m.tiles + (participant to Media.Picture())) }
-                else -> _media.update { it.copy(remoteVideo = true) }
+                surfaces.showsScreen(participant, stream) -> _media.update { it.copy(screenVideo = true, screen = said) }
+                surfaces.showsTile(participant, stream) -> _media.update { m -> m.copy(tiles = m.tiles + (participant to said)) }
+                else -> _media.update { it.copy(remoteVideo = true, remoteWidth = said.width, remoteHeight = said.height, remoteRotation = said.rotation) }
             }
             return surface
         }
@@ -872,7 +874,7 @@ class FaceTimeCalls internal constructor(
             val screenGone = streams.any { surfaces.showsScreen(participant, it) }
             val tileGone = streams.any { surfaces.showsTile(participant, it) }
             if (surfaces.removed(participant, streams)) {
-                _media.update { it.copy(remoteVideo = false, remoteWidth = 0, remoteHeight = 0, remoteRotation = Media.ROTATION_NONE) }
+                _media.update { it.copy(remoteVideo = false, remoteWidth = 0, remoteHeight = 0, remoteRotation = Media.ROTATION_UNKNOWN) }
             }
             if (screenGone) _media.update { it.copy(screenVideo = false, screen = Media.Picture()) }
             if (tileGone) _media.update { it.copy(tiles = it.tiles - participant) }
@@ -881,6 +883,8 @@ class FaceTimeCalls internal constructor(
 
         override fun videoSize(participant: Long, stream: Int, width: Int, height: Int) {
             if (!current() || width <= 0 || height <= 0 || width > MAX_SIDE || height > MAX_SIDE) return
+            // Kept for every stream: the library says it once, and may say it before it asks for the view.
+            surfaces.noteSize(participant, stream, width, height)
             when {
                 surfaces.shows(participant, stream) -> _media.update { it.copy(remoteWidth = width, remoteHeight = height) }
                 surfaces.showsScreen(participant, stream) -> _media.update { it.copy(screen = it.screen.copy(width = width, height = height)) }
@@ -891,6 +895,7 @@ class FaceTimeCalls internal constructor(
 
         override fun streamRotation(participant: Long, stream: Int, rotation: Int) {
             if (!current() || rotation !in 0..3) return
+            surfaces.noteRotation(participant, stream, rotation)
             when {
                 surfaces.shows(participant, stream) -> _media.update { it.copy(remoteRotation = rotation) }
                 surfaces.showsScreen(participant, stream) -> _media.update { it.copy(screen = it.screen.copy(rotation = rotation)) }

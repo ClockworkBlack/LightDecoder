@@ -324,6 +324,35 @@ class MessageContentScreenTest {
         }
     }
 
+    // --- a group's people ----------------------------------------------------------------------
+
+    @Test
+    fun anIMessageGroupsMenuAddsPeopleToItAndOpensItsDetails() {
+        message("M0", "Who's coming?", 10 * 60_000)
+        launch().use { scenario ->
+            scenario.waitFor("the group, as the library can change it") { it.groupManageable && rowOf(it, "Who's coming?") != null }
+            scenario.onActivity { activity ->
+                val menu = androidx.appcompat.widget.PopupMenu(activity, activity.findViewById(R.id.messages)).menu
+                activity.menuInflater.inflate(R.menu.thread_actions, menu)
+                activity.onPrepareOptionsMenu(menu)
+                val add = menu.findItem(R.id.action_add_people)
+                assertTrue("Add People is in the group's menu", add.isVisible)
+                assertEquals("Add People", add.title.toString())
+                assertTrue(menu.findItem(R.id.action_chat_details).isVisible)
+                // It opens the same picker as "Add Member" in the group's details, for this group.
+                activity.onOptionsItemSelected(add)
+                val started = org.robolectric.Shadows.shadowOf(activity).nextStartedActivity
+                assertEquals(com.lightdecoder.ui.chat.NewConversationActivity::class.java.name, started.component!!.className)
+                assertEquals(GROUP, started.getStringExtra(com.lightdecoder.ui.chat.NewConversationActivity.EXTRA_ADD_TO))
+                activity.onOptionsItemSelected(menu.findItem(R.id.action_chat_details))
+                assertEquals(
+                    com.lightdecoder.ui.chat.ChatDetailsActivity::class.java.name,
+                    org.robolectric.Shadows.shadowOf(activity).nextStartedActivity.component!!.className,
+                )
+            }
+        }
+    }
+
     // --- polls -------------------------------------------------------------------------------
 
     @Test
@@ -360,6 +389,66 @@ class MessageContentScreenTest {
                 val mark = rowOf(activity, "Poll: Dinner on Saturday?")!!.findViewById<LinearLayout>(R.id.pollOptions).getChildAt(2).findViewById<TextView>(R.id.pollOptionMark)
                 assertEquals("✓", mark.text.toString())
             }
+        }
+    }
+
+    @Test
+    fun aPollTheUserMadeCanBeLockedAndHaveAChoiceTakenOff() {
+        // Alice's poll offers no "Edit Poll"; the user's own does.
+        pollCard("PL1", 6 * 60_000)
+        val mine = Polls.create("Which trail?", listOf("Ridge", "Lake", "Forest"), "+15550000001") { "MY-${++pollIds}" }!!
+        message("PL2", "Poll: Which trail?", 5 * 60_000, mine = true, extra = IMessageExtra(app = Polls.card(mine, "1F8FAD5B-D9CB-469F-A165-70867728950E", root = "imsg:PL2")))
+        fun shown() = Polls.decode(IMessageExtra.parse(imRepo.message("imsg:PL2")!!.extra).app!!.url)!!
+        launch().use { scenario ->
+            scenario.waitFor("the polls") { rowOf(it, "Poll: Which trail?") != null && rowOf(it, "Poll: Dinner on Saturday?") != null }
+            scenario.onActivity { activity ->
+                assertEquals(View.GONE, rowOf(activity, "Poll: Dinner on Saturday?")!!.findViewById<View>(R.id.pollEdit).visibility)
+                val row = rowOf(activity, "Poll: Which trail?")!!
+                assertEquals(View.VISIBLE, row.findViewById<View>(R.id.pollEdit).visibility)
+                assertEquals(View.VISIBLE, row.findViewById<View>(R.id.pollAddChoice).visibility)
+                assertEquals(View.GONE, row.findViewById<View>(R.id.pollLockedNote).visibility)
+                // "Edit Poll" > "Remove a choice" > Lake > Remove.
+                row.findViewById<View>(R.id.pollEdit).performClick()
+                val edit = ShadowDialog.getLatestDialog() as androidx.appcompat.app.AlertDialog
+                assertEquals(
+                    listOf(activity.getString(R.string.imessage_poll_lock), activity.getString(R.string.imessage_poll_remove_choice)),
+                    (0 until edit.listView.adapter.count).map { edit.listView.adapter.getItem(it).toString() },
+                )
+                edit.listView.performItemClick(edit.listView.adapter.getView(1, null, edit.listView), 1, 1L)
+                val pick = ShadowDialog.getLatestDialog() as androidx.appcompat.app.AlertDialog
+                assertEquals(listOf("Ridge", "Lake", "Forest"), (0 until pick.listView.adapter.count).map { pick.listView.adapter.getItem(it).toString() })
+                pick.listView.performItemClick(pick.listView.adapter.getView(1, null, pick.listView), 1, 1L)
+                (ShadowDialog.getLatestDialog() as androidx.appcompat.app.AlertDialog).getButton(android.content.DialogInterface.BUTTON_POSITIVE).performClick()
+            }
+            two.waitUntil("the poll sent again without it") { sent.any { it.first == DirectWire.EXTENSION } && shown().options.size == 2 }
+            val r = DirectWire.ExtensionRequest.fromJson(sent.first { it.first == DirectWire.EXTENSION }.second)
+            assertEquals("PL2", r.rootGuid)
+            assertFalse(r.isMeta)
+            assertEquals(listOf("Ridge", "Forest"), Polls.decode(r.app.url)!!.options.map { it.text })
+            scenario.waitFor("two choices shown") { a -> rowOf(a, "Poll: Which trail?")?.findViewById<LinearLayout>(R.id.pollOptions)?.childCount == 2 }
+            // Locked: said once what it does, then "Add Choice" makes way for "Choices locked", here only.
+            val before = sent.size
+            scenario.onActivity { activity ->
+                rowOf(activity, "Poll: Which trail?")!!.findViewById<View>(R.id.pollEdit).performClick()
+                val edit = ShadowDialog.getLatestDialog() as androidx.appcompat.app.AlertDialog
+                edit.listView.performItemClick(edit.listView.adapter.getView(0, null, edit.listView), 0, 0L)
+                val confirm = ShadowDialog.getLatestDialog() as androidx.appcompat.app.AlertDialog
+                confirm.getButton(android.content.DialogInterface.BUTTON_POSITIVE).performClick()
+            }
+            two.waitUntil("locked") { IMessageExtra.parse(imRepo.message("imsg:PL2")!!.extra).pollLocked }
+            scenario.waitFor("the lock shown") { a ->
+                val row = rowOf(a, "Poll: Which trail?") ?: return@waitFor false
+                row.findViewById<View>(R.id.pollLockedNote).visibility == View.VISIBLE && row.findViewById<View>(R.id.pollAddChoice).visibility == View.GONE
+            }
+            assertEquals("locking sends nothing", before, sent.size)
+            // And unlocked again from the same place, with no question.
+            scenario.onActivity { activity ->
+                rowOf(activity, "Poll: Which trail?")!!.findViewById<View>(R.id.pollEdit).performClick()
+                val edit = ShadowDialog.getLatestDialog() as androidx.appcompat.app.AlertDialog
+                assertEquals(activity.getString(R.string.imessage_poll_unlock), edit.listView.adapter.getItem(0).toString())
+                edit.listView.performItemClick(edit.listView.adapter.getView(0, null, edit.listView), 0, 0L)
+            }
+            two.waitUntil("unlocked") { !IMessageExtra.parse(imRepo.message("imsg:PL2")!!.extra).pollLocked }
         }
     }
 

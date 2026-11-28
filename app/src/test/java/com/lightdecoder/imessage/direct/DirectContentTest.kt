@@ -755,6 +755,162 @@ class DirectContentTest {
         assertEquals(listOf("PC2"), IMessageExtra.parse(repo.message("imsg:P1")!!.extra).pollCards)
     }
 
+    // --- a poll the user made: choices taken off, and locked ------------------------------------------
+
+    /** A poll the user made (its first card went from the user): Pizza, Tacos and Sushi. */
+    private fun myPoll(link: DirectLink): Polls.Poll {
+        var n = 0
+        val poll = Polls.create("Dinner?", listOf("Pizza", "Tacos", "Sushi"), "+15550000001") { "OPT-${++n}" }!!
+        link.apply(map(inst("P1", me, normal(listOf(IndexedMessagePart(MessagePart.Object("Pizza, Tacos, Sushi"), null, null)), app = pollApp(poll)))))
+        return poll
+    }
+
+    private fun pollExtra() = IMessageExtra.parse(repo.message("imsg:P1")!!.extra)
+
+    @Test
+    fun aChoiceIsTakenOffTheUsersOwnPollForEveryone() {
+        val asked = Collections.synchronizedList(ArrayList<Pair<Int, JSONObject>>())
+        val link = DirectLink.installForTesting(context) { what, request, _ ->
+            asked += what to request
+            DirectWire.sent("RC1", 1_700_000_010_000L)
+        }
+        activate()
+        aGroup(link)
+        myPoll(link)
+        assertTrue(link.ownsPoll(repo.message("imsg:P1")!!))
+        link.apply(voteFrom("V1", bob, "P1", listOf("OPT-2", "OPT-3"), 1_700_000_001_000L))
+        runBlocking { link.removePollChoice("imsg:P1", "OPT-2") }
+        // The poll's card went again to its session, without the choice, its count one higher.
+        val (what, request) = asked.single()
+        assertEquals(DirectWire.EXTENSION, what)
+        val r = DirectWire.ExtensionRequest.fromJson(request)
+        assertEquals("P1", r.rootGuid)
+        assertFalse(r.isMeta)
+        assertEquals(session, r.app.session)
+        assertEquals("Pizza, Sushi", r.app.ldText)
+        assertEquals(Polls.FIRST_COUNT + 1, Polls.countOf(r.app.url))
+        assertEquals(listOf("OPT-1", "OPT-3"), Polls.decode(r.app.url)!!.options.map { it.id })
+        // Here it shows without it, and without the vote for it.
+        assertEquals(listOf("Pizza", "Sushi"), shownPoll().options.map { it.text })
+        assertEquals(listOf("RC1"), pollExtra().pollCards)
+        assertEquals(listOf(0, 1), Polls.tally(shownPoll(), pollExtra().pollVotes).map { it.count })
+        // Two are kept at least; and it is not one of its choices any more: refused before anything goes.
+        assertTrue(runCatching { runBlocking { link.removePollChoice("imsg:P1", "OPT-1") } }.isFailure)
+        assertTrue(runCatching { runBlocking { link.removePollChoice("imsg:P1", "OPT-2") } }.isFailure)
+        assertEquals(1, asked.size)
+    }
+
+    @Test
+    fun onlyThePollsMakerTakesChoicesOffOrLocksIt() {
+        val asked = Collections.synchronizedList(ArrayList<Int>())
+        val link = DirectLink.installForTesting(context) { what, _, _ ->
+            asked += what
+            DirectWire.sent("RC1", 1_700_000_010_000L)
+        }
+        activate()
+        aGroup(link)
+        // Alice's poll, with a third choice added by Bob.
+        val poll = aPoll(link)
+        link.apply(pollChange("PC2", Polls.addChoice(poll, "Curry", "+15559876543", "OPT-3")!!))
+        assertFalse(link.ownsPoll(repo.message("imsg:P1")!!))
+        assertTrue(runCatching { runBlocking { link.removePollChoice("imsg:P1", "OPT-3") } }.isFailure)
+        assertTrue(runCatching { link.setPollLocked("imsg:P1", true) }.isFailure)
+        assertTrue(asked.isEmpty())
+        assertFalse(pollExtra().pollLocked)
+        // Bob sends it again without Alice's Tacos: not his poll, nothing goes.
+        val bobs = shownPoll().let { it.copy(options = it.options.filter { o -> o.id != "OPT-2" }, count = it.count + 1) }
+        link.apply(pollChange("PC3", bobs))
+        assertEquals(listOf("Pizza", "Tacos", "Curry"), shownPoll().options.map { it.text })
+        // Alice, whose poll it is, takes Bob's Curry off: it goes here too.
+        val alices = shownPoll().let { it.copy(options = it.options.filter { o -> o.id != "OPT-3" }, count = it.count + 1) }
+        link.apply(pollChange("PC4", alices, from = alice))
+        assertEquals(listOf("Pizza", "Tacos"), shownPoll().options.map { it.text })
+        assertEquals(listOf("PC2", "PC4"), pollExtra().pollCards)
+    }
+
+    @Test
+    fun aLockedPollLeavesOutWhatOthersAddAndIsSentAgainAsItIs() {
+        val sent = Collections.synchronizedList(ArrayList<JSONObject>())
+        val link = DirectLink.installForTesting(context) { what, request, _ ->
+            if (what == DirectWire.EXTENSION) sent += request
+            DirectWire.sent("RA${sent.size}", 1_700_000_010_000L)
+        }
+        link.pollReassertDelayMs = 400
+        activate()
+        aGroup(link)
+        val poll = myPoll(link)
+        link.setPollLocked("imsg:P1", true)
+        assertTrue(pollExtra().pollLocked)
+        assertTrue("locking sends nothing", sent.isEmpty())
+        // "Add Choice" is not offered here either.
+        assertTrue(runCatching { runBlocking { link.addPollChoice("imsg:P1", "Soup") } }.isFailure)
+        // Bob adds a choice on his iPhone, and Alice one right after (her card has both).
+        val bobs = Polls.addChoice(poll, "Curry", "+15559876543", "OPT-8")!!
+        link.apply(pollChange("PC2", bobs))
+        link.apply(pollChange("PC3", Polls.addChoice(bobs, "Soup", "+15551234567", "OPT-9")!!, from = alice))
+        assertEquals("neither is taken", listOf("Pizza", "Tacos", "Sushi"), shownPoll().options.map { it.text })
+        // Their cards are still the poll's: a vote sent to one counts on it.
+        link.apply(voteFrom("V1", bob, "PC3", listOf("OPT-1", "OPT-9"), 1_700_000_002_000L))
+        assertEquals(listOf(1, 0, 0), Polls.tally(shownPoll(), pollExtra().pollVotes).map { it.count })
+        // The poll goes again once for both, with the user's choices, above the highest card seen.
+        waitFor("the poll sent again") { sent.size == 1 && shownPoll().count == Polls.FIRST_COUNT + 3 }
+        val r = DirectWire.ExtensionRequest.fromJson(sent.single())
+        assertEquals("P1", r.rootGuid)
+        assertEquals(session, r.app.session)
+        assertEquals(listOf("OPT-1", "OPT-2", "OPT-3"), Polls.decode(r.app.url)!!.options.map { it.id })
+        assertEquals(Polls.FIRST_COUNT + 3, Polls.countOf(r.app.url))
+        assertEquals(listOf("PC2", "PC3", "RA1"), pollExtra().pollCards)
+        assertTrue("still locked", pollExtra().pollLocked)
+        // The same cards handed over again (Apple's journal after a restart) change nothing and send nothing.
+        link.apply(pollChange("PC2", bobs))
+        Thread.sleep(700)
+        assertEquals(1, sent.size)
+        // The user's own card handed over again keeps the lock.
+        myPoll(link)
+        assertTrue(pollExtra().pollLocked)
+        assertEquals(listOf("Pizza", "Tacos", "Sushi"), shownPoll().options.map { it.text })
+    }
+
+    @Test
+    fun someoneWhoKeepsAddingToALockedPollIsNotAnsweredCardForCard() {
+        val sent = Collections.synchronizedList(ArrayList<JSONObject>())
+        val link = DirectLink.installForTesting(context) { what, request, _ ->
+            if (what == DirectWire.EXTENSION) sent += request
+            DirectWire.sent("RA${sent.size}", 1_700_000_010_000L)
+        }
+        link.pollReassertDelayMs = 20
+        activate()
+        aGroup(link)
+        myPoll(link)
+        link.setPollLocked("imsg:P1", true)
+        for (i in 1..(DirectLink.MAX_POLL_REASSERTS + 3)) {
+            val before = sent.size
+            link.apply(pollChange("PC$i", Polls.addChoice(shownPoll(), "Extra $i", "+15559876543", "OPT-X$i")!!))
+            if (i <= DirectLink.MAX_POLL_REASSERTS) waitFor("sent again, time $i") { sent.size == before + 1 && shownPoll().count == Polls.countOf(DirectWire.ExtensionRequest.fromJson(sent.last()).app.url) }
+        }
+        Thread.sleep(200)
+        assertEquals(DirectLink.MAX_POLL_REASSERTS, sent.size)
+        assertEquals("left out here all the same", listOf("Pizza", "Tacos", "Sushi"), shownPoll().options.map { it.text })
+        // Unlocked, a choice someone adds is taken again, as on an iPhone, and nothing is sent for it.
+        link.setPollLocked("imsg:P1", false)
+        link.apply(pollChange("PCU", Polls.addChoice(shownPoll(), "Curry", "+15559876543", "OPT-C")!!))
+        assertEquals(listOf("Pizza", "Tacos", "Sushi", "Curry"), shownPoll().options.map { it.text })
+        Thread.sleep(100)
+        assertEquals(DirectLink.MAX_POLL_REASSERTS, sent.size)
+    }
+
+    @Test
+    fun aPollsLockIsKeptWithItsCard() {
+        val locked = IMessageExtra(app = Polls.card(Polls.create("Q", listOf("A", "B"), "+15550000001")!!, session), pollLocked = true)
+        assertTrue(IMessageExtra.parse(locked.toJson()).pollLocked)
+        assertFalse(IMessageExtra.parse(locked.copy(pollLocked = false).toJson()).pollLocked)
+        assertFalse(locked.copy(pollLocked = false).toJson().contains("pollLocked"))
+        // The card as Apple hands it over again knows nothing of the lock: it stays.
+        assertTrue(locked.copy(pollLocked = false).keepingGathered(locked).pollLocked)
+        // Never part of what is sent: the card's address is the poll alone.
+        assertFalse(String(java.util.Base64.getDecoder().decode(locked.app!!.url.removePrefix("data:,").substringBefore('?'))).contains("lock", ignoreCase = true))
+    }
+
     companion object {
         private const val DB = "direct-content-test.db"
     }

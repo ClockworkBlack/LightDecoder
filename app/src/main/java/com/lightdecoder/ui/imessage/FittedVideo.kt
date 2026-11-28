@@ -11,70 +11,98 @@ import com.lightdecoder.imessage.facetime.Media
 
 /**
  * One view of someone's picture in a call (the other side's camera, a group call's tile, a shared
- * screen) laid out as [VideoFit] says: turned upright by its stream's rotation, undone from the
- * view's stretch, filled or fitted by shape, with the user's pinch, drag and double tap. Every
- * picture of the call screen is shown through one of these, so each looks as the big one does.
+ * screen) laid out as [VideoFit] says: upright and in its own shape (by how its frames come,
+ * [VideoFit.shape]), undone from the view's stretch, filled or fitted by shape, with the user's
+ * pinch, drag and double tap. Every picture of the call screen is shown through one of these, so
+ * each looks as the big one does.
  *
  * [fixedFill]: the picture is always filled (true) or always whole (false, a shared screen: a
  * double tap then only takes the zoom back); null: by shape, the user's double tap switching it.
+ * [noted]: where this view says how its picture is laid out, whenever that changes (the iMessage
+ * log: what to look at, should a picture ever look pulled or squeezed again); null: nowhere.
  */
-internal class FittedVideo(val view: TextureView, private val fixedFill: Boolean? = null) {
+internal class FittedVideo(val view: TextureView, private val fixedFill: Boolean? = null, private val noted: ((String) -> Unit)? = null) {
 
     /** The user's pinch, drag and double tap on the picture. */
     val zoom = VideoFit.Zoom()
 
-    /** The picture's decoder already turns it (its SurfaceTexture's transform says so): it is not turned again. */
-    private var textureTurned = false
-    private var textureChecked = false
+    /**
+     * How the decoder turns the frames being drawn (each frame's SurfaceTexture transform says so):
+     * what the picture's shape goes by. Null before a stream's first frame.
+     */
+    private var textureTurn: VideoFit.Turn? = null
     private val textureMatrix = FloatArray(16)
 
-    /** The shape and turn the zoom was made for: another stream starts fresh. */
-    private var zoomFor: Triple<Int, Int, Int>? = null
+    /** The shape the zoom was made for: another one (another stream, the phone turned) starts fresh. */
+    private var zoomFor: VideoFit.Shape? = null
 
     /** The picture last laid out. */
     private var picture = Media.Picture()
 
-    /** Lays [shown] into the view (as its decoder makes it, with the library's rotation). */
+    /** What was last said of the layout ([noted]), and how often so far. */
+    private var said: List<Any?>? = null
+    private var notes = 0
+
+    private fun shape(): VideoFit.Shape = VideoFit.shape(picture.width, picture.height, picture.rotation, textureTurn)
+
+    /** Lays [shown] into the view (as its decoder makes it, with the rotation the library said, if any). */
     fun fit(shown: Media.Picture = picture) {
         picture = shown
-        val key = Triple(shown.width, shown.height, shown.rotation)
-        if (zoomFor != key) {
-            // Another stream, or the other side turned their phone: back to fitted, and the decoder looked at again.
-            val before = zoomFor
-            if (before != null && (before.first != key.first || before.second != key.second)) textureChecked = false
-            zoomFor = key
+        val shape = shape()
+        if (zoomFor != shape) {
+            // Another stream, or the other side turned their phone: back to fitted.
+            zoomFor = shape
             zoom.reset()
         }
         if (fixedFill != null) zoom.fill = fixedFill
-        view.setTransform(
-            FaceTimeCallActivity.remoteTransform(view.width, view.height, shown.width, shown.height, shown.rotation, textureTurned, zoom),
-        )
+        view.setTransform(FaceTimeCallActivity.remoteTransform(view.width, view.height, shape, zoom))
+        note(shape)
     }
 
-    /** There is no picture now: whatever the user did to the last one is forgotten, and the next one's decoder is looked at again. */
+    /** There is no picture now: whatever the user did to the last one is forgotten, and the next one starts by its own first frame. */
     fun forget() {
-        if (!zoom.isZoomed && zoom.fill == null && !textureChecked) return
+        if (!zoom.isZoomed && zoom.fill == null && textureTurn == null && zoomFor == null) return
         zoom.reset()
         zoom.fill = null
-        textureChecked = false
-        textureTurned = false
+        textureTurn = null
         zoomFor = null
     }
 
-    /** A frame was drawn: once per stream, whether the decoder turns the picture itself (then it is not turned again). */
+    /** The view has a new Surface: how its frames are turned is read off the first one. */
+    fun newSurface() {
+        textureTurn = null
+    }
+
+    /**
+     * A frame was drawn: how the decoder turns it. That changes in the middle of a call (the other
+     * side turns their phone, and the frames from then on come turned otherwise), and what the
+     * library says of it may come before those frames, after them, or not at all: the picture is
+     * laid out again with the first frame that is turned otherwise, by that frame.
+     */
     fun frameDrawn(texture: SurfaceTexture) {
-        if (textureChecked) return
-        textureChecked = true
-        val turned = try {
+        val turn = try {
             texture.getTransformMatrix(textureMatrix)
-            VideoFit.textureIsTurned(textureMatrix)
+            VideoFit.textureTurn(textureMatrix)
         } catch (e: RuntimeException) {
-            false
+            VideoFit.Turn.NONE
         }
-        if (turned != textureTurned) {
-            textureTurned = turned
+        if (turn != textureTurn) {
+            textureTurn = turn
             fit()
         }
+    }
+
+    /** Says how the picture is laid out ([noted]) when that changed since it was last said; a few times a call, never more than [FaceTimeCallActivity.MAX_PICTURE_NOTES]. */
+    private fun note(shape: VideoFit.Shape) {
+        val to = noted ?: return
+        val turn = textureTurn ?: return
+        if (!shape.known || view.width <= 0 || view.height <= 0) return
+        val fill = zoom.fill ?: VideoFit.fillsByDefault(view.width, view.height, shape.width, shape.height)
+        val now = listOf(picture, turn, shape, view.width, view.height, fill)
+        if (now == said || notes >= FaceTimeCallActivity.MAX_PICTURE_NOTES) return
+        said = now
+        notes++
+        to(FaceTimeCallActivity.pictureLine(picture.width, picture.height, picture.rotation, turn, shape, view.width, view.height, fill))
     }
 
     /**
@@ -114,8 +142,8 @@ internal class FittedVideo(val view: TextureView, private val fixedFill: Boolean
 
                 override fun onDoubleTap(e: MotionEvent): Boolean {
                     if (fixedFill == null) {
-                        val (w, h) = VideoFit.upright(picture.width, picture.height, VideoFit.degreesForStream(picture.rotation))
-                        val filled = zoom.fill ?: VideoFit.fillsByDefault(view.width, view.height, w, h)
+                        val shape = shape()
+                        val filled = zoom.fill ?: VideoFit.fillsByDefault(view.width, view.height, shape.width, shape.height)
                         zoom.fill = !filled
                     }
                     zoom.reset()

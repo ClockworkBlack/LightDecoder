@@ -253,6 +253,39 @@ class DirectGroupsTest {
     }
 
     @Test
+    fun aGroupMadeHereCountsItsChangesFromTheStartAndOneNeverSeenChangingGoesWellAhead() {
+        val l = link()
+        // A group others made, known here only by its messages (as every group is after the app was installed
+        // again): how often it changed is not known. A change as of a version it is past already would be left
+        // out by the iPhones in it, so the first one from here goes well ahead, and the next ones follow it.
+        group(l, listOf(me, bob, alice))
+        assertNull(GroupVersions(context).of(id))
+        runBlocking { l.addMembers(id, listOf("(555) 666-7777")) }
+        assertEquals(GroupVersions.UNKNOWN_FIRST, DirectWire.MembersRequest.fromJson(lastRequest(DirectWire.MEMBERS)).groupVersion)
+        assertEquals(GroupVersions.UNKNOWN_FIRST, GroupVersions(context).of(id))
+        runBlocking { l.addMembers(id, listOf("+15553334444")) }
+        assertEquals(GroupVersions.UNKNOWN_FIRST + 1, DirectWire.MembersRequest.fromJson(lastRequest(DirectWire.MEMBERS)).groupVersion)
+        // Within what a change from someone else may be ahead by: this app on another phone takes it.
+        assertTrue(GroupVersions.plausible(GroupVersions.UNKNOWN_FIRST))
+        // A group started from here: nothing has changed in it, so its first change is the first.
+        val made = runBlocking { l.startGroup(listOf("+15559876543", "+15551234567"), "Ski trip") }
+        assertNull("no version seen yet", GroupVersions(context).of(made))
+        assertEquals(0L, GroupVersions(context).next(made))
+        runBlocking { l.addMembers(made, listOf("(555) 666-7777")) }
+        assertEquals(0L, DirectWire.MembersRequest.fromJson(lastRequest(DirectWire.MEMBERS)).groupVersion)
+        assertEquals(1L, GroupVersions(context).next(made))
+        // Once Apple's events say a version, a change from here follows that one, made here or not.
+        val versions = GroupVersions(context)
+        versions.noteNew("imsg:group:OTHER")
+        versions.note("imsg:group:OTHER", 7)
+        assertEquals(8L, versions.next("imsg:group:OTHER"))
+        versions.noteNew("imsg:group:OTHER")
+        assertEquals("already known: not new again", 8L, versions.next("imsg:group:OTHER"))
+        versions.forget("imsg:group:OTHER")
+        assertEquals(GroupVersions.UNKNOWN_FIRST, versions.next("imsg:group:OTHER"))
+    }
+
+    @Test
     fun aMemberIsRemovedOnlyFromAGroupOfFourOrMore() {
         val l = link()
         group(l)
@@ -260,7 +293,8 @@ class DirectGroupsTest {
         runBlocking { l.removeMember(id, "+1 (555) 333-4444") }
         val m = DirectWire.MembersRequest.fromJson(lastRequest(DirectWire.MEMBERS))
         assertEquals(setOf(bob, alice, me), m.participants.toSet())
-        assertEquals(0L, m.groupVersion)
+        // A group this phone never saw change: its version is not known, so the change goes well past where it may be.
+        assertEquals(GroupVersions.UNKNOWN_FIRST, m.groupVersion)
         assertEquals("You removed +15553334444.", latestRow().text)
         assertEquals(setOf("+15559876543", "+15551234567"), members())
         // Down to two others: as on an iPhone, nobody can be removed and the user cannot leave.
@@ -355,16 +389,16 @@ class DirectGroupsTest {
         assertEquals(GroupPhotoImages.SIDE to GroupPhotoImages.SIDE, shape)
         val r = DirectWire.GroupPhotoRequest.fromJson(lastRequest(DirectWire.GROUP_PHOTO))
         assertEquals("G-1", r.target.groupGuid)
-        assertEquals(0L, r.groupVersion)
+        assertEquals(GroupVersions.UNKNOWN_FIRST, r.groupVersion)
         val shown = GroupPhotos(context).of(id)
         assertNotNull(shown.file)
-        assertEquals(0L, shown.version)
+        assertEquals(GroupVersions.UNKNOWN_FIRST, shown.version)
         assertEquals("You changed the group photo.", latestRow().text)
         // Taken off: none sent, the next version, no picture here.
         runBlocking { l.setGroupPhoto(id, null) }
         val removed = DirectWire.GroupPhotoRequest.fromJson(lastRequest(DirectWire.GROUP_PHOTO))
         assertNull(removed.path)
-        assertEquals(1L, removed.groupVersion)
+        assertEquals(GroupVersions.UNKNOWN_FIRST + 1, removed.groupVersion)
         assertNull(GroupPhotos(context).pictureOf(id))
         assertEquals("You removed the group photo.", latestRow().text)
         // Something that is no picture is not sent at all.

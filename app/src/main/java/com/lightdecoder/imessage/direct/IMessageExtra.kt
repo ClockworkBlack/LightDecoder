@@ -29,6 +29,8 @@ import org.json.JSONObject
  * @param pollVotes a poll's card ([Polls]): each person's votes, the latest of each
  * @param pollCards a poll's card: the GUIDs of the cards its session sent since (a choice added), whose
  *   votes are this card's too
+ * @param pollLocked a poll the user made, locked here ([DirectLink.setPollLocked]): choices others add
+ *   are not taken, and the poll is sent again as it is. Kept on this phone only, never sent.
  * @param stickers stickers people put on the message (iOS 17), each by the message that put it there
  * @param history an edited message's earlier texts (iOS 16's edit history), oldest first, each with
  *   when it became the text; the latest [MAX_HISTORY] of them, each at most [MAX_HISTORY_TEXT_CHARS]
@@ -60,6 +62,7 @@ data class IMessageExtra(
     val mentions: Map<Int, List<Mention>> = emptyMap(),
     val pollVotes: List<Polls.Ballot> = emptyList(),
     val pollCards: List<String> = emptyList(),
+    val pollLocked: Boolean = false,
     val stickers: List<PlacedSticker> = emptyList(),
     val history: List<Version> = emptyList(),
     val call: CallInfo? = null,
@@ -291,6 +294,7 @@ data class IMessageExtra(
         return copy(
             pollVotes = stored.pollVotes.ifEmpty { pollVotes },
             pollCards = (stored.pollCards + pollCards).distinct().take(MAX_POLL_CARDS),
+            pollLocked = stored.pollLocked || pollLocked,
             stickers = (stored.stickers + stickers).distinctBy { it.id }.take(MAX_STICKERS),
             tapbackParts = stored.tapbackParts,
             quietly = stored.quietly || quietly,
@@ -330,6 +334,7 @@ data class IMessageExtra(
         if (mentions.values.any { it.isNotEmpty() }) o.put("mentions", Mentions.toJson(mentions))
         if (pollVotes.isNotEmpty()) o.put("pollVotes", Polls.ballotsToJson(pollVotes))
         if (pollCards.isNotEmpty()) o.put("pollCards", JSONArray(pollCards))
+        if (pollLocked) o.put("pollLocked", true)
         if (stickers.isNotEmpty()) o.put("stickers", JSONArray().apply { stickers.forEach { put(it.toJson()) } })
         if (history.isNotEmpty()) o.put("history", JSONArray().apply { history.forEach { put(it.toJson()) } })
         call?.let { o.put("call", it.toJson()) }
@@ -484,6 +489,7 @@ data class IMessageExtra(
                     pollCards = o.optJSONArray("pollCards")?.let { a ->
                         (0 until minOf(a.length(), MAX_POLL_CARDS)).map { a.optString(it) }.filter { it.isNotBlank() && it.length <= 64 }
                     }.orEmpty(),
+                    pollLocked = o.optBoolean("pollLocked"),
                     stickers = o.optJSONArray("stickers")?.let { a ->
                         (0 until minOf(a.length(), MAX_STICKERS)).mapNotNull { a.optJSONObject(it)?.let(PlacedSticker::fromJson) }
                     }.orEmpty(),

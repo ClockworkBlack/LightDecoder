@@ -249,6 +249,50 @@ class PollsTest {
     }
 
     @Test
+    fun theMakerTakesAChoiceOffAndNobodyElseCan() {
+        val stored = Polls.decode(cardUrl(sample, 3))!!
+        val removed = Polls.removeChoice(stored, o2)!!
+        assertEquals(listOf(o1 to "Pizza", o3 to "Sushi"), removed.options.map { it.id to it.text })
+        assertEquals(stored.count + 1, removed.count)
+        assertEquals("Dinner?", removed.title)
+        // It goes as any card of the poll goes, and reads back the same.
+        assertEquals(removed, Polls.decode(Polls.encode(removed)))
+        assertEquals("Pizza, Sushi", Polls.ldText(removed))
+        // Not one of its choices, only two left, or a count that could not be read back: nothing to send.
+        assertNull(Polls.removeChoice(stored, "NOPE"))
+        assertNull(Polls.removeChoice(removed, o1))
+        assertNull(Polls.removeChoice(stored.copy(count = Polls.MAX_COUNT), o2))
+        // From the poll's maker the card without it is the poll; from anyone else it is no change at all.
+        assertEquals(removed, Polls.merged(stored, removed, byMaker = true))
+        assertNull(Polls.merged(stored, removed))
+        // The maker's card may add one as well; what stays keeps the stored words and order.
+        val both = removed.copy(options = listOf(removed.options[1].copy(text = "Sashimi"), removed.options[0], Polls.Option("NEW-1", "Curry")))
+        assertEquals(listOf(o1 to "Pizza", o3 to "Sushi", "NEW-1" to "Curry"), Polls.merged(stored, both, byMaker = true)!!.options.map { it.id to it.text })
+        // The count still has to go up, by a few at most; and a card that leaves nothing is not taken.
+        assertNull(Polls.merged(stored, removed.copy(count = stored.count), byMaker = true))
+        assertNull(Polls.merged(stored, removed.copy(count = stored.count + Polls.MAX_COUNT_STEP + 1), byMaker = true))
+        assertNull(Polls.merged(stored, stored.copy(count = stored.count + 1), byMaker = true))
+        // Votes for a choice taken off are not counted any more; the others are.
+        val ballots = listOf(Polls.Ballot("+15559876543", listOf(o2, o3), 1), Polls.Ballot(Polls.ME, listOf(o2), 2))
+        assertEquals(listOf(0, 1), Polls.tally(removed, ballots).map { it.count })
+    }
+
+    @Test
+    fun aLockedPollIsSentAgainWithItsOwnChoicesAboveTheCardSeen() {
+        val stored = Polls.decode(cardUrl(sample, 3))!!
+        // Someone's card went as far as 4: the maker's goes as 5, with the maker's choices.
+        assertEquals(stored.copy(count = 5), Polls.reasserted(stored, 4))
+        // An older one seen: still above the poll's own count.
+        assertEquals(stored.copy(count = 4), Polls.reasserted(stored, 2))
+        assertNull(Polls.reasserted(stored, Polls.MAX_COUNT))
+        assertNull(Polls.reasserted(stored.copy(count = Polls.MAX_COUNT), 3))
+        // Where this app shows the poll, the maker's card takes the choice someone added off again.
+        val theirs = Polls.addChoice(stored, "Curry", "+15559876543", "NEW-1")!!
+        val shown = Polls.merged(stored, theirs)!!
+        assertEquals(stored.options, Polls.merged(shown, Polls.reasserted(stored, theirs.count)!!, byMaker = true)!!.options)
+    }
+
+    @Test
     fun aPollNestingDeeperThanAnyPollIsNotReadAtAll() {
         // Thousands deep: org.json would run its stack out reading it.
         val deep = """{"item":{"orderedPollOptions":[{"optionIdentifier":"X","text":"a","x":""" + "[".repeat(5_000) + "]".repeat(5_000) + "}]},\"version\":1}"

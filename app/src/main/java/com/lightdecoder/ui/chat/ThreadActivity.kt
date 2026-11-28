@@ -206,6 +206,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private var localRowsFor: String? = null
     private var historyComplete = false
     private var remoteExhausted = false
+
+    /** Everything the archives hold of this conversation (and of the iMessage chats in it) is shown: nothing older to scroll up to here. */
+    private var archivesShown = false
+
+    /** The window is growing for rows the phone just paged in ([loadOlderFromPhone]), not for a scroll. */
+    private var grewForPhone = false
     private var loadingOlder = false
     private val loadMutex = Mutex()
     private var reloadScheduled = false
@@ -247,6 +253,11 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
      */
     @VisibleForTesting
     internal var junkOffered = false
+        private set
+
+    /** This is an iMessage group the iMessage library can add people to: "Add People" is in the menu (set with each load). */
+    @VisibleForTesting
+    internal var groupManageable = false
         private set
 
     /**
@@ -561,6 +572,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             accountChat = null
             sharedTitle = null
             focusAskedFor = null
+            groupManageable = false
             renderJunk()
             closeOptionsMenu()
             // Leaving the thread: stop reading its messages; the next one's are new from its first read.
@@ -576,6 +588,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             arrivedEffect = null
             windowSize = PAGE
             growWindow = false
+            grewForPhone = false
             growPending = false
             messages = emptyList()
             companionId?.let { if (MessageNotifier.visibleConversationId(ChatService.IMESSAGE) == it) MessageNotifier.setVisibleConversationId(ChatService.IMESSAGE, null) }
@@ -589,6 +602,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             localRowsFor = null
             historyComplete = false
             remoteExhausted = false
+            archivesShown = false
             remoteFailedAtMs = 0L
             lastMarkedId = null
             lastMarkAtMs = 0L
@@ -932,6 +946,14 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val banners: com.lightdecoder.imessage.direct.DirectLink.AccountBanners = com.lightdecoder.imessage.direct.DirectLink.AccountBanners(),
         /** The name the person shared and the user took, shown where the chat has no name of its own. */
         val sharedTitle: String? = null,
+        /** An iMessage group the iMessage library can add people to ([com.lightdecoder.imessage.direct.DirectLink.groupRules]): "Add People" is offered. */
+        val groupManageable: Boolean = false,
+        /** The archive holds no row of this conversation's own older than the ones shown ([ThreadWindow.Read.ownExhausted]). */
+        val ownExhausted: Boolean,
+        /** How many rows of its own the archive is known to hold ([ThreadWindow.Read.ownStored]). */
+        val ownStored: Int,
+        /** Everything the archives hold is shown; null when this read could not tell ([ThreadWindow.Read.allShown]). */
+        val allShown: Boolean?,
     )
 
     /**
@@ -946,6 +968,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val target = targetMessageId
         val grow = growWindow
         growWindow = false
+        // The window grew for what the phone just paged in: the phone is not asked again for the same scroll.
+        val afterPhone = grow && grewForPhone
+        grewForPhone = false
         // Back at the newest messages after reading far up (or after jumping to
         // an old search hit): shrink the window again, so later reloads (one per
         // incoming message or status change) do not re-read thousands of rows.
@@ -955,36 +980,33 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val wanted = windowSize
         val snapshot = withContext(Dispatchers.IO) {
             beforeLocalRead?.invoke(id)
-            var rows: List<MessageRow>
-            if (grow || oldestShown == null) {
-                rows = repo.messages(id, limit = wanted)
-            } else {
-                rows = repo.messages(id, limit = wanted + RELOAD_SLACK).filter { it.timestampMs >= oldestShown }
-            }
-            if (target != null) {
-                var size = maxOf(wanted, rows.size)
-                while (rows.none { it.id == target } && rows.size >= size && size < MAX_WINDOW) {
-                    size *= 2
-                    rows = repo.messages(id, limit = size)
-                }
-            }
             val conversation = repo.conversation(id)
             val people = repo.participants(id)
-            // Blue Bubbles: the person's iMessages, from as far back as the texts shown go.
+            // Blue Bubbles: the person's iMessages are shown with the texts, as one conversation.
             val companion = if (link.service == ChatService.MESSAGES) BlueBubblesLinks.iMessageFor(applicationContext, conversation, people) else null
             val imRepo = companion?.let { iMessageLink.repo }
-            val ownFull = rows.size >= wanted
             // With the person's other iMessage chats (from before OpenBubbles was set up again), so their history stays.
             val chats = if (companion == null) emptyList() else listOf(companion) + BlueBubblesLinks.alsoShown(applicationContext, id)
-            val companionRows = if (imRepo == null) emptyList() else chats.flatMap { chat ->
-                runCatching { imRepo.messages(chat, limit = wanted) }.getOrDefault(emptyList())
-            }.distinctBy { it.id }
-                .let { im -> if (ownFull && rows.isNotEmpty()) im.filter { it.timestampMs >= rows.first().timestampMs } else im }
+            // The window is cut from the texts and the iMessages together ([ThreadWindow]): scrolling up
+            // goes back through both, however few of one kind there are among the other.
+            val window = ThreadWindow.read(
+                wanted = wanted,
+                anchorMs = if (grow) null else oldestShown,
+                slack = RELOAD_SLACK,
+                target = target,
+                maxWindow = MAX_WINDOW,
+                own = { limit -> repo.messages(id, limit = limit) },
+                companion = if (imRepo == null) null else { limit ->
+                    chats.flatMap { chat -> runCatching { imRepo.messages(chat, limit = limit) }.getOrDefault(emptyList()) }.distinctBy { it.id }
+                },
+            )
+            val rows = window.own
+            val companionRows = window.companion
             val moveTo = if (link.service == ChatService.IMESSAGE) BlueBubblesLinks.messagesFor(applicationContext, id) else null
             val iMessageChats = if (link.service == ChatService.IMESSAGE) listOf(id) else chats
             val direct = if (iMessageChats.isEmpty()) null else com.lightdecoder.imessage.direct.DirectLink.get(applicationContext)
             val reachable = if (direct?.active != true) emptySet() else iMessageChats.filterTo(HashSet()) { direct.canSend(it) }
-            val shown = if (companionRows.isEmpty()) rows else (rows + companionRows).sortedBy { it.timestampMs }
+            val shown = window.shown
             val companionIds = companionRows.mapTo(HashSet()) { it.id }
             val reach = if (link.service == ChatService.MESSAGES && companion == null) reachAddress(conversation, people) else null
             val backgroundChat = if (link.service == ChatService.IMESSAGE) id else companion
@@ -1033,14 +1055,21 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                     val stored = conversation?.name.orEmpty()
                     direct?.sharedTitle(c, stored)?.takeIf { it != stored }
                 },
+                groupManageable = link.service == ChatService.IMESSAGE && conversation?.isGroup == true && direct != null &&
+                    runCatching { direct.groupRules(id).manageable }.getOrDefault(false),
+                ownExhausted = window.ownExhausted,
+                ownStored = window.ownStored,
+                allShown = window.allShown,
             )
         }
         if (grow) growPending = false
         if (!isCurrent(link, id)) return@withLock
         // An iMessage chat that is also a Messages conversation is shown inside it.
         snapshot.moveTo?.let { messagesId ->
+            // With the message this was opened for (a search hit among the iMessages): it is found there too.
+            if (target != null) targetMessageId = null
             startActivity(
-                RelayIntents.thread(this@ThreadActivity, messagesId, service = ChatService.MESSAGES)
+                RelayIntents.thread(this@ThreadActivity, messagesId, messageId = target, service = ChatService.MESSAGES)
                     .setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
             )
             return@withLock
@@ -1053,8 +1082,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         updatePhoneStyle()
         media.awaitingLabel = if (snapshot.direct) R.string.imessage_media_waiting_direct else R.string.imessage_media_waiting
         markCompanionVisible()
-        val localExhausted = snapshot.rows.size < wanted
-        windowSize = maxOf(PAGE, snapshot.rows.size)
+        val localExhausted = snapshot.ownExhausted
+        // Everything shown counts, the iMessages too: the next "load older" widens the window past them.
+        windowSize = maxOf(PAGE, snapshot.shown.size)
+        snapshot.allShown?.let { archivesShown = it }
         messages = snapshot.shown
         localRowsFor = id
         conversation = snapshot.conversation
@@ -1062,8 +1093,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         historyComplete = snapshot.historyComplete
         avatarPhoto = snapshot.photo
         memberPhotos = snapshot.memberPhotos
-        if (junkOffered != snapshot.junk) {
+        if (junkOffered != snapshot.junk || groupManageable != snapshot.groupManageable) {
             junkOffered = snapshot.junk
+            groupManageable = snapshot.groupManageable
             invalidateOptionsMenu()
         }
         showFaceTime(snapshot.faceTimeChat, snapshot.faceTimeCapable)
@@ -1085,7 +1117,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         }
         effectWatch.arrived(messages, unreadAtOpen, System.currentTimeMillis(), effectPlays::contains)?.let { arrivedEffect = it.id }
 
-        val scrollTo = target?.takeIf { t -> snapshot.rows.any { it.id == t } }
+        val scrollTo = target?.takeIf { t -> snapshot.shown.any { it.id == t } }
         if (target != null) targetMessageId = null
         if (scrollTo != null) highlight(scrollTo)
         knownRows = snapshot.known
@@ -1120,8 +1152,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             val direct = com.lightdecoder.imessage.direct.DirectLink.get(applicationContext)
             runInBackground { direct.reachOnce(address) }
         }
-        // The archive has no more: ask the phone (also fills a thread that was never imported).
-        if ((grow && localExhausted) || snapshot.rows.size < PAGE) loadOlderFromPhone(auto = !grow)
+        // The archive has no more of its own: ask the phone (also fills a thread that was never imported).
+        // One page for each scroll to the top: with iMessages in the window its own rows never fill
+        // it exactly, which is what used to end the paging after one page.
+        if ((grow && !afterPhone && localExhausted) || (localExhausted && snapshot.ownStored < PAGE)) loadOlderFromPhone(auto = !grow)
     }
 
     /**
@@ -1212,7 +1246,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         if (scrollToMessage != null) pendingScrollTo = scrollToMessage
         val header = when {
             loadingOlder -> ThreadItem.Header(loading = true, complete = false)
-            historyComplete || remoteExhausted -> ThreadItem.Header(loading = false, complete = true)
+            // Only above the oldest message there is: not while the archives hold older ones the window has not reached.
+            (historyComplete || remoteExhausted) && archivesShown -> ThreadItem.Header(loading = false, complete = true)
             else -> null
         }
         val shown = messages
@@ -1388,6 +1423,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                         } else {
                             windowSize += added
                             growWindow = true
+                            grewForPhone = true
                         }
                     }
                     .onFailure {
@@ -2805,6 +2841,80 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             .setNegativeButton(android.R.string.cancel, null)
             .show()
         edit.requestFocus()
+    }
+
+    /**
+     * "Edit Poll" on a poll the user made: its choices locked or unlocked
+     * ([com.lightdecoder.imessage.direct.DirectLink.setPollLocked]), or one of them taken off for
+     * everyone ([com.lightdecoder.imessage.direct.DirectLink.removePollChoice]).
+     */
+    override fun onPollEdit(row: MessageRow) {
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(this)
+        val current = messages.firstOrNull { it.id == row.id } ?: row
+        if (!direct.ownsPoll(current, reachable = current.conversationId in directReachable)) return
+        val locked = direct.pollLocked(current)
+        val choices = arrayOf(getString(if (locked) R.string.imessage_poll_unlock else R.string.imessage_poll_lock), getString(R.string.imessage_poll_remove_choice))
+        confirmDialog?.dismiss()
+        confirmDialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.imessage_poll_edit)
+            .setItems(choices) { _, which ->
+                when (which) {
+                    0 -> if (locked) setPollLocked(current, false) else confirmPollLock(current)
+                    else -> pickPollChoiceToRemove(current)
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /** What locking a poll does, said once before it is locked. */
+    private fun confirmPollLock(row: MessageRow) {
+        confirmDialog?.dismiss()
+        confirmDialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.imessage_poll_lock_title)
+            .setMessage(R.string.imessage_poll_lock_body)
+            .setPositiveButton(R.string.imessage_poll_lock) { _, _ -> setPollLocked(row, true) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun setPollLocked(row: MessageRow, locked: Boolean) {
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(this)
+        lifecycleScope.launch {
+            relayAttempt { withContext(Dispatchers.IO) { direct.setPollLocked(row.id, locked) } }
+                .onSuccess { toast(getString(if (locked) R.string.imessage_poll_locked_done else R.string.imessage_poll_unlocked_done)) }
+                .onFailure { toast(errorText(iMessageLink, it)) }
+        }
+    }
+
+    /** The poll's choices to pick one from; the one picked is taken off once the user says so again. */
+    private fun pickPollChoiceToRemove(row: MessageRow) {
+        val poll = com.lightdecoder.imessage.direct.IMessageExtra.parse(row.extra).app?.let { com.lightdecoder.imessage.direct.Polls.decode(it.url) } ?: return
+        if (poll.options.size <= com.lightdecoder.imessage.direct.Polls.MIN_OPTIONS) {
+            toast(getString(R.string.imessage_poll_keeps_two))
+            return
+        }
+        confirmDialog?.dismiss()
+        confirmDialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.imessage_poll_remove_title)
+            .setItems(poll.options.map { it.text }.toTypedArray()) { _, which ->
+                val option = poll.options.getOrNull(which) ?: return@setItems
+                confirmDialog = MaterialAlertDialogBuilder(this)
+                    .setMessage(getString(R.string.imessage_poll_remove_confirm, option.text))
+                    .setPositiveButton(R.string.imessage_poll_remove) { _, _ -> removePollChoice(row, option.id) }
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun removePollChoice(row: MessageRow, optionId: String) {
+        val direct = com.lightdecoder.imessage.direct.DirectLink.get(this)
+        lifecycleScope.launch {
+            relayAttempt { direct.removePollChoice(row.id, optionId) }
+                .onFailure { toast(getString(R.string.imessage_poll_remove_failed, errorText(iMessageLink, it))) }
+        }
     }
 
     /**
@@ -5280,6 +5390,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         menu.findItem(R.id.action_unlink_imessage)?.isVisible = manager.service == ChatService.MESSAGES && companionId != null
         // The chat's background (iOS 26): only an iMessage chat the iMessage library reaches.
         menu.findItem(R.id.action_chat_background)?.isVisible = backgroundChat() != null
+        // An iMessage group: people added to it from here too, not only from its details (a tap on its name).
+        menu.findItem(R.id.action_add_people)?.isVisible = groupManageable && conv != null && conv.folderEnum != Folder.DELETED
+        menu.findItem(R.id.action_chat_details)?.isVisible = hasDetails() && conv?.folderEnum != Folder.DELETED
         val checking = com.lightdecoder.imessage.IMessageChecks.current.value?.let { it.running && it.conversationId == conversationId } == true
         menu.findItem(R.id.action_check_imessage)?.setTitle(if (checking) R.string.imessage_check_running else R.string.imessage_check)
         val archived = conv?.folderEnum == Folder.ARCHIVE
@@ -5362,6 +5475,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 }
             }
             R.id.action_mark_unread -> if (conv != null) markUnreadAndLeave(conv.id)
+            R.id.action_add_people -> if (conv != null && groupManageable) startActivity(NewConversationActivity.addMembers(this, conv.id))
+            R.id.action_chat_details -> openDetails()
             R.id.action_report_junk -> confirmReportJunk()
             R.id.action_not_spam -> if (conv != null) {
                 runAction(R.string.chat_not_spam_done) { it.markNotSpam(conv.id) }
