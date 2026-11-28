@@ -45,6 +45,7 @@ import com.lightdecoder.imessage.direct.Handles
 import com.lightdecoder.imessage.facetime.Call
 import com.lightdecoder.imessage.facetime.CallIds
 import com.lightdecoder.imessage.facetime.CallMessage
+import com.lightdecoder.imessage.facetime.FaceTimeActionReceiver
 import com.lightdecoder.imessage.facetime.FaceTimeCalls
 import com.lightdecoder.imessage.facetime.FaceTimeCamera
 import com.lightdecoder.imessage.facetime.FaceTimeLog
@@ -188,6 +189,11 @@ class FaceTimeCallActivity : AppCompatActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) { calls.messages.collect(::onMessage) }
         }
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) { calls.waiting.collect(::renderWaiting) }
+        }
+        binding.waitingDecline.setOnClickListener { calls.waiting.value?.let { calls.decline(it.guid) } }
+        binding.waitingAccept.setOnClickListener { calls.waiting.value?.let { answer(it.guid, withCamera = it.video) } }
         take(intent, fresh = savedInstanceState == null)
     }
 
@@ -384,8 +390,17 @@ class FaceTimeCallActivity : AppCompatActivity() {
         calls.place(request.peer, request.name, video, request.from, request.conversationId, request.photo)
     }
 
+    /** Someone calling while the user is in a call ([FaceTimeCalls.waiting]): who, over the call, with "End & Accept" and Decline. */
+    private fun renderWaiting(call: Call?) {
+        binding.waitingCard.visibility = if (call == null) View.GONE else View.VISIBLE
+        if (call == null) return
+        binding.waitingName.text = FaceTimeNotices.nameOf(call)
+        binding.waitingKind.text = getString(R.string.facetime_waiting_kind, FaceTimeNotices.kind(this, call.video))
+    }
+
     private fun answer(guid: String, withCamera: Boolean) {
-        val call = calls.state.value
+        // The ringing call, or the one that waits while the user is in another (answered, that one ends).
+        val call = calls.waiting.value?.takeIf { it.guid == guid } ?: calls.state.value
         if (call == null || call.guid != guid || call.phase != Phase.RINGING_IN) {
             // Answered from a notice that outlived its call.
             if (call == null) refuse(Refusal.GONE)
@@ -554,6 +569,8 @@ class FaceTimeCallActivity : AppCompatActivity() {
         }
         // The camera's picture is laid out for that side's camera once it is known.
         if (call.joined && media.cameraOn) fitPreview()
+        updateSmallWindow(call, media)
+        if (inSmallWindow) layoutSmallWindow()
 
         val ringingIn = call.phase == Phase.RINGING_IN || call.phase == Phase.SCREENING
         binding.incoming.visibility = if (ringingIn) View.VISIBLE else View.GONE
@@ -657,7 +674,144 @@ class FaceTimeCallActivity : AppCompatActivity() {
     /** Back, or the arrow: the call goes on under its notice; with no call to keep, the screen is closed. */
     private fun stepBack() {
         val call = calls.state.value
-        if (call != null && call.live) moveTaskToBack(true) else leave()
+        if (call != null && call.live) {
+            if (!enterSmallWindow()) moveTaskToBack(true)
+        } else {
+            leave()
+        }
+    }
+
+    // --- the small window (picture-in-picture) ------------------------------------------------------
+
+    /** The call is shown in the small window over other apps: the two pictures side by side, nothing else. */
+    @VisibleForTesting
+    internal var inSmallWindow = false
+        private set
+
+    /** The user's own picture's place in the full screen, kept while the small window lays it out otherwise. */
+    private var previewPlace: FrameLayout.LayoutParams? = null
+
+    /** What the small window was last told ([updateSmallWindow]). */
+    private var smallWindowKey: List<Any?>? = null
+
+    /** Whether the call can go on in a small window now: a joined call with a picture, on a phone that has such windows. */
+    private fun smallWindowOffered(call: Call? = calls.state.value, media: Media = calls.media.value): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && call != null && call.phase == Phase.ACTIVE &&
+            (media.remoteVideo || media.cameraOn) && packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
+
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.O)
+    private fun smallWindowParams(call: Call?, media: Media): android.app.PictureInPictureParams {
+        val (w, h) = smallWindowShape(media.remoteVideo, media.cameraOn)
+        val builder = android.app.PictureInPictureParams.Builder().setAspectRatio(android.util.Rational(w, h))
+        if (call != null) {
+            val end = android.app.PendingIntent.getBroadcast(
+                this, 1, FaceTimeActionReceiver.intent(this, FaceTimeActionReceiver.ACTION_HANG_UP, call.guid),
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
+            )
+            val label = getString(R.string.facetime_end)
+            builder.setActions(listOf(android.app.RemoteAction(android.graphics.drawable.Icon.createWithResource(this, R.drawable.ic_ft_end), label, label, end)))
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            // Home (also by gesture) puts a call with pictures into the small window by itself.
+            builder.setAutoEnterEnabled(smallWindowOffered(call, media))
+            builder.setSeamlessResizeEnabled(false)
+        }
+        return builder.build()
+    }
+
+    /** Puts the call into the small window. False when it cannot go there (no picture, an older phone, turned off for the app). */
+    private fun enterSmallWindow(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || !smallWindowOffered()) return false
+        return try {
+            enterPictureInPictureMode(smallWindowParams(calls.state.value, calls.media.value))
+        } catch (e: RuntimeException) {
+            false
+        }
+    }
+
+    /** The phone is told what the small window is to be, whenever that changes (so that Home can open it by itself). */
+    private fun updateSmallWindow(call: Call?, media: Media) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val key = listOf(call?.guid, smallWindowOffered(call, media), media.remoteVideo, media.cameraOn)
+        if (key == smallWindowKey) return
+        smallWindowKey = key
+        try {
+            setPictureInPictureParams(smallWindowParams(call, media))
+        } catch (e: RuntimeException) {
+            // A phone without such windows: the call just stays where it is.
+        }
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        // Before Android 12 the window does not open by itself on Home.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) enterSmallWindow()
+    }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        inSmallWindow = isInPictureInPictureMode
+        layoutSmallWindow()
+        binding.root.post {
+            layoutSmallWindow()
+            fitRemote()
+            fitPreview()
+        }
+    }
+
+    /**
+     * In the small window: only the pictures, the user's own on the left half and the other side's
+     * on the right (one of them alone: all of it). Back in the full screen: everything as it was.
+     */
+    private fun layoutSmallWindow() {
+        val media = calls.media.value
+        val content = binding.content
+        for (i in 0 until content.childCount) {
+            val child = content.getChildAt(i)
+            if (child !== binding.previewCard) child.alpha = if (inSmallWindow) 0f else 1f
+        }
+        binding.scrimTop.alpha = if (inSmallWindow) 0f else 1f
+        binding.scrimBottom.alpha = binding.scrimTop.alpha
+        val card = binding.previewCard
+        val remote = binding.remoteVideo
+        val cardParams = card.layoutParams as FrameLayout.LayoutParams
+        val remoteParams = remote.layoutParams as FrameLayout.LayoutParams
+        if (inSmallWindow) {
+            if (previewPlace == null) previewPlace = FrameLayout.LayoutParams(cardParams)
+            val width = binding.root.width
+            val both = media.cameraOn && media.remoteVideo && width > 0
+            val half = width / 2
+            val cardWidth = if (both) half else FrameLayout.LayoutParams.MATCH_PARENT
+            val remoteWidth = if (both) width - half else FrameLayout.LayoutParams.MATCH_PARENT
+            if (cardParams.width != cardWidth || cardParams.height != FrameLayout.LayoutParams.MATCH_PARENT || cardParams.topMargin != 0) {
+                cardParams.width = cardWidth
+                cardParams.height = FrameLayout.LayoutParams.MATCH_PARENT
+                cardParams.gravity = android.view.Gravity.TOP or android.view.Gravity.START
+                cardParams.setMargins(0, 0, 0, 0)
+                cardParams.marginEnd = 0
+                card.layoutParams = cardParams
+                card.radius = 0f
+                card.strokeWidth = 0
+                card.cardElevation = 0f
+            }
+            if (remoteParams.width != remoteWidth) {
+                remoteParams.width = remoteWidth
+                remoteParams.gravity = android.view.Gravity.TOP or android.view.Gravity.END
+                remote.layoutParams = remoteParams
+            }
+        } else {
+            previewPlace?.let { place ->
+                previewPlace = null
+                card.layoutParams = place
+                card.radius = dp(18).toFloat()
+                card.strokeWidth = dp(1)
+                card.cardElevation = dp(6).toFloat()
+            }
+            if (remoteParams.width != FrameLayout.LayoutParams.MATCH_PARENT) {
+                remoteParams.width = FrameLayout.LayoutParams.MATCH_PARENT
+                remote.layoutParams = remoteParams
+            }
+        }
     }
 
     /** Close: a "no answer" is dismissed, and the screen goes. */
@@ -977,6 +1131,13 @@ class FaceTimeCallActivity : AppCompatActivity() {
             val (bw, bh) = VideoFit.upright(shape.width, shape.height, shape.degrees)
             return VideoFit.transform(viewWidth, viewHeight, bw, bh, shape.degrees, fill, zoom)
         }
+
+        /**
+         * The small window's shape (width to height): the two pictures side by side, each upright
+         * (9:8, as a messenger's call window); one picture alone, upright (9:16).
+         */
+        internal fun smallWindowShape(remoteVideo: Boolean, cameraOn: Boolean): Pair<Int, Int> =
+            if (remoteVideo && cameraOn) 9 to 8 else 9 to 16
 
         /** The most lines one call screen says about the other side's picture ([notePicture]). */
         private const val MAX_PICTURE_NOTES = 24

@@ -219,6 +219,13 @@ class CallSurfaces {
     /** Whether [surface] is the view the library may still be drawing into. */
     fun isRemote(surface: Surface): Boolean = synchronized(lock) { remote === surface }
 
+    /** Another call is joined: no stream of the last one has the view any more, and nothing said of them is kept. */
+    fun newCall() = synchronized(lock) {
+        owner = null
+        sizes.clear()
+        rotations.clear()
+    }
+
     fun clear() = synchronized(lock) {
         remote = null
         owner = null

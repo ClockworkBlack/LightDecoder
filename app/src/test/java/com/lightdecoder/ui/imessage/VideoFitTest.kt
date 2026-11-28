@@ -34,10 +34,11 @@ class VideoFitTest {
             val m = FaceTimeCallActivity.remoteTransform(1968, 2184, 1920, 1080, rotation, turn = VideoFit.Turn.NONE)
             val r = shown(m, 1968, 2184)
             assertEquals("upright 9:16", 1080f / 1920f, aspect(r), 0.005f)
-            // A 9:16 picture on a near-square screen is shown whole (not cut to a sliver): the full height, bars at the sides.
-            assertEquals(2184f, r.height(), 1f)
-            assertTrue(r.left > 0f && r.right < 1968f)
+            // A 9:16 picture on the unfolded screen fills all of it, as a messenger's call does: the full width, top and bottom cut.
+            assertEquals(1968f, r.width(), 1f)
+            assertTrue(r.top < 0f && r.bottom > 2184f)
             assertEquals(1968f / 2, r.centerX(), 1f)
+            assertEquals(2184f / 2, r.centerY(), 1f)
         }
     }
 
@@ -58,7 +59,8 @@ class VideoFitTest {
         for (rotation in listOf(Media.ROTATION_NONE, 2)) {
             val r = shown(FaceTimeCallActivity.remoteTransform(1968, 2184, 1920, 1080, rotation), 1968, 2184)
             assertEquals(1920f / 1080f, aspect(r), 0.005f)
-            assertEquals(1968f, r.width(), 1f)
+            // On the unfolded screen it fills too: the full height, its sides cut.
+            assertEquals(2184f, r.height(), 1f)
         }
     }
 
@@ -177,7 +179,7 @@ class VideoFitTest {
         // Zoomed twice about the middle: twice the size, still centered.
         zoom.scaleBy(2f, 0f, 0f)
         val r = shown(FaceTimeCallActivity.remoteTransform(1968, 2184, 1920, 1080, 1, zoom = zoom), 1968, 2184)
-        assertEquals(2 * 2184f, r.height(), 2f)
+        assertEquals(2 * 1968f, r.width(), 2f)
         assertEquals(1080f / 1920f, aspect(r), 0.005f)
         // A long drag right goes only as far as the picture's left edge reaching the screen's.
         zoom.panX += 10_000f
@@ -227,6 +229,9 @@ class VideoFitTest {
         assertEquals(listOf(90, 270, 180, 0), (0..3).map(VideoFit::degreesForStream))
         assertEquals(0, VideoFit.degreesForStream(-1))
         assertTrue(VideoFit.fillsByDefault(1080, 2340, 1080, 1920))
-        assertFalse(VideoFit.fillsByDefault(1968, 2184, 1080, 1920))
+        // The unfolded Fold: an upright picture fills it; one on its side there too; one on its side on an upright phone is shown whole.
+        assertTrue(VideoFit.fillsByDefault(1968, 2184, 1080, 1920))
+        assertTrue(VideoFit.fillsByDefault(1968, 2184, 1920, 1080))
+        assertFalse(VideoFit.fillsByDefault(1080, 2340, 1920, 1080))
     }
 }

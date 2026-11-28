@@ -87,6 +87,10 @@ class FaceTimeCalls internal constructor(
     /** The one call, or null. */
     val state: StateFlow<Call?> = _state
 
+    /** Someone calling while the user is in a call ([CallRules.waiting]), once they may be offered: "End & Accept" answers them ([answer]). */
+    private val _waiting = MutableStateFlow<Call?>(null)
+    val waiting: StateFlow<Call?> = _waiting
+
     private val _media = MutableStateFlow(Media())
 
     /** The joined call's buttons and pictures. */
@@ -301,6 +305,8 @@ class FaceTimeCalls internal constructor(
             startCamera()
         } else {
             command { it.camera(false) }
+            // Turned on again, the library may go on with this encoder or make another: remembered as the one from before.
+            synchronized(mediaLock) { encoderFromBefore = encoder }
             stopCamera {}
         }
     }
@@ -523,6 +529,15 @@ class FaceTimeCalls internal constructor(
             }
             is CallRules.Effect.Refused -> _messages.tryEmit(CallMessage.NotStarted(effect.why))
             is CallRules.Effect.Note -> FaceTimeLog.note(effect.text)
+            is CallRules.Effect.ShowWaiting -> {
+                FaceTimeLog.note("${FaceTimeLog.ref(effect.call.guid)}: waiting during another call (${if (effect.call.video) "video" else "audio"})")
+                _waiting.value = effect.call
+                notices.showIncoming(effect.call)
+            }
+            is CallRules.Effect.HideWaiting -> {
+                if (_waiting.value?.guid == effect.guid) _waiting.value = null
+                notices.hideIncoming(effect.guid)
+            }
         }
     }
 
@@ -551,6 +566,9 @@ class FaceTimeCalls internal constructor(
 
     private fun startNative(call: Call) {
         val native = NativeCall(call.guid, natives.create(host(call.guid)), bridge)
+        // The view is free for this call's picture (the last call's stream may still be down as its owner).
+        surfaces.newCall()
+        _media.update { it.copy(remoteVideo = false, remoteWidth = 0, remoteHeight = 0, remoteRotation = Media.ROTATION_UNKNOWN) }
         joined = Joined(call.guid, native)
         scope.launch(io) {
             // Its notice is up before the microphone opens (the library opens it in the join).
@@ -688,7 +706,10 @@ class FaceTimeCalls internal constructor(
 
     /** The library made (another) encoder for the camera's picture: the camera draws into it when it is on. */
     private fun newEncoder(surface: Surface) {
-        val old = synchronized(mediaLock) { encoder.also { encoder = surface } }
+        val old = synchronized(mediaLock) {
+            encoderFromBefore = null
+            encoder.also { encoder = surface }
+        }
         if (old != null && old !== surface) {
             // Whatever drew into the old one stops first; only then it is let go.
             stopCamera {
@@ -700,25 +721,36 @@ class FaceTimeCalls internal constructor(
         }
     }
 
+    /** Counts the camera's starts: what an earlier one says after a later one began is not about the camera any more. */
+    private var cameraStarts = 0
+
     /** Starts the camera if it is to be on and there is an encoder to draw into. Never before the call is joined. */
     private fun startCamera() {
         val m = _media.value
-        val target = synchronized(mediaLock) {
+        val (target, mine) = synchronized(mediaLock) {
             if (!m.cameraOn || cameraPaused || cameraRunning || joined?.native?.isUp != true) return
             val e = encoder?.takeIf { it.isValid } ?: return
             cameraRunning = true
-            e
+            e to ++cameraStarts
         }
         if (!cameraAllowed()) {
             synchronized(mediaLock) { cameraRunning = false }
             return
         }
         camera.start(target, surfaces.preview?.takeIf { it.isValid }, m.cameraFront) { ok, front ->
+            // An earlier start's word, come after the camera was started again (another encoder from the
+            // library, the camera turned off and on): it must not turn the picture being sent off.
+            val current = synchronized(mediaLock) { mine == cameraStarts && encoder === target }
+            if (!current) return@start
             if (ok) {
                 if (front != _media.value.cameraFront) {
                     _media.update { it.copy(cameraFront = front) }
                     command { it.orientation(orientationFor(front)) }
                 }
+            } else if (staleEncoder(target)) {
+                // The library's encoder from before the camera was turned off takes no pictures any more:
+                // it makes another when the camera is turned on again, and the camera starts with that one.
+                FaceTimeLog.note("the camera did not start with the encoder from before; waiting for the library's new one")
             } else {
                 // No camera that gives what the encoder takes: sound only, and said so.
                 synchronized(mediaLock) { cameraRunning = false }
@@ -727,6 +759,35 @@ class FaceTimeCalls internal constructor(
                 _messages.tryEmit(CallMessage.CameraUnavailable)
             }
         }
+    }
+
+    /** The encoder the camera was turned off with ([setCamera]): one that may be dead, while the library's next is waited for. */
+    private var encoderFromBefore: Surface? = null
+
+    /**
+     * The camera could not start with [target], the encoder it had before it was turned off: that
+     * one is given up (the library makes a new one for a camera turned on again), and the camera
+     * waits [ENCODER_WAIT_MS] for the next. True when it waits; false when [target] is no such
+     * encoder (then the camera really cannot be used). If none comes, the camera is said to be
+     * unavailable then.
+     */
+    private fun staleEncoder(target: Surface): Boolean {
+        synchronized(mediaLock) {
+            if (encoderFromBefore !== target) return false
+            encoderFromBefore = null
+            cameraRunning = false
+            if (encoder === target) encoder = null
+        }
+        scope.launch {
+            kotlinx.coroutines.delay(ENCODER_WAIT_MS)
+            val waiting = synchronized(mediaLock) { encoder == null && !cameraRunning } && _media.value.cameraOn && joined?.native?.isUp == true
+            if (waiting) {
+                _media.update { it.copy(cameraOn = false, cameraFailed = true) }
+                command { it.camera(false) }
+                _messages.tryEmit(CallMessage.CameraUnavailable)
+            }
+        }
+        return true
     }
 
     private fun stopCamera(then: () -> Unit) {
@@ -759,6 +820,9 @@ class FaceTimeCalls internal constructor(
     }
 
     companion object {
+        /** A camera turned on again waits this long for the library's new encoder before it is said to be unavailable. */
+        const val ENCODER_WAIT_MS = 4_000L
+
         /** The main process is given this long to say who is calling; then the call rings (or, with unknown callers silenced, does not). */
         const val LOOKUP_MS = 2_500L
 
