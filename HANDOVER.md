@@ -8,9 +8,36 @@ Branch: `ccr-b9245ae8-inefuw` (continues `ccr-b4eccc90-m97k4j`). No pull request
    had earlier chosen "build with a warning", then "pause on Discord", and has now asked for
    the web-view tab only, with no bridge). **Instagram: skipped** (ban risk, like Messenger).
 
+## 0.5.73.3 (versionCode 88) - hotfix: call waiting, small call window, Fold layout, camera restart, poll question
+- Still on `hotfix-0.5.73.1` (the owner: "don't build off 5.74"). Next full update from the 0.5.74 line:
+  **0.5.76 / 89**. **Not run on a phone.** No archive schema change (still what 0.5.73 has): an update
+  over 0.5.73.x keeps every chat; nothing in this version deletes or rewrites stored messages.
+- **Call waiting.** `CallRules.waiting`: a ring while a call is ACTIVE no longer becomes a missed call.
+  It is screened as any ring (`LookupCaller`), then offered (`Effect.ShowWaiting`: the ringing notice,
+  and a bar on the call screen with "End & Accept" / Decline; `FaceTimeCalls.waiting`). `Input.Answer`
+  for it ends the call there is and joins this one in the same step (the state is never null in
+  between); declined, timed out or given up it is logged as any ring; if the call there is ends first,
+  it becomes the ringing call. One waits at a time. `FaceTimeCalls.startNative` now frees the view
+  for the new call (`CallSurfaces.newCall`): the last call's stream stayed its owner.
+- **Small window** (`FaceTimeCallActivity`, picture-in-picture, in this line too now): Home, Back or
+  the minimize button during a call with a picture; both pictures side by side (9:8), one alone 9:16;
+  End in the window. `supportsPictureInPicture` on the activity.
+- **Unfolded Fold**: `VideoFit.FILL_LIMIT` 1.4 -> 2.0, so an upright picture fills the near-square
+  screen (top and bottom cut), as the owner's Messenger screenshot; double tap still switches to whole.
+- **Camera off, then on: the other side got no picture.** A camera start that failed late (the encoder
+  from before the camera was turned off) turned the stream off after the library's new encoder had
+  already started the camera. Now a start's word only counts while it is the latest (`cameraStarts`),
+  and a failure with the encoder from before waits `ENCODER_WAIT_MS` for the library's next one.
+  Inferred from the code, not reproduced.
+- **A poll's question never showed on iPhones**: Apple's polls have no question (what a poll is about
+  is a message sent with it). `sendPoll` now also sends the question as a text right after the card.
+- **Backgrounds**: versions are times, so they survive a reinstall; what was missing is the backup.
+  `ChatBackup` now holds `imessage/backgrounds` (as `media/imessage-backgrounds/`) and restores it;
+  a backup without it leaves the ones on the phone alone.
+
 ## 0.5.73.2 (versionCode 87) - hotfix: iMessage history, FaceTime picture shape, polls, Add People
 - On branch `hotfix-0.5.73.1` (0.5.73.1 + this), not the 0.5.74 line (whose start-up crash on the owner's
-  Fold 7 is still not found). Next full update: **0.5.76 / 88**. **Not run on a phone.**
+  Fold 7 is still not found). **Not run on a phone.**
 - **"We are losing old iMessage texts"** was the thread screen, not the archive. A Messages conversation
   shows the person's iMessage chats in it (`BlueBubblesLinks`); the window was cut from the conversation's
   own rows and the iMessages laid over it, at most `windowSize` of them, and `windowSize` followed the

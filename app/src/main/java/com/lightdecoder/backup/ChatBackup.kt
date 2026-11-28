@@ -89,7 +89,17 @@ object ChatBackup {
     /** A service's folders whose files a backup may hold. */
     fun folderNames(service: ChatService) = listOf(MediaCache.mediaDirName(service), MediaCache.outboxDirName(service))
 
-    private val FOLDERS: Set<String> = ChatService.entries.flatMap(::folderNames).toSet()
+    /**
+     * The iMessage chats' backgrounds (their pictures and which chat has which), under this name in a
+     * backup: they are no rows of an archive, and an iPhone does not send a chat's background again,
+     * so without them a restored phone and the other side's would show different ones for good.
+     */
+    const val BACKGROUNDS_FOLDER = "imessage-backgrounds"
+
+    /** Where [BACKGROUNDS_FOLDER]'s files live on the phone. */
+    private fun backgroundsDir(app: Context): File = com.lightdecoder.imessage.direct.ChatBackgrounds.dir(app)
+
+    private val FOLDERS: Set<String> = ChatService.entries.flatMap(::folderNames).toSet() + BACKGROUNDS_FOLDER
 
     /** Held by the one backup or restore of this process that may run (from start to end). */
     private val running = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -200,6 +210,13 @@ object ChatBackup {
                         file.length() > MAX_MEDIA_FILE_BYTES -> tooLarge++
                         else -> (MEDIA_PREFIX + parent.name + "/" + file.name)
                             .let { files.getOrPut(it) { MediaFile(file, it) } }
+                    }
+                }
+                if (service == ChatService.IMESSAGE) {
+                    // The chats' backgrounds go with the iMessage archive.
+                    for (file in backgroundsDir(app).listFiles().orEmpty()) {
+                        if (!file.isFile || !SAFE_FILE.matches(file.name) || file.name.endsWith(".tmp") || file.length() > MAX_MEDIA_FILE_BYTES) continue
+                        (MEDIA_PREFIX + BACKGROUNDS_FOLDER + "/" + file.name).let { files.getOrPut(it) { MediaFile(file, it) } }
                     }
                 }
                 snapshots += Snapshot(service, name, copy, info.version, info.conversations, info.messages, files.values.toList())
@@ -606,7 +623,7 @@ object ChatBackup {
     private fun targets(app: Context): List<Pair<File, Boolean>> = ChatService.entries.flatMap { service ->
         listOf(app.getDatabasePath(ArchiveDb.nameFor(service)) to true) +
             folderNames(service).map { File(app.filesDir, it) to false }
-    }
+    } + (backgroundsDir(app) to false)
 
     private fun marker(app: Context) = File(app.filesDir, PENDING_MARKER)
 
@@ -653,6 +670,17 @@ object ChatBackup {
                         val dir = Swap(liveDir, fromDir?.let { File(liveDir.path + NEXT) }, File(liveDir.path + OLD), database = false)
                         swaps += dir
                         dir.prepare(fromDir)
+                    }
+                    if (service == ChatService.IMESSAGE) {
+                        // The chats' backgrounds, when the backup has them (one made before 0.5.73.3 has none: those here stay).
+                        val fromDir = File(File(staged.dir, "media"), BACKGROUNDS_FOLDER).takeIf { inBackup && it.isDirectory }
+                        if (fromDir != null) {
+                            val liveDir = backgroundsDir(app)
+                            liveDir.parentFile?.mkdirs()
+                            val dir = Swap(liveDir, File(liveDir.path + NEXT), File(liveDir.path + OLD), database = false)
+                            swaps += dir
+                            dir.prepare(fromDir)
+                        }
                     }
                 }
             } catch (e: IOException) {
