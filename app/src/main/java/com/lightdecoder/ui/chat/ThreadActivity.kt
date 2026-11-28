@@ -209,6 +209,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
 
     /** Everything the archives hold of this conversation (and of the iMessage chats in it) is shown: nothing older to scroll up to here. */
     private var archivesShown = false
+
+    /** The window is growing for rows the phone just paged in ([loadOlderFromPhone]), not for a scroll. */
+    private var grewForPhone = false
     private var loadingOlder = false
     private val loadMutex = Mutex()
     private var reloadScheduled = false
@@ -548,6 +551,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             arrivedEffect = null
             windowSize = PAGE
             growWindow = false
+            grewForPhone = false
             growPending = false
             messages = emptyList()
             companionId?.let { if (MessageNotifier.visibleConversationId(ChatService.IMESSAGE) == it) MessageNotifier.setVisibleConversationId(ChatService.IMESSAGE, null) }
@@ -913,6 +917,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val target = targetMessageId
         val grow = growWindow
         growWindow = false
+        // The window grew for what the phone just paged in: the phone is not asked again for the same scroll.
+        val afterPhone = grow && grewForPhone
+        grewForPhone = false
         // Back at the newest messages after reading far up (or after jumping to
         // an old search hit): shrink the window again, so later reloads (one per
         // incoming message or status change) do not re-read thousands of rows.
@@ -1073,7 +1080,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             runInBackground { direct.reachOnce(address) }
         }
         // The archive has no more of its own: ask the phone (also fills a thread that was never imported).
-        if ((grow && localExhausted) || (localExhausted && snapshot.ownStored < PAGE)) loadOlderFromPhone(auto = !grow)
+        // One page for each scroll to the top: with iMessages in the window its own rows never fill
+        // it exactly, which is what used to end the paging after one page.
+        if ((grow && !afterPhone && localExhausted) || (localExhausted && snapshot.ownStored < PAGE)) loadOlderFromPhone(auto = !grow)
     }
 
     /**
@@ -1314,6 +1323,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                         } else {
                             windowSize += added
                             growWindow = true
+                            grewForPhone = true
                         }
                     }
                     .onFailure {

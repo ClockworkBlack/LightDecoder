@@ -649,6 +649,56 @@ class BlueBubblesScreenTest {
         }
     }
 
+    @Test
+    fun everyOldIMessageCanBeScrolledBackToInAConversationWithFewTexts() {
+        // What looked like iMessages being lost (until 0.5.73.1): a person with a few texts and hundreds of iMessages
+        // showed the newest hundred iMessages at most, under "Start of the conversation".
+        two.env.pairedManager()
+        IMessagePrefs.setEnabled(two.app, true)
+        two.seedConversation(ChatService.MESSAGES, "c1", "Alice", lastTs = 1_000, number = "+1 555-123-4567")
+        val t0 = System.currentTimeMillis() - 400L * 60_000
+        for (i in 0 until 4) two.seedIncoming(ChatService.MESSAGES, "sms$i", "c1", "text $i", ts = t0 + (300L + i) * 60_000)
+        // The phone has no older texts than these (all of its history is here).
+        two.env.repo.setSyncState(com.lightdecoder.archive.SyncStateRow("c1", "", 0, historyComplete = true, lastBackfillAt = 0))
+        directMode(java.util.Collections.synchronizedList(ArrayList()))
+        for (i in 0 until 230) directMessage("IM$i", "imessage $i", t0 + i * 60_000L, mine = i % 3 == 0)
+        fun header(a: Activity) = ((a.findViewById<RecyclerView>(R.id.messages).adapter as MessagesAdapter).currentList)
+            .filterIsInstance<com.lightdecoder.ui.chat.ThreadItem.Header>().firstOrNull()
+        ActivityScenario.launch<ThreadActivity>(RelayIntents.thread(two.app, "c1").setFlags(0)).use { scenario ->
+            scenario.waitFor("the newest messages") { shownTexts(it).containsAll(listOf("imessage 229", "text 3")) }
+            scenario.onActivity { activity ->
+                assertTrue("not everything at once", shownTexts(activity).size < 120)
+                assertFalse("older ones are not shown yet", "imessage 0" in shownTexts(activity))
+            }
+            // Scrolled to the top again and again, as a finger would: older messages come each time, down to the first.
+            var rounds = 0
+            while (true) {
+                var before = 0
+                // Near the top first (laid out there), then the finger's last stretch up to it.
+                scenario.onActivity { activity ->
+                    before = shownTexts(activity).size
+                    activity.findViewById<RecyclerView>(R.id.messages).scrollToPosition(6)
+                }
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                scenario.onActivity { activity -> activity.findViewById<RecyclerView>(R.id.messages).scrollBy(0, -4_000) }
+                if (before == 234) break
+                assertTrue("it ends", ++rounds < 40)
+                scenario.waitFor("older messages, round $rounds (from $before)") { shownTexts(it).size > before }
+                scenario.onActivity { activity ->
+                    if (shownTexts(activity).size < 234) assertNull("no \"Start of the conversation\" above messages still to come", header(activity)?.takeIf { it.complete })
+                }
+            }
+            scenario.onActivity { activity ->
+                val texts = shownTexts(activity)
+                assertEquals(234, texts.size)
+                assertEquals("imessage 0", texts.first())
+                assertTrue(texts.containsAll((0 until 230).map { "imessage $it" } + (0 until 4).map { "text $it" }))
+            }
+            // Only now, above the very first message, the conversation's start.
+            scenario.waitFor("the start of the conversation") { header(it)?.complete == true }
+        }
+    }
+
     // --- received pictures ---------------------------------------------------------------
 
     @Test
