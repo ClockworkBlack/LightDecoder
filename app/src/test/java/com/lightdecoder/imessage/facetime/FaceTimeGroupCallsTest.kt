@@ -147,6 +147,9 @@ class FaceTimeGroupCallsTest {
         assertSame(screen, host.buildSurface(8, CallSurfaces.STREAM_SCREEN))
         assertTrue(calls.media.value.screenVideo)
         host.videoSize(8, CallSurfaces.STREAM_SCREEN, 1170, 2532)
+        // No rotation said for it yet: taken as OpenBubbles takes every stream then (a quarter turn), until the library says.
+        assertEquals(2532 to 1170, calls.media.value.screen.shown)
+        host.streamRotation(8, CallSurfaces.STREAM_SCREEN, Media.ROTATION_NONE)
         assertEquals(1170 to 2532, calls.media.value.screen.shown)
         assertNull("a second camera, never", host.buildSurface(8, CallSurfaces.GROUP_SECOND_CAMERA))
         // They stop.
