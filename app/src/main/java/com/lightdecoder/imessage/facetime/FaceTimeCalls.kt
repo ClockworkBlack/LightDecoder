@@ -634,26 +634,34 @@ class FaceTimeCalls internal constructor(
         override fun buildSurface(participant: Long, stream: Int): Surface? {
             if (!current()) return null
             val surface = surfaces.forStream(participant, stream)
-            if (surface != null) _media.update { it.copy(remoteVideo = true) }
+            if (surface != null) {
+                // With what the library said of this stream so far, also before it asked for the view.
+                val size = surfaces.sizeOf(participant, stream)
+                val rotation = surfaces.rotationOf(participant, stream) ?: Media.ROTATION_UNKNOWN
+                _media.update {
+                    it.copy(remoteVideo = true, remoteWidth = size?.first ?: 0, remoteHeight = size?.second ?: 0, remoteRotation = rotation)
+                }
+            }
             return surface
         }
 
         override fun streamsRemoved(participant: Long, streams: IntArray) {
             if (!current()) return
             if (surfaces.removed(participant, streams)) {
-                _media.update { it.copy(remoteVideo = false, remoteWidth = 0, remoteHeight = 0, remoteRotation = Media.ROTATION_NONE) }
+                _media.update { it.copy(remoteVideo = false, remoteWidth = 0, remoteHeight = 0, remoteRotation = Media.ROTATION_UNKNOWN) }
             }
             command { it.refreshSurfaces() }
         }
 
         override fun videoSize(participant: Long, stream: Int, width: Int, height: Int) {
             if (!current() || width <= 0 || height <= 0 || width > MAX_SIDE || height > MAX_SIDE) return
-            if (surfaces.shows(participant, stream)) _media.update { it.copy(remoteWidth = width, remoteHeight = height) }
+            // Kept for every stream: the library says it once, and may say it before it asks for the view.
+            if (surfaces.noteSize(participant, stream, width, height)) _media.update { it.copy(remoteWidth = width, remoteHeight = height) }
         }
 
         override fun streamRotation(participant: Long, stream: Int, rotation: Int) {
             if (!current() || rotation !in 0..3) return
-            if (surfaces.shows(participant, stream)) _media.update { it.copy(remoteRotation = rotation) }
+            if (surfaces.noteRotation(participant, stream, rotation)) _media.update { it.copy(remoteRotation = rotation) }
         }
 
         override fun participants(ids: LongArray, handles: Array<String?>) {

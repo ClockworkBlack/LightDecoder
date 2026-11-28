@@ -206,6 +206,9 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
     private var localRowsFor: String? = null
     private var historyComplete = false
     private var remoteExhausted = false
+
+    /** Everything the archives hold of this conversation (and of the iMessage chats in it) is shown: nothing older to scroll up to here. */
+    private var archivesShown = false
     private var loadingOlder = false
     private val loadMutex = Mutex()
     private var reloadScheduled = false
@@ -552,6 +555,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             localRowsFor = null
             historyComplete = false
             remoteExhausted = false
+            archivesShown = false
             remoteFailedAtMs = 0L
             lastMarkedId = null
             lastMarkAtMs = 0L
@@ -881,6 +885,12 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         /** The iMessage chat a FaceTime call from here goes from ([faceTimeChat]), and what is known of whether its person can be called. */
         val faceTimeChat: String? = null,
         val faceTimeCapable: Boolean? = null,
+        /** The archive holds no row of this conversation's own older than the ones shown ([ThreadWindow.Read.ownExhausted]). */
+        val ownExhausted: Boolean,
+        /** How many rows of its own the archive is known to hold ([ThreadWindow.Read.ownStored]). */
+        val ownStored: Int,
+        /** Everything the archives hold is shown; null when this read could not tell ([ThreadWindow.Read.allShown]). */
+        val allShown: Boolean?,
     )
 
     /**
@@ -904,36 +914,33 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val wanted = windowSize
         val snapshot = withContext(Dispatchers.IO) {
             beforeLocalRead?.invoke(id)
-            var rows: List<MessageRow>
-            if (grow || oldestShown == null) {
-                rows = repo.messages(id, limit = wanted)
-            } else {
-                rows = repo.messages(id, limit = wanted + RELOAD_SLACK).filter { it.timestampMs >= oldestShown }
-            }
-            if (target != null) {
-                var size = maxOf(wanted, rows.size)
-                while (rows.none { it.id == target } && rows.size >= size && size < MAX_WINDOW) {
-                    size *= 2
-                    rows = repo.messages(id, limit = size)
-                }
-            }
             val conversation = repo.conversation(id)
             val people = repo.participants(id)
-            // Blue Bubbles: the person's iMessages, from as far back as the texts shown go.
+            // Blue Bubbles: the person's iMessages are shown with the texts, as one conversation.
             val companion = if (link.service == ChatService.MESSAGES) BlueBubblesLinks.iMessageFor(applicationContext, conversation, people) else null
             val imRepo = companion?.let { iMessageLink.repo }
-            val ownFull = rows.size >= wanted
             // With the person's other iMessage chats (from before OpenBubbles was set up again), so their history stays.
             val chats = if (companion == null) emptyList() else listOf(companion) + BlueBubblesLinks.alsoShown(applicationContext, id)
-            val companionRows = if (imRepo == null) emptyList() else chats.flatMap { chat ->
-                runCatching { imRepo.messages(chat, limit = wanted) }.getOrDefault(emptyList())
-            }.distinctBy { it.id }
-                .let { im -> if (ownFull && rows.isNotEmpty()) im.filter { it.timestampMs >= rows.first().timestampMs } else im }
+            // The window is cut from the texts and the iMessages together ([ThreadWindow]): scrolling up
+            // goes back through both, however few of one kind there are among the other.
+            val window = ThreadWindow.read(
+                wanted = wanted,
+                anchorMs = if (grow) null else oldestShown,
+                slack = RELOAD_SLACK,
+                target = target,
+                maxWindow = MAX_WINDOW,
+                own = { limit -> repo.messages(id, limit = limit) },
+                companion = if (imRepo == null) null else { limit ->
+                    chats.flatMap { chat -> runCatching { imRepo.messages(chat, limit = limit) }.getOrDefault(emptyList()) }.distinctBy { it.id }
+                },
+            )
+            val rows = window.own
+            val companionRows = window.companion
             val moveTo = if (link.service == ChatService.IMESSAGE) BlueBubblesLinks.messagesFor(applicationContext, id) else null
             val iMessageChats = if (link.service == ChatService.IMESSAGE) listOf(id) else chats
             val direct = if (iMessageChats.isEmpty()) null else com.lightdecoder.imessage.direct.DirectLink.get(applicationContext)
             val reachable = if (direct?.active != true) emptySet() else iMessageChats.filterTo(HashSet()) { direct.canSend(it) }
-            val shown = if (companionRows.isEmpty()) rows else (rows + companionRows).sortedBy { it.timestampMs }
+            val shown = window.shown
             val companionIds = companionRows.mapTo(HashSet()) { it.id }
             val reach = if (link.service == ChatService.MESSAGES && companion == null) reachAddress(conversation, people) else null
             val backgroundChat = if (link.service == ChatService.IMESSAGE) id else companion
@@ -970,14 +977,19 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
                 othersUnread = if (imRepo == null) emptyList() else chats.drop(1).filter { runCatching { imRepo.conversation(it)?.unread == true }.getOrDefault(false) },
                 faceTimeChat = faceTimeChat,
                 faceTimeCapable = faceTimeChat?.let { direct?.faceTimeCapableKnown(it) },
+                ownExhausted = window.ownExhausted,
+                ownStored = window.ownStored,
+                allShown = window.allShown,
             )
         }
         if (grow) growPending = false
         if (!isCurrent(link, id)) return@withLock
         // An iMessage chat that is also a Messages conversation is shown inside it.
         snapshot.moveTo?.let { messagesId ->
+            // With the message this was opened for (a search hit among the iMessages): it is found there too.
+            if (target != null) targetMessageId = null
             startActivity(
-                RelayIntents.thread(this@ThreadActivity, messagesId, service = ChatService.MESSAGES)
+                RelayIntents.thread(this@ThreadActivity, messagesId, messageId = target, service = ChatService.MESSAGES)
                     .setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
             )
             return@withLock
@@ -990,8 +1002,10 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         updatePhoneStyle()
         media.awaitingLabel = if (snapshot.direct) R.string.imessage_media_waiting_direct else R.string.imessage_media_waiting
         markCompanionVisible()
-        val localExhausted = snapshot.rows.size < wanted
-        windowSize = maxOf(PAGE, snapshot.rows.size)
+        val localExhausted = snapshot.ownExhausted
+        // Everything shown counts, the iMessages too: the next "load older" widens the window past them.
+        windowSize = maxOf(PAGE, snapshot.shown.size)
+        snapshot.allShown?.let { archivesShown = it }
         messages = snapshot.shown
         localRowsFor = id
         conversation = snapshot.conversation
@@ -1012,7 +1026,7 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         val unreadAtOpen = snapshot.conversation?.unread == true || snapshot.companionUnread
         effectWatch.arrived(messages, unreadAtOpen, System.currentTimeMillis(), effectPlays::contains)?.let { arrivedEffect = it.id }
 
-        val scrollTo = target?.takeIf { t -> snapshot.rows.any { it.id == t } }
+        val scrollTo = target?.takeIf { t -> snapshot.shown.any { it.id == t } }
         if (target != null) targetMessageId = null
         if (scrollTo != null) highlight(scrollTo)
         knownRows = snapshot.known
@@ -1047,8 +1061,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
             val direct = com.lightdecoder.imessage.direct.DirectLink.get(applicationContext)
             runInBackground { direct.reachOnce(address) }
         }
-        // The archive has no more: ask the phone (also fills a thread that was never imported).
-        if ((grow && localExhausted) || snapshot.rows.size < PAGE) loadOlderFromPhone(auto = !grow)
+        // The archive has no more of its own: ask the phone (also fills a thread that was never imported).
+        if ((grow && localExhausted) || (localExhausted && snapshot.ownStored < PAGE)) loadOlderFromPhone(auto = !grow)
     }
 
     /**
@@ -1136,7 +1150,8 @@ class ThreadActivity : AppCompatActivity(), MessagesAdapter.Callbacks {
         if (scrollToMessage != null) pendingScrollTo = scrollToMessage
         val header = when {
             loadingOlder -> ThreadItem.Header(loading = true, complete = false)
-            historyComplete || remoteExhausted -> ThreadItem.Header(loading = false, complete = true)
+            // Only above the oldest message there is: not while the archives hold older ones the window has not reached.
+            (historyComplete || remoteExhausted) && archivesShown -> ThreadItem.Header(loading = false, complete = true)
             else -> null
         }
         val shown = messages

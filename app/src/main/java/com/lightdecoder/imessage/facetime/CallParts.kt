@@ -34,18 +34,32 @@ data class Media(
     val routes: List<Route> = listOf(Route.EARPIECE, Route.SPEAKER),
     /** The other side's camera picture is being drawn into the call screen's view. */
     val remoteVideo: Boolean = false,
-    /** The other side's picture, as its decoder makes it, and its rotation (the library's 0..3; 0 and 1 are quarter turns). */
+    /**
+     * The other side's picture, as its decoder makes it (0 until the library says), and its rotation:
+     * the library's 0..3 (0 and 1 are quarter turns), or [ROTATION_UNKNOWN] while the library has
+     * not said one for the stream shown.
+     */
     val remoteWidth: Int = 0,
     val remoteHeight: Int = 0,
-    val remoteRotation: Int = ROTATION_NONE,
+    val remoteRotation: Int = ROTATION_UNKNOWN,
 ) {
-    /** The picture's width and height as shown: turned a quarter, they change places. */
+    /**
+     * The picture's width and height as shown: turned a quarter, they change places. A rotation the
+     * library has not said counts as a quarter turn (an iPhone held upright), as OpenBubbles takes it
+     * (its `VideoRotation.DEFAULT`): the library does not say the rotation a stream starts out with.
+     */
     val remoteShown: Pair<Int, Int>
-        get() = if (remoteRotation == 0 || remoteRotation == 1) remoteHeight to remoteWidth else remoteWidth to remoteHeight
+        get() = if (quarterTurn(remoteRotation)) remoteHeight to remoteWidth else remoteWidth to remoteHeight
 
     companion object {
         /** The library's value for "not turned". */
         const val ROTATION_NONE = 3
+
+        /** No rotation said by the library yet (never one of its own values). */
+        const val ROTATION_UNKNOWN = -1
+
+        /** Whether a picture with [rotation] is shown with its sides changed over ([ROTATION_UNKNOWN]: yes, see [remoteShown]). */
+        fun quarterTurn(rotation: Int): Boolean = rotation == 0 || rotation == 1 || rotation == ROTATION_UNKNOWN
     }
 }
 
@@ -132,6 +146,36 @@ class CallSurfaces {
     private var remote: Surface? = null
     private var owner: Pair<Long, Int>? = null
 
+    /**
+     * What the library said of each stream's picture, kept whether or not that stream is the one
+     * shown (as OpenBubbles keeps them, by stream): the library says a size or a rotation once, when
+     * it changes, and may say it before it asks for the stream's view ([forStream]), or while the
+     * view is away. One said then must not be lost: the picture would be laid out in another shape
+     * than it has (squeezed or pulled wide) until the other side turned their phone.
+     */
+    private val sizes = HashMap<Pair<Long, Int>, Pair<Int, Int>>()
+    private val rotations = HashMap<Pair<Long, Int>, Int>()
+
+    /** [stream] of [participant] makes pictures [width] x [height] from now on. True when it is the stream shown. */
+    fun noteSize(participant: Long, stream: Int, width: Int, height: Int): Boolean = synchronized(lock) {
+        val key = participant to stream
+        if (key in sizes || sizes.size < MAX_STREAMS) sizes[key] = width to height
+        owner == key
+    }
+
+    /** [stream] of [participant] is turned [rotation] (the library's 0..3) from now on. True when it is the stream shown. */
+    fun noteRotation(participant: Long, stream: Int, rotation: Int): Boolean = synchronized(lock) {
+        val key = participant to stream
+        if (key in rotations || rotations.size < MAX_STREAMS) rotations[key] = rotation
+        owner == key
+    }
+
+    /** The picture size the library last said for [stream] of [participant], or null. */
+    fun sizeOf(participant: Long, stream: Int): Pair<Int, Int>? = synchronized(lock) { sizes[participant to stream] }
+
+    /** The rotation the library last said for [stream] of [participant], or null when it said none. */
+    fun rotationOf(participant: Long, stream: Int): Int? = synchronized(lock) { rotations[participant to stream] }
+
     /** The call screen's small view of the user's own camera, while it is there. */
     @Volatile
     var preview: Surface? = null
@@ -179,12 +223,17 @@ class CallSurfaces {
         remote = null
         owner = null
         preview = null
+        sizes.clear()
+        rotations.clear()
     }
 
     companion object {
         /** The library's stream indexes of a camera's picture (OpenBubbles' `StreamKey`): the first camera, and its alternate. */
         const val STREAM_CAMERA = 1
         const val STREAM_CAMERA_ALTERNATE = 5
+
+        /** The most streams a size and a rotation are kept for (a call with one person has a handful). */
+        const val MAX_STREAMS = 64
 
         /** The encoder groups that are not the first camera's: a shared screen, and a second camera. */
         const val GROUP_SCREEN = 3

@@ -47,6 +47,7 @@ import com.lightdecoder.imessage.facetime.CallIds
 import com.lightdecoder.imessage.facetime.CallMessage
 import com.lightdecoder.imessage.facetime.FaceTimeCalls
 import com.lightdecoder.imessage.facetime.FaceTimeCamera
+import com.lightdecoder.imessage.facetime.FaceTimeLog
 import com.lightdecoder.imessage.facetime.FaceTimeNotices
 import com.lightdecoder.imessage.facetime.Media
 import com.lightdecoder.imessage.facetime.Phase
@@ -117,13 +118,19 @@ class FaceTimeCallActivity : AppCompatActivity() {
     /** The user's pinch, drag and double tap on the other side's picture. */
     private val remoteZoom = VideoFit.Zoom()
 
-    /** The picture's decoder already turns it (its SurfaceTexture's transform says so): it is not turned again. */
-    private var textureTurned = false
-    private var textureChecked = false
+    /**
+     * How the decoder turns the frames being drawn (each frame's SurfaceTexture transform says so):
+     * what the picture's shape goes by ([VideoFit.shape]). Null before a stream's first frame.
+     */
+    private var textureTurn: VideoFit.Turn? = null
     private val textureMatrix = FloatArray(16)
 
-    /** The shape and turn the zoom was made for: another stream starts fresh. */
-    private var zoomFor: Triple<Int, Int, Int>? = null
+    /** The shape the zoom was made for: another one (another stream, the phone turned) starts fresh. */
+    private var zoomFor: VideoFit.Shape? = null
+
+    /** How the other side's picture was last said to be laid out in the log ([notePicture]), and how often so far. */
+    private var pictureSaid: PictureNote? = null
+    private var pictureNotes = 0
 
     /** How the camera in use is mounted, by side (read once). */
     private val sensors = HashMap<Boolean, Int?>()
@@ -538,11 +545,11 @@ class FaceTimeCallActivity : AppCompatActivity() {
         binding.previewCard.alpha = if (call.joined && media.cameraOn) 1f else 0f
         if (pictures) {
             fitRemote()
-        } else if (remoteZoom.isZoomed || remoteZoom.fill != null || textureChecked) {
+        } else if (remoteZoom.isZoomed || remoteZoom.fill != null || textureTurn != null || zoomFor != null) {
+            // The stream is gone: the next one starts fresh, by its own first frame.
             remoteZoom.reset()
             remoteZoom.fill = null
-            textureChecked = false
-            textureTurned = false
+            textureTurn = null
             zoomFor = null
         }
         // The camera's picture is laid out for that side's camera once it is known.
@@ -724,6 +731,8 @@ class FaceTimeCallActivity : AppCompatActivity() {
         override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
             val surface = Surface(texture)
             remoteSurface = surface
+            // A new view: how its frames are turned is read off the first one.
+            textureTurn = null
             calls.attachRemote(surface)
             fitRemote()
         }
@@ -742,18 +751,21 @@ class FaceTimeCallActivity : AppCompatActivity() {
             return false
         }
 
-        /** Once per stream: whether the decoder turns the picture itself (then it is not turned again). */
+        /**
+         * Every frame: how the decoder turns it. That changes in the middle of a call (the other side
+         * turns their phone, and the frames from then on come turned otherwise), and what the library
+         * says of it may come before those frames, after them, or not at all: the picture is laid out
+         * again with the first frame that is turned otherwise, by that frame.
+         */
         override fun onSurfaceTextureUpdated(texture: SurfaceTexture) {
-            if (textureChecked) return
-            textureChecked = true
-            val turned = try {
+            val turn = try {
                 texture.getTransformMatrix(textureMatrix)
-                VideoFit.textureIsTurned(textureMatrix)
+                VideoFit.textureTurn(textureMatrix)
             } catch (e: RuntimeException) {
-                false
+                VideoFit.Turn.NONE
             }
-            if (turned != textureTurned) {
-                textureTurned = turned
+            if (turn != textureTurn) {
+                textureTurn = turn
                 fitRemote()
             }
         }
@@ -792,14 +804,42 @@ class FaceTimeCallActivity : AppCompatActivity() {
     private fun fitRemote() {
         val view = binding.remoteVideo
         val m = calls.media.value
-        val key = Triple(m.remoteWidth, m.remoteHeight, m.remoteRotation)
-        if (zoomFor != key) {
-            // Another stream, or the other side turned their phone: back to fitted, and the decoder looked at again.
-            if (zoomFor != null && (zoomFor!!.first != key.first || zoomFor!!.second != key.second)) textureChecked = false
-            zoomFor = key
+        val shape = VideoFit.shape(m.remoteWidth, m.remoteHeight, m.remoteRotation, textureTurn)
+        if (zoomFor != shape) {
+            // Another stream, or the other side turned their phone: back to fitted.
+            zoomFor = shape
             remoteZoom.reset()
         }
-        view.setTransform(remoteTransform(view.width, view.height, m.remoteWidth, m.remoteHeight, m.remoteRotation, textureTurned, remoteZoom))
+        view.setTransform(remoteTransform(view.width, view.height, shape, remoteZoom))
+        notePicture(m, shape, view.width, view.height)
+    }
+
+    /** What [notePicture] says: everything the layout of the other side's picture goes by. */
+    private data class PictureNote(
+        val width: Int,
+        val height: Int,
+        val rotation: Int,
+        val turn: VideoFit.Turn?,
+        val shape: VideoFit.Shape,
+        val viewWidth: Int,
+        val viewHeight: Int,
+        val fill: Boolean,
+    )
+
+    /**
+     * Says in the iMessage log how the other side's picture is laid out, whenever that changes (a
+     * few times a call; never more than [MAX_PICTURE_NOTES]): the size and rotation the library
+     * said, how the frames really come, and the shape shown. What to look at, should a picture ever
+     * look pulled or squeezed again. Sizes only: nothing of who is calling.
+     */
+    private fun notePicture(m: Media, shape: VideoFit.Shape, viewWidth: Int, viewHeight: Int) {
+        if (!shape.known || viewWidth <= 0 || viewHeight <= 0 || textureTurn == null) return
+        val fill = remoteZoom.fill ?: VideoFit.fillsByDefault(viewWidth, viewHeight, shape.width, shape.height)
+        val note = PictureNote(m.remoteWidth, m.remoteHeight, m.remoteRotation, textureTurn, shape, viewWidth, viewHeight, fill)
+        if (note == pictureSaid || pictureNotes >= MAX_PICTURE_NOTES) return
+        pictureSaid = note
+        pictureNotes++
+        FaceTimeLog.note(pictureLine(note.width, note.height, note.rotation, note.turn, shape, viewWidth, viewHeight, fill))
     }
 
     /** The small view of the user's own camera: the camera's picture, upright and in its shape, however the screen is turned and the camera mounted. */
@@ -833,8 +873,8 @@ class FaceTimeCallActivity : AppCompatActivity() {
 
             override fun onDoubleTap(e: MotionEvent): Boolean {
                 val m = calls.media.value
-                val (w, h) = VideoFit.upright(m.remoteWidth, m.remoteHeight, VideoFit.degreesForStream(m.remoteRotation))
-                val filled = remoteZoom.fill ?: VideoFit.fillsByDefault(view.width, view.height, w, h)
+                val shape = VideoFit.shape(m.remoteWidth, m.remoteHeight, m.remoteRotation, textureTurn)
+                val filled = remoteZoom.fill ?: VideoFit.fillsByDefault(view.width, view.height, shape.width, shape.height)
                 remoteZoom.fill = !filled
                 remoteZoom.reset()
                 fitRemote()
@@ -911,12 +951,12 @@ class FaceTimeCallActivity : AppCompatActivity() {
         fun showIntent(context: Context): Intent = base(context, ACTION_SHOW)
 
         /**
-         * How the other side's picture, [bufferWidth] x [bufferHeight] as its decoder makes it and
-         * turned by the library's [rotation] (0..3, [Media.ROTATION_NONE] for none), is laid into
-         * the view [viewWidth] x [viewHeight]: upright, in its own shape (never stretched), filling
-         * the view when the shapes are close and fitting it otherwise, unless the user chose
-         * ([zoom]'s fill), then zoomed and moved as the user did. [decoderTurns]: the decoder already
-         * turned it (only its shape changes then). Pure.
+         * How the other side's picture, [bufferWidth] x [bufferHeight] as its decoder makes it, is
+         * laid into the view [viewWidth] x [viewHeight]: upright, in its own shape (never
+         * stretched), filling the view when the shapes are close and fitting it otherwise, unless the
+         * user chose ([zoom]'s fill), then zoomed and moved as the user did. Its shape goes by how its
+         * frames come ([turn], null before the first) and the library's [rotation] (0..3,
+         * [Media.ROTATION_NONE] for none, [Media.ROTATION_UNKNOWN] when it said none): [VideoFit.shape]. Pure.
          */
         fun remoteTransform(
             viewWidth: Int,
@@ -924,18 +964,44 @@ class FaceTimeCallActivity : AppCompatActivity() {
             bufferWidth: Int,
             bufferHeight: Int,
             rotation: Int = Media.ROTATION_NONE,
-            decoderTurns: Boolean = false,
+            turn: VideoFit.Turn? = null,
             zoom: VideoFit.Zoom? = null,
-        ): Matrix {
-            val degrees = VideoFit.degreesForStream(rotation)
-            val (uw, uh) = VideoFit.upright(bufferWidth, bufferHeight, degrees)
-            val fill = zoom?.fill ?: VideoFit.fillsByDefault(viewWidth, viewHeight, uw, uh)
-            return if (decoderTurns) {
-                // The view already gets it upright (stretched to the view): only its shape is put right.
-                VideoFit.transform(viewWidth, viewHeight, uw, uh, 0, fill, zoom)
-            } else {
-                VideoFit.transform(viewWidth, viewHeight, bufferWidth, bufferHeight, degrees, fill, zoom)
+        ): Matrix = remoteTransform(viewWidth, viewHeight, VideoFit.shape(bufferWidth, bufferHeight, rotation, turn), zoom)
+
+        /** The same for a picture of [shape] ([VideoFit.shape]). Pure. */
+        fun remoteTransform(viewWidth: Int, viewHeight: Int, shape: VideoFit.Shape, zoom: VideoFit.Zoom? = null): Matrix {
+            val fill = zoom?.fill ?: VideoFit.fillsByDefault(viewWidth, viewHeight, shape.width, shape.height)
+            // The view gets every frame stretched over all of it. Turned upright by its decoder, only its
+            // shape is put right; else it is as its decoder made it (its sides the other way round for a
+            // quarter turn), and the view turns it as well.
+            val (bw, bh) = VideoFit.upright(shape.width, shape.height, shape.degrees)
+            return VideoFit.transform(viewWidth, viewHeight, bw, bh, shape.degrees, fill, zoom)
+        }
+
+        /** The most lines one call screen says about the other side's picture ([notePicture]). */
+        private const val MAX_PICTURE_NOTES = 24
+
+        /** [notePicture]'s line. Its numbers are sizes with words between them (never taken for a phone number). Pure. */
+        internal fun pictureLine(
+            width: Int,
+            height: Int,
+            rotation: Int,
+            turn: VideoFit.Turn?,
+            shape: VideoFit.Shape,
+            viewWidth: Int,
+            viewHeight: Int,
+            fill: Boolean,
+        ): String {
+            val said = if (rotation in 0..3) "rotation $rotation said" else "no rotation said"
+            val frames = when (turn) {
+                VideoFit.Turn.QUARTER -> "its frames come turned a quarter"
+                VideoFit.Turn.HALF -> "its frames come turned half"
+                VideoFit.Turn.NONE -> "its frames come as they are"
+                null -> "no frame yet"
             }
+            val byScreen = if (shape.degrees != 0) ", turned ${shape.degrees} more by the screen" else ""
+            return "the other side's picture is ${width}x$height as decoded ($said; $frames): shown as ${shape.width}x${shape.height}$byScreen, " +
+                "${if (fill) "filling" else "whole in"} a ${viewWidth}x$viewHeight view"
         }
 
         /**

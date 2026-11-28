@@ -33,6 +33,48 @@ object VideoFit {
         else -> 0
     }
 
+    /** How a picture's decoder already turns it on its way into the view ([textureTurn]). */
+    enum class Turn { NONE, QUARTER, HALF }
+
+    /**
+     * How a picture is laid out: [width] x [height] is its shape upright, and [degrees] (clockwise)
+     * is how far the view still has to turn it to be upright (0 when its decoder turned it already).
+     */
+    data class Shape(val width: Int, val height: Int, val degrees: Int) {
+        /** Whether there is a picture to lay out at all. */
+        val known: Boolean get() = width > 0 && height > 0
+    }
+
+    /**
+     * The shape of the other side's picture, [bufferWidth] x [bufferHeight] as its decoder makes it.
+     *
+     * What is on the screen decides, not what was said about it: [turn] is how the decoder turns the
+     * frames being drawn (read off each frame, null before the first). The library has the decoder
+     * turn a picture upright (as OpenBubbles relies on: it never turns a tile, only gives it the
+     * turned shape), so a quarter turn there means the picture's sides have changed places, whatever
+     * [rotation] the library said, late, or not at all. Laying it out by the said rotation alone is
+     * what pulled faces wide: with none said, the upright picture was given the shape it has lying
+     * on its side.
+     *
+     * [rotation] (the library's 0..3, anything else: none said) is used only where the decoder does
+     * not turn the picture: before the first frame (the shape it will have; none said counts as a
+     * quarter turn, [com.lightdecoder.imessage.facetime.Media.remoteShown]), and for a picture the
+     * library says is turned while its frames are not (then the view turns it).
+     */
+    fun shape(bufferWidth: Int, bufferHeight: Int, rotation: Int, turn: Turn?): Shape {
+        val said = rotation in 0..3
+        return when (turn) {
+            Turn.QUARTER -> Shape(bufferHeight, bufferWidth, 0)
+            Turn.HALF -> Shape(bufferWidth, bufferHeight, 0)
+            Turn.NONE -> {
+                val degrees = if (said) degreesForStream(rotation) else 0
+                val (w, h) = upright(bufferWidth, bufferHeight, degrees)
+                Shape(w, h, degrees)
+            }
+            null -> if (!said || rotation == 0 || rotation == 1) Shape(bufferHeight, bufferWidth, 0) else Shape(bufferWidth, bufferHeight, 0)
+        }
+    }
+
     /** The picture's width and height once turned upright. */
     fun upright(width: Int, height: Int, degrees: Int): Pair<Int, Int> =
         if (quarter(degrees)) height to width else width to height
@@ -117,16 +159,21 @@ object VideoFit {
      * is not a turn. A quarter turn shows as the 2D part having nothing on its diagonal; a half turn
      * as x flipped as well.
      */
-    fun textureIsTurned(m: FloatArray): Boolean {
-        if (m.size < 16) return false
+    fun textureIsTurned(m: FloatArray): Boolean = textureTurn(m) != Turn.NONE
+
+    /** [textureIsTurned], saying which turn: a quarter (either way) changes the picture's sides over, a half does not. */
+    fun textureTurn(m: FloatArray): Turn {
+        if (m.size < 16) return Turn.NONE
         val eps = 0.01f
         val a = m[0]
         val b = m[4]
         val c = m[1]
         val d = m[5]
-        val quarter = abs(a) < eps && abs(d) < eps && abs(b) > eps && abs(c) > eps
-        val half = abs(b) < eps && abs(c) < eps && a < -eps
-        return quarter || half
+        return when {
+            abs(a) < eps && abs(d) < eps && abs(b) > eps && abs(c) > eps -> Turn.QUARTER
+            abs(b) < eps && abs(c) < eps && a < -eps -> Turn.HALF
+            else -> Turn.NONE
+        }
     }
 
     private fun quarter(degrees: Int): Boolean = ((degrees % 360) + 360) % 180 == 90
